@@ -3808,6 +3808,7 @@ struct HandshakeT : public ::flatbuffers::NativeTable {
   typedef Handshake TableType;
   uint16_t protocol_version = 0;
   std::string client_version{};
+  std::string schema_hash{};
 };
 
 struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3815,7 +3816,8 @@ struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef HandshakeBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PROTOCOL_VERSION = 4,
-    VT_CLIENT_VERSION = 6
+    VT_CLIENT_VERSION = 6,
+    VT_SCHEMA_HASH = 8
   };
   uint16_t protocol_version() const {
     return GetField<uint16_t>(VT_PROTOCOL_VERSION, 0);
@@ -3823,11 +3825,16 @@ struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *client_version() const {
     return GetPointer<const ::flatbuffers::String *>(VT_CLIENT_VERSION);
   }
+  const ::flatbuffers::String *schema_hash() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SCHEMA_HASH);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_PROTOCOL_VERSION, 2) &&
            VerifyOffset(verifier, VT_CLIENT_VERSION) &&
            verifier.VerifyString(client_version()) &&
+           VerifyOffset(verifier, VT_SCHEMA_HASH) &&
+           verifier.VerifyString(schema_hash()) &&
            verifier.EndTable();
   }
   HandshakeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3845,6 +3852,9 @@ struct HandshakeBuilder {
   void add_client_version(::flatbuffers::Offset<::flatbuffers::String> client_version) {
     fbb_.AddOffset(Handshake::VT_CLIENT_VERSION, client_version);
   }
+  void add_schema_hash(::flatbuffers::Offset<::flatbuffers::String> schema_hash) {
+    fbb_.AddOffset(Handshake::VT_SCHEMA_HASH, schema_hash);
+  }
   explicit HandshakeBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3859,8 +3869,10 @@ struct HandshakeBuilder {
 inline ::flatbuffers::Offset<Handshake> CreateHandshake(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint16_t protocol_version = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> client_version = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> client_version = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> schema_hash = 0) {
   HandshakeBuilder builder_(_fbb);
+  builder_.add_schema_hash(schema_hash);
   builder_.add_client_version(client_version);
   builder_.add_protocol_version(protocol_version);
   return builder_.Finish();
@@ -3869,12 +3881,15 @@ inline ::flatbuffers::Offset<Handshake> CreateHandshake(
 inline ::flatbuffers::Offset<Handshake> CreateHandshakeDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint16_t protocol_version = 0,
-    const char *client_version = nullptr) {
+    const char *client_version = nullptr,
+    const char *schema_hash = nullptr) {
   auto client_version__ = client_version ? _fbb.CreateString(client_version) : 0;
+  auto schema_hash__ = schema_hash ? _fbb.CreateString(schema_hash) : 0;
   return SpringWeb::CreateHandshake(
       _fbb,
       protocol_version,
-      client_version__);
+      client_version__,
+      schema_hash__);
 }
 
 ::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -19613,6 +19628,7 @@ inline void Handshake::UnPackTo(HandshakeT *_o, const ::flatbuffers::resolver_fu
   (void)_resolver;
   { auto _e = protocol_version(); _o->protocol_version = _e; }
   { auto _e = client_version(); if (_e) _o->client_version = _e->str(); }
+  { auto _e = schema_hash(); if (_e) _o->schema_hash = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<Handshake> Handshake::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -19625,10 +19641,12 @@ inline ::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBuffe
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const HandshakeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _protocol_version = _o->protocol_version;
   auto _client_version = _o->client_version.empty() ? 0 : _fbb.CreateString(_o->client_version);
+  auto _schema_hash = _o->schema_hash.empty() ? 0 : _fbb.CreateString(_o->schema_hash);
   return SpringWeb::CreateHandshake(
       _fbb,
       _protocol_version,
-      _client_version);
+      _client_version,
+      _schema_hash);
 }
 
 inline AuthRequestT *AuthRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

@@ -3,6 +3,7 @@ import * as flatbuffers from 'flatbuffers';
 import { WireClient, type WireSession } from './wire-client';
 import { ControlFrameDeframer, frameControlMessage } from '../src/core/transport';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from '../src/core/protocol-version';
+import { SCHEMA_HASH } from '../src/protocol/schema-hash';
 import { ClientMessage } from '../src/protocol/spring-web/client-message';
 import { ClientPayload } from '../src/protocol/spring-web/client-payload';
 import { Handshake } from '../src/protocol/spring-web/handshake';
@@ -161,6 +162,10 @@ describe('scripted wire client — outbound', () => {
 
         const hs = sent[0].msg.payload(new Handshake()) as Handshake;
         expect(hs.protocolVersion()).toBe(PROTOCOL_VERSION);
+        // PLAN-protocol-guard task 3: the server compares this for strict
+        // equality and refuses the connection on any difference — including an
+        // ABSENT field, which is what a harness that forgot it would send.
+        expect(hs.schemaHash()).toBe(SCHEMA_HASH);
         const auth = sent[1].msg.payload(new AuthRequest()) as AuthRequest;
         expect(auth.username()).toBe('wire_probe');
         expect(auth.passwordHash()).toBe('devpass');

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "protocol_generated.h"
+#include "HandshakePolicy.h"
 #include "ClientFrame.h"
 #include "CombatEventCollector.h"
 #include "DecalEventCollector.h"
@@ -44,13 +45,9 @@
 
 namespace Protocol {
 
-/// Wire-protocol version negotiated in the Handshake (C1). Bump on any
-/// breaking change to the FlatBuffers schema or binary envelope formats; the
-/// server rejects clients that send a different value (a stale cached JS
-/// bundle against a changed schema is exactly the failure this prevents).
-/// Additive, default-valued FlatBuffers fields do NOT require a bump.
-/// Keep in sync with PROTOCOL_VERSION in client/src/core/connection.ts.
-constexpr uint16_t CURRENT_PROTOCOL_VERSION = 1;
+// CURRENT_PROTOCOL_VERSION and the Handshake admission rule live in
+// HandshakePolicy.h — a dependency-free header the tests can include, since
+// nothing that includes this one can be stood up in a doctest.
 
 constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
 constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;

@@ -47,6 +47,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define LOG_SECTION "server"
@@ -144,22 +145,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         case SpringWeb::ClientPayload_Handshake: {
             auto* hs = clientMsg->payload_as_Handshake();
             const uint16_t clientVer = hs->protocol_version();
-            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s",
+            const std::string_view clientSchemaHash =
+                hs->schema_hash() ? std::string_view(hs->schema_hash()->c_str())
+                                  : std::string_view();
+            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s schema %s",
                 msg.clientId,
                 clientVer,
-                hs->client_version() ? hs->client_version()->c_str() : "unknown");
-            // C1: enforce the protocol version. A mismatch (typically a stale
-            // cached JS bundle against a changed schema) is rejected with a
-            // VersionMismatch AuthResponse; the client closes on auth failure.
-            // We deliberately do NOT record the client as handshaked, so even
-            // if it ignores the response its AuthRequest is refused below.
-            if (clientVer != Protocol::CURRENT_PROTOCOL_VERSION) {
+                hs->client_version() ? hs->client_version()->c_str() : "unknown",
+                Protocol::ShortSchemaHash(clientSchemaHash).c_str());
+            // C1 + PLAN-protocol-guard task 3: enforce the epoch AND the wire
+            // schema hash. A mismatch (typically a stale cached JS bundle
+            // against a changed schema) is rejected with a VersionMismatch
+            // AuthResponse; the client closes on auth failure. We deliberately
+            // do NOT record the client as handshaked, so even if it ignores
+            // the response its AuthRequest is refused below.
+            const auto verdict =
+                Protocol::CheckHandshake(clientVer, clientSchemaHash);
+            if (!verdict.accepted) {
                 SLOG(SPRING_LOG_WARNING,
-                    "client %u protocol mismatch: client v%d, server v%d — rejecting",
-                    msg.clientId, clientVer, Protocol::CURRENT_PROTOCOL_VERSION);
+                    "client %u handshake rejected — %s",
+                    msg.clientId, verdict.logDetail.c_str());
                 auto resp = Protocol::BuildAuthResponse(
                     SpringWeb::AuthStatus_VersionMismatch, "", 0,
-                    "Protocol version mismatch — reload the client");
+                    verdict.message.c_str());
                 rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                 break;
             }

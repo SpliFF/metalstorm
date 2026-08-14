@@ -28,6 +28,13 @@
  *       [--pass secret] [--expect-auth ok|reject] [--expect-player-num N]
  *       [--command 10 --squads 1,2 --params 100,0,100] [--hold-ms 2000] [--json]
  *       [--wire-command guidance.veto --wire-field goalId=obj:1]
+ *       [--schema-hash <hex>|none]
+ *
+ * `--schema-hash` overrides the wire schema hash sent in the Handshake, and
+ * `none` omits the field entirely. It exists for the same reason
+ * `--pin-mismatch` does: the refusing arm of a strict-equality guard cannot
+ * be driven from a tree whose two halves are generated together. Both
+ * refusals are `--expect-auth reject`.
  *
  * Exit status: 0 = every assertion held, 1 = an assertion failed, 2 = the
  * harness itself could not run (no server, no addon, bad arguments).
@@ -47,6 +54,7 @@ function parseArgs(argv) {
         expectAuth: 'ok', expectPlayerNum: null, command: null,
         squads: [], params: [], options: 0, holdMs: 1500, json: false, quiet: false,
         pinMismatch: false, waitForServerMs: 0, wireCommands: [],
+        schemaHash: null,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -66,6 +74,14 @@ function parseArgs(argv) {
             case '--json': out.json = true; break;
             case '--quiet': out.quiet = true; break;
             case '--pin-mismatch': out.pinMismatch = true; break;
+            // Drive the server's schema-hash refusal (PLAN-protocol-guard
+            // task 3). `--schema-hash none` sends no hash at all, which is a
+            // pre-guard bundle and a distinct server verdict from a wrong one.
+            case '--schema-hash': {
+                const v = next();
+                out.schemaHash = (v === 'none') ? '' : v;
+                break;
+            }
             case '--wait-for-server': out.waitForServerMs = Number(next()); break;
             // `--wire-command guidance.veto --wire-field goalId=obj:1` — one
             // synced-Lua message per `--wire-command`, sent in the order given,
@@ -207,6 +223,8 @@ try {
     const client = new WireClient({
         httpBase: args.url, username: args.user, password: args.pass,
         token: args.token || undefined, WebTransportCtor: wt.WebTransport, log,
+        // null = send this build's own hash, i.e. what a real client sends.
+        schemaHash: args.schemaHash === null ? undefined : args.schemaHash,
         // The browser needs the hashes in the constructor; this client pins
         // through the hook, so it is handed nothing.
         sessionOptions: () => ({}),

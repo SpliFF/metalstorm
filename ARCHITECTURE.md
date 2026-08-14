@@ -302,8 +302,24 @@ Full CLI flag list (from `rts/server_main.cpp`):
 `client/src/core/transport.ts`, and both read the generated FlatBuffers under
 `client/src/protocol/spring-web/`. `PROTOCOL_VERSION` and the `0x01` envelope byte
 live in **`client/src/core/protocol-version.ts`** — one client-side definition,
-paired with `Protocol::CURRENT_PROTOCOL_VERSION` (`rts/Server/Protocol.h`). A
-third copy is the drift PLAN-protocol-guard.md is about. The harness's node entry
+paired with `Protocol::CURRENT_PROTOCOL_VERSION` (`rts/Server/HandshakePolicy.h`).
+A third copy is the drift PLAN-protocol-guard.md is about.
+
+**The Handshake carries the schema hash, and the server enforces it**
+(PLAN-protocol-guard task 3). `Handshake.schema_hash` is `SCHEMA_HASH` from the
+regen script's own output; the admission rule is
+`Protocol::CheckHandshake()` in **`rts/Server/HandshakePolicy.h`**, a pure
+function so it can be tested at all — inline in the handler's switch it needed a
+NetworkServer, a Simulation and a live room to reach. It checks the epoch first,
+then the hash for strict equality, and an ABSENT hash is a rejection (a
+pre-guard bundle is stale by definition). Either way the client gets
+`AuthStatus.VersionMismatch` with both values named, and is deliberately NOT
+recorded in `handshakedClients`, so an ignored response still loses the
+following `AuthRequest`. `PROTOCOL_VERSION` is therefore no longer the drift
+guard: it is a manual epoch for the breaks the schema text cannot see (the
+`0x02`-`0x09` binary framings, a semantic reinterpretation of an existing
+field), bumped 1 -> 2 when the hash landed. A schema-visible change needs only
+the regen script. The harness's node entry
 point (`client/wire/run-wire-client.mjs`) is where node-only concerns live: node
 has no WebTransport, and the package that supplies one implements cert pinning
 through a global hook rather than `serverCertificateHashes`. Server-side the frame

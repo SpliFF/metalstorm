@@ -24,6 +24,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from '../src/core/protocol-version.js';
+import { SCHEMA_HASH } from '../src/protocol/schema-hash.js';
 import { frameControlMessage, ControlFrameDeframer } from '../src/core/transport.js';
 import { ClientMessage } from '../src/protocol/spring-web/client-message.js';
 import { ClientPayload } from '../src/protocol/spring-web/client-payload.js';
@@ -72,6 +73,17 @@ export interface WireClientOptions {
     sessionOptions?: (info: WtInfo) => unknown;
     /** Optional session token, sent instead of relying on password auth. */
     token?: string;
+    /**
+     * Schema hash to send in the Handshake. Defaults to this build's own
+     * SCHEMA_HASH, which is the only value a real client ever sends.
+     *
+     * It is overridable for the same reason `--pin-mismatch` exists: the
+     * refusing arm of a strict-equality guard cannot be exercised from a tree
+     * whose two halves are generated together by construction. `''` omits the
+     * field entirely — a pre-guard bundle, which is a DIFFERENT server verdict
+     * from a wrong hash and has to be drivable separately.
+     */
+    schemaHash?: string;
     log?: (msg: string) => void;
     /** Injected fetch, so the harness is testable without a network. */
     fetchImpl?: typeof fetch;
@@ -229,9 +241,12 @@ export class WireClient {
     private sendHandshake(): void {
         const b = new flatbuffers.Builder(64);
         const ver = b.createString(`springweb-wire/${PROTOCOL_VERSION}`);
-        const hs = Handshake.createHandshake(b, PROTOCOL_VERSION, ver);
+        const hash = this.opts.schemaHash ?? SCHEMA_HASH;
+        const hashOff = hash ? b.createString(hash) : 0;
+        const hs = Handshake.createHandshake(b, PROTOCOL_VERSION, ver, hashOff);
         this.sendClientMessage(b, ClientPayload.Handshake, hs);
-        this.log(`[wire] sent Handshake (protocol v${PROTOCOL_VERSION})`);
+        this.log(`[wire] sent Handshake (protocol v${PROTOCOL_VERSION},`
+            + ` schema ${hash ? hash.slice(0, 12) : '<omitted>'})`);
     }
 
     private sendAuthRequest(): void {

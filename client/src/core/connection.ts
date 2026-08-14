@@ -126,6 +126,7 @@ import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
 import { recordInbound, recordOutbound } from './net-inspector.js';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
+import { SCHEMA_HASH } from '../protocol/schema-hash.js';
 
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
@@ -1628,9 +1629,15 @@ export class Connection {
     private sendHandshake(): void {
         const builder = new flatbuffers.Builder(64);
         const clientVerOff = builder.createString(`springweb/${PROTOCOL_VERSION}`);
-        const hs = Handshake.createHandshake(builder, PROTOCOL_VERSION, clientVerOff);
+        // PLAN-protocol-guard task 3: the schema hash is the guard the epoch
+        // integer never was — the server compares it for strict equality and
+        // rejects a stale cached bundle with AuthStatus.VersionMismatch.
+        const schemaHashOff = builder.createString(SCHEMA_HASH);
+        const hs = Handshake.createHandshake(
+            builder, PROTOCOL_VERSION, clientVerOff, schemaHashOff);
         this.sendClientMessage(builder, ClientPayload.Handshake, hs);
-        console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION})`);
+        console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION},`
+            + ` schema ${SCHEMA_HASH.slice(0, 12)})`);
     }
 
     private sendAuthRequest(): void {

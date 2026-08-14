@@ -5,4 +5,4 @@
  * sent in the Handshake and compared for equality by the game server. See
  * rts/Server/ProtocolSchemaHash.h for the other half.
  */
-export const SCHEMA_HASH = '3f24c8b4b48ec862f75836b043c6f158034cb9563c12eb7d36920980ca0721f6';
+export const SCHEMA_HASH = 'efdd25212f66adccffc9b53e72a58ac74b16bc2acfa6f19a8f08e2877a1bf780';
