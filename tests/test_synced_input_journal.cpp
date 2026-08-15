@@ -63,8 +63,16 @@ TEST_CASE("the classifier's tag mirror matches the generated enum") {
     // Setup they have to delete this line to do it.
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ReplayControl) == WireClass::Ignored);
     CHECK_FALSE(ShouldRecordClientPayload(SpringWeb::ClientPayload_ReplayControl));
+    // Browser-eval relay reply (PLAN-test-automation P7). Same load-bearing
+    // `Ignored`: the response carries a debugging read-out, never an input,
+    // and recording it would replay a screenshot's stats back into a cause
+    // stream. The master plan's "replay does not re-execute an eval" claim is
+    // exactly this assertion.
+    CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ClientEvalResponse) == WireClass::Ignored);
+    CHECK_FALSE(ShouldRecordClientPayload(SpringWeb::ClientPayload_ClientEvalResponse));
+    CHECK_FALSE(ShouldRecordClientPayload(46));   // the tag the mirror hand-copies
     // The last tag today. If this fails the union grew — extend the mirror.
-    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_ReplayControl);
+    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_ClientEvalResponse);
     CHECK_FALSE(IsKnownClientPayload(
         static_cast<uint8_t>(SpringWeb::ClientPayload_MAX) + 1));
 }

@@ -1446,6 +1446,46 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 }
                 break;
             }
+            // PLAN-test-automation P7: the server relayed an eval whose target
+            // is not `worker`, so it runs here. Always answer — the worker
+            // holds an 8s timer and the server a 10s waiter behind it.
+            case 'gp:clientEval': {
+                const { requestId, target, code } = m as
+                    { requestId: number; target: string; code: string };
+                void (async () => {
+                    let success = true;
+                    let output = '';
+                    try {
+                        let v: unknown;
+                        if (target === 'widgets') {
+                            v = await (window as any).widgets.eval(code);
+                        } else if (target === 'test') {
+                            // An expression evaluated with the harness's own
+                            // members in scope, so a caller writes
+                            // `readyState()` or `captureFrame({maxDim:640})`
+                            // rather than repeating `test.` on every call —
+                            // which is exactly the string `browser_test`
+                            // builds from {method, args}. `with` is what puts
+                            // prototype methods in scope; a `new Function`
+                            // body is non-strict regardless of this module.
+                            // `test` stays bound too, so `test.foo()` works.
+                            v = await new Function(
+                                'test', `with (test) { return (async () => (${code}))(); }`,
+                            )((window as any).test);
+                        } else {   // 'js' — main's global scope
+                            const r = (0, eval)(code);  // eslint-disable-line no-eval
+                            v = r && typeof (r as { then?: unknown }).then === 'function'
+                                ? await (r as Promise<unknown>) : r;
+                        }
+                        output = typeof v === 'string' ? v : (JSON.stringify(v) ?? 'undefined');
+                    } catch (e) {
+                        success = false;
+                        output = `${target} eval error: ${(e as Error).message}`;
+                    }
+                    gameWorker?.postMessage({ type: 'gp:clientEvalResult', requestId, success, output });
+                })();
+                break;
+            }
             // PLAN-client-resilience.md task 1: heartbeat watchdog reply.
             case 'gp:pong': {
                 const resolve = gpPingPending.get(m.id);
@@ -1649,6 +1689,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // bundle has no way to misdeclare itself.
         schemaHashOverride: import.meta.env.DEV
             ? schemaHashOverrideFromUrl() : undefined,
+        // PLAN-test-automation P7 gate 3. The worker has no page URL, so read
+        // `?allowClientEval=1` here. A DEV build relays evals with or without
+        // it; this is what opens the relay in a production bundle.
+        allowClientEval:
+            new URLSearchParams(window.location.search).get('allowClientEval') === '1',
     };
     gameWorker.postMessage(init, [offscreen]);
 

@@ -425,6 +425,37 @@ await window.test.spawn('papertank', 4096, 4096, 0, 4)
 
 Or use the `browser_test` MCP tool (in the spring-debug server) to generate the snippet automatically.
 
+### `?allowClientEval=1` — let the server drive this tab
+
+A **DEV** build (`npm run dev`) always accepts relayed evals, with no URL param
+at all. A **production** bundle refuses them unless the page was opened with
+`?allowClientEval=1`, answering
+`{"success":false,"output":"client eval disabled in this build"}` instead.
+
+That is gate 3 of the browser-eval relay ([POST /api/client/eval](api.md#browser-eval-relay)),
+which lets a server-side caller — in practice the spring-debug MCP's
+`client_eval`, `client_ready`, `client_screenshot`, `browser_test`,
+`evaluate_widget_lua` and `spawn_at_camera` tools — run code in this tab and get
+the result back, instead of printing a snippet for a human to paste into
+chrome-devtools. Two more gates stand upstream: the route is compiled out under
+`SPRING_PROD`, and only an **admin-role** session is ever addressed (a
+`/api/rooms/direct` dev account is role `player` and is never eligible;
+`launch_scenario`'s default player *is* `admin`).
+
+The four relay targets map onto the APIs on this page:
+
+| `target` | Runs where | Reaches |
+|---|---|---|
+| `js` | main thread global scope | `window.test`, `window.widgets`, `window.lobby`, the DOM |
+| `test` | main thread, harness members in scope | `readyState()`, `captureFrame({maxDim:640})` — the `window.test` API below, without the `test.` prefix |
+| `widgets` | the in-worker LuaUI runtime | the same Lua `window.widgets.eval` takes |
+| `worker` | render-worker global scope | `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool` — the same hooks `window.__gp()` reaches |
+
+Relayed code must **not** call back into the game server's HTTP API
+(`test.spawn`, `test.lua`, `test.state`, …): the server serves HTTP on one
+thread and it is parked waiting for this tab, so those deadlock until the
+timeout. Use the server-side MCP tools for those.
+
 ### `?play=<scenarioId>` — one URL, straight into a game
 
 `?play=` boots a game scenario with **no login screen and no lobby UI**. It is

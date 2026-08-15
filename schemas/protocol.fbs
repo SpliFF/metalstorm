@@ -604,6 +604,30 @@ table GameStarted {
 table GameRestarting {
 }
 
+/// Server → client: execute `code` in the browser (dev/test relay,
+/// PLAN-test-automation P7). `target` picks the executor:
+///   "worker"  — the render worker's global scope (same engine hooks as evalJs)
+///   "js"      — the main thread's global scope
+///   "widgets" — the in-worker LuaUI runtime via window.widgets.eval (Lua)
+///   "test"    — window.test harness expression on main
+/// A client that is not a DEV build (and lacks ?allowClientEval=1) answers
+/// success:false without evaluating anything.
+table ClientEvalRequest {
+    request_id: uint32;
+    target: string;
+    code: string;
+}
+
+/// Client → server reply to a ClientEvalRequest. Classified `Ignored` by
+/// SyncedInputJournal (ReplayControl precedent): never journaled, so a
+/// replay can never re-execute an eval; dropped on any server without a
+/// matching waiter.
+table ClientEvalResponse {
+    request_id: uint32;
+    success: bool;
+    output: string;
+}
+
 /// Response to a ConsoleCommand.
 table ConsoleResponse {
     request_id: uint32;
@@ -719,6 +743,7 @@ union ClientPayload {
     GroupDirectiveRemove,
     GroupPosture,
     ReplayControl,
+    ClientEvalResponse,
 }
 
 table ClientMessage {
@@ -2411,6 +2436,7 @@ union ServerPayload {
     RulesParamKeyDictionary,
     PlayerRoster,
     ReplayState,
+    ClientEvalRequest,
 }
 
 table ServerMessage {

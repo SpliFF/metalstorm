@@ -13,6 +13,6 @@
 
 namespace Protocol {
 
-constexpr char SCHEMA_HASH[] = "efdd25212f66adccffc9b53e72a58ac74b16bc2acfa6f19a8f08e2877a1bf780";
+constexpr char SCHEMA_HASH[] = "2d9f91ac736f2edc6f0a90430eecee1a135abf0cc3819af3d99cbb4fd37b27da";
 
 }  // namespace Protocol

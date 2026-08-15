@@ -43,9 +43,10 @@ TEST_CASE("every union member is classified, including new ones") {
                       << " (tag " << (int)tag << ")");
         CHECK(IsOpenPreAuth(tag) != RequiresSession(tag));
     }
-    // 46 = NONE + 45 verbs. Bump this deliberately, having decided which side
-    // of the gate the new verb belongs on.
-    CHECK(members == 46);
+    // 47 = NONE + 46 verbs. Bump this deliberately, having decided which side
+    // of the gate the new verb belongs on. (46 → 47: ClientEvalResponse,
+    // PLAN-test-automation P7 — session-requiring, see PreAuthPolicy.h.)
+    CHECK(members == 47);
 }
 
 TEST_CASE("the sim-reaching verbs all require a session") {

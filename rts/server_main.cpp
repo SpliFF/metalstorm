@@ -25,6 +25,7 @@
 #include "Server/SnapshotRoundTrip.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
+#include "Server/ClientEvalBroker.h"
 #include "Server/EntityStateSerializer.h"
 #include "Server/ProjectileStateSerializer.h"
 #include "Server/PieceStateSerializer.h"
@@ -349,6 +350,11 @@ int main(int argc, char* argv[])
 
     // Console command execution queue (pushed by WS thread, drained by sim)
     LuaExecEngine luaExecEngine;
+
+    // PLAN-test-automation P7: browser-eval relay waiters. Registered by the
+    // HTTP thread in POST /api/client/eval, resolved by the sim thread when
+    // the addressed browser answers with a ClientEvalResponse.
+    ClientEvalBroker evalBroker;
 
     // Parse a "field1:field2:field3" spec used by --player and --ai.
     // Returns {field1, field2, field3}; missing trailing fields are
@@ -1134,6 +1140,7 @@ int main(int argc, char* argv[])
     // bake below.
     GameServerContext ctx{
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
+        evalBroker,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
         clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,

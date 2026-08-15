@@ -21,6 +21,8 @@ import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, 
 // so the DumpTools side-effects it needs come along in a tree-shaken build.
 import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
 import { luminanceStats } from './frame-stats.js';
+import { CLIENT_EVAL_DISABLED, clientEvalAllowed, clientEvalRunsOnMain, isClientEvalTarget }
+    from './client-eval-gate.js';
 import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
     GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
@@ -336,6 +338,15 @@ let gpCaptureInFlight: Promise<unknown> | null = null;
 /// `gp:resync` can re-open the game connection with the same creds/map without
 /// a fresh boot. Null until gpConnect runs.
 let gpInitMsg: GpInitToWorker | null = null;
+
+/// PLAN-test-automation P7 gate 3: `?allowClientEval=1` on the page URL,
+/// passed in by main (the worker has no page URL). A DEV build relays evals
+/// regardless; this is the only way to open the relay in a prod bundle.
+let gpAllowClientEval = false;
+/// In-flight relayed evals forwarded to main, keyed by the server's
+/// request_id → the 8s giveup timer. Cleared on teardown so a worker recycle
+/// mid-eval leaks no timers (the server's 10s waiter then times out cleanly).
+const gpPendingClientEvals = new Map<number, ReturnType<typeof setTimeout>>();
 /// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
 /// against a double detach and lets diagnostics see the parked state.
 let gpParked = false;
@@ -1147,6 +1158,46 @@ function gpConnect(msg: GpInitToWorker): void {
     gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
+        // PLAN-test-automation P7: the server relayed an eval request. Every
+        // path here MUST answer — an HTTP caller is parked on a waiter.
+        onClientEvalRequest: (requestId, target, code) => {
+            const answer = (ok: boolean, out: string) =>
+                gpCtx.connection?.sendClientEvalResponse(requestId, ok, out);
+            // GATE 3. Deliberately not URL-param-only: a DEV build must work
+            // with no param at all.
+            if (!clientEvalAllowed(import.meta.env.DEV, gpAllowClientEval)) {
+                answer(false, CLIENT_EVAL_DISABLED);
+                return;
+            }
+            if (!isClientEvalTarget(target)) {
+                answer(false, `unknown eval target: ${target}`);
+                return;
+            }
+            if (!clientEvalRunsOnMain(target)) {
+                // Same indirect-eval + clone-safe path as the `evalJs` test op.
+                void (async () => {
+                    try {
+                        const v = (0, eval)(code);  // eslint-disable-line no-eval
+                        const r = v && typeof (v as { then?: unknown }).then === 'function'
+                            ? await (v as Promise<unknown>) : v;
+                        const safe = gpCloneSafe(r);
+                        answer(true, typeof safe === 'string' ? safe
+                            : (JSON.stringify(safe) ?? 'undefined'));
+                    } catch (e) {
+                        answer(false, `worker eval error: ${(e as Error).message}`);
+                    }
+                })();
+                return;
+            }
+            // 'js' | 'widgets' | 'test' run on main; the reply rides back
+            // through this worker (main has no socket of its own). 8s, so the
+            // server's 10s waiter always gets a structured answer.
+            gpPendingClientEvals.set(requestId, setTimeout(() => {
+                gpPendingClientEvals.delete(requestId);
+                answer(false, 'timeout: main thread did not answer in 8s');
+            }, 8000));
+            postToMain({ type: 'gp:clientEval', requestId, target, code });
+        },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
@@ -2256,6 +2307,10 @@ export function gpInit(msg: GpInitToWorker): void {
     // worker's asset URLs match main's (no stale-cache skew on a new deploy, and
     // a shared same-origin HTTP cache hit instead of two distinct URLs).
     if (msg.buildStamp) CONFIG.buildStamp = msg.buildStamp;
+
+    // PLAN-test-automation P7 gate 3: main read `?allowClientEval=1` off the
+    // page URL for us. Not the whole gate — a DEV build relays regardless.
+    gpAllowClientEval = msg.allowClientEval === true;
 
     // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
     // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
@@ -4921,6 +4976,25 @@ export function gpHandleLuaRulesMsg(data: Uint8Array | string): void {
 
 export function gpHandleConsoleCommand(scope: string, command: string): void {
     gpCtx.connection?.sendConsoleCommand(scope, command);
+}
+
+/// PLAN-test-automation P7: main finished a `js`/`widgets`/`test` eval.
+/// Forward it to the server unless our 8s timer already answered for it.
+export function gpHandleClientEvalResult(
+    requestId: number, success: boolean, output: string): void {
+    const t = gpPendingClientEvals.get(requestId);
+    if (t === undefined) return;   // already timed out; the server has its answer
+    clearTimeout(t);
+    gpPendingClientEvals.delete(requestId);
+    gpCtx.connection?.sendClientEvalResponse(requestId, success, output);
+}
+
+/// Drop every in-flight relayed eval (worker teardown / recycle). The server
+/// waiter times out at 10s rather than hanging, and no timer outlives the
+/// connection it would have answered on.
+export function gpClearPendingClientEvals(): void {
+    for (const t of gpPendingClientEvals.values()) clearTimeout(t);
+    gpPendingClientEvals.clear();
 }
 
 export function gpHandlePlayerCommand(commandId: number, unitIds: number[], params: number[], options: number): void {

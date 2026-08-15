@@ -11,6 +11,7 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "ClientEvalBroker.h"
 #include "RoomWatchIntent.h"
 #include "AuthTokens.h"
 #include "WarPlayerBindings.h"
@@ -1768,6 +1769,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 d.setSeek ? d.seekTarget : -1, sim.GetFrameNum());
             // Shared state changed, so every watcher's bar does.
             Protocol::BroadcastReplayState(ctx);
+            break;
+        }
+        // ── Browser-eval relay reply (PLAN-test-automation P7) ───────────
+        // Classified `Ignored` in SyncedInputJournal.cpp with the same
+        // reasoning as ReplayControl above: an eval RESULT is not an input to
+        // the simulation, so it is never journaled and a replay can never
+        // re-execute an eval. The matching REQUEST cannot be journaled at all
+        // — it is a ServerPayload, and the journal only classifies client
+        // payloads.
+        //
+        // Only the client the broker addressed may resolve the waiter;
+        // anything else is stray (already timed out) or spoofed, and is
+        // dropped with a log line rather than answering someone else's HTTP
+        // request.
+        case SpringWeb::ClientPayload_ClientEvalResponse: {
+            auto* ev = clientMsg->payload_as_ClientEvalResponse();
+            if (!ev) break;
+            if (!ctx.evalBroker.Deliver(ev->request_id(), msg.clientId,
+                                        ev->success(),
+                                        ev->output() ? ev->output()->str() : "")) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "dropped ClientEvalResponse req=%u from client=%u "
+                    "(no waiter, or not the addressed client)",
+                    ev->request_id(), msg.clientId);
+            }
             break;
         }
         case SpringWeb::ClientPayload_PathRequest: {

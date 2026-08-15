@@ -66,8 +66,9 @@ enum Tag : uint8_t {
     GroupDirectiveRemove = 43,
     GroupPosture = 44,
     ReplayControl = 45,
+    ClientEvalResponse = 46,
     // Not a tag — the exclusive upper bound used by IsKnownClientPayload.
-    TagCount = 46,
+    TagCount = 47,
 };
 
 } // namespace
@@ -276,6 +277,14 @@ WireClass ClassifyClientPayload(uint8_t payloadType) {
         // replay::IsReplaying(); on a live server ClientMessageHandler drops
         // it exactly like the ungated verbs above.
         case ReplayControl:
+        // Browser-eval relay reply (PLAN-test-automation P7). Same reasoning
+        // as ReplayControl above: an eval RESULT is not an input to the
+        // simulation. Journalling it would replay a debugging read-out back
+        // into a cause stream, and the matching REQUEST can never be
+        // journalled at all — it is a ServerPayload, and this switch only
+        // classifies client payloads. The response resolves an HTTP waiter
+        // (ClientEvalBroker) and touches no sim state.
+        case ClientEvalResponse:
             return WireClass::Ignored;
 
         case TagCount:

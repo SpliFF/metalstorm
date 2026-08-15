@@ -40,7 +40,7 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `restart_client` | Restart the Vite client pane (:8012) via the mprocs control channel | After editing a worker-imported client file (`entity-renderer.ts`, `game-processor.ts`) that Vite serves stale |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
-This server also exposes browser-bridging tools (`browser_test`, `evaluate_widget_lua`) and the server-side test verbs (`spawn_unit`, `give_order`, etc.) — those, plus the performance-profiling tools (`perfDump`, `uiProfileStart/Dump/Stop`, `netSim*`), are documented in the **`spring-test`** skill and [docs/debugging-performance.md](../../../docs/debugging-performance.md), since they're really one `window.test` API surface rather than server-log/DB tooling.
+This server also exposes browser-bridging tools (`client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` — these **run code in a connected browser and return the answer**, via the P7 relay, falling back to printing a chrome-devtools snippet when one of its three gates refuses) and the server-side test verbs (`spawn_unit`, `give_order`, etc.) — those, plus the performance-profiling tools (`perfDump`, `uiProfileStart/Dump/Stop`, `netSim*`), are documented in the **`spring-test`** skill and [docs/debugging-performance.md](../../../docs/debugging-performance.md), since they're really one `window.test` API surface rather than server-log/DB tooling.
 
 ## Server URLs
 

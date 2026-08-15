@@ -90,6 +90,8 @@ import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
 import { LuaUIMsg } from '../protocol/spring-web/lua-uimsg.js';
 import { LuaUIMsgRelay } from '../protocol/spring-web/lua-uimsg-relay.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
+import { ClientEvalRequest } from '../protocol/spring-web/client-eval-request.js';
+import { ClientEvalResponse } from '../protocol/spring-web/client-eval-response.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
@@ -1099,6 +1101,13 @@ export interface ReplayStateInfo {
 
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
+    /** PLAN-test-automation P7: the server asks this client to evaluate
+     *  `code` and answer with `sendClientEvalResponse(requestId, ...)`.
+     *  `target` is one of `worker` | `js` | `widgets` | `test`. The handler
+     *  MUST always answer (success or refusal) — the server's HTTP caller is
+     *  parked on a waiter until it does or 10s elapse. Gate 3 (a DEV build or
+     *  `?allowClientEval=1`) is the handler's responsibility, not the wire's. */
+    onClientEvalRequest?: (requestId: number, target: string, code: string) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
      *  content-addressed key for fetching the game's UnitDefs/WeaponDefs
      *  via HTTP — empty if the lobby (no defs) or a server that didn't
@@ -1743,6 +1752,19 @@ export class Connection {
         // requestId=0 — we don't track the response.
         const cc = ConsoleCommand.createConsoleCommand(builder, scopeOff, cmdOff, 0);
         this.sendClientMessage(builder, ClientPayload.ConsoleCommand, cc);
+    }
+
+    /** Answer a ClientEvalRequest (PLAN-test-automation P7). Unlike
+     *  `sendConsoleCommand` this does NOT require `authenticated` — a refusal
+     *  must reach the server's waiter even in an odd session state, and the
+     *  server only ever addresses an already-authenticated admin session. */
+    sendClientEvalResponse(requestId: number, success: boolean, output: string): void {
+        if (!this.transport?.connected) return;
+        const builder = new flatbuffers.Builder(128 + output.length);
+        const outOff = builder.createString(output);
+        const resp = ClientEvalResponse.createClientEvalResponse(
+            builder, requestId, success, outOff);
+        this.sendClientMessage(builder, ClientPayload.ClientEvalResponse, resp);
     }
 
     /** Send the local player's current selection. The server uses this
@@ -2533,6 +2555,12 @@ export class Connection {
                     });
                 }
                 this.events.onPlayerRoster?.(players);
+                break;
+            }
+            case ServerPayload.ClientEvalRequest: {
+                const ce = msg.payload(new ClientEvalRequest()) as ClientEvalRequest;
+                this.events.onClientEvalRequest?.(
+                    ce.requestId(), ce.target() ?? 'js', ce.code() ?? '');
                 break;
             }
             case ServerPayload.ReplayState: {

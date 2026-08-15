@@ -76,6 +76,12 @@ export interface GpInitToWorker {
      *  production build; the only way to drive the server's refusal from a
      *  browser, since the build guards refuse a patched hash file. */
     schemaHashOverride?: string;
+    /** PLAN-test-automation P7 gate 3: the page was booted with
+     *  `?allowClientEval=1`. The worker has no page URL, so main reads the
+     *  param and passes it. A DEV build accepts relayed evals with or without
+     *  it (`import.meta.env.DEV`); this is what opens the relay in a
+     *  production bundle. Absent ⇒ false. */
+    allowClientEval?: boolean;
     // NOTE: this used to carry a lobby room roster snapshot to seed
     // `liveState.players` before the LuaUI boot. It claimed lobby `player_id`
     // was the game-server playerID; it is not — it is the DB account id, and
@@ -382,6 +388,16 @@ export interface GpConsoleCommandToWorker {
     command: string;
 }
 
+/** PLAN-test-automation P7: main's answer to a `gp:clientEval` request. The
+ *  worker owns the Connection, so a `js`/`widgets`/`test` eval runs on main
+ *  and its result rides back through the worker to the server. */
+export interface GpClientEvalResultToWorker {
+    type: 'gp:clientEvalResult';
+    requestId: number;
+    success: boolean;
+    output: string;
+}
+
 /** Widget-issued unit order (none send this yet; carried for completeness of
  *  the CommandConnection surface). */
 export interface GpPlayerCommandToWorker {
@@ -437,6 +453,7 @@ export type GpMessageToWorker =
     | GpStandingOrderCreateToWorker
     | GpLuaRulesMsgToWorker
     | GpConsoleCommandToWorker
+    | GpClientEvalResultToWorker
     | GpPlayerCommandToWorker
     | GpSelectionStateToWorker
     | GpReplayControlToWorker
@@ -709,6 +726,12 @@ export type GpMessageToMain =
     | { type: 'gp:counterbatteryPing'; x: number; z: number }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** PLAN-test-automation P7: a relayed eval whose target is not `worker`
+     *  (`js` | `widgets` | `test`) has to run on main. Main answers with
+     *  `gp:clientEvalResult`; the worker forwards it to the server. Main must
+     *  ALWAYS answer — the worker holds an 8s timer and the server a 10s
+     *  waiter behind it. */
+    | { type: 'gp:clientEval'; requestId: number; target: string; code: string }
     /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
     | { type: 'gp:pong'; id: number }
     /**

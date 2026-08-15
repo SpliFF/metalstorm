@@ -29,6 +29,7 @@ class SessionManager;
 class RoomManager;
 class AIRuntimePool;
 class LuaExecEngine;
+class ClientEvalBroker;
 
 // Human player roster slot from the lobby (`--player username:team:pos`).
 struct RequestedPlayer {
@@ -64,6 +65,10 @@ struct GameServerContext {
     RoomManager&        rooms;
     AIRuntimePool&      aiPool;
     LuaExecEngine&      luaExecEngine;
+    // PLAN-test-automation P7: waiter table for POST /api/client/eval.
+    // Registered on the HTTP thread, resolved on the sim thread by
+    // ClientMessageHandler's ClientEvalResponse case.
+    ClientEvalBroker&   evalBroker;
 
     uint32_t    roomId = 0;
     std::string gameId;

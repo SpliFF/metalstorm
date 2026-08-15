@@ -45,7 +45,24 @@ Returns `{ roomId, gameServerPort, ... }`. Pair it with `list_processes` to conf
 | `set_stockpile({unitId, count, queued?})` | Insta-fill a unit's stockpile weapon (missiles etc.), skipping the whole build cycle — sets `numStockpiled` directly, so it works where `Spring.SetUnitStockpile` silently no-ops on a null stockpile weapon. |
 | `profile({target, action?, topN?})` | Server-side profilers. `target:"lua"` → per-callin synced-Lua wall time (`topN` caps the report, default 25); `target:"sim"` → SimFrame phase split (native sim / unit scripts / Lua call-ins), which also appears under `/api/metrics` → `simFrame` once enabled. `action`: `on\|off\|reset\|status\|report` (default `report`). |
 | `get_frame({roomId?})` | Sim `frame` + `simFps` + `clients` straight off the public `/api/metrics` route — no exec round-trip, so it answers while the sim is paused or still pre-`GameStart` (`frame: -1`). |
-| `browser_test({method, args?})` | Print the chrome-devtools eval string for any `window.test.<method>(args…)` call. The harness lives in the browser; this tool does **not** make the call itself — feed the printed snippet into `mcp__chrome-devtools__evaluate_script`. |
+| `browser_test({method, args?})` | Call any `window.test.<method>(args…)` **in the connected browser** and return its result — the relay does it for you (P7). Falls back to printing the chrome-devtools snippet when a gate refuses. **Refuses the server-bound methods by name** (`spawn`, `kill`, `damage`, `order`, `clear`, `state`, `units`, `unitState`, `frame`, `lua`, `server`, `simPause`, `simSpeed`, …) and names the server-side tool instead — see the deadlock note below. |
+| `client_eval({code, target?, roomId?, clientId?, timeoutMs?})` | Arbitrary code in the browser. `target`: `js` (main globals) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (Lua in the LuaUI runtime) · `test` (an expression with the harness's members in scope, no `test.` prefix). |
+| `client_ready({roomId?, clientId?})` | The **browser's** readiness (`readyState()`): renderer, defs, LuaUI, newest frame, feed age. `wait_for_game` is the server-side question — a game can be server-ready while the tab still ingests defs. |
+| `client_screenshot({maxDim?, quality?, roomId?, clientId?})` | A real image you can **see** — relays `captureFrame({maxDim, stats:true})` and returns an MCP image block plus the capture metadata. `maxDim` clamped to 2048. This replaces the pause→focus→`browser_test captureFrame`→copy-the-dataURL dance for a quick look. |
+
+**The relay's three gates.** Every browser-bound tool answers for real when all
+three pass, and otherwise prints its old snippet with the reason on the first
+line: (1) the route is compiled out under `SPRING_PROD`; (2) only an
+**admin-role** session is addressed — a `/api/rooms/direct` dev account is role
+`player` and is **never** eligible, while `launch_scenario`'s default player *is*
+`admin`; (3) the page must be a DEV build or booted `?allowClientEval=1`.
+
+> **Never relay code that calls back into the game server.** The game server
+> serves HTTP on one thread and that thread is parked waiting for the browser,
+> so `window.test.spawn/lua/state/…` deadlock until the timeout (`/api/metrics`
+> stops answering meanwhile). Use `spawn_unit` / `exec_lua` / `get_game_state`.
+> `spawn_at_camera` already does the right thing: it relays only the camera read
+> and spawns server-side.
 
 ### Browser-side `window.test` (TestHarness)
 
@@ -108,9 +125,9 @@ browser_test({ method: "uiProfileStop" })
 launch_game({ gameId: "papertanks", mapId: "wanderlust2.1", ai: "null" })
 # → wait a beat for spring-server to come up
 spawn_unit({ defName: "papertank", x: 4096, z: 4096, team: 0, count: 1 })
-# Now in the browser tab:
+# The browser tab does this itself now — no snippet to paste (P7 relay):
 browser_test({ method: "focus", args: [<id from spawn_unit>] })
-# → feed the printed snippet into mcp__chrome-devtools__evaluate_script
+client_screenshot({ maxDim: 640 })      # and look at it
 ```
 
 ### Verify weapon firing logs
@@ -136,8 +153,13 @@ spawn_unit(...)
 pause_sim({ paused: true })             # freeze sim state
 browser_test({ method: "pause" })       # freeze rendering
 browser_test({ method: "focus", args: [<id>, { durationMs: 0 }] })
-browser_test({ method: "captureFrame", args: [{ stats: true }] })
+client_screenshot({ maxDim: 1280 })     # returns an image block, not a dataURL
 ```
+
+`client_screenshot` is the quick path — one call, and the picture comes back as
+something you can actually look at. Reach for `browser_test({method:"captureFrame"})`
+when you want the raw `{dataUrl, width, height, frameId, gameFrame, stats}`
+object (e.g. to diff two captures, or to pass `{render:false}`).
 
 `captureFrame` renders and reads in one worker task, so it needs neither the
 pause nor a retry loop to avoid a black frame. A paused capture still renders

@@ -828,6 +828,24 @@ void WebTransportServerImpl::OnHandshakeDone(WtConn* c) {
 
 void WebTransportServerImpl::OnStreamData(WtConn* c, int64_t sid, uint32_t flags,
                                           const uint8_t* data, size_t len) {
+    // Return the flow-control credit these bytes used, per stream and for the
+    // connection. Every byte handed to this callback is copied into `rx.buf`
+    // below, so it is consumed the moment we are called and the window can be
+    // reopened immediately.
+    //
+    // Without this the transport parameters (initial_max_stream_data_bidi_remote
+    // = 512 KiB, initial_max_data = 8 MiB) are not a rate limit but a LIFETIME
+    // budget: a client's control bidi stream carries every command, viewport
+    // and console message it will ever send, and at 512 KiB cumulative the
+    // stream stalls forever with no error anywhere — the writes just stop
+    // arriving. Found via PLAN-test-automation P7, where a single ~600 KB
+    // screenshot reply crossed the line in one message and wedged the client
+    // permanently; a long enough ordinary game would have got there on its own.
+    if (len > 0 && c->conn != nullptr) {
+        ngtcp2_conn_extend_max_stream_offset(c->conn, sid, len);
+        ngtcp2_conn_extend_max_offset(c->conn, len);
+    }
+
     bool fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
     RxStream& rx = c->rx[sid];
 

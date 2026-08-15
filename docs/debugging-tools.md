@@ -149,7 +149,32 @@ Configure in `.claude/settings.local.json`:
 | `generate_scenario` | `gameId`, `mapId` (required), `seed`, `sides`, `towns`, `outposts`, `bases`, `mines`, `sites`, `relics`, `wrecks`, `bridges`, `hostility`, `roster` | Generate a war with `scenariogen.py` via the lobby admin route, store it, materialise it to `gen_*.lua` and re-discover it. `seed` defaults **server-side** to `sum(ord(c) for c in mapId)`, so re-running with no seed is an idempotent upsert of the same war rather than a new one. A map that cannot host a war answers 422 with the generator's own `REJECTED` line naming the violated invariant — surfaced verbatim. Int knobs are range-clamped by the lobby (`sides` 2-8, the rest 0-32) |
 | `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client` | see `.claude/skills/spring-debug` | Service lifecycle management (`restart_client` = Vite pane via mprocs control channel). `launch_game` waits on `probe_game` (not the lobby's room state) and returns the readiness `phase`; on failure it adds `lastLogs` and returns as soon as the server dies instead of waiting out 120 s. **`kill_game` is deprecated** — it is now an alias for `end_game(graceful:false)` and, like `end_game`, **requires `roomId`**: called bare it refuses and lists candidate rooms instead of SIGKILLing whichever game it found first |
 | `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed`, `revive_team`, `set_stockpile`, `profile` | see `.claude/skills/spring-test` | Scripted test verbs (server-side). `revive_team {team?}` flips dead teams alive again (pair with `set_cheats`); `set_stockpile {unitId, count, queued?}` insta-fills a stockpile weapon; `profile {target: lua\|sim, action: on\|off\|reset\|status\|report, topN?}` drives the two server-side profilers (`sim` results also surface under `/api/metrics` → `simFrame`). Three of these return **objects**, not text: `spawn_unit` → `{spawned, ids[]}`, `get_unit_state` → `{id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons[]}`, `get_combat_summary` → `{combat, sounds}` — see [structured server verbs](#structured-server-verbs-json-prefix) |
-| `browser_test`, `evaluate_widget_lua` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md) |
+| `client_eval` | `code` (required), `target` (`js`\|`worker`\|`widgets`\|`test`, default `js`), `roomId`, `clientId`, `timeoutMs` (default `10000`, clamped 500–60000) | Run code **inside a connected browser** and get the result back, over [`POST /api/client/eval`](api.md#browser-eval-relay). Targets: `js` = main-thread globals (`document`, `window.test`, `window.lobby`); `worker` = render-worker globals (`__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool` — the hooks the render-core move stranded there); `widgets` = Lua in the in-worker LuaUI runtime; `test` = an expression with the `window.test` harness's members in scope (`readyState()`, `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. See the three gates + the deadlock warning below |
+| `client_ready` | `roomId`, `clientId` | The **browser's** readiness (`window.test.readyState()`): renderer up, defs ingested, LuaUI booted, newest game frame, feed age. Different question from `wait_for_game`, which is server-side — a game can be server-ready while the tab is still ingesting defs |
+| `client_screenshot` | `maxDim` (default `1280`, clamped 64–2048), `quality`, `roomId`, `clientId` | Relays `window.test.captureFrame({maxDim, stats:true})` and returns a real **MCP image content block** (a Claude session can see it) plus a text block of `{clientId, width, height, frameId, gameFrame, stats, bytes}`. `captureFrame` waits for a presented frame rather than grabbing a stale backbuffer. A 640px capture is ~600 KB — the wire cap is 4 MB |
+| `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md). Since P7 these **relay for real** over `/api/client/eval` and return the answer; the paste-into-chrome-devtools snippet is now only the fallback when a gate refuses |
+
+**The three gates on every relayed tool.** All of them fall back to printing a
+snippet rather than erroring, and the fallback line names which gate refused:
+
+1. The route is compiled out under `SPRING_PROD` → a 404 reads as
+   `server built without the relay (SPRING_PROD)`.
+2. Only an **admin-role** session is ever addressed → `no connected admin client`.
+   **Trap:** a `/api/rooms/direct` dev account is role `player` and is never
+   eligible; `launch_scenario`'s default player *is* `admin`, so the happy path
+   works. Among live admin sessions the newest wins (a reloaded tab arrives as a
+   new client id beside the old one's corpse).
+3. The browser refuses unless it is a DEV build or the page was booted with
+   **`?allowClientEval=1`** → `client eval disabled in this build`.
+
+> **Relayed code must not call back into the game server's HTTP API.** The game
+> server serves HTTP on one thread, and that thread is parked inside
+> `/api/client/eval` waiting for the very browser whose request it would have to
+> answer — so `window.test.spawn/lua/state/…` deadlock until the timeout (and
+> `/api/metrics` on that server stops answering meanwhile). `browser_test`
+> refuses those harness methods by name and names the server-side tool to use
+> instead (`spawn_unit`, `exec_lua`, `get_game_state`, …); `spawn_at_camera`
+> relays only the camera read and does the spawn server-side.
 
 The full, current tool list (with input schemas) lives in `tools/debug-mcp/server.js`; the skills in `.claude/skills/` document the recipes and pitfalls for using them. This table is a map, not the source of truth — it can drift from the server as tools are added.
 

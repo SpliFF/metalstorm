@@ -663,6 +663,73 @@ normally and still answers text; a converted verb's own errors come back as
 `unknown command: json <verb>`, which is the intended capability probe. Full
 per-verb shapes: [debugging-tools.md § Structured server verbs](debugging-tools.md#structured-server-verbs-json-prefix).
 
+### Browser-Eval Relay
+
+**POST /api/client/eval** (localhost, or admin token from off-box)
+
+Runs code inside a **connected browser client** and returns the result — the
+server side of the MCP's `client_eval` / `client_ready` / `client_screenshot`
+tools, and what makes `browser_test` / `evaluate_widget_lua` /
+`spawn_at_camera` answer instead of printing a snippet to paste.
+
+Compiled out under `SPRING_PROD`, exactly like `/api/exec` above and for the
+same reason: it is an arbitrary-code-execution channel, differing only in the
+victim (the client rather than the sim). A production binary returns 404, which
+callers should read as "fall back to pasting a snippet".
+
+```bash
+curl -X POST http://localhost:<game-port>/api/client/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"worker","code":"globalThis.__entityRenderer ? \"up\" : \"down\""}'
+# → {"success":true,"clientId":1,"output":"up"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `code` | Required. JavaScript, or Lua when `target` is `widgets`. |
+| `target` | `js` (main thread global scope) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (the in-worker LuaUI runtime, via `window.widgets.eval`) · `test` (an expression with the `window.test` harness's members in scope, e.g. `readyState()`). Default `js`. |
+| `clientId` | Address one connected client. It must still be a live admin session. Default: the highest-id live admin session — newest-wins, because a reloaded tab arrives as a new client id beside the old one's corpse. |
+| `timeoutMs` | How long the HTTP call waits, clamped to 500–60000. Default 10000. |
+
+`output` is always a string on the wire; `test` and `worker` targets JSON-stringify
+their result, so callers usually `JSON.parse` it.
+
+**Three stacked gates**, all of which must pass:
+
+1. **HTTP** — `LocalhostOrAdmin`, plus the `SPRING_PROD` compile-out above.
+2. **Targeting** — only an **admin-role** session is ever addressed. Note the
+   trap: a `/api/rooms/direct` dev account is role `player`, so a browser booted
+   that way is never eligible. `launch_scenario`'s default player *is* `admin`.
+3. **Client acceptance** — the browser honours the request only in a DEV build
+   or when the page was booted with **`?allowClientEval=1`**. A production
+   bundle without the param answers
+   `{"success":false,"output":"client eval disabled in this build"}`.
+
+Every refusal is HTTP 200 with `success:false` so a caller can branch on
+`output`; 400 is reserved for a malformed request (bad JSON, missing `code`,
+unknown `target`).
+
+| `output` on `success:false` | Meaning |
+|---|---|
+| `no connected admin client` | No live admin session — see gate 2. |
+| `client eval disabled in this build` | Gate 3 refused. |
+| `timeout: client did not answer in <n>ms` | The waiter expired. |
+| `timeout: main thread did not answer in 8s` | The worker relayed to main and main never replied — see the deadlock note below. |
+| `<target> eval error: <message>` | The code threw. |
+
+> **The code you relay must not call back into this game server's HTTP API.**
+> The game server serves HTTP on a single thread, and that thread is parked
+> inside `/api/client/eval` waiting for the very browser whose request it would
+> have to answer. Relaying `window.test.spawn(...)` (or anything else that
+> posts to `/api/exec`) deadlocks until the timeout — while it is parked,
+> `/api/metrics` on the same server does not respond either. Use the server-side
+> MCP tools (`spawn_unit`, `exec_lua`, `get_game_state`, …) for anything the
+> server can do without a browser; the MCP's `browser_test` refuses the
+> server-bound harness methods by name and points at the tool to use instead.
+
+The response can be large — a 640px `captureFrame` is ~600 KB — but must stay
+under the 4 MB control-message cap. `client_screenshot` clamps `maxDim` to 2048.
+
 ### WebTransport Endpoint Discovery
 
 WebRTC and its `/api/rtc/*` SDP/ICE signaling endpoints were **removed** (GW7,

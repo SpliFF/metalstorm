@@ -115,6 +115,12 @@ inline bool IsOpenPreAuth(uint8_t payloadType) {
         case SpringWeb::ClientPayload_GroupDirectiveRemove:
         case SpringWeb::ClientPayload_GroupPosture:
         case SpringWeb::ClientPayload_ReplayControl:
+        // PLAN-test-automation P7. Behind the gate: the server only ever
+        // addresses a ClientEvalRequest to an authenticated admin session, so
+        // a response from a client with no session answers nothing and has no
+        // business being parsed. The broker would refuse it anyway (the sender
+        // could not be the addressed client) — this is the outer of the two.
+        case SpringWeb::ClientPayload_ClientEvalResponse:
             return false;
     }
     return false;

@@ -229,6 +229,20 @@ inline std::vector<uint8_t> BuildConsoleResponse(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ConsoleResponse, resp.Union());
 }
 
+/// Build a ClientEvalRequest (server → browser; PLAN-test-automation P7).
+/// `target` is one of "js" | "worker" | "widgets" | "test"; the client
+/// answers with a ClientEvalResponse carrying the same requestId.
+inline std::vector<uint8_t> BuildClientEvalRequest(
+    uint32_t requestId,
+    const std::string& target,
+    const std::string& code)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + code.size());
+    auto req = SpringWeb::CreateClientEvalRequestDirect(fbb,
+        requestId, target.c_str(), code.c_str());
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ClientEvalRequest, req.Union());
+}
+
 /// Build a GameStarted message (game server → lobby).
 inline std::vector<uint8_t> BuildGameStarted(uint32_t frame) {
     flatbuffers::FlatBufferBuilder fbb(64);

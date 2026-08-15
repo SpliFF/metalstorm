@@ -472,6 +472,76 @@ async function execJsonVerb(verb, roomId) {
     catch { return { legacy: output }; }
 }
 
+/// PLAN-test-automation P7: run code inside a CONNECTED browser client and get
+/// the result back, via the game server's `POST /api/client/eval` relay.
+///
+/// Three gates stand between this call and an eval: the route is compiled out
+/// under SPRING_PROD, only an **admin-role** session is ever addressed, and the
+/// browser itself refuses unless it is a DEV build or was booted with
+/// `?allowClientEval=1`. Each of those answers with a distinct string, and this
+/// helper turns all three into `{fallback: <reason>}` so a caller can print the
+/// paste-into-devtools snippet instead. A real transport/auth failure throws.
+///
+/// `target` is one of:
+///   'js'      — main thread global scope
+///   'worker'  — render worker global scope (the __entityRenderer/__csm hooks)
+///   'widgets' — the in-worker LuaUI runtime (Lua source, via window.widgets.eval)
+///   'test'    — a `window.test` harness expression, e.g. `readyState()`
+async function clientEval(target, code, roomId, clientId, timeoutMs) {
+    const server = await getGameServerUrl(roomId);
+    if (!server) return { fallback: 'no active game server found' };
+    let resp;
+    try {
+        resp = await authedFetch(token => fetch(`${server.url}/api/client/eval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({
+                target, code,
+                ...(clientId ? { clientId } : {}),
+                ...(timeoutMs ? { timeoutMs } : {}),
+            }),
+        }));
+    } catch (e) {
+        return { fallback: `game server unreachable: ${e.message}` };
+    }
+    // 404 = the route does not exist = a production binary (SPRING_PROD).
+    if (resp.status === 404) return { fallback: 'server built without the relay (SPRING_PROD)' };
+    if (!resp.ok) throw new Error(`client eval failed (${resp.status}): ${await resp.text()}`);
+    const r = await resp.json();
+    if (!r.success && (r.output === 'no connected admin client'
+                    || r.output === 'client eval disabled in this build'
+                    || String(r.output || '').startsWith('timeout:'))) {
+        return { fallback: r.output };
+    }
+    return r;   // {success, clientId, output}
+}
+
+/// TestHarness methods that round-trip to the game server's OWN HTTP API
+/// (`/api/exec`). Relaying one DEADLOCKS: the game server serves HTTP on a
+/// single thread, and that thread is parked inside `/api/client/eval` waiting
+/// for the very browser whose request it would have to answer. Verified — with
+/// a relay call in flight, `/api/metrics` on the same server does not respond
+/// until the waiter gives up. Each of these has a server-side MCP tool that
+/// does the same job without a browser in the loop.
+const SERVER_BOUND_HARNESS_METHODS = new Map([
+    ['spawn', 'spawn_unit'], ['spawnAndFocus', 'spawn_unit + browser_test focus'],
+    ['stageCombat', 'spawn_unit + give_order'],
+    ['kill', 'kill_unit'], ['damage', 'damage_unit'], ['clear', 'clear_units'],
+    ['order', 'give_order'], ['state', 'get_game_state'], ['units', 'list_units'],
+    ['unitState', 'get_unit_state'], ['frame', 'get_frame'],
+    ['combatSummary', 'get_combat_summary'], ['cheats', 'set_cheats'],
+    ['log', 'set_debug_logging'], ['logStatus', 'set_debug_logging'],
+    ['setLogging', 'set_debug_logging'], ['lua', 'exec_lua'], ['server', 'exec_lua'],
+    ['serverJson', 'exec_lua'], ['simPause', 'pause_sim'], ['simResume', 'pause_sim'],
+    ['simSpeed', 'set_sim_speed'], ['stockpile', 'set_stockpile'],
+    ['reviveTeam', 'revive_team'],
+]);
+
+/// Parse a relay `output` as JSON when it is JSON, else hand back the string.
+function clientEvalValue(output) {
+    try { return JSON.parse(output); } catch { return output; }
+}
+
 // --- Minimal FlatBuffer decoder for cached UnitDefs/WeaponDefs ---
 // The server bakes defs to data/games/{gameId}/cache/defs/{key}/unitdefs.bin
 // (and weapondefs.bin) framed as: 1-byte envelope + ServerMessage root.
@@ -767,6 +837,10 @@ function clearDefsCache(gameId) {
 }
 
 // --- Tool definitions ---
+// Shared tail for every tool that goes over the P7 browser-eval relay —
+// documented once so each description stays honest about the three gates.
+const RELAY = 'Runs over the P7 browser-eval relay (POST /api/client/eval on the game server): the code executes in a CONNECTED browser and the result comes back here. Three gates — the route is compiled out under SPRING_PROD, only an admin-role session is addressed (a /api/rooms/direct dev account is role "player" and is NEVER eligible; launch_scenario\'s default player IS admin), and the browser refuses unless it is a DEV build or was booted with ?allowClientEval=1. When any gate refuses, this tool falls back to printing the chrome-devtools snippet to paste by hand.';
+
 const TOOLS = [
     {
         name: 'get_logs',
@@ -1331,7 +1405,7 @@ const TOOLS = [
     },
     {
         name: 'spawn_at_camera',
-        description: 'Spawn one or more units at the current browser camera\'s look-at position. The camera lives in the browser, so this tool emits a `mcp__chrome-devtools__evaluate_script` snippet that reads `window.test.cameraPose().lookAt` and forwards to the server `spawn` verb via `window.test.spawn(...)`. Pattern matches `browser_test` — feed the returned snippet into chrome-devtools eval. Requires a game tab in focus with `startGame()` complete.',
+        description: 'Spawn one or more units at the current browser camera\'s look-at position. Reads `window.test.cameraPose().lookAt` in the browser and forwards to `window.test.spawn(...)`, returning {x, z, response}. ' + RELAY,
         inputSchema: {
             type: 'object',
             properties: {
@@ -1345,7 +1419,7 @@ const TOOLS = [
     },
     {
         name: 'browser_test',
-        description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
+        description: 'Call a TestHarness method on `window.test` in the browser and return its result. ' + RELAY + ' Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1357,13 +1431,53 @@ const TOOLS = [
     },
     {
         name: 'evaluate_widget_lua',
-        description: 'Run a Lua snippet in the LuaUI widget worker (browser-side) via the chrome-devtools bridge. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. Requires a connected browser tab; if none, returns an error and you should fall back to chrome-devtools eval directly.',
+        description: 'Run a Lua snippet in the LuaUI widget runtime (browser-side render worker) and return its result string. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. ' + RELAY,
         inputSchema: {
             type: 'object',
             properties: {
                 code: { type: 'string', description: 'Lua code. Last expression returned via "return …".' },
             },
             required: ['code'],
+        },
+    },
+
+    {
+        name: 'client_eval',
+        description: 'Execute arbitrary code inside a connected browser client and return the result. ' + RELAY + ' Targets: "js" (main-thread global scope — document, window.test, window.widgets), "worker" (render-worker global scope — the __entityRenderer / __csm / __renderPipeline / __fxLightPool debug hooks the render-core move stranded there), "widgets" (Lua source run in the in-worker LuaUI runtime), "test" (an expression with the `test` harness already bound, e.g. `readyState()` or `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. Keep results well under 4 MB — that is the wire control-message cap.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                code:      { type: 'string', description: 'Code to run (JS, or Lua for target "widgets").' },
+                target:    { type: 'string', enum: ['js', 'worker', 'widgets', 'test'], description: 'Which executor runs it.', default: 'js' },
+                roomId:    { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId:  { type: 'number', description: 'Address a specific connected client id; it must still be an admin session. Default: the lowest-id admin client.' },
+                timeoutMs: { type: 'number', description: 'Server-side wait, 500–60000. Default 10000.', default: 10000 },
+            },
+            required: ['code'],
+        },
+    },
+    {
+        name: 'client_ready',
+        description: 'Client-side readiness: relays `window.test.readyState()` to the connected browser and returns its report (renderer up, defs ingested, LuaUI booted, newest game frame, feed age). ' + RELAY + ' This is the BROWSER\'s view — for server-side readiness (sim ticking, players seated) use `wait_for_game` instead; the two answer different questions and a game can be server-ready while the tab is still ingesting defs.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
+        },
+    },
+    {
+        name: 'client_screenshot',
+        description: 'Capture the browser client\'s rendered frame and return it as an image you can actually look at, plus a text block of capture metadata (width/height, frameId, gameFrame, per-phase stats, byte size). Relays `window.test.captureFrame({maxDim, stats:true})`, which waits for a real presented frame rather than grabbing a stale backbuffer. ' + RELAY + ' maxDim is clamped to 2048 to stay well inside the 4 MB wire cap.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                maxDim:   { type: 'number', description: 'Longest edge in pixels, 64–2048.', default: 1280 },
+                quality:  { type: 'number', description: 'JPEG quality 0–1 (passed through to captureFrame).' },
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
         },
     },
 
@@ -2366,8 +2480,25 @@ async function executeTool(name, args) {
                 + ` const out = await window.test.spawn(${defName}, x, z, ${team}, ${count});`
                 + ` return { x, z, response: out };`
                 + ` })()`;
+            // P7: relay ONLY the camera read, then spawn from here over
+            // /api/exec. Relaying the whole snippet would deadlock — the
+            // browser's `window.test.spawn` posts back to the same game
+            // server whose single HTTP thread is parked on this very request
+            // (see SERVER_BOUND_HARNESS_METHODS). Reading the pose touches
+            // nothing but the browser's cached scene state.
+            const relayed = await clientEval('test', 'cameraPose()', args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                const pose = clientEvalValue(relayed.output);
+                if (!pose || !pose.lookAt) return `Unexpected cameraPose reply: ${String(relayed.output).slice(0, 200)}`;
+                const x = pose.lookAt.x + ox, z = pose.lookAt.z + oz;
+                const spawned = await execOnGameServer(
+                    'server', `spawn ${args.defName} ${x} ${z} ${team} ${count}`, args.roomId);
+                return { x, z, clientId: relayed.clientId,
+                         response: spawned.success ? spawned.output : `Error: ${spawned.output}` };
+            }
             return [
-                `Spawn-at-camera: paste this into mcp__chrome-devtools__evaluate_script:`,
+                `Relay unavailable (${relayed.fallback}) — paste this into mcp__chrome-devtools__evaluate_script:`,
                 ``,
                 `  ${snippet}`,
                 ``,
@@ -2386,8 +2517,27 @@ async function executeTool(name, args) {
             };
             const argList = (args.args || []).map(fmt).join(', ');
             const snippet = `(async () => { const r = await window.test.${args.method}(${argList}); return r === undefined ? 'ok' : r; })()`;
+            // P7: refuse the server-bound methods rather than eating a 10s
+            // deadlock (see SERVER_BOUND_HARNESS_METHODS).
+            const serverSide = SERVER_BOUND_HARNESS_METHODS.get(args.method);
+            if (serverSide) {
+                return `\`window.test.${args.method}()\` calls back into the game server's own HTTP API. `
+                    + `Relaying it would deadlock: the server serves HTTP on one thread, and that thread `
+                    + `is parked waiting for this browser. Use the \`${serverSide}\` MCP tool instead `
+                    + `(no browser needed), or paste this into mcp__chrome-devtools__evaluate_script:\n\n  ${snippet}`;
+            }
+            // Relay the harness call to the connected admin browser. The
+            // 'test' target evaluates an expression with the harness's members
+            // in scope, so it takes the method call without the window.* wrapper.
+            const relayed = await clientEval(
+                'test', `${args.method}(${argList})`, args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                const v = clientEvalValue(relayed.output);
+                return v === undefined || v === null ? 'ok' : v;
+            }
             return [
-                `Browser-side TestHarness call. Feed this into mcp__chrome-devtools__evaluate_script:`,
+                `Relay unavailable (${relayed.fallback}) — feed this into mcp__chrome-devtools__evaluate_script:`,
                 ``,
                 `  ${snippet}`,
                 ``,
@@ -2407,14 +2557,76 @@ async function executeTool(name, args) {
             // the lifecycle, but for the common case (a Claude session
             // already has chrome-devtools attached) we just emit a
             // helpful instruction telling the caller to use it.
+            // P7: the LuaUI runtime lives in the browser's render worker, so
+            // this goes over the relay (`widgets` target → window.widgets.eval).
+            // The printed snippet below is the fallback for when no admin
+            // browser is connected or the relay is compiled out.
+            const relayed = await clientEval('widgets', args.code, args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                return relayed.success
+                    ? relayed.output
+                    : `Error (client ${relayed.clientId}): ${relayed.output}`;
+            }
             return [
-                '`evaluate_widget_lua` is a stub: the LuaUI worker runs in the browser, not on the game server.',
+                `Relay unavailable (${relayed.fallback}): the LuaUI runtime is in the browser, not on the game server.`,
                 'Use `mcp__chrome-devtools__evaluate_script` instead with the snippet:',
                 '',
                 '  () => window.widgets.eval(`' + args.code.replace(/`/g, '\\`') + '`)',
                 '',
-                'When CDP is added to spring-debug a real implementation will replace this.',
+                'A DEV client connected as the `admin` account is relayed automatically;',
+                'a /api/rooms/direct dev session is role "player" and is never eligible.',
             ].join('\n');
+        }
+
+        // --- Browser-eval relay (P7) -----------------------------------
+
+        case 'client_eval': {
+            if (!args.code) return 'Error: client_eval needs `code`.';
+            const target = args.target || 'js';
+            if (!['js', 'worker', 'widgets', 'test'].includes(target))
+                return `Error: target must be js | worker | widgets | test (got ${target}).`;
+            const r = await clientEval(target, args.code, args.roomId, args.clientId, args.timeoutMs);
+            if (r.fallback) return `Relay unavailable: ${r.fallback}`;
+            return { success: r.success, clientId: r.clientId, output: clientEvalValue(r.output) };
+        }
+
+        case 'client_ready': {
+            const r = await clientEval('test', 'readyState()', args.roomId, args.clientId);
+            if (r.fallback)
+                return `Relay unavailable: ${r.fallback}. For SERVER-side readiness use \`wait_for_game\` instead.`;
+            if (!r.success) return `Error (client ${r.clientId}): ${r.output}`;
+            return { clientId: r.clientId, ...(clientEvalValue(r.output) ?? {}) };
+        }
+
+        case 'client_screenshot': {
+            const maxDim = Math.max(64, Math.min(2048, Number(args.maxDim ?? 1280)));
+            const opts = { maxDim, stats: true };
+            if (args.quality !== undefined) opts.quality = Number(args.quality);
+            const r = await clientEval(
+                'test', `captureFrame(${JSON.stringify(opts)})`,
+                args.roomId, args.clientId, /*timeoutMs=*/20000);
+            if (r.fallback) return `Relay unavailable: ${r.fallback}`;
+            if (!r.success) return `Error (client ${r.clientId}): ${r.output}`;
+            const shot = clientEvalValue(r.output);
+            if (!shot || typeof shot !== 'object' || !shot.dataUrl)
+                return `Unexpected captureFrame reply: ${String(r.output).slice(0, 400)}`;
+            // `data:image/jpeg;base64,AAAA…` → mime + payload. MCP image blocks
+            // carry the base64 WITHOUT the data: prefix.
+            const m = /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+            if (!m) return `captureFrame returned a non-data-URL image (${shot.dataUrl.slice(0, 60)}…)`;
+            const meta = {
+                clientId: r.clientId,
+                width: shot.width, height: shot.height,
+                frameId: shot.frameId, gameFrame: shot.gameFrame,
+                stats: shot.stats,
+                bytes: Math.round(m[2].length * 3 / 4),
+            };
+            return {
+                content: [
+                    { type: 'image', data: m[2], mimeType: m[1] },
+                    { type: 'text', text: JSON.stringify(meta, null, 2) },
+                ],
+            };
         }
 
         // --- Scenario authoring (S3) -----------------------------------
@@ -2638,6 +2850,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
         const result = await executeTool(name, args || {});
+        // A tool that builds its own MCP content blocks (image + text —
+        // `client_screenshot`, P7) hands them back whole; everything else is
+        // still wrapped as a single text block.
+        if (result && typeof result === 'object' && Array.isArray(result.content)) return result;
         return {
             content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
         };
