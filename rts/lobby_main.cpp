@@ -5158,6 +5158,11 @@ int main(int argc, char *argv[]) {
     ChatScope scope = ChatScope::Main;
     std::string target;             ///< canonical, server-built
     std::vector<int64_t> recipients; ///< everyone who hears it, sender included
+    /// Task 9c: the caller is the host of the room this scope belongs to.
+    /// Read off the roster here because this is where the roster is already
+    /// in hand — a moderation route that looked it up a second time would be
+    /// a second answer to "who runs this room".
+    bool callerIsRoomHost = false;
   };
   auto resolveChatScope =
       [&](int64_t userId, const std::string &scopeWord, const std::string &rawTarget,
@@ -5173,6 +5178,7 @@ int main(int argc, char *argv[]) {
     // account, which is what presenceFactsFor above already relies on.
     const RoomPlayer *me =
         room ? room->FindPlayer(static_cast<uint32_t>(userId)) : nullptr;
+    out.callerIsRoomHost = me && me->isHost;
 
     switch (out.scope) {
       case ChatScope::Main:
@@ -5285,6 +5291,24 @@ int main(int argc, char *argv[]) {
         ChatResolution res;
         if (auto bad = resolveChatScope(userId, scopeWord, rawTarget, res))
           return *bad;
+
+        // Task 9c: a moderator's mute is checked BEFORE flood control and is
+        // a 403, not a 429. A 429 says "you are going too fast" and every
+        // client answers it by trying again; a mute is a decision that will
+        // not change when the sender slows down, and one that outlives this
+        // process (see Chat.h's header block on the two mutes).
+        if (auto mute = Chat::ActiveMute(mapDb, userId,
+                                         Chat::MuteKey(res.scope, res.target),
+                                         static_cast<int64_t>(std::time(nullptr)))) {
+          nlohmann::json m;
+          m["error"] = "you are muted";
+          m["muted"] = true;
+          m["until"] = mute->until;  // 0 = until lifted
+          m["scope"] = mute->scopeKey.empty() ? "account" : mute->scopeKey;
+          if (!mute->reason.empty()) m["reason"] = mute->reason;
+          if (!mute->byName.empty()) m["by"] = mute->byName;
+          return HttpAuth::JsonResponse(403, m.dump());
+        }
 
         // Flood control runs AFTER the scope check so a refused scope is not
         // also charged a token — the budget is for what you said, not for
@@ -5451,6 +5475,24 @@ int main(int argc, char *argv[]) {
         // silently stop hearing the one channel an admin broadcast reaches.
         if (name == Chat::MainTarget() && !join)
           return HttpAuth::JsonResponse(400, R"({"error":"cannot leave #main"})");
+        // Task 9c: a channel mute refuses the RE-JOIN as well as the send.
+        // That is what makes a kick mean anything — membership is one POST
+        // away, so a kick that only removed you would be undone by the
+        // client's next reconnect, and an ejection that leaves you free to
+        // walk back in is theatre. `#main` is exempt because it cannot be
+        // left, so it cannot be re-entered either; a mute there silences.
+        if (join && name != Chat::MainTarget()) {
+          if (auto mute = Chat::ScopedMute(
+                  mapDb, userId, Chat::MuteKey(ChatScope::Channel, name),
+                  static_cast<int64_t>(std::time(nullptr)))) {
+            nlohmann::json m;
+            m["error"] = "you are muted in that channel";
+            m["muted"] = true;
+            m["until"] = mute->until;
+            if (!mute->reason.empty()) m["reason"] = mute->reason;
+            return HttpAuth::JsonResponse(403, m.dump());
+          }
+        }
         if (join)
           gChatChannels.Join(userId, name);
         else
@@ -5460,6 +5502,290 @@ int main(int argc, char *argv[]) {
         j["channel"] = name;
         j["joined"] = join;
         j["channels"] = gChatChannels.ChannelsFor(userId);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // ── Moderation (PLAN-lobby §3.4's roles half, task 9c) ────────────────────
+  //
+  // Three routes and one policy. `ChatCanModerate` in Chat.h holds every rule
+  // about WHO may act; these routes hold what a moderator may act ON, and the
+  // one rule that lives here rather than there is that **you moderate a
+  // conversation you are standing in** — resolveChatScope refuses a
+  // non-member, admin included. An admin who needs to act on somebody they
+  // are not sharing a channel with has the account-level mute, which belongs
+  // to no conversation and therefore needs no membership.
+
+  // A system line: stored in the conversation (§3.1's "carries system lines")
+  // and delivered live with the same `system` marker History returns, so a
+  // moderation notice does not read as ordinary chat until the page is
+  // reloaded.
+  auto emitChatSystemLine = [&](ChatScope scope, const std::string &target,
+                                const std::vector<int64_t> &recipients,
+                                const std::string &text) {
+    const int64_t ts = static_cast<int64_t>(std::time(nullptr));
+    const int64_t id =
+        Chat::Append(mapDb, scope, target, 0, "", text, ts, /*system=*/true);
+    nlohmann::json ev;
+    ev["id"] = id;
+    ev["scope"] = ChatScopeToString(scope);
+    ev["target"] = target;
+    ev["from"] = "";
+    ev["fromId"] = 0;
+    ev["text"] = text;
+    ev["ts"] = ts;
+    ev["system"] = true;
+    // NOT ignore-filtered: a system line has no sender to ignore, and the
+    // channel telling you what happened to it is not somebody talking.
+    net.SendSSETo(chatStreamChannel, recipients, ev.dump(), "chat");
+  };
+
+  // POST /api/chat/mute — { username, scope?, target?, seconds?, reason?, on? }
+  //
+  // No `scope` means the account-level mute (§3.4's "timed/permanent mutes
+  // stored on the account"); a scope means that one conversation. No
+  // `username` means "list the mutes in force", because "who is muted" and
+  // "mute this person" are the same object — the same shape /api/chat/ignore
+  // already uses.
+  net.AddHttpPost(
+      "/api/chat/mute", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto caller = db.FindUserById(userId);
+        const bool callerIsAdmin = caller && caller->role == "admin";
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json in =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (in.is_discarded() || !in.is_object())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+        const std::string name = in.value("username", "");
+        const std::string scopeWord = in.value("scope", "");
+
+        if (name.empty()) {
+          // The read path is the operator's, so it is the operator's alone:
+          // the list names accounts and reasons, which is moderation record,
+          // not chat.
+          if (!callerIsAdmin)
+            return HttpAuth::JsonResponse(403, R"({"error":"admin only"})");
+          nlohmann::json out = nlohmann::json::array();
+          for (const auto &m : Chat::Mutes(mapDb, now)) {
+            nlohmann::json mj;
+            mj["account_id"] = m.accountId;
+            if (auto u = db.FindUserById(m.accountId)) mj["username"] = u->username;
+            mj["scope"] = m.scopeKey.empty() ? "account" : m.scopeKey;
+            mj["until"] = m.until;
+            mj["permanent"] = m.Permanent();
+            mj["reason"] = m.reason;
+            mj["by"] = m.byName;
+            mj["created_at"] = m.createdAt;
+            out.push_back(std::move(mj));
+          }
+          return HttpAuth::JsonResponse(200, out.dump());
+        }
+
+        auto subject = db.FindUser(name);
+        if (!subject)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+
+        // Resolve the scope key and the caller's standing in it together: a
+        // room host is an op because of the roster row this same call reads.
+        std::string scopeKey = Chat::GlobalMuteKey();
+        ChatResolution res;
+        bool haveScope = false;
+        if (!scopeWord.empty()) {
+          if (auto bad = resolveChatScope(userId, scopeWord,
+                                          in.value("target", ""), res))
+            return *bad;
+          // A PM is not a channel and has no ops: the tool for a
+          // conversation between two people is the ignore list, and a
+          // moderator who could mute one end of a PM would be reading it.
+          if (res.scope == ChatScope::Pm)
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"a PM has no moderators — use ignore"})");
+          scopeKey = Chat::MuteKey(res.scope, res.target);
+          haveScope = true;
+        }
+
+        const ChatRole role = callerIsAdmin      ? ChatRole::Admin
+                              : res.callerIsRoomHost ? ChatRole::RoomHost
+                                                     : ChatRole::Player;
+        const auto right =
+            ChatCanModerate(scopeKey, role, subject->role == "admin",
+                            subject->id == userId);
+        if (right != ChatModerationRight::Allowed) {
+          nlohmann::json e;
+          e["error"] = ChatModerationRightToString(right);
+          return HttpAuth::JsonResponse(403, e.dump());
+        }
+
+        const bool on = in.value("on", true);
+        const std::string callerName = caller ? caller->username : std::string("admin");
+        if (!on) {
+          const bool lifted = Chat::ClearMute(mapDb, subject->id, scopeKey);
+          db.LogAudit(userId, callerName, "chat_unmute", subject->username,
+                      scopeKey.empty() ? "account" : scopeKey);
+          if (!lifted)
+            return HttpAuth::JsonResponse(
+                404, R"({"error":"no mute in that scope"})");
+          if (haveScope)
+            emitChatSystemLine(res.scope, res.target, res.recipients,
+                               subject->username + " was unmuted by " + callerName);
+          nlohmann::json j;
+          j["ok"] = true;
+          j["username"] = subject->username;
+          j["muted"] = false;
+          return HttpAuth::JsonResponse(200, j.dump());
+        }
+
+        ChatMute m;
+        m.accountId = subject->id;
+        m.scopeKey = scopeKey;
+        const int64_t seconds = in.value("seconds", (int64_t)0);
+        m.until = seconds > 0 ? now + seconds : 0;  // 0 = until lifted
+        m.reason = in.value("reason", "");
+        m.byId = userId;
+        m.byName = callerName;
+        m.createdAt = now;
+        if (!Chat::SetMute(mapDb, m))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store mute"})");
+        db.LogAudit(userId, callerName, "chat_mute", subject->username,
+                    (scopeKey.empty() ? std::string("account") : scopeKey) + " " +
+                        (seconds > 0 ? std::to_string(seconds) + "s"
+                                     : std::string("indefinite")));
+
+        if (haveScope) {
+          emitChatSystemLine(res.scope, res.target, res.recipients,
+                             subject->username + " was muted by " + callerName +
+                                 (seconds > 0 ? " for " + std::to_string(seconds) + "s"
+                                              : ""));
+        } else {
+          // An account-level mute is told to the account and to NOBODY else.
+          // It belongs to no conversation, so there is no channel it could be
+          // filed in — and announcing it in `#main` would make every
+          // moderation action a public event, which is a different policy
+          // than the one §3.4 asks for.
+          nlohmann::json ev;
+          ev["scope"] = "notice";
+          ev["muted"] = true;
+          ev["until"] = m.until;
+          ev["reason"] = m.reason;
+          ev["by"] = callerName;
+          net.SendSSETo(chatStreamChannel, {subject->id}, ev.dump(), "moderation");
+        }
+
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = subject->username;
+        j["muted"] = true;
+        j["until"] = m.until;
+        j["scope"] = scopeKey.empty() ? "account" : scopeKey;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/kick — { channel, username, seconds? }
+  //
+  // §3.4's "kick from channel". Named channels only: `#main` cannot be left
+  // (see /api/chat/channel), so there is nothing to eject anybody from, and a
+  // room's ejection verb is /api/rooms/kick — a player removed from a room
+  // channel but still seated would be in a war they cannot talk to.
+  net.AddHttpPost(
+      "/api/chat/kick", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto caller = db.FindUserById(userId);
+        const bool callerIsAdmin = caller && caller->role == "admin";
+        nlohmann::json in =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (in.is_discarded() || !in.is_object())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+        const std::string channel =
+            Chat::NormalizeChannel(in.value("channel", ""));
+        if (channel.empty() || channel == Chat::MainTarget())
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"kick applies to a named channel"})");
+        auto subject = db.FindUser(in.value("username", ""));
+        if (!subject)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+
+        const std::string scopeKey = Chat::MuteKey(ChatScope::Channel, channel);
+        const auto right = ChatCanModerate(
+            scopeKey, callerIsAdmin ? ChatRole::Admin : ChatRole::Player,
+            subject->role == "admin", subject->id == userId);
+        if (right != ChatModerationRight::Allowed) {
+          nlohmann::json e;
+          e["error"] = ChatModerationRightToString(right);
+          return HttpAuth::JsonResponse(403, e.dump());
+        }
+        if (!gChatChannels.IsMember(subject->id, channel))
+          return HttpAuth::JsonResponse(
+              404, R"({"error":"that player is not in the channel"})");
+
+        // The mute is what makes the kick stick — /api/chat/channel refuses
+        // the re-join while it is in force. Written BEFORE the eject so the
+        // window in which a client could rejoin does not exist.
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        const int64_t seconds = in.value("seconds", kChatKickMuteSec);
+        const std::string callerName = caller ? caller->username : std::string("admin");
+        ChatMute m;
+        m.accountId = subject->id;
+        m.scopeKey = scopeKey;
+        m.until = now + (seconds > 0 ? seconds : kChatKickMuteSec);
+        m.reason = in.value("reason", "kicked from #" + channel);
+        m.byId = userId;
+        m.byName = callerName;
+        m.createdAt = now;
+        if (!Chat::SetMute(mapDb, m))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store mute"})");
+        gChatChannels.Leave(subject->id, channel);
+        db.LogAudit(userId, callerName, "chat_kick", subject->username,
+                    channel + " " + std::to_string(m.until - now) + "s");
+
+        // The channel is told AFTER the eject, so the ejected client is not
+        // among the recipients of the line about itself.
+        emitChatSystemLine(ChatScope::Channel, channel,
+                           gChatChannels.Members(channel),
+                           subject->username + " was kicked from #" + channel +
+                               " by " + callerName);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = subject->username;
+        j["channel"] = channel;
+        j["until"] = m.until;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/broadcast — { text }
+  //
+  // §3.4's "admin broadcast lines". `#main` is the one channel §3.1 makes
+  // everyone a member of and /api/chat/channel refuses to let anybody leave,
+  // which is exactly why the broadcast lands there: it is the only scope a
+  // client cannot opt out of hearing.
+  net.AddHttpPost(
+      "/api/chat/broadcast", RouteAuth::AdminOnly,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = 0;
+        std::string callerName;
+        if (auto e = requireLobbyAdmin(headers, userId, callerName))
+          return *e;
+        std::string text, err;
+        if (!Chat::ValidateText(HttpAuth::JsonField(body, "text"), text, err))
+          return HttpAuth::JsonResponse(400, "{\"error\":\"" + err + "\"}");
+        if (callerName.empty()) callerName = "admin";
+        // Named in the line rather than only in the audit row: a server
+        // announcement with nobody's name on it is indistinguishable from a
+        // client that made one up.
+        const std::string line = callerName + ": " + text;
+        const auto recipients = gChatChannels.Members(Chat::MainTarget());
+        emitChatSystemLine(ChatScope::Main, Chat::MainTarget(), recipients, line);
+        db.LogAudit(userId, callerName, "chat_broadcast", "main", text);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["delivered"] = recipients.size();
         return HttpAuth::JsonResponse(200, j.dump());
       });
 
@@ -6502,7 +6828,9 @@ int main(int argc, char *argv[]) {
       const int chat = Chat::Prune(maintenanceDb.Handle(),
                                    static_cast<int64_t>(std::time(nullptr)));
       if (chat > 0)
-        SLOG(SPRING_LOG_INFO, "swept %d chat message(s) past retention", chat);
+        SLOG(SPRING_LOG_INFO,
+             "swept %d chat row(s) past retention (messages + served mutes)",
+             chat);
     }
 
     // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).

@@ -388,3 +388,224 @@ TEST_CASE("task 9b: the ticket is read from the query string, not guessed at") {
     // suffix match here would let `?notticket=` authenticate a stream.
     CHECK(SSETickets::TicketFromQuery("notticket=abc") == "");
 }
+
+// ── Moderator mutes (§3.4's roles half, task 9c) ────────────────────────────
+//
+// What these defend:
+//
+//   * **a mute is a ROW, and the row's absence is the only "not muted".**
+//     `until = 0` therefore means "until lifted" rather than "no mute" — the
+//     one encoding where a permanent mute cannot be written as a timed one
+//     that has already expired.
+//   * **an expired mute stops biting without a sweep having run.** Enforcement
+//     that depends on the maintenance tick is enforcement that is wrong for
+//     however long the tick is late.
+//   * **speaking and hearing are different questions**, so ActiveMute (may I
+//     talk here) and ScopedMute (may I come back in) read different rows.
+//   * **the policy is a pure function**, so every rung of §3.4's role map is
+//     a case rather than a live lobby with four accounts in it.
+
+namespace {
+
+ChatMute Mute(int64_t account, const std::string& scopeKey, int64_t until,
+              int64_t now = 1000) {
+    ChatMute m;
+    m.accountId = account;
+    m.scopeKey = scopeKey;
+    m.until = until;
+    m.reason = "spam";
+    m.byId = 99;
+    m.byName = "mod";
+    m.createdAt = now;
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("task 9c: a mute with no expiry is permanent, not already expired") {
+    TestDb t;
+    const std::string key = Chat::MuteKey(ChatScope::Channel, "help");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, 0)));
+
+    // The whole encoding hangs on this: 0 is the open-ended case, and a
+    // reader that treated it as a past timestamp would let every permanent
+    // mute through on the first send.
+    auto m = Chat::ActiveMute(t.db, 4, key, /*now=*/5'000'000);
+    REQUIRE(m.has_value());
+    CHECK(m->Permanent());
+    CHECK(m->byName == "mod");
+    CHECK(m->reason == "spam");
+
+    // …and an account with no row is not muted, in any scope.
+    CHECK_FALSE(Chat::ActiveMute(t.db, 5, key, 1000).has_value());
+}
+
+TEST_CASE("task 9c: a served mute stops biting before anything sweeps it") {
+    TestDb t;
+    const std::string key = Chat::MuteKey(ChatScope::Main, "main");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, /*until=*/1060)));
+
+    CHECK(Chat::ActiveMute(t.db, 4, key, 1059).has_value());
+    // One second past expiry the row is still on disk and must already be
+    // inert: Prune is hygiene, never enforcement.
+    CHECK_FALSE(Chat::ActiveMute(t.db, 4, key, 1060).has_value());
+    CHECK(Chat::Mutes(t.db, 1060).empty());
+
+    // The sweep then removes it — and only the served one.
+    REQUIRE(Chat::SetMute(t.db, Mute(5, key, 0)));
+    CHECK(Chat::Prune(t.db, 1060) == 1);
+    CHECK(Chat::Mutes(t.db, 1060).size() == 1);
+}
+
+TEST_CASE("task 9c: the account-level mute outranks the channel it overlaps") {
+    TestDb t;
+    const std::string key = Chat::MuteKey(ChatScope::Channel, "help");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, Chat::GlobalMuteKey(), /*until=*/0)));
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, /*until=*/1060)));
+
+    // Both are in force; the player must be told the bigger one, or the mute
+    // they are shown expires while they are still silent.
+    auto m = Chat::ActiveMute(t.db, 4, key, 1000);
+    REQUIRE(m.has_value());
+    CHECK(m->scopeKey == Chat::GlobalMuteKey());
+    CHECK(m->Permanent());
+}
+
+TEST_CASE("task 9c: a global mute silences, it does not lock the door") {
+    TestDb t;
+    const std::string key = Chat::MuteKey(ChatScope::Channel, "help");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, Chat::GlobalMuteKey(), 0)));
+
+    // ScopedMute is the re-join question. Answering it with ActiveMute would
+    // turn every account-level mute into a ban from every named channel — a
+    // policy nobody wrote, arrived at by reusing one query for two questions.
+    CHECK(Chat::ActiveMute(t.db, 4, key, 1000).has_value());
+    CHECK_FALSE(Chat::ScopedMute(t.db, 4, key, 1000).has_value());
+
+    // The channel's own row is what refuses the door.
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, /*until=*/2000)));
+    CHECK(Chat::ScopedMute(t.db, 4, key, 1000).has_value());
+    CHECK_FALSE(Chat::ScopedMute(t.db, 4, key, 2000).has_value());
+}
+
+TEST_CASE("task 9c: re-muting the same scope replaces, it does not accumulate") {
+    TestDb t;
+    const std::string key = Chat::MuteKey(ChatScope::Channel, "help");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, /*until=*/1060)));
+    REQUIRE(Chat::SetMute(t.db, Mute(4, key, /*until=*/9000)));
+
+    // Two rows would be two answers, settled by whichever the reader saw
+    // first — and the extension would be defeated by the shorter one.
+    auto all = Chat::Mutes(t.db, 1000);
+    REQUIRE(all.size() == 1);
+    CHECK(all[0].until == 9000);
+    CHECK(Chat::ActiveMute(t.db, 4, key, 5000).has_value());
+}
+
+TEST_CASE("task 9c: lifting a mute reports whether it lifted anything") {
+    TestDb t;
+    const std::string help = Chat::MuteKey(ChatScope::Channel, "help");
+    const std::string dev = Chat::MuteKey(ChatScope::Channel, "dev");
+    REQUIRE(Chat::SetMute(t.db, Mute(4, help, 0)));
+
+    // The usual cause of an unmute that matched nothing is a moderator
+    // lifting in the wrong scope, which "ok" would hide until the player
+    // reported still being muted.
+    CHECK_FALSE(Chat::ClearMute(t.db, 4, dev));
+    CHECK_FALSE(Chat::ClearMute(t.db, 5, help));
+    CHECK(Chat::ClearMute(t.db, 4, help));
+    CHECK_FALSE(Chat::ActiveMute(t.db, 4, help, 1000).has_value());
+}
+
+TEST_CASE("task 9c: a mute is filed under the CANONICAL target, so it cannot "
+          "be spelled around") {
+    TestDb t;
+    // An ally channel and its room are different conversations, and a mute in
+    // one is not a mute in the other. Both keys come off the same builders
+    // History pages on, so there is no second spelling to slip through.
+    const std::string ally = Chat::MuteKey(ChatScope::Ally, Chat::AllyTarget(7, 1));
+    const std::string room = Chat::MuteKey(ChatScope::Room, Chat::RoomTarget(7));
+    CHECK(ally != room);
+    REQUIRE(Chat::SetMute(t.db, Mute(4, ally, 0)));
+    CHECK(Chat::ActiveMute(t.db, 4, ally, 1000).has_value());
+    CHECK_FALSE(Chat::ActiveMute(t.db, 4, room, 1000).has_value());
+
+    CHECK(Chat::MuteKeyScope(ally) == "ally");
+    CHECK(Chat::MuteKeyScope(room) == "room");
+    CHECK(Chat::MuteKeyScope(Chat::GlobalMuteKey()) == "");
+}
+
+// ── The role map ───────────────────────────────────────────────────────────
+
+TEST_CASE("task 9c: a room host ops their own room's channels and nothing else") {
+    const std::string room = Chat::MuteKey(ChatScope::Room, Chat::RoomTarget(7));
+    const std::string ally = Chat::MuteKey(ChatScope::Ally, Chat::AllyTarget(7, 1));
+    const std::string spec = Chat::MuteKey(ChatScope::Spectator, Chat::SpectatorTarget(7));
+    const std::string help = Chat::MuteKey(ChatScope::Channel, "help");
+    const std::string main = Chat::MuteKey(ChatScope::Main, Chat::MainTarget());
+
+    for (const auto& key : {room, ally, spec}) {
+        CHECK(ChatCanModerate(key, ChatRole::RoomHost, false, false) ==
+              ChatModerationRight::Allowed);
+    }
+    // Opening a room must not be a way to become a moderator: neither the
+    // server's channels nor — the one that matters — the account-level key.
+    CHECK(ChatCanModerate(help, ChatRole::RoomHost, false, false) ==
+          ChatModerationRight::NotAnOp);
+    CHECK(ChatCanModerate(main, ChatRole::RoomHost, false, false) ==
+          ChatModerationRight::NotAnOp);
+    CHECK(ChatCanModerate(Chat::GlobalMuteKey(), ChatRole::RoomHost, false, false) ==
+          ChatModerationRight::NotAnOp);
+
+    // An ordinary player ops nothing, including the room they are sitting in.
+    CHECK(ChatCanModerate(room, ChatRole::Player, false, false) ==
+          ChatModerationRight::NotAnOp);
+    // An admin ops all of it.
+    for (const auto& key : {room, ally, spec, help, main, Chat::GlobalMuteKey()}) {
+        CHECK(ChatCanModerate(key, ChatRole::Admin, false, false) ==
+              ChatModerationRight::Allowed);
+    }
+}
+
+TEST_CASE("task 9c: an admin cannot be muted, and nobody moderates themselves") {
+    const std::string help = Chat::MuteKey(ChatScope::Channel, "help");
+
+    // Immunity is a property of the SUBJECT, so it is answered before the
+    // actor's standing: an admin who could mute another admin makes the rule
+    // depend on who moved first, and the loser can lift it back.
+    CHECK(ChatCanModerate(help, ChatRole::Admin, /*subjectIsAdmin=*/true, false) ==
+          ChatModerationRight::ImmuneSubject);
+    CHECK(ChatCanModerate(help, ChatRole::RoomHost, true, false) ==
+          ChatModerationRight::ImmuneSubject);
+
+    // Self-moderation is refused before everything, including immunity: it is
+    // how a moderator locks themselves out of the channel they run.
+    CHECK(ChatCanModerate(help, ChatRole::Admin, false, /*selfTarget=*/true) ==
+          ChatModerationRight::SelfTarget);
+    CHECK(ChatCanModerate(help, ChatRole::Admin, true, true) ==
+          ChatModerationRight::SelfTarget);
+
+    // Every refusal has words a route can hand back; "allowed" is not one of
+    // them by accident.
+    CHECK(std::string(ChatModerationRightToString(ChatModerationRight::NotAnOp)) !=
+          std::string(ChatModerationRightToString(ChatModerationRight::Allowed)));
+    CHECK(std::string(ChatModerationRightToString(ChatModerationRight::ImmuneSubject)) !=
+          std::string(ChatModerationRightToString(ChatModerationRight::SelfTarget)));
+}
+
+TEST_CASE("task 9c: a system line is stored as one, and is never ignorable") {
+    TestDb t;
+    // §3.1's "carries system lines". A moderation notice has no sender, so
+    // there is nobody to ignore — and the channel telling you what happened
+    // to it must reach the person who muted the account it is about.
+    REQUIRE(Chat::SetIgnore(t.db, 4, 9, true));
+    REQUIRE(t.say(ChatScope::Channel, "help", 9, "hello") != 0);
+    REQUIRE(Chat::Append(t.db, ChatScope::Channel, "help", 0, "",
+                         "user9 was muted by mod", 1001, /*system=*/true) != 0);
+
+    auto seen = Chat::History(t.db, ChatScope::Channel, "help", 4, 0, 50);
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].system);
+    CHECK(seen[0].fromId == 0);
+    CHECK(seen[0].text == "user9 was muted by mod");
+}

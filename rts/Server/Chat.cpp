@@ -81,6 +81,22 @@ void Chat::EnsureTables(sqlite3* db) {
         "  created_at INTEGER NOT NULL DEFAULT 0,"
         "  PRIMARY KEY (viewer_id, target_id)"
         ")", nullptr, nullptr, nullptr);
+
+    // Moderator mutes (§3.4). The primary key is (account, scope) so that a
+    // second mute in the same scope REPLACES the first — a moderator
+    // extending a mute must not leave two rows whose disagreement is settled
+    // by whichever the reader saw first.
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS chat_mutes ("
+        "  account_id INTEGER NOT NULL,"
+        "  scope_key TEXT NOT NULL DEFAULT '',"
+        "  until INTEGER NOT NULL DEFAULT 0,"
+        "  reason TEXT NOT NULL DEFAULT '',"
+        "  by_id INTEGER NOT NULL DEFAULT 0,"
+        "  by_name TEXT NOT NULL DEFAULT '',"
+        "  created_at INTEGER NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY (account_id, scope_key)"
+        ")", nullptr, nullptr, nullptr);
 }
 
 // ── Canonical targets ──────────────────────────────────────────────────────
@@ -282,6 +298,14 @@ int Chat::Prune(sqlite3* db, int64_t now) {
             "AND ts < " + std::to_string(now - kOrphanRoomRetentionSec);
         deleted += ExecCounting(db, sql.c_str());
     }
+    // Served mutes. ActiveMute already ignores an expired row, so this is
+    // hygiene rather than enforcement — deliberately, because a sweep that
+    // has not run must never be the reason somebody can speak again.
+    {
+        const std::string sql =
+            "DELETE FROM chat_mutes WHERE until>0 AND until<=" + std::to_string(now);
+        deleted += ExecCounting(db, sql.c_str());
+    }
     // PMs are not swept: §3.3 keeps them "until both parties delete", and no
     // delete verb exists yet. Stated so the absence reads as a decision.
     return deleted;
@@ -371,6 +395,177 @@ std::vector<int64_t> Chat::FilterIgnored(sqlite3* db, int64_t senderId,
             out.push_back(r);
     }
     return out;
+}
+
+// ── Moderator mutes ────────────────────────────────────────────────────────
+
+std::string Chat::GlobalMuteKey() { return ""; }
+
+std::string Chat::MuteKey(ChatScope scope, const std::string& target) {
+    return std::string(ChatScopeToString(scope)) + ":" + target;
+}
+
+std::string Chat::MuteKeyScope(const std::string& key) {
+    const auto colon = key.find(':');
+    if (colon == std::string::npos) return "";
+    return key.substr(0, colon);
+}
+
+bool Chat::SetMute(sqlite3* db, const ChatMute& m) {
+    if (!db || m.accountId <= 0) return false;
+    static const char* kSql =
+        "INSERT INTO chat_mutes "
+        "  (account_id, scope_key, until, reason, by_id, by_name, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (account_id, scope_key) DO UPDATE SET "
+        "  until=excluded.until, reason=excluded.reason, by_id=excluded.by_id, "
+        "  by_name=excluded.by_name, created_at=excluded.created_at";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return false;
+    }
+    sqlite3_bind_int64(s, 1, m.accountId);
+    BindText(s, 2, m.scopeKey);
+    sqlite3_bind_int64(s, 3, m.until);
+    BindText(s, 4, m.reason);
+    sqlite3_bind_int64(s, 5, m.byId);
+    BindText(s, 6, m.byName);
+    sqlite3_bind_int64(s, 7, m.createdAt);
+    const bool ok = sqlite3_step(s) == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return ok;
+}
+
+bool Chat::ClearMute(sqlite3* db, int64_t accountId, const std::string& scopeKey) {
+    if (!db || accountId <= 0) return false;
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM chat_mutes WHERE account_id=? AND scope_key=?",
+            -1, &s, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return false;
+    }
+    sqlite3_bind_int64(s, 1, accountId);
+    BindText(s, 2, scopeKey);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+    return sqlite3_changes(db) > 0;
+}
+
+namespace {
+
+ChatMute ReadMute(sqlite3_stmt* s) {
+    ChatMute m;
+    m.accountId = sqlite3_column_int64(s, 0);
+    m.scopeKey = ColText(s, 1);
+    m.until = sqlite3_column_int64(s, 2);
+    m.reason = ColText(s, 3);
+    m.byId = sqlite3_column_int64(s, 4);
+    m.byName = ColText(s, 5);
+    m.createdAt = sqlite3_column_int64(s, 6);
+    return m;
+}
+
+const char* kMuteCols =
+    "account_id, scope_key, until, reason, by_id, by_name, created_at";
+
+}  // namespace
+
+std::optional<ChatMute> Chat::ActiveMute(sqlite3* db, int64_t accountId,
+                                         const std::string& scopeKey, int64_t now) {
+    if (!db || accountId <= 0) return std::nullopt;
+    // The account-level row wins the tie, and the ORDER BY is what makes that
+    // true rather than the row order: a player muted everywhere AND in one
+    // channel must be told the bigger of the two, or the mute they are shown
+    // expires while they are still silent.
+    const std::string sql =
+        std::string("SELECT ") + kMuteCols +
+        " FROM chat_mutes WHERE account_id=? AND (scope_key='' OR scope_key=?) "
+        "  AND (until=0 OR until>?) "
+        "ORDER BY (scope_key='') DESC LIMIT 1";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return std::nullopt;
+    }
+    sqlite3_bind_int64(s, 1, accountId);
+    BindText(s, 2, scopeKey);
+    sqlite3_bind_int64(s, 3, now);
+    std::optional<ChatMute> out;
+    if (sqlite3_step(s) == SQLITE_ROW) out = ReadMute(s);
+    sqlite3_finalize(s);
+    return out;
+}
+
+std::optional<ChatMute> Chat::ScopedMute(sqlite3* db, int64_t accountId,
+                                         const std::string& scopeKey, int64_t now) {
+    if (!db || accountId <= 0 || scopeKey.empty()) return std::nullopt;
+    const std::string sql =
+        std::string("SELECT ") + kMuteCols +
+        " FROM chat_mutes WHERE account_id=? AND scope_key=? AND (until=0 OR until>?)";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return std::nullopt;
+    }
+    sqlite3_bind_int64(s, 1, accountId);
+    BindText(s, 2, scopeKey);
+    sqlite3_bind_int64(s, 3, now);
+    std::optional<ChatMute> out;
+    if (sqlite3_step(s) == SQLITE_ROW) out = ReadMute(s);
+    sqlite3_finalize(s);
+    return out;
+}
+
+std::vector<ChatMute> Chat::Mutes(sqlite3* db, int64_t now) {
+    std::vector<ChatMute> out;
+    if (!db) return out;
+    const std::string sql =
+        std::string("SELECT ") + kMuteCols +
+        " FROM chat_mutes WHERE until=0 OR until>? ORDER BY created_at DESC, account_id";
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return out;
+    }
+    sqlite3_bind_int64(s, 1, now);
+    while (sqlite3_step(s) == SQLITE_ROW) out.push_back(ReadMute(s));
+    sqlite3_finalize(s);
+    return out;
+}
+
+// ── Who may moderate ───────────────────────────────────────────────────────
+
+ChatModerationRight ChatCanModerate(const std::string& scopeKey, ChatRole actor,
+                                    bool subjectIsAdmin, bool selfTarget) {
+    if (selfTarget) return ChatModerationRight::SelfTarget;
+    // Checked before the actor's own standing so that an admin gets the same
+    // answer as a host: this is a property of the SUBJECT, and an admin who
+    // could mute another admin makes the rule depend on who moved first.
+    if (subjectIsAdmin) return ChatModerationRight::ImmuneSubject;
+    if (actor == ChatRole::Admin) return ChatModerationRight::Allowed;
+    if (actor == ChatRole::RoomHost) {
+        const std::string scope = Chat::MuteKeyScope(scopeKey);
+        const bool roomShaped =
+            scope == "room" || scope == "ally" || scope == "spectator";
+        // A host's ops stop at their room's own channels. The GLOBAL key is
+        // deliberately not room-shaped, so this also refuses the one request
+        // that would turn opening a room into a moderator role.
+        return roomShaped ? ChatModerationRight::Allowed
+                          : ChatModerationRight::NotAnOp;
+    }
+    return ChatModerationRight::NotAnOp;
+}
+
+const char* ChatModerationRightToString(ChatModerationRight r) {
+    switch (r) {
+        case ChatModerationRight::Allowed:       return "allowed";
+        case ChatModerationRight::NotAnOp:       return "you do not op that channel";
+        case ChatModerationRight::ImmuneSubject: return "that account cannot be muted";
+        case ChatModerationRight::SelfTarget:    return "you cannot moderate yourself";
+    }
+    return "refused";
 }
 
 // ── Channel membership ─────────────────────────────────────────────────────

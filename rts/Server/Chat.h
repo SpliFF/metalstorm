@@ -29,14 +29,22 @@
 // testing at second boundaries, and a rate limiter that reads the clock
 // itself can only be tested by sleeping.
 //
+// ── Moderation is a STORE, not a connection state (task 9c) ────────────────
+// §3.4's roles half lives at the bottom of this file. The distinction that
+// decides its shape: ChatFlood's mute is a rate-limiter state and is
+// process-local on purpose, so a flooder who reconnects gets a clean bucket;
+// a moderator's mute is a *decision about an account* and must outlive the
+// connection, the lobby process and the account's next login, or it is a
+// suggestion. Same word, two mechanisms, and only one of them is a table.
+//
 // ── What is deliberately NOT here ──────────────────────────────────────────
-// Channel ops, admin broadcast and account-level mutes (§3.4's roles half)
-// and every §3.5 quality-of-life item are client or moderation work with no
-// store implication beyond this schema; they are filed in PLAN-lobby.md §3
-// and named in the task-9b entry rather than half-built here.
+// Every §3.5 quality-of-life item, and §4.6's `!` room-command surface, which
+// is gated on §4's endpoints rather than on chat (see PLAN-lobby.md §3's
+// status block for the census of which of its eleven verbs have one).
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -81,6 +89,29 @@ struct ChatMessage {
     /// Server-generated line (joins/leaves, option changes, game start/end —
     /// §3.1's "carries system lines"). `fromId` is 0 for these.
     bool        system = false;
+};
+
+/// One moderator decision (§3.4: "timed/permanent mutes stored on the
+/// account"). Durable, unlike ChatFlood's — see the header block.
+struct ChatMute {
+    int64_t     accountId = 0;
+    /// Chat::GlobalMuteKey() (empty) for an account-level mute, otherwise the
+    /// one conversation it applies to.
+    std::string scopeKey;
+    /// Unix seconds, or **0 meaning until lifted**. Deliberately not
+    /// "0 = no mute": the ROW is the mute, so its absence is the only way to
+    /// say "not muted" and 0 is free to mean the open-ended case.
+    int64_t     until = 0;
+    std::string reason;
+    /// Who did it. Kept alongside the audit row rather than instead of it:
+    /// the audit log is the operator's record, this is what the muted player
+    /// is told, and a player must not be shown "you were muted" with nobody's
+    /// name on it.
+    int64_t     byId = 0;
+    std::string byName;
+    int64_t     createdAt = 0;
+
+    bool Permanent() const { return until == 0; }
 };
 
 // ── Retention (§3.3) ───────────────────────────────────────────────────────
@@ -160,8 +191,8 @@ public:
     /// wired, which is why this is a separate call rather than a DB trigger.
     static int DeleteRoom(sqlite3* db, uint32_t roomId);
 
-    /// Apply §3.3's retention rules. Cheap enough for the maintenance tick.
-    /// Returns rows deleted.
+    /// Apply §3.3's retention rules, plus the served-mute sweep. Cheap enough
+    /// for the maintenance tick. Returns rows deleted across both tables.
     static int Prune(sqlite3* db, int64_t now);
 
     // ── Ignore list (§3.4) ──
@@ -176,6 +207,45 @@ public:
     /// handle, at chat rates.
     static std::vector<int64_t> FilterIgnored(sqlite3* db, int64_t senderId,
                                               const std::vector<int64_t>& recipients);
+
+    // ── Moderator mutes (§3.4's roles half) ──
+
+    /// The scope key an account-level mute is filed under. Empty string, and
+    /// it is a named constant because "" is also what a caller passes by
+    /// accident: every route builds the key through MuteKey() or through
+    /// this, so a typo'd scope cannot silently become a global silence.
+    static std::string GlobalMuteKey();
+    /// The key for one conversation. Always built from a CANONICAL target —
+    /// the same string History pages on — so a mute cannot be evaded by
+    /// spelling the target differently.
+    static std::string MuteKey(ChatScope scope, const std::string& target);
+    /// The scope word inside a key, or "" for the global key. Lets the
+    /// moderation policy read a key without a second parameter carrying the
+    /// same fact.
+    static std::string MuteKeyScope(const std::string& key);
+
+    /// Write or replace a mute. `m.until` of 0 means "until lifted".
+    static bool SetMute(sqlite3* db, const ChatMute& m);
+    /// Lift one. Returns true if a row went away — an unmute that matched
+    /// nothing is reported rather than answered "ok", because the usual cause
+    /// is a moderator lifting a mute in the wrong scope.
+    static bool ClearMute(sqlite3* db, int64_t accountId, const std::string& scopeKey);
+    /// The mute in force for this account in this conversation, if any: the
+    /// account-level row FIRST, then the conversation's own. An expired row is
+    /// not in force and is never returned (Prune deletes it later — expiry is
+    /// a property of the row, not of the sweep having run).
+    static std::optional<ChatMute> ActiveMute(sqlite3* db, int64_t accountId,
+                                              const std::string& scopeKey, int64_t now);
+    /// The conversation's OWN row only, ignoring any account-level mute.
+    /// Exists for the one question that is about *hearing* rather than
+    /// speaking — whether a kicked player may re-enter a channel. An
+    /// account-level mute silences a player everywhere; it does not blind
+    /// them, and answering that question with ActiveMute would quietly turn
+    /// every global mute into a ban from every named channel.
+    static std::optional<ChatMute> ScopedMute(sqlite3* db, int64_t accountId,
+                                              const std::string& scopeKey, int64_t now);
+    /// Every mute in force, newest first. The moderator's read path.
+    static std::vector<ChatMute> Mutes(sqlite3* db, int64_t now);
 };
 
 // ── Channel membership ─────────────────────────────────────────────────────
@@ -221,9 +291,56 @@ enum class ChatSendVerdict {
 /// Refill rate and ceiling. One token per second, four in hand.
 inline constexpr double kChatTokensPerSec = 1.0;
 inline constexpr double kChatBurstTokens = 4.0;
+/// How long a channel kick keeps the kicked account out (§3.4's "channel ops
+/// (mute/kick from channel)"). A kick is a cooling-off, not a ban: an
+/// indefinite one is what the mute verb is for, and a kick that expires by
+/// itself is the one a moderator does not have to remember to undo.
+inline constexpr int64_t kChatKickMuteSec = 300;
+
 /// Consecutive drops that turn a warning into a mute, and how long for.
 inline constexpr int kChatDropsBeforeMute = 5;
 inline constexpr int64_t kChatMuteSec = 60;
+
+// ── Who may moderate (§3.4's roles half) ───────────────────────────────────
+
+/// The actor's standing for ONE moderation request. `RoomHost` is a fact
+/// about a specific room, so a caller may only pass it for a scope key
+/// belonging to *that* room — the policy below cannot check it, because the
+/// roster lives in RoomManager and this file deliberately holds no rooms.
+enum class ChatRole {
+    Player,
+    RoomHost,  ///< host of the room whose channel is being moderated
+    Admin,     ///< the account-level "admin" role
+};
+
+enum class ChatModerationRight {
+    Allowed,
+    NotAnOp,        ///< the actor holds no ops in this scope
+    ImmuneSubject,  ///< the subject is an admin
+    SelfTarget,     ///< the actor named themselves
+};
+
+/// §3.4's role map, as a pure function of the request. Every rule that
+/// decides it is here rather than spread across four routes:
+///
+///  * **an admin is never muted by a chat row.** An admin who is abusing
+///    chat is a role problem, and a mute that a moderator can apply to the
+///    person who can lift it is a fight, not a moderation system.
+///  * **a room host is an op in their OWN room's three channels** (room,
+///    ally, spectator) and nowhere else. §3.1 makes the room channel the
+///    room's, and the host is the only role a room has; a host who could mute
+///    globally would be a moderator by opening a room.
+///  * **`#main` and named channels are the server's**, so only an admin ops
+///    them. §3.1 makes named channels admin-creatable first, and there is no
+///    channel-owner concept to inherit ops from.
+///  * **nobody moderates themselves** — representable, meaningless, and it
+///    is how a moderator locks themselves out of the channel they run.
+ChatModerationRight ChatCanModerate(const std::string& scopeKey, ChatRole actor,
+                                    bool subjectIsAdmin, bool selfTarget);
+
+/// Human-readable refusal, so four routes cannot word the same rule three
+/// ways.
+const char* ChatModerationRightToString(ChatModerationRight r);
 
 /// Per-account token bucket. Process-local by design: chat rates are a
 /// property of a live connection, and persisting them would mean a flooder
