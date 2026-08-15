@@ -15,7 +15,7 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 |------|-------------|-------------|
 | `get_logs` | Fetch recent log entries (filter by level, section, scope, room) | Checking server output, finding errors |
 | `search_logs` | Full-text search across all logs | Finding specific errors or patterns |
-| `exec_lua` | Execute Lua code in LuaRules, LuaGaia, or server scope | Testing gadgets, inspecting game state |
+| `exec_lua` | Execute Lua code in LuaRules, LuaGaia, or server scope. In `server` scope a leading `json ` token (`json state`, `json units 0`, `json unit_state 42`) returns a JSON object instead of free text — see [structured server verbs](../../../docs/debugging-tools.md#structured-server-verbs-json-prefix) | Testing gadgets, inspecting game state |
 | `query_db` | Run read-only SQL against the lobby database (only row-returning statements: SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads) | Checking users, sessions, room state |
 | `end_game` | Gracefully stop a room's spring-server: SIGTERM (clean exit + war-log drain + exit checkpoint) → poll → SIGKILL on timeout. `{roomId, graceful=true, timeoutMs=10000, escalate=true}`. Goes through the lobby's `POST /api/admin/rooms/end` and returns its **drain-quality report** — `{source, outcome, frame, label, lossy, resume_eligibility, exited, escalated, waitedMs, describe}` — i.e. it tells you whether the world actually checkpointed, not just that the pid died. `source:'sigterm-fallback'` means the lobby predates that route and there is no checkpoint verification | Ending a game you launched — **the default teardown verb** |
 | `kill_game` | **DEPRECATED** alias for `end_game(graceful:false)` (immediate SIGKILL, no checkpoint) | Only when a graceful stop is pointless (server wedged in precache) |
@@ -30,8 +30,8 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `generate_scenario` | Wraps the admin generator route. `{mapId, seed?, sides?, towns?, outposts?, bases?, mines?, sites?, relics?, wrecks?, bridges?, hostility?, roster?}`. Seed defaults to `sum(ord(c) for c in mapId)`, so a re-run is an **idempotent upsert**; a 422 carries the generator's own `REJECTED` line | Making a new war for a map without hand-authoring one |
 | `list_processes` | List game server subprocesses managed by the lobby | Checking if a game is running |
 | `list_sessions` | List recent game sessions from the log server | Post-mortem, history |
-| `get_game_state` | Get sim frame, teams, unit count from game server | Checking if sim is ticking |
-| `list_units` | List units, optionally by team | Debugging combat, spawning |
+| `get_game_state` | Sim state as an **object**: `{frame, paused, speed, teams, units, luaHeapKb}` (falls back to legacy text on a pre-`json ` game server) | Checking if sim is ticking; reading paused/speed without a second call |
+| `list_units` | Units as an **object**: `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}` — `total` counts every match of the team filter, `units` caps at 100 rows | Debugging combat, spawning; positions without a Lua round-trip |
 | `list_gadgets` | List loaded Lua gadgets | Checking which gadgets are active |
 | `get_lua_source` | Read a Lua file via the lobby's VFS HTTP endpoint | Reading gadget source when debugging errors |
 | `restart_lobby` | Restart the lobby server in-place (re-exec, same PID, preserves game servers) | After rebuilding spring-lobby binary |

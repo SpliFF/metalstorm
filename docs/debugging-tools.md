@@ -129,9 +129,9 @@ Configure in `.claude/settings.local.json`:
 |------|-----------|-------------|
 | `get_logs` | `roomId`, `game`, `level`, `section`, `scope`, `sinceMinutes`, `limit` | Fetch recent log entries; `roomId` scopes to one game instance |
 | `search_logs` | `query`, `roomId`, `game`, `section`, `level`, `sinceMinutes`, `limit` | Search logs; scope with `roomId`/`game`/`sinceMinutes` to avoid a flood of history |
-| `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope |
-| `get_game_state` | `roomId` | Get sim state summary |
-| `list_units` | `team`, `roomId` | List units, optionally by team |
+| `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope. With `scope:"server"`, a leading `json ` token asks the converted verbs for a JSON object instead of free text — see [structured server verbs](#structured-server-verbs-json-prefix) |
+| `get_game_state` | `roomId` | Sim state as an object: `{frame, paused, speed, teams, units, luaHeapKb}` (`luaHeapKb` is 0 when LuaRules is not loaded). Falls back to the legacy `frame=N teams=N units=N` text on a pre-`json ` game server |
+| `list_units` | `team`, `roomId` | Units as `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}`. `total` counts every match of the team filter (the legacy text reports the *unfiltered* active count); `units` is capped at 100 rows. Falls back to legacy text on a pre-`json ` game server |
 | `list_processes` | | List game server processes (via lobby HTTP) |
 | `get_lua_source` | `gamePath`, `filePath` | Read a Lua source file from disk |
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
@@ -148,7 +148,7 @@ Configure in `.claude/settings.local.json`:
 | `list_scenarios` | `gameId` (default `metalstorm`) | Merges the public discovery view (id, displayName, map, tutorial/retired, `terminal`, playable sides, briefing) with the admin provenance view for generated wars (seed, params, generatorVersion, createdBy/At). Rows are tagged `source: "authored"\|"generated"`. A stored row the lobby did **not** discover is surfaced explicitly — that means the materialised file failed to parse. Degrades to the public view alone (with a note) when the admin call is refused |
 | `generate_scenario` | `gameId`, `mapId` (required), `seed`, `sides`, `towns`, `outposts`, `bases`, `mines`, `sites`, `relics`, `wrecks`, `bridges`, `hostility`, `roster` | Generate a war with `scenariogen.py` via the lobby admin route, store it, materialise it to `gen_*.lua` and re-discover it. `seed` defaults **server-side** to `sum(ord(c) for c in mapId)`, so re-running with no seed is an idempotent upsert of the same war rather than a new one. A map that cannot host a war answers 422 with the generator's own `REJECTED` line naming the violated invariant — surfaced verbatim. Int knobs are range-clamped by the lobby (`sides` 2-8, the rest 0-32) |
 | `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client` | see `.claude/skills/spring-debug` | Service lifecycle management (`restart_client` = Vite pane via mprocs control channel). `launch_game` waits on `probe_game` (not the lobby's room state) and returns the readiness `phase`; on failure it adds `lastLogs` and returns as soon as the server dies instead of waiting out 120 s. **`kill_game` is deprecated** — it is now an alias for `end_game(graceful:false)` and, like `end_game`, **requires `roomId`**: called bare it refuses and lists candidate rooms instead of SIGKILLing whichever game it found first |
-| `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed`, `revive_team`, `set_stockpile`, `profile` | see `.claude/skills/spring-test` | Scripted test verbs (server-side). `revive_team {team?}` flips dead teams alive again (pair with `set_cheats`); `set_stockpile {unitId, count, queued?}` insta-fills a stockpile weapon; `profile {target: lua\|sim, action: on\|off\|reset\|status\|report, topN?}` drives the two server-side profilers (`sim` results also surface under `/api/metrics` → `simFrame`) |
+| `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed`, `revive_team`, `set_stockpile`, `profile` | see `.claude/skills/spring-test` | Scripted test verbs (server-side). `revive_team {team?}` flips dead teams alive again (pair with `set_cheats`); `set_stockpile {unitId, count, queued?}` insta-fills a stockpile weapon; `profile {target: lua\|sim, action: on\|off\|reset\|status\|report, topN?}` drives the two server-side profilers (`sim` results also surface under `/api/metrics` → `simFrame`). Three of these return **objects**, not text: `spawn_unit` → `{spawned, ids[]}`, `get_unit_state` → `{id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons[]}`, `get_combat_summary` → `{combat, sounds}` — see [structured server verbs](#structured-server-verbs-json-prefix) |
 | `browser_test`, `evaluate_widget_lua` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md) |
 
 The full, current tool list (with input schemas) lives in `tools/debug-mcp/server.js`; the skills in `.claude/skills/` document the recipes and pitfalls for using them. This table is a map, not the source of truth — it can drift from the server as tools are added.
@@ -1363,6 +1363,54 @@ curl -s -X POST http://localhost:8011/api/exec \
   -d '{"scope":"sql","code":"SELECT 1"}'
 # → {"success":true,"output":"1=1"}
 ```
+
+### Structured server verbs (`json ` prefix)
+
+A leading `json ` token on a `scope:"server"` exec command switches the
+converted verbs from free text to a serialized JSON object. Nothing else
+changes: same route, same envelope, same `success` derivation.
+
+```bash
+curl -s -X POST http://localhost:<game-port>/api/exec \
+  -d '{"scope":"server","code":"json state"}'
+# → {"success":true,"output":"{\"frame\":798,\"luaHeapKb\":3692,\"paused\":false,
+#      \"speed\":1.0,\"teams\":3,\"units\":100}"}
+```
+
+The reply travels as a **string** inside `output`, so a caller parses twice
+(envelope, then `output`). The same prefix works from the browser via
+`window.test.server('json state')` and from `debugConsole.exec`.
+
+| Verb | JSON shape |
+|------|-----------|
+| `json frame` | `{frame}` |
+| `json state` | `{frame, paused, speed, teams, units, luaHeapKb}` — `speed` is the *applied* `speedFactor`; `luaHeapKb` is 0 when LuaRules is not loaded |
+| `json units [team]` | `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}` — `total` counts every match of the filter, `units` caps at 100 |
+| `json unit_state <id>` | `{id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]}` — `index` is the unit's own weapon slot; null slots are skipped, so the array can be shorter than the slot count |
+| `json combat_summary` | `{combat, sounds}` |
+| `json log status` | `{combat, sound, weapon, explosion, order, unit, script}` (booleans) |
+| `json los status` | `{globalLos:[bool]}`, indexed by ally team |
+| `json cheats status` | `{cheatEnabled, godMode}` |
+| `json spawn <def> <x> <z> [team] [count]` | `{spawned, ids:[int]}` |
+
+Rules worth knowing before you rely on it:
+
+- **The prefix is a request, not a guarantee.** An *unconverted* verb (e.g.
+  `json pause`, `lua profile`, the debugger verbs, every mutation ack) runs
+  normally and answers its legacy text. Parse defensively.
+- **Errors inside a converted verb come back `success:true`** with an
+  `{"error":"..."}` body — the server derives `success` solely from a leading
+  `unknown command:`. Check the `error` key, not just the flag.
+- **Capability probe:** a game server predating this prefix does not strip the
+  token, so it answers `unknown command: json <verb>` with `success:false`.
+  That exact string is what the MCP's `execJsonVerb` helper keys its legacy
+  fallback off — no version negotiation, no new endpoint.
+- **`json spawn` runs through LuaRules**, so its non-JSON failure modes
+  (`error: LuaRules not loaded`, a Lua `syntax error:` from a quote in the def
+  name) are error strings, not old-binary fallbacks.
+- **Legacy output is byte-identical**, deliberately — including `units`'
+  `... (N total)` line reporting the *unfiltered* active count. Only the JSON
+  arm reports an honest filtered `total`.
 
 ### libspringapi
 

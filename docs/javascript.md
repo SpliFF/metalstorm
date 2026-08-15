@@ -175,6 +175,27 @@ await test.unitState(42)  // dump health/pos/weapons for a unit
 await test.combatSummary()
 ```
 
+Those return the server's free text. For machine-readable state use
+`serverJson()`, which asks the same verbs for their structured form (the
+[`json ` exec prefix](api.md#command-execution)) and returns a parsed object:
+
+```js
+await test.serverJson('state')          // {frame, paused, speed, teams, units, luaHeapKb}
+await test.serverJson('units', 0)       // {total, returned, units:[{id,def,team,hp,maxHp,x,y,z}]}
+await test.serverJson('unit_state', 42) // {id,def,team,hp,maxHp,pos:{x,y,z},heading,weapons:[…]}
+await test.serverJson('combat_summary') // {combat, sounds}
+await test.serverJson('spawn', 'ms_supply_truck', 3000, 3000, 0, 4)  // {spawned, ids:[…]}
+await test.serverJson('cheats', 'status')  // {cheatEnabled, godMode}
+await test.serverJson('log', 'status')     // {combat, sound, weapon, …} booleans
+```
+
+`units`' `total` counts every match of the team filter (the text form reports
+the *unfiltered* active count) and `units` caps at 100 rows. A verb with no
+structured form, and a game server too old to know the prefix, both **throw**
+rather than return half-parsed output. A converted verb's own error arrives as
+`{error: '…'}` on a successful request — check the key. Per-verb shapes:
+[debugging-tools.md § Structured server verbs](debugging-tools.md#structured-server-verbs-json-prefix).
+
 ### Model harness: orbit rig + sun control (PLAN-model-harness)
 
 Dev/test camera + lighting verbs; both live worker-side (dispatch wrappers).

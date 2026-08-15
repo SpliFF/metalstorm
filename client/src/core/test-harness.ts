@@ -190,6 +190,33 @@ export class TestHarness {
         return r.output;
     }
 
+    /** Execute a verb in the `server` exec scope asking for its STRUCTURED
+     *  form (the `json ` prefix), and return the parsed object.
+     *
+     *  Converted verbs: frame, state, units [team], unit_state <id>,
+     *  combat_summary, `log status`, `los status`, `cheats status`, spawn.
+     *  Anything else runs normally and answers text — that, and a game server
+     *  too old to know the prefix (it replies `unknown command: json …`), both
+     *  throw here rather than handing back something that only looks parsed.
+     *  A converted verb's own error arrives as `{error: "…"}` with the request
+     *  reported successful, so check the key. */
+    async serverJson<T = Record<string, unknown>>(
+        verb: ServerVerb, ...args: (string | number)[]
+    ): Promise<T> {
+        const code = [verb, ...args.map(String)].join(' ').trim();
+        const r = await this.execOnGameServer('server', `json ${code}`);
+        if (!r.success) {
+            if (r.output.startsWith('unknown command: json'))
+                throw new Error(`[test] server "json ${code}" → game server predates the json prefix`);
+            throw new Error(`[test] server "json ${code}" → ${r.output}`);
+        }
+        try {
+            return JSON.parse(r.output) as T;
+        } catch {
+            throw new Error(`[test] server "json ${code}" → not JSON (unconverted verb?): ${r.output}`);
+        }
+    }
+
     /** Execute a Lua snippet in the LuaRules synced state. Returns the
      *  text representation of the last expression. Throws on error. */
     async lua(code: string): Promise<string> {

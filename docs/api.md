@@ -643,6 +643,26 @@ curl -X POST http://localhost:<game-port>/api/exec \
 | `step_over` / `n` | Step over |
 | `step_out` / `o` | Step out |
 
+**Structured output — the `json ` prefix.** Prefixing a `server` command with
+`json ` makes the *converted* verbs (`frame`, `state`, `units [team]`,
+`unit_state <id>`, `combat_summary`, `log status`, `los status`,
+`cheats status`, `spawn`) answer a serialized JSON object instead of free
+text, carried as a string in the usual `output` field:
+
+```bash
+curl -X POST http://localhost:<game-port>/api/exec \
+  -d '{"scope":"server","code":"json state"}'
+# → {"success":true,"output":"{\"frame\":798,\"paused\":false,\"speed\":1.0,
+#      \"teams\":3,\"units\":100,\"luaHeapKb\":3692}"}
+```
+
+Legacy output is byte-identical without the prefix; an unconverted verb runs
+normally and still answers text; a converted verb's own errors come back as
+`{"error":"..."}` with `success:true` (the flag only keys off a leading
+`unknown command:`); and a game server predating the prefix answers
+`unknown command: json <verb>`, which is the intended capability probe. Full
+per-verb shapes: [debugging-tools.md § Structured server verbs](debugging-tools.md#structured-server-verbs-json-prefix).
+
 ### WebTransport Endpoint Discovery
 
 WebRTC and its `/api/rtc/*` SDP/ICE signaling endpoints were **removed** (GW7,

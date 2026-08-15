@@ -37,6 +37,8 @@
 #include <vector>
 #include <atomic>
 
+#include <nlohmann/json.hpp>
+
 #define LOG_SECTION "exec"
 
 namespace {
@@ -149,11 +151,36 @@ std::string ExecuteInLuaState(lua_State* L, const std::string& code) {
 namespace {
 
 // Execute a built-in server command (not Lua)
-std::string ExecuteServerCommand(const std::string& cmd) {
+//
+// A leading `json ` token switches the *converted* verbs (frame, state,
+// units, unit_state, log status, los status, cheats status, combat_summary,
+// spawn) to emit a JSON object instead of free text; every other verb runs
+// unchanged and still answers its legacy one-liner. An old binary has no
+// stripping and answers `unknown command: json <verb>` — that reply is the
+// capability probe callers use to fall back to the text parser.
+std::string ExecuteServerCommand(const std::string& cmdIn) {
+    bool wantJson = false;
+    std::string cmd = cmdIn;
+    if (cmd.rfind("json ", 0) == 0) {
+        wantJson = true;
+        cmd = cmd.substr(5);
+    }
+
     if (cmd == "frame") {
+        if (wantJson) return nlohmann::json{{"frame", gs->frameNum}}.dump();
         return std::to_string(gs->frameNum);
     }
     if (cmd == "state") {
+        if (wantJson) {
+            return nlohmann::json{
+                {"frame",      gs->frameNum},
+                {"paused",     gs->paused},
+                {"speed",      gs->speedFactor},
+                {"teams",      teamHandler.ActiveTeams()},
+                {"units",      unitHandler.GetActiveUnits().size()},
+                {"luaHeapKb",  GetSyncedLuaHeapKb()},
+            }.dump();
+        }
         std::ostringstream ss;
         ss << "frame=" << gs->frameNum
            << " teams=" << teamHandler.ActiveTeams()
@@ -164,6 +191,36 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         // "units" or "units <teamId>"
         int filterTeam = -1;
         if (cmd.size() > 6) filterTeam = std::atoi(cmd.c_str() + 6);
+
+        if (wantJson) {
+            // Unlike the legacy arm, `total` counts every FILTERED match
+            // (the legacy `... (N total)` line reports the unfiltered active
+            // count even under a team filter — kept byte-identical below,
+            // deliberately not reproduced here).
+            nlohmann::json arr = nlohmann::json::array();
+            int total = 0;
+            for (const CUnit* u : unitHandler.GetActiveUnits()) {
+                if (!u) continue;
+                if (filterTeam >= 0 && u->team != filterTeam) continue;
+                total++;
+                if (arr.size() >= 100) continue;
+                arr.push_back({
+                    {"id",    u->id},
+                    {"def",   u->unitDef->name},
+                    {"team",  u->team},
+                    {"hp",    u->health},
+                    {"maxHp", u->maxHealth},
+                    {"x",     u->pos.x},
+                    {"y",     u->pos.y},
+                    {"z",     u->pos.z},
+                });
+            }
+            return nlohmann::json{
+                {"total",    total},
+                {"returned", arr.size()},
+                {"units",    arr},
+            }.dump();
+        }
 
         std::ostringstream ss;
         int count = 0;
@@ -272,6 +329,17 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         }
         // 'log status' alone reports every flag.
         if (subsystem == "status" && action.empty()) {
+            if (wantJson) {
+                return nlohmann::json{
+                    {"combat",    g_debugFlags.combat   .load()},
+                    {"sound",     g_debugFlags.sound    .load()},
+                    {"weapon",    g_debugFlags.weapon   .load()},
+                    {"explosion", g_debugFlags.explosion.load()},
+                    {"order",     g_debugFlags.order    .load()},
+                    {"unit",      g_debugFlags.unit     .load()},
+                    {"script",    g_debugFlags.script   .load()},
+                }.dump();
+            }
             std::ostringstream ss;
             ss << "combat="    << (g_debugFlags.combat   .load() ? "on" : "off")
                << " sound="    << (g_debugFlags.sound    .load() ? "on" : "off")
@@ -317,6 +385,8 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         int team = 0, count = 1;
         is >> defName >> x >> z >> team >> count;
         if (defName.empty()) {
+            if (wantJson)
+                return nlohmann::json{{"error", "usage: spawn <defName> <x> <z> [team=0] [count=1]"}}.dump();
             return "usage: spawn <defName> <x> <z> [team=0] [count=1]";
         }
         if (count < 1) count = 1;
@@ -350,8 +420,21 @@ std::string ExecuteServerCommand(const std::string& cmd) {
             << "  local py = Spring.GetGroundHeight(px, pz)\n"
             << "  local ok, id = pcall(Spring.CreateUnit, '" << defName << "', px, py, pz, 0, targetTeam)\n"
             << "  if ok and id then ids[#ids+1] = id end\n"
-            << "end\n"
-            << "return 'spawned ' .. #ids .. ' unit(s): ' .. table.concat(ids, ',')\n";
+            << "end\n";
+        // The snippet's return VALUE is the verb's output, so the JSON arm has
+        // to be built in Lua. table.concat of an empty table yields "" —
+        // {"spawned":0,"ids":[]} stays valid JSON.
+        if (wantJson) {
+            // Spring.CreateUnit hands back a Lua number, and table.concat
+            // renders those as "6841.0" — legal JSON but a float where every
+            // consumer wants an id. Reformat here, not in the collection loop,
+            // so the legacy arm's output stays byte-identical.
+            lua << "local out = {}\n"
+                << "for i = 1, #ids do out[i] = string.format('%d', ids[i]) end\n"
+                << "return string.format('{\"spawned\":%d,\"ids\":[%s]}', #out, table.concat(out, ','))\n";
+        }
+        else
+            lua << "return 'spawned ' .. #ids .. ' unit(s): ' .. table.concat(ids, ',')\n";
         return runOnLuaRules(lua.str());
     }
 
@@ -503,9 +586,41 @@ std::string ExecuteServerCommand(const std::string& cmd) {
     // unit_state <unitId>  — dump health/pos/team/weapons.
     if (cmd.rfind("unit_state ", 0) == 0) {
         int unitId = std::atoi(cmd.c_str() + 11);
-        if (unitId <= 0) return "usage: unit_state <unitId>";
+        if (unitId <= 0) {
+            if (wantJson) return nlohmann::json{{"error", "usage: unit_state <unitId>"}}.dump();
+            return "usage: unit_state <unitId>";
+        }
         const CUnit* u = unitHandler.GetUnit((unsigned)unitId);
-        if (!u) return "no such unit";
+        if (!u) {
+            if (wantJson) return nlohmann::json{{"error", "no such unit"}}.dump();
+            return "no such unit";
+        }
+        if (wantJson) {
+            nlohmann::json weapons = nlohmann::json::array();
+            for (size_t i = 0; i < u->weapons.size(); ++i) {
+                const CWeapon* w = u->weapons[i];
+                if (!w || !w->weaponDef) continue;
+                // Carry the loop index so callers keep the legacy `w<i>` identity
+                // even though null slots shorten the array.
+                weapons.push_back({
+                    {"index",       (int)i},
+                    {"def",         w->weaponDef->name},
+                    {"range",       w->range},
+                    {"reloadFrame", w->reloadStatus},
+                    {"hasTarget",   w->HaveTarget()},
+                });
+            }
+            return nlohmann::json{
+                {"id",      u->id},
+                {"def",     u->unitDef->name},
+                {"team",    u->team},
+                {"hp",      u->health},
+                {"maxHp",   u->maxHealth},
+                {"pos",     {{"x", u->pos.x}, {"y", u->pos.y}, {"z", u->pos.z}}},
+                {"heading", u->heading},
+                {"weapons", weapons},
+            }.dump();
+        }
         std::ostringstream ss;
         ss << "id=" << u->id
            << " def=" << u->unitDef->name
@@ -531,8 +646,17 @@ std::string ExecuteServerCommand(const std::string& cmd) {
     // No arg or "status" returns the current state (per-team).
     if (cmd.rfind("los", 0) == 0 && (cmd.size() == 3 || cmd[3] == ' ')) {
         std::string arg = cmd.size() > 4 ? cmd.substr(4) : "status";
-        if (!losHandler) return "error: LosHandler not initialised";
+        if (!losHandler) {
+            if (wantJson) return nlohmann::json{{"error", "LosHandler not initialised"}}.dump();
+            return "error: LosHandler not initialised";
+        }
         if (arg == "status") {
+            if (wantJson) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at)
+                    arr.push_back(losHandler->GetGlobalLOS(at));
+                return nlohmann::json{{"globalLos", arr}}.dump();
+            }
             std::ostringstream ss;
             for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
                 if (at > 0) ss << " ";
@@ -552,6 +676,12 @@ std::string ExecuteServerCommand(const std::string& cmd) {
     if (cmd.rfind("cheats", 0) == 0 && (cmd.size() == 6 || cmd[6] == ' ')) {
         std::string arg = cmd.size() > 7 ? cmd.substr(7) : "status";
         if (arg == "status") {
+            if (wantJson) {
+                return nlohmann::json{
+                    {"cheatEnabled", (bool)gs->cheatEnabled},
+                    {"godMode",      gs->godMode},
+                }.dump();
+            }
             std::ostringstream ss;
             ss << "cheatEnabled=" << (gs->cheatEnabled ? "on" : "off")
                << " godMode=" << gs->godMode;
@@ -652,6 +782,12 @@ std::string ExecuteServerCommand(const std::string& cmd) {
 
     // combat_summary  — recent combat / sound / death queue depths.
     if (cmd == "combat_summary") {
+        if (wantJson) {
+            return nlohmann::json{
+                {"combat", combatEvents.Size()},
+                {"sounds", soundEvents.Size()},
+            }.dump();
+        }
         std::ostringstream ss;
         ss << "queued combat=" << combatEvents.Size()
            << " sounds=" << soundEvents.Size()

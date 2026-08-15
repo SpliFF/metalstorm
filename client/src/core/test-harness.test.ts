@@ -139,3 +139,48 @@ describe('withStableCamera', () => {
         expect(console.warn).toHaveBeenCalled();
     });
 });
+
+describe('serverJson (P6 structured server verbs)', () => {
+    function stubExec(reply: { success: boolean; output: string }) {
+        const fetchMock = vi.fn(async () => ({
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify(reply),
+            json: async () => reply,
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+        return fetchMock;
+    }
+
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    it('prefixes the verb with `json ` and returns the parsed object', async () => {
+        const fetchMock = stubExec({
+            success: true,
+            output: '{"total":2,"returned":2,"units":[{"id":7},{"id":8}]}',
+        });
+        const { h } = makeHarness();
+        const state = await h.serverJson('units', 0);
+
+        expect(JSON.parse(String(fetchMock.mock.calls[0][1].body)).code).toBe('json units 0');
+        expect(state).toEqual({ total: 2, returned: 2, units: [{ id: 7 }, { id: 8 }] });
+    });
+
+    it('throws a legible error when the game server predates the prefix', async () => {
+        stubExec({ success: false, output: 'unknown command: json state' });
+        const { h } = makeHarness();
+        await expect(h.serverJson('state')).rejects.toThrow(/predates the json prefix/);
+    });
+
+    it('throws rather than returning half-parsed output for an unconverted verb', async () => {
+        stubExec({ success: true, output: 'paused' });
+        const { h } = makeHarness();
+        await expect(h.serverJson('pause')).rejects.toThrow(/not JSON/);
+    });
+
+    it('surfaces a converted verb error object to the caller (request "succeeded")', async () => {
+        stubExec({ success: true, output: '{"error":"no such unit"}' });
+        const { h } = makeHarness();
+        expect(await h.serverJson('unit_state', 999999)).toEqual({ error: 'no such unit' });
+    });
+});

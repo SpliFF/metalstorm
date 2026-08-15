@@ -9,7 +9,7 @@ user-invocable: false
 
 Three coordinated layers:
 
-1. **Server-side verbs** — extensions to `LuaExecEngine`'s `server` exec scope (`spawn`, `kill`, `damage`, `order`, `clear`, `log`, `unit_state`, `combat_summary`).
+1. **Server-side verbs** — extensions to `LuaExecEngine`'s `server` exec scope (`spawn`, `kill`, `damage`, `order`, `clear`, `log`, `unit_state`, `combat_summary`). A leading `json ` token on a read verb (`json state`, `json units 0`, `json unit_state <id>`, `json spawn …`) returns a JSON object instead of free text — never regex-scrape these; shapes in [docs/debugging-tools.md](../../../docs/debugging-tools.md#structured-server-verbs-json-prefix).
 2. **Browser-side `window.test` (TestHarness)** — exposes camera focus, render-loop pause, screenshot, selection control, and composite helpers (`spawnAndFocus`, `stageCombat`).
 3. **MCP tools** — thin wrappers over both layers so Claude can drive a session without a tab open.
 
@@ -31,14 +31,14 @@ Returns `{ roomId, gameServerPort, ... }`. Pair it with `list_processes` to conf
 
 | Tool | Purpose |
 |------|---------|
-| `spawn_unit({defName, x, z, team?, count?})` | Spawn one or more units. Y is auto-resolved from the heightmap. `count > 1` lays them out in a grid. |
+| `spawn_unit({defName, x, z, team?, count?})` | Spawn one or more units. Y is auto-resolved from the heightmap. `count > 1` lays them out in a grid. Returns `{spawned, ids:[…]}` — feed `ids` straight into `give_order`/`get_unit_state`. |
 | `kill_unit({unitId, selfDestruct?, reclaimed?})` | Destroy a unit (optionally with self-destruct VFX or wreckage drop). |
 | `damage_unit({unitId, amount, paralyze?})` | Apply damage. Returns the new HP. |
 | `give_order({unitId, cmdId, params?, opts?})` | Issue any CMD.* order. Numeric cmdId — see `client/src/core/command-buffer.ts` for the table. |
 | `clear_units({team?})` | Wipe everything (or one team's units). |
-| `get_unit_state({unitId})` | Health, position, weapons, per-weapon target/range/reload. |
+| `get_unit_state({unitId})` | Health, position, weapons, per-weapon target/range/reload — as an **object**: `{id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]}`. `weapons[].index` is the unit's own slot (null slots are skipped). |
 | `set_debug_logging({combat?, sound?, weapon?, explosion?, order?, unit?, script?})` | Flip subsystem flags. Returns post-call status. |
-| `get_combat_summary` | Pending combat / sound / death queue depths. |
+| `get_combat_summary` | Pending combat / sound queue depths, as `{combat, sounds}`. |
 | `pause_sim({paused})` | Pause / unpause the server tick. |
 | `set_sim_speed({multiplier})` | Adjust sim speed (0.05 – 100). |
 | `revive_team({team?})` | Flip a dead team (or all dead teams, when `team` is omitted) back to alive so units can be spawned onto it. Pair with `set_cheats` so the game-over check doesn't re-kill it. Returns `revived N team(s)`. |
@@ -58,6 +58,7 @@ Exposed after `startGame()` finishes. Removed by `quitToLobby()`.
 | `test.order(id, cmdId, params?, opts?)` | Issue a single command. |
 | `test.clear(team?)` | Wipe all units (or one team). |
 | `test.log(subsystem, on)` / `test.setLogging({...})` / `test.logStatus()` | Debug-flag toggles. |
+| `test.serverJson(verb, ...args)` | Any converted `server` verb in **structured** form: `serverJson('state')`, `serverJson('units', 0)`, `serverJson('unit_state', 42)`, `serverJson('spawn', def, x, z, team, count)`, `serverJson('cheats','status')`. Returns a parsed object; throws on an unconverted verb or a game server predating the `json ` prefix. |
 | `test.state()` / `test.frame()` / `test.units(team?)` / `test.unitState(id)` / `test.combatSummary()` | Read-only sim queries. |
 | `test.simPause()` / `test.simResume()` / `test.simSpeed(n)` | Server-side time control. |
 | `test.focus(id, {durationMs?, height?})` | Animate the camera over a unit. |

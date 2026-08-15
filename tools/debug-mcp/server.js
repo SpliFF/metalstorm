@@ -448,6 +448,30 @@ async function execOnGameServer(scope, code, roomId) {
     return execOnServer(server.url, scope, code);
 }
 
+/// Try the structured form of a server verb (`json <verb>`), falling back to
+/// legacy free text when the binary predates the prefix — such a binary answers
+/// `unknown command: json <verb>`, and that reply IS the capability probe.
+///
+/// Returns `{json}` when the reply parsed, `{legacy: null}` when the server is
+/// old (caller re-issues the plain verb), and `{legacy: <text>}` when the reply
+/// is real output that simply isn't JSON (an unconverted verb — the `json `
+/// prefix is a request, not a guarantee — or a Lua `error:`/`runtime error:`
+/// string from a verb that routes through LuaRules). Throws on real errors.
+///
+/// Note converted-verb errors come back `success:true` with an `{"error":...}`
+/// body (the server derives success solely from `unknown command:`), so callers
+/// must check `.error` on the parsed object.
+async function execJsonVerb(verb, roomId) {
+    const r = await execOnGameServer('server', `json ${verb}`, roomId);
+    const output = r.output ?? '';
+    if (!r.success) {
+        if (output.startsWith('unknown command: json')) return { legacy: null };
+        throw new Error(output || 'exec failed');
+    }
+    try { return { json: JSON.parse(output) }; }
+    catch { return { legacy: output }; }
+}
+
 // --- Minimal FlatBuffer decoder for cached UnitDefs/WeaponDefs ---
 // The server bakes defs to data/games/{gameId}/cache/defs/{key}/unitdefs.bin
 // (and weapondefs.bin) framed as: 1-byte envelope + ServerMessage root.
@@ -791,7 +815,7 @@ const TOOLS = [
     },
     {
         name: 'get_game_state',
-        description: 'Get current game state summary (frame, teams, unit count) from the game server.',
+        description: 'Get current game state summary from the game server. Returns a JSON object {frame, paused, speed, teams, units, luaHeapKb} (luaHeapKb is 0 when LuaRules is not loaded). Against a game server that predates the `json ` exec prefix it falls back to the legacy one-line text "frame=N teams=N units=N".',
         inputSchema: {
             type: 'object',
             properties: {
@@ -801,7 +825,7 @@ const TOOLS = [
     },
     {
         name: 'list_units',
-        description: 'List units in the game, optionally filtered by team.',
+        description: 'List units in the game, optionally filtered by team. Returns a JSON object {total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]} — `total` counts every match of the team filter, `units` is capped at 100 rows (`returned`). Falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1139,7 +1163,7 @@ const TOOLS = [
     },
     {
         name: 'spawn_unit',
-        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart.',
+        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart. Returns a JSON object {spawned, ids:[...]}; falls back to the legacy "spawned N unit(s): ..." text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1209,7 +1233,7 @@ const TOOLS = [
     },
     {
         name: 'get_unit_state',
-        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip).',
+        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip). Returns a JSON object {id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]} — `index` is the unit\'s own weapon slot (null slots are skipped, so the array can be shorter). Falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1238,7 +1262,7 @@ const TOOLS = [
     },
     {
         name: 'get_combat_summary',
-        description: 'Quick-look queue depths for combat events, sound events, and unit deaths still pending broadcast. Useful for sanity-checking that combat is actually happening.',
+        description: 'Quick-look queue depths for combat events and sound events still pending broadcast. Useful for sanity-checking that combat is actually happening. Returns a JSON object {combat, sounds}; falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1472,6 +1496,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_game_state': {
+            const r = await execJsonVerb('state', args.roomId);
+            if (r.json) {
+                if (r.json.error) return `Error: ${r.json.error}`;
+                return r.json;
+            }
+            if (r.legacy) return r.legacy;
             const result = await execOnGameServer('server', 'state', args.roomId);
             return result.output || '(no state)';
         }
@@ -1479,6 +1509,12 @@ async function executeTool(name, args) {
         case 'list_units': {
             const cmd = args.team !== undefined && args.team >= 0
                 ? `units ${args.team}` : 'units';
+            const r = await execJsonVerb(cmd, args.roomId);
+            if (r.json) {
+                if (r.json.error) return `Error: ${r.json.error}`;
+                return r.json;
+            }
+            if (r.legacy) return r.legacy;
             const result = await execOnGameServer('server', cmd, args.roomId);
             return result.output || '(no units)';
         }
@@ -2212,6 +2248,15 @@ async function executeTool(name, args) {
 
         case 'spawn_unit': {
             const cmd = `spawn ${args.defName} ${args.x} ${args.z} ${args.team ?? 0} ${args.count ?? 1}`;
+            const j = await execJsonVerb(cmd, args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            // spawn runs through LuaRules, so a non-JSON reply from the json
+            // path is an error string ("error: LuaRules not loaded", a Lua
+            // syntax/runtime error), NOT old-binary fallback.
+            if (j.legacy) return `Error: ${j.legacy}`;
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -2242,6 +2287,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_unit_state': {
+            const j = await execJsonVerb(`unit_state ${args.unitId}`, args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            if (j.legacy) return j.legacy;
             const r = await execOnGameServer('server', `unit_state ${args.unitId}`, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -2257,6 +2308,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_combat_summary': {
+            const j = await execJsonVerb('combat_summary', args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            if (j.legacy) return j.legacy;
             const r = await execOnGameServer('server', 'combat_summary', args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
