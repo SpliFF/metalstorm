@@ -140,6 +140,12 @@
         <div id="friends-list" class="friends-list"></div>
     </div>
     <div id="room-list" class="room-list"></div>
+    <!-- Chat (PLAN-lobby.md §3, task 9b). An empty host: everything inside it
+         is built by `renderChat()` from `chat.ts`'s model, because the tabs
+         are a property of the conversations this account is in and not of the
+         screen it is looking at. Hidden until a ticket answers, so a lobby
+         without the chat routes looks exactly as it did. -->
+    <div id="chat-dock" class="chat-dock" style="display:none"></div>
     <div id="replay-panel" class="replay-panel" style="display:none">
         <h3>Replays</h3>
         <div id="replay-list" class="replay-list"></div>

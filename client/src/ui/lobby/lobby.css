@@ -647,6 +647,116 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .friends-btn-pending { background: #f0a04c; color: #241a0c; }
 .friends-btn-pending:hover { background: #f7b978; }
 
+/* ---- Chat (PLAN-lobby.md §3, task 9b) ---- */
+
+.chat-dock {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+}
+.chat-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.chat-head h3 { margin: 0; font-size: 15px; }
+.chat-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+/* A tab is a quiet control until it is the one being read: the panel can
+   easily hold six of them, and six filled cyan buttons read as six calls to
+   action rather than one conversation and five places it is not. */
+.chat-tab {
+    background: #182236;
+    color: #9aa4b5;
+    font-size: 12px;
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.chat-tab:hover { background: #22304a; color: #dfe6f0; }
+.chat-tab-active { background: #16304a; color: #4cc9f0; }
+.chat-tab-active:hover { background: #16304a; color: #4cc9f0; }
+/* Unread rides on the tab, amber like every other "this wants you" mark in
+   the lobby (`.friends-btn-pending`, the incoming-request edge). */
+.chat-unread {
+    background: #f0a04c;
+    color: #241a0c;
+    border-radius: 8px;
+    padding: 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.chat-tab-close { color: #7a8496; font-size: 13px; line-height: 1; }
+.chat-tab-close:hover { color: #ff6b6b; }
+/* The stream's own line — never a message. Amber because every state it
+   reports is one the player may have to act on (reconnecting, disconnected,
+   muted, a refused command). */
+.chat-notice {
+    font-size: 12px;
+    color: #f0a04c;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.chat-log {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    height: 220px;
+    overflow-y: auto;
+    background: #0f1626;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+.chat-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #dfe6f0;
+}
+.chat-time { color: #55607a; font-size: 11px; font-variant-numeric: tabular-nums; }
+.chat-from { color: #4cc9f0; font-weight: 600; }
+.chat-from::after { content: ':'; color: #55607a; font-weight: 400; }
+/* `word-break` rather than nothing: a 500-character word is a legal message
+   and an unbreakable one stretches the panel past the page. */
+.chat-text { flex: 1; word-break: break-word; }
+/* Your own line is dimmer, and its name is the one green thing in the log:
+   you already know what you said, and the lines worth reading are other
+   people's. The three modifiers each paint the whole line rather than
+   qualifying `.chat-text` — `.chat-text` declares no colour, so it inherits,
+   and a rule that only exists as a descendant selector is a rule the panel's
+   own coverage test cannot see. */
+.chat-line-mine { color: #b9c2d0; }
+.chat-line-mine .chat-from { color: #7fd4a8; }
+.chat-line-system { color: #9aa4b5; font-style: italic; }
+.chat-line-action { color: #c9a0f0; font-style: italic; }
+.chat-compose { display: flex; gap: 8px; margin-top: 8px; }
+.chat-input {
+    flex: 1;
+    background: #0f1626;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    color: #dfe6f0;
+    padding: 6px 10px;
+    font-size: 13px;
+}
+.chat-input:focus { outline: none; border-color: #4cc9f0; }
+.chat-send-btn { font-size: 12px; padding: 4px 14px; }
+/* The composer's hint line names the slash commands, so they have to be
+   legible against the panel rather than the browser's default serif. */
+.chat-log code {
+    background: #182236;
+    color: #9aa4b5;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12px;
+}
+
 .create-form {
     margin-top: 16px;
     padding-top: 16px;

@@ -28,6 +28,11 @@ import {
     type FriendJoinResult, type FriendRow,
 } from './friends';
 import {
+    ChatModel, CHAT_STREAM_MAX_ATTEMPTS, CHAT_TICKET_TTL_SEC,
+    actionBody, chatTime, isActionLine, parseChatInput, pmOther, streamRecovery,
+    tabKey,
+} from './chat';
+import {
     classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
     type TotpStatus,
 } from './totp';
@@ -662,6 +667,10 @@ export class LobbyUI {
             this.roomEventSource.close();
             this.roomEventSource = null;
         }
+        // Chat rides the same session: a logged-out browser must not keep a
+        // stream open against a ticket the server has just revoked, retrying
+        // it every few seconds for the life of the page.
+        this.stopChat();
     }
 
     private applyRoomList(rooms: any[]): void {
@@ -1645,6 +1654,7 @@ export class LobbyUI {
         this.wireReplayPanel();
         this.wireFriendsPanel();
         this.wireDeployButton();
+        this.wireChatDock();
     }
 
     /// Deploy — §6/task 7's one-click "which war should I fight in".
@@ -1874,6 +1884,338 @@ export class LobbyUI {
                 }
             };
         });
+    }
+
+    // ================= CHAT (PLAN-lobby.md §3, task 9b client) ================
+    //
+    // The service is `rts/Server/Chat.{h,cpp}` plus six `/api/chat/*` routes;
+    // every decision that is not a fetch lives in `chat.ts`. Two things about
+    // the transport shape the code here:
+    //
+    //   * The stream is IDENTIFIED, so it needs a credential, and an
+    //     `EventSource` cannot send a header — hence the ticket, minted with
+    //     the real token and spent in the url (SSETickets.h).
+    //   * `onerror` says nothing about WHY, so the recovery policy has to be a
+    //     rule rather than a reaction; `streamRecovery` is that rule, and this
+    //     file only carries out what it decides.
+    //
+    // The dock is rendered from `chat.ts`'s model into whichever screen is up
+    // — the browser and the room are two views of the same conversation list,
+    // which is §3's "one chat service" seen from the client end.
+
+    private chat = new ChatModel();
+    private chatStream: EventSource | null = null;
+    private chatTicketMintedAt = 0;
+    private chatTicketTtlSec = CHAT_TICKET_TTL_SEC;
+    private chatErrors = 0;
+    private chatRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /// Null until the first mint answers: null hides the dock (a lobby without
+    /// the routes must look exactly as it did), false means the routes refused
+    /// this account, true means chat is live.
+    private chatAvailable: boolean | null = null;
+    /// Two notice lines, deliberately not one. The stream's state
+    /// (reconnecting, disconnected) is a standing condition and clears itself
+    /// when the connection comes back; a refused command ("Unknown command
+    /// /whisper", a mute, a 404 on a typo'd name) is a reply to one action and
+    /// has to go away on the next one. Sharing a field left a refusal from
+    /// four actions ago sitting over a working panel — seen in the browser,
+    /// which is the only place it looked wrong.
+    private chatStreamNotice = '';
+    private chatCmdNotice = '';
+
+    /// Bring the chat panel up. Idempotent: both screens call it on render and
+    /// the stream survives the screen change.
+    private wireChatDock(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable === null && !this.chatStream) void this.startChat();
+        this.chat.myId = this.myPlayerId;
+        this.syncChatRoomTabs();
+        this.renderChat();
+    }
+
+    /// Mint a ticket and open the stream.
+    ///
+    /// Order matters and is the opposite of the obvious one: the STREAM opens
+    /// before any history is fetched, so a line said while the backfill is in
+    /// flight is delivered rather than lost. It arrives twice instead, which
+    /// `mergeMessages` is for.
+    private async startChat(): Promise<void> {
+        let ticket = '';
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            ticket = typeof r?.ticket === 'string' ? r.ticket : '';
+            if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+        } catch { /* no route, or no lobby */ }
+        if (!ticket) {
+            this.chatAvailable = false;
+            this.renderChat();
+            return;
+        }
+        this.chatAvailable = true;
+        this.chatTicketMintedAt = Date.now();
+        this.openChatStream(ticket);
+        void this.backfillActiveTab();
+    }
+
+    private openChatStream(ticket: string): void {
+        this.closeChatStream();
+        const es = new EventSource(
+            `${CONFIG.httpUrl}/api/chat/stream?ticket=${encodeURIComponent(ticket)}`);
+        this.chatStream = es;
+        es.addEventListener('open', () => {
+            // A connection that stands up clears the backoff: the next failure
+            // is a new failure, not the sixth of the old one.
+            this.chatErrors = 0;
+            if (this.chatStreamNotice) { this.chatStreamNotice = ''; this.renderChat(); }
+        });
+        es.addEventListener('chat', (e: MessageEvent) => {
+            let f: any;
+            try { f = JSON.parse(e.data); } catch { return; }
+            if (!f || typeof f.id !== 'number') return;
+            const landed = this.chat.applyFrame({
+                id: f.id, scope: f.scope, target: String(f.target ?? ''),
+                from: String(f.from ?? ''), fromId: Number(f.fromId ?? 0),
+                text: String(f.text ?? ''), ts: Number(f.ts ?? 0),
+                ...(f.system ? { system: true } : {}),
+            });
+            if (landed) this.renderChat();
+        });
+        es.onerror = () => this.onChatStreamError();
+    }
+
+    /// The one place that decides what a dead stream means.
+    private onChatStreamError(): void {
+        this.chatErrors++;
+        const ageSec = (Date.now() - this.chatTicketMintedAt) / 1000;
+        const r = streamRecovery(this.chatErrors, ageSec, this.chatTicketTtlSec);
+        if (r.notice !== this.chatStreamNotice) { this.chatStreamNotice = r.notice; this.renderChat(); }
+        if (r.action === 'wait') return;          // the browser retries on its own
+        this.closeChatStream();                    // stop the retry on a dead url
+        if (r.action === 'stop') return;           // the player asks for the next one
+        if (this.chatRetryTimer) clearTimeout(this.chatRetryTimer);
+        this.chatRetryTimer = setTimeout(() => {
+            this.chatRetryTimer = null;
+            void this.remintAndReopen();
+        }, r.delayMs);
+    }
+
+    /// Trade the (real, header-borne) token for a fresh ticket and reconnect.
+    private async remintAndReopen(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            if (typeof r?.ticket === 'string' && r.ticket) {
+                this.chatTicketMintedAt = Date.now();
+                if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+                this.openChatStream(r.ticket);
+                return;
+            }
+        } catch { /* fall through to the same backoff as a stream failure */ }
+        this.onChatStreamError();
+    }
+
+    private closeChatStream(): void {
+        if (!this.chatStream) return;
+        this.chatStream.close();
+        this.chatStream = null;
+    }
+
+    /// Shut chat down with the rest of the session (logout, or leaving the
+    /// lobby for the game surface). The ticket dies server-side with the
+    /// account's tokens; this stops the browser retrying against it.
+    private stopChat(): void {
+        this.closeChatStream();
+        if (this.chatRetryTimer) { clearTimeout(this.chatRetryTimer); this.chatRetryTimer = null; }
+        this.chatErrors = 0;
+        this.chatAvailable = null;
+        this.chatStreamNotice = '';
+        this.chatCmdNotice = '';
+    }
+
+    /// Room tabs follow the seat, and the seat comes off the roster the room
+    /// screen already holds — never off anything the client chooses.
+    private syncChatRoomTabs(): void {
+        const r = this.currentRoom;
+        const me = r?.players.find(p => p.playerId === this.myPlayerId) ?? null;
+        const seat = r && me
+            ? { roomId: r.id, team: me.team, isSpectator: !!me.isSpectator }
+            : null;
+        if (this.chat.syncRoomTabs(seat, r?.name ?? '')) void this.backfillActiveTab();
+    }
+
+    /// §3.3's "backfills the UI on join". Once per tab: the store is
+    /// authoritative and a re-open must not re-page it.
+    private async backfillActiveTab(): Promise<void> {
+        const tab = this.chat.active();
+        if (!tab || tab.loaded || this.chatAvailable !== true) return;
+        try {
+            const r = await this.lobbyPost('/api/chat/history',
+                { scope: tab.scope, target: tab.sendTarget, limit: 50 });
+            if (Array.isArray(r?.messages)) {
+                this.chat.applyHistory(tab.key, r.messages);
+                this.renderChat();
+            }
+        } catch { /* an empty channel and an unreachable one look the same here */ }
+    }
+
+    /// One line typed in the composer.
+    private async submitChat(raw: string): Promise<void> {
+        // A reply belongs to one action, so the next action takes it away.
+        this.chatCmdNotice = '';
+        const cmd = parseChatInput(raw, this.chat.active());
+        switch (cmd.kind) {
+            case 'none':
+                return;
+            case 'error':
+                this.chatCmdNotice = cmd.message;
+                this.renderChat();
+                return;
+            case 'send': {
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: cmd.scope, target: cmd.target, text: cmd.text });
+                // The line comes back down the stream — the sender is in its
+                // own recipient list — so nothing is appended here. What the
+                // reply is for is the refusals: a mute, a flood drop, or a
+                // scope this client thinks it is in and the server does not.
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); }
+                return;
+            }
+            case 'pm': {
+                // Open the tab whatever happens, so a typed name that turns
+                // out to be nobody says so in the conversation it was aimed
+                // at rather than in the channel the player was reading.
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: 'pm', target: cmd.username, text: cmd.text || ' ' });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                // `target` in the reply is CANONICAL (`<lo>:<hi>`); the tab is
+                // keyed on it and addressed by the name that was typed.
+                const other = pmOther(String(r?.target ?? ''), this.myPlayerId);
+                if (other) {
+                    const tab = this.chat.ensurePmTab(other, cmd.username);
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                }
+                this.renderChat();
+                return;
+            }
+            case 'ignore': {
+                const r = await this.lobbyPost('/api/chat/ignore',
+                    { username: cmd.username, on: cmd.on });
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on ? `Ignoring ${cmd.username}.` : `No longer ignoring ${cmd.username}.`;
+                this.renderChat();
+                return;
+            }
+            case 'channel': {
+                const r = await this.lobbyPost('/api/chat/channel',
+                    { channel: cmd.channel, join: cmd.join });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                if (cmd.join) {
+                    const tab = this.chat.ensureTab({
+                        scope: 'channel', target: cmd.channel, sendTarget: cmd.channel,
+                        label: `#${cmd.channel}`, closable: true,
+                    });
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                } else {
+                    this.chat.close(tabKey('channel', cmd.channel));
+                }
+                this.chatCmdNotice = '';
+                this.renderChat();
+                return;
+            }
+        }
+    }
+
+    private renderChat(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable !== true) { dock.style.display = 'none'; return; }
+        dock.style.display = '';
+
+        const active = this.chat.active();
+        const tabs = this.chat.list().map(t => {
+            const unread = t.unread > 0 ? `<span class="chat-unread">${t.unread}</span>` : '';
+            const close = t.closable
+                ? `<span class="chat-tab-close" data-close="${this.escAttr(t.key)}">×</span>` : '';
+            return `<button class="chat-tab${t.key === this.chat.activeKey ? ' chat-tab-active' : ''}" ` +
+                   `data-tab="${this.escAttr(t.key)}">${this.esc(t.label)}${unread}${close}</button>`;
+        }).join('');
+
+        const lines = (active?.messages ?? []).map(m => {
+            const time = `<span class="chat-time">${chatTime(m.ts)}</span>`;
+            if (m.system) {
+                return `<div class="chat-line chat-line-system">${time}` +
+                       `<span class="chat-text">${this.esc(m.text)}</span></div>`;
+            }
+            if (isActionLine(m.text)) {
+                // No colon, no name-then-text: an action reads as one
+                // sentence or it is not an action.
+                return `<div class="chat-line chat-line-action">${time}` +
+                       `<span class="chat-text">${this.esc(m.from)} ` +
+                       `${this.esc(actionBody(m.text))}</span></div>`;
+            }
+            const mine = m.fromId === this.myPlayerId ? ' chat-line-mine' : '';
+            return `<div class="chat-line${mine}">${time}` +
+                   `<span class="chat-from">${this.esc(m.from)}</span>` +
+                   `<span class="chat-text">${this.esc(m.text)}</span></div>`;
+        }).join('');
+
+        const empty = !active || active.messages.length === 0
+            ? `<div class="empty-state">Nothing said here yet. ` +
+              `<code>/w player</code>, <code>/join #channel</code>, <code>/me</code>.</div>`
+            : '';
+        const stopped = this.chatErrors >= CHAT_STREAM_MAX_ATTEMPTS;
+        // The stream outranks a command reply: "chat is disconnected" is why
+        // the command failed, and showing the reply instead explains nothing.
+        const noticeText = this.chatStreamNotice || this.chatCmdNotice;
+        const notice = noticeText
+            ? `<div class="chat-notice">${this.esc(noticeText)}` +
+              (stopped ? ' <button id="chat-reconnect-btn" class="secondary">Reconnect</button>' : '') +
+              `</div>`
+            : '';
+
+        dock.innerHTML =
+            `<div class="chat-head"><h3>Chat</h3><div class="chat-tabs">${tabs}</div></div>` +
+            notice +
+            `<div id="chat-log" class="chat-log">${lines}${empty}</div>` +
+            `<form id="chat-form" class="chat-compose">` +
+            `<input type="text" id="chat-input" class="chat-input" autocomplete="off" ` +
+            `maxlength="500" placeholder="Message ${this.escAttr(active?.label ?? '')}">` +
+            `<button type="submit" class="chat-send-btn">Send</button></form>`;
+
+        // Newest line at the bottom, and the view pinned to it: a chat panel
+        // that opens scrolled to the oldest line looks empty.
+        const log = document.getElementById('chat-log');
+        if (log) log.scrollTop = log.scrollHeight;
+
+        const form = document.getElementById('chat-form') as HTMLFormElement | null;
+        const input = document.getElementById('chat-input') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const text = input.value;
+                input.value = '';
+                void this.submitChat(text);
+            };
+        }
+        dock.querySelectorAll('.chat-tab').forEach(b => {
+            (b as HTMLElement).onclick = (e) => {
+                const closeKey = (e.target as HTMLElement).getAttribute('data-close');
+                if (closeKey) { this.chat.close(closeKey); this.renderChat(); return; }
+                this.chat.setActive(b.getAttribute('data-tab')!);
+                this.chatCmdNotice = '';
+                this.renderChat();
+                void this.backfillActiveTab();
+            };
+        });
+        const again = document.getElementById('chat-reconnect-btn');
+        if (again) again.onclick = () => {
+            this.chatErrors = 0;
+            this.chatStreamNotice = '';
+            void this.remintAndReopen();
+        };
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
@@ -2855,6 +3197,9 @@ export class LobbyUI {
 
         document.getElementById('leave-btn')!.onclick = () => this.leave();
         this.wireLogoutButton();
+        // The room screen hosts the same dock: the room and ally tabs only
+        // exist while a seat does, and this is where the seat is known.
+        this.wireChatDock();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
         document.getElementById('enlist-btn')?.addEventListener('click',

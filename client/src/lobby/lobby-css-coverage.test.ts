@@ -144,6 +144,43 @@ describe('lobby.css covers the controls lobby markup renders', () => {
                'a fighting friend is not marked').toMatch(/color:/);
     });
 
+    it('styles the chat dock, which is built entirely from data (task 9b)', () => {
+        // The chat dock is an EMPTY div in both templates — every class it
+        // renders is written by `renderChat()` — so the markup scan above sees
+        // exactly one of them. The panel is also the one surface here that a
+        // player types into, and an unstyled `.chat-input` is the browser's
+        // white box on the dark card, i.e. D61 again one panel later.
+        for (const cls of [
+            'chat-dock', 'chat-head', 'chat-tabs', 'chat-tab', 'chat-tab-active',
+            'chat-tab-close', 'chat-unread', 'chat-notice', 'chat-log',
+            'chat-line', 'chat-line-mine', 'chat-line-system', 'chat-line-action',
+            'chat-time', 'chat-from', 'chat-text',
+            'chat-compose', 'chat-input', 'chat-send-btn',
+        ]) {
+            expect(allRulesFor(cls), `no rule block for .${cls}`).not.toBe('');
+        }
+        // The three that have to own a declaration, not merely a name: the
+        // input paints (D61's own defect), the log scrolls (without a height
+        // it grows the page and the composer walks off the bottom), and the
+        // unread badge is the only mark that says a tab wants the player.
+        expect(allRulesFor('chat-input'), '.chat-input has no background')
+            .toMatch(/background:/);
+        expect(allRulesFor('chat-log'), '.chat-log does not scroll')
+            .toMatch(/overflow-y:\s*auto/);
+        expect(allRulesFor('chat-unread'), '.chat-unread has no background')
+            .toMatch(/background:/);
+    });
+
+    it('gives both lobby screens the chat dock the renderer needs (task 9b)', () => {
+        // `renderChat()` writes into `#chat-dock` and does nothing when it is
+        // absent, so a template that drops the host loses chat silently — no
+        // error, no empty panel, just a screen with no chat on it.
+        for (const f of ['browser/browser.html', 'room/room.html']) {
+            const html = readFileSync(join(LOBBY_SRC, ...f.split('/')), 'utf8');
+            expect(html, `${f} has no #chat-dock`).toContain('id="chat-dock"');
+        }
+    });
+
     it('stops the war card inheriting the room card"s join-button placement', () => {
         // `.join-btn` is pinned `grid-row: 1 / -1` for the room card, where it
         // is a grid item. In a war card it is a flex child of `.war-actions`,
