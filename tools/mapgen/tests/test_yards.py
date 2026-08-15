@@ -364,6 +364,94 @@ class TheCarveIsWhatMakesItTarmac(unittest.TestCase):
                                0.0, "a pad has no shoulder to fade over")
 
 
+class TheDrivewayIntoAPad(unittest.TestCase):
+    """The ramp between a pad and its road — roads R4d, and nothing measured it.
+
+    `plan_yard_pads` bounds the relief of the ground a pad is planned ON and
+    `report_pad_relief` measures the relief left on the delivered pad. Between
+    those two sits the thing a lorry climbs, and a pad can pass both while being
+    a mesa: flat on top, planned inside every limit, and walled by the very fade
+    that made it flat. See `yards.pad_ramps`.
+    """
+
+    def setUp(self):
+        self.h, self.net, self.raster = flat_net()
+        self.pads, _r = yd.plan_yard_pads(
+            self.net, self.h, self.raster, CELL, 0.0, road_params=RP)
+
+    def test_a_flat_map_delivers_a_flat_driveway(self):
+        """The positive: nothing to climb means nothing to report.
+
+        Paired with the mesa test below, because a ramp measurement that answers
+        "steep" everywhere would pass that one alone and be useless.
+        """
+        levelled = yd.level_yard_pads(self.h, self.pads, CELL)
+        for pad in self.pads:
+            drive, cut = yd.pad_ramps(levelled, pad, CELL)
+            self.assertLess(drive, 1.0, "a flat map grew a driveway")
+            self.assertLess(cut, 1.0, "a flat map grew a cut face")
+
+    def test_a_pad_on_a_slope_is_a_MESA_and_only_the_ramp_says_so(self):
+        """The defect this instrument exists for (roads R4d).
+
+        A pad plateaued on sloping ground reports 0.0 elmos of relief, passes
+        `plan_yard_pads`' pre-flatten grade limit, passes every footprint probe
+        the scenario layer runs (they are all ON the flat) — and is still a
+        rectangle of tarmac standing above a bank no lorry can climb. The three
+        assertions are the whole argument: flat, planned-legal, undrivable.
+        """
+        n = 200
+        # The rise runs along ROWS, i.e. across the pad's away axis, because the
+        # fixture highway runs along x: a gradient parallel to the road puts the
+        # steep faces on the pad's sides, which is the number this test is not
+        # about. 0.2 elmos per elmo = 11.3 degrees of hillside — legal ground for
+        # every class, and shallow enough across the pad's 600-elmo depth (120
+        # elmos of relief over an 821-elmo diagonal, 8.3 degrees) that
+        # `plan_yard_pads`' 9-degree limit accepts it.
+        h = np.fromfunction(lambda r, c: 60.0 + r * (0.2 * CELL), (n, n))
+        elmos = n * CELL
+        hw = np.array([[200.0, elmos / 2.0], [elmos - 200.0, elmos / 2.0]])
+        net = rd.RoadNetwork(links=[rd.RoadLink(hw, rd.ROAD_HIGHWAY, 0, 1)])
+        raster = rd.rasterize_network(net, h.shape, CELL, RP)
+        pads, _r = yd.plan_yard_pads(net, h, raster, CELL, 0.0, road_params=RP)
+        self.assertTrue(pads, "the fixture planned no pad to measure")
+        levelled = yd.level_yard_pads(h, pads, CELL)
+        steep = [yd.pad_ramps(levelled, p, CELL)[0] for p in pads]
+        for pad in pads:
+            self.assertLess(yd.pad_relief(levelled, pad, CELL), 1.0,
+                            "the plateau did not deliver a flat pad")
+        self.assertGreater(max(steep), yd.YardParams().warn_ramp_deg,
+                           "a pad cut into a 20-degree hillside reported a "
+                           "driveway inside the limit — the ramp is not "
+                           "being measured")
+
+    def test_the_ramp_is_read_at_the_engines_own_scale(self):
+        """Roads R2 finding 5, one file across: a grade is nothing without a scale.
+
+        The same ground read on a 4-elmo grid and on a 16-elmo one must give the
+        same driveway grade, because the number is a claim about what a movement
+        class can climb and Spring grades a square (8 elmos), not a cell.
+        """
+        def grade_at(cell):
+            n = int(3200.0 / cell)
+            h = np.fromfunction(lambda r, c: 60.0 + r * (0.2 * cell), (n, n))
+            elmos = n * cell
+            hw = np.array([[200.0, elmos / 2.0], [elmos - 200.0, elmos / 2.0]])
+            net = rd.RoadNetwork(links=[rd.RoadLink(hw, rd.ROAD_HIGHWAY, 0, 1)])
+            raster = rd.rasterize_network(net, h.shape, cell, RP)
+            pads, _r = yd.plan_yard_pads(net, h, raster, cell, 0.0,
+                                         road_params=RP)
+            self.assertTrue(pads, f"no pad at cell {cell}")
+            levelled = yd.level_yard_pads(h, pads, cell)
+            return max(yd.pad_ramps(levelled, p, cell)[0] for p in pads)
+
+        coarse, fine = grade_at(16.0), grade_at(4.0)
+        self.assertAlmostEqual(coarse, fine, delta=2.0,
+                               msg=f"{coarse:.1f} deg at 16-elmo cells vs "
+                                   f"{fine:.1f} at 4 — the reading is following "
+                                   f"the grid instead of the engine's square")
+
+
 class ThePublishedPad(unittest.TestCase):
     """The emitter and the reader, which are the only two ends of the file."""
 

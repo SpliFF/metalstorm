@@ -1007,6 +1007,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         print(f"yard pads: {len(yard_pads)} prepared, "
               f"{len(yard_refusals)} station(s) refused")
         yd.report_pad_relief(h, yard_pads, cell)
+        # ...and the ramp INTO each pad, which the relief report cannot see:
+        # a plateau is flat by construction and can still sit above an
+        # unclimbable verge (roads R4d, yards.pad_ramps).
+        yd.report_pad_ramps(h, yard_pads, cell)
         rd.report_delivered_grades(network, h, cell, rp)
         # Water crossings (roads R3b) — an archipelago plans one network per
         # island, so every crossing here is an INLAND ford: the sea between two
