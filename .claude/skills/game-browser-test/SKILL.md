@@ -43,6 +43,19 @@ without fighting over the single shared `chrome-profile` lock (the
   `kill -CONT <pid>` — before killing anything. That is what proved the load
   was ours and not the user's.
 
+**Shortcut that skips rules 1–4 entirely (metalstorm scenarios):**
+`launch_scenario({scenarioId:'crossing_standoff'})` returns a `browserUrl` of
+the form `http://localhost:8012/?play=<id>&room=<id>&user=<host>&skipBriefing=1#token=…`.
+Navigate a fresh isolated profile straight to it: the page **attaches** to that
+exact room with the host's own direct-minted session, so there is no login
+step, no roster mismatch and no `joinRoom` call to get wrong. Login and lobby
+never render. Wait on `window.test`/`__gp` + the HUD — **not**
+`lobby.currentRoom.state >= 4`, which never fires on this path. A bare
+`?play=<id>` (no `room`/token) works too: it mints a guest and launches its own
+room named `play:<id>:<username>`. Boot failures paint a `#boot-error` overlay
+instead of a blank page — read its text before debugging anything else. Rules
+1–6 below still govern `launch_game` and every room-scoped MCP call.
+
 **Discipline — track your own game, every time:**
 
 1. **Own the roomId.** Capture the `roomId` that *your* `launch_game`

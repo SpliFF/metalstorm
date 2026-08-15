@@ -261,6 +261,57 @@ await window.test.spawn('papertank', 4096, 4096, 0, 4)
 
 Or use the `browser_test` MCP tool (in the spring-debug server) to generate the snippet automatically.
 
+### `?play=<scenarioId>` — one URL, straight into a game
+
+`?play=` boots a game scenario with **no login screen and no lobby UI**. It is
+the browser half of the `launch_scenario` MCP tool (see
+[debugging-tools.md](debugging-tools.md)) and needs the lobby to run with
+`--dev-direct-start`.
+
+```
+http://localhost:8012/?play=crossing_standoff
+http://localhost:8012/?play=crossing_standoff&side=union&ai=null
+http://localhost:8012/?play=crossing_standoff&game=metalstorm&room=12&user=admin&skipBriefing=1#token=…
+```
+
+| Param | Meaning |
+|---|---|
+| `play` | Scenario id — the file stem of `data/games/<game>/scenarios/<id>.lua`. |
+| `game` | Game id, default `metalstorm`. |
+| `side` | Playable faction key to seat *you* on (default: the scenario's first side). An unknown key shows the valid list. |
+| `ai` | AI id for every other playable side, default `strategos`. `&ai=` (empty) requests no AI slots. |
+| `map` | Map override; default is the scenario's declared map. |
+| `room`, `user` + `#token=` | **Attach mode** — adopt an already-running room instead of launching one. This is the form `launch_scenario` returns. |
+| `skipBriefing` | Reserved for the S2 briefing splash; parsed and threaded today, no-op until that lands. |
+
+Two modes, both in [`main.ts`'s `bootPlay`](../client/src/main.ts), with the
+pure derivation in [`client/src/lobby/play-boot.ts`](../client/src/lobby/play-boot.ts):
+
+- **Attach** (`room`+`user`+`#token`): fetches the public `GET /api/rooms`,
+  finds that room and `attachSession`s into it. It never re-POSTs — a bare
+  `?play=` would replace the room *by name* and tear down the very server the
+  launcher just waited on. If the room is gone or Ended it falls through to a
+  fresh launch, so a play link never dangles.
+- **Fresh**: runs the auto-auth ladder — stored session (`/api/auth/validate`,
+  one refresh attempt) → guest resume (`/api/auth/guest/resume`) → guest mint
+  (`/api/auth/guest`) → **only then** the login form. It then POSTs
+  `/api/rooms/direct` with a manifest naming the room `play:<scenarioId>:<username>`
+  (per-user so two browsers do not tear each other's games down; per-scenario so
+  re-opening the same link replaces your own stale room instead of leaking rooms).
+
+Traps:
+
+- The token rides the **hash fragment**, never the query string, so it stays out
+  of the lobby access log and the Vite log. Browser history still holds it.
+- `/api/rooms/direct` is `LocalhostOrAdmin`. A guest is `role:'player'`, so
+  `?play=` works from a browser **on the lobby host**, or from an admin session
+  — a remote guest gets a 403 and an error overlay saying so.
+- Guest mint is rate-limited 20/min. A loop that wipes browser storage every
+  iteration will 429; the stored device token (rung 3) is what keeps a loop cheap.
+- `?direct=` and `?scenario=` win if combined with `?play=` (console warning).
+- Any boot failure now paints a copyable `#boot-error` overlay instead of the
+  old blank page — that applies to `?direct=` too.
+
 ### Driving scenarios for iterative testing
 
 Scenarios live in [client/src/scenarios/](../client/src/scenarios/) and are launched via `?scenario=<name>` (e.g. `?scenario=weapon-showcase&only=missile&dwellMs=60000`). The runner ([client/src/scenarios/runner.ts](../client/src/scenarios/runner.ts)) auto-logs in as `test1:test`, waits for first frame, runs `scenario.setup(h)`, then `scenario.run(h)` if defined.

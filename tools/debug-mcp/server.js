@@ -17,6 +17,7 @@ import {
     ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
+import { buildScenarioManifest } from './scenario-manifest.js';
 import { resolve, join } from 'path';
 import { readFileSync, existsSync, readdirSync, unlinkSync, rmdirSync, statSync } from 'fs';
 import { execFile } from 'child_process';
@@ -989,6 +990,43 @@ const TOOLS = [
         },
     },
     {
+        name: 'launch_scenario',
+        description: 'Launch a scenario game directly (no lobby UI, no manifest files): resolves the scenario via GET /api/games/<gameId>/scenarios, builds the /api/rooms/direct manifest in memory with the scenario as the TOP-LEVEL field (modoptions.scenario alone gets overwritten by the map default), POSTs it, and waits for the sim to tick. Re-launching the same scenario replaces the previous room (same room name → teardown + recreate). Returns {roomId, port, sessions, browserUrl} — browserUrl attaches to THIS room (?play= + room + token in the URL hash) and never re-launches; the token is in the hash fragment, so it stays out of server logs but does land in browser history (dev feature). Requires the lobby to run with --dev-direct-start. A players[] entry naming an unknown username creates an is_dev account; the defaults never do.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                scenarioId: { type: 'string', description: 'Scenario id — the file stem of data/games/<gameId>/scenarios/<id>.lua (e.g. "crossing_standoff").' },
+                gameId: { type: 'string', default: 'metalstorm', description: 'Game the scenario belongs to.' },
+                mapId: { type: 'string', description: 'Map override. Default: the scenario\'s declared world.map.' },
+                ai: { type: 'string', default: 'null', description: 'AI id seated on every non-host playable side ("null", "strategos"). "" = no AI slots (the lobby\'s solo-team safety net may still add a Null AI).' },
+                players: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            username: { type: 'string' },
+                            team: { type: 'number' },
+                            side: { type: 'string', description: 'Playable faction key; resolved to that side\'s team.' },
+                            spectator: { type: 'boolean' },
+                        },
+                        required: ['username'],
+                    },
+                    description: 'Default [{username:"admin"}] seated on the scenario\'s first playable side. players[0] is the room host; extras default to spectators.',
+                },
+                side: { type: 'string', description: 'Shorthand: seat players[0] on this faction\'s side.' },
+                modoptions: { type: 'object', description: 'Extra modoptions. A "scenario" key here is hoisted to the manifest top level (it does NOT work as a modoption).' },
+                roomName: { type: 'string', description: 'Room name. Default "mcp:<scenarioId>". Re-POSTing a name replaces that room.' },
+                headless: { type: 'boolean', default: false, description: 'No browser will connect: omit browserUrl and warn about the idle-grace self-exit (workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS).' },
+                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return immediately, when the game server answers /api/metrics, or when the sim frame advances.' },
+                waitTimeoutMs: { type: 'number', default: 120000 },
+                idleGraceSeconds: { type: 'number', description: 'Written to the manifest as idleStartupGraceSeconds — honoured once P3 lands, inert (and noted) before that.' },
+                skipBriefing: { type: 'boolean', default: true, description: 'Append &skipBriefing=1 to browserUrl (S2 splash bypass).' },
+                force: { type: 'boolean', default: false, description: 'Launch even if the scenario is not in the lobby\'s (startup-snapshot) list — the direct path reads the VFS fresh. Requires mapId; sides default to the legacy two-team shape.' },
+            },
+            required: ['scenarioId'],
+        },
+    },
+    {
         name: 'api_request',
         description: 'Make an authenticated HTTP request to the lobby, log server, or a specific game server. Tokens are obtained automatically (admin/admin by default — override via SPRING_USER/SPRING_PASS env). Prefer this over running curl + setting Authorization headers manually.',
         inputSchema: {
@@ -1707,6 +1745,158 @@ async function executeTool(name, args) {
                 if (tail.note) out.logsNote = tail.note;
             }
             return JSON.stringify(out, null, 2);
+        }
+
+        case 'launch_scenario': {
+            // One call from nothing to a running scenario: resolve → build the
+            // manifest in memory → POST /api/rooms/direct → wait on probeGame.
+            // No lobby UI, no manifest file on disk, no login.
+            const gameId = args.gameId || 'metalstorm';
+            const notes = [];
+
+            // 1. Resolve against the lobby's scenario list (public route).
+            //    The list is the lobby's *startup snapshot*, so a freshly
+            //    authored file is invisible here until a resync — hence the
+            //    two escapes named in the failure text.
+            let scenario = null;
+            let list = [];
+            try {
+                const lr = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (lr.ok) list = await lr.json();
+            } catch { /* lobby down — reported by the direct POST below */ }
+            if (Array.isArray(list)) scenario = list.find(s => s.id === args.scenarioId) ?? null;
+            if (!scenario && !args.force) {
+                const avail = (Array.isArray(list) ? list : []).map(s =>
+                    s.id + (s.retired ? ' (retired)' : s.tutorial ? ' (tutorial)' : '')).join(', ');
+                return `Scenario "${args.scenarioId}" is not in the lobby's list for game "${gameId}". `
+                     + `Available: ${avail || '(none — is the lobby up?)'}. `
+                     + 'New files need POST /api/admin/scenarios/resync (lobby scenario lists are a '
+                     + 'startup snapshot; the direct-boot path itself reads the VFS fresh), '
+                     + 'or pass force:true (+ mapId) to launch blind.';
+            }
+            if (scenario?.retired) notes.push(`scenario "${scenario.id}" is retired — loadable, but the lobby will not offer it in room lists.`);
+            if (scenario?.tutorial) notes.push(`scenario "${scenario.id}" is a tutorial — loadable, but not offered as a normal war.`);
+
+            // 2. Build the manifest (pure; throws with a caller-facing message).
+            let manifest;
+            try {
+                const built = buildScenarioManifest({
+                    scenario,
+                    scenarioId: args.scenarioId,
+                    gameId,
+                    mapId: args.mapId,
+                    players: args.players || [{ username: AUTH_USER }],
+                    side: args.side,
+                    ai: args.ai === undefined ? 'null' : args.ai,
+                    modoptions: args.modoptions,
+                    roomName: args.roomName || `mcp:${args.scenarioId}`,
+                    idleGraceSeconds: args.idleGraceSeconds,
+                });
+                manifest = built.manifest;
+                notes.push(...built.notes);
+            } catch (e) {
+                return `Error: ${e.message}`;
+            }
+            if (typeof args.idleGraceSeconds === 'number') {
+                notes.push('idleStartupGraceSeconds is in the manifest but the game server ignores unknown '
+                         + 'manifest keys until P3 lands — set the lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS instead.');
+            }
+            if (args.headless || args.wait === 'none') {
+                notes.push('no browser will attach: the game server can self-exit on its startup idle timer. '
+                         + 'Workaround until P3: run the lobby with SPRING_IDLE_STARTUP_GRACE_SECONDS=3600.');
+            }
+            if (LOBBY_URL !== 'http://localhost:8011') {
+                notes.push(`LOBBY_URL is ${LOBBY_URL} but the client at ${CLIENT_URL} bakes its lobby port at BUILD time `
+                         + '— browserUrl may drive a different stack than the one just launched.');
+            }
+
+            // 3. POST authed even on loopback (the route skips token checks for
+            //    a loopback caller): it costs nothing, names the caller in the
+            //    lobby audit row, and keeps the tool working against a remote
+            //    lobby where an admin Bearer token is mandatory.
+            let resp;
+            try {
+                resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/rooms/direct`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify(manifest),
+                }));
+            } catch (e) {
+                return `Error: POST ${LOBBY_URL}/api/rooms/direct failed: ${e.message}`;
+            }
+            if (resp.status === 404) {
+                return 'POST /api/rooms/direct answered 404 — the lobby needs --dev-direct-start '
+                     + '(or this lobby binary predates the route). Restart the lobby with the flag.';
+            }
+            const bodyText = await resp.text();
+            let room = {};
+            try { room = JSON.parse(bodyText); } catch { /* non-JSON error body */ }
+            if (!resp.ok) {
+                if (resp.status === 403) {
+                    return `direct start refused (403): ${room.error ?? bodyText}. `
+                         + 'The route is LocalhostOrAdmin — run the MCP on the lobby host, or as an admin account.';
+                }
+                return `direct start failed (${resp.status}): ${room.error ?? (bodyText || '?')}`;
+            }
+
+            // 4. Wait on probeGame (never the room-state loop: state>=4 is
+            //    known-unreliable, and a dead server must fail fast).
+            const roomId = room.id;
+            let probe = { phase: 'unknown', frame: null, detail: 'wait:none' };
+            let timedOut = false;
+            if (args.wait !== 'none') {
+                const want = args.wait || 'ticking';
+                const deadline = Date.now() + (args.waitTimeoutMs ?? 120000);
+                probe = await probeGame(roomId);
+                while (probe.phase !== 'dead'
+                       && !(want === 'ready' ? (probe.phase === 'ready' || probe.phase === 'ticking')
+                                             : probe.phase === 'ticking')) {
+                    if (Date.now() >= deadline) { timedOut = true; break; }
+                    await new Promise(r => setTimeout(r, 500));
+                    probe = await probeGame(roomId);
+                }
+                if (probe.phase === 'dead') {
+                    notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
+                } else if (timedOut) {
+                    notes.push(`WARNING: still in phase '${probe.phase}' after the wait timeout (${probe.detail}).`);
+                    if (want === 'ticking' && probe.phase === 'ready' && probe.clientCount === 0) {
+                        notes.push('the sim holds at frame -1 until a client connects — with no browser attached, '
+                                 + "wait:'ready' is the reachable target (open browserUrl, then wait_for_game until:'ticking').");
+                    }
+                }
+            }
+
+            // 5. Attach-form browser URL (never a bare ?play=, which would
+            //    re-POST the same room name and tear down the server we just
+            //    launched and waited on). Token rides the hash fragment.
+            const host = manifest.players[0].username;
+            const hostToken = room.sessions?.[host] ?? '';
+            const browserUrl = args.headless ? undefined
+                : `${CLIENT_URL}/?play=${encodeURIComponent(args.scenarioId)}&game=${encodeURIComponent(gameId)}`
+                  + `&room=${roomId}&user=${encodeURIComponent(host)}`
+                  + (args.skipBriefing === false ? '' : '&skipBriefing=1')
+                  + `#token=${encodeURIComponent(hostToken)}`;
+
+            const out = {
+                roomId,
+                port: room.game_server_port,
+                roomName: manifest.name,
+                sessions: room.sessions,
+                browserUrl,
+                scenario: scenario && {
+                    id: scenario.id, map: scenario.map,
+                    sides: scenario.sides, terminal: scenario.terminal,
+                },
+                phase: probe.phase,
+                frame: probe.frame,
+                notes,
+            };
+            if (probe.phase === 'dead' || timedOut) {
+                const tail = await roomLogTail(roomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+            return out;
         }
 
         case 'api_request': {

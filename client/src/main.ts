@@ -33,6 +33,11 @@ import type { GpInitToWorker, GpMinimapMetalSpots, GpTimingState } from './core/
 import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { parseDirectManifest } from './core/direct-manifest.js';
+import {
+    buildPlayManifest, parsePlayParams, pickAttachIdentity, isAttachableRoom,
+    type PlayParams, type ScenarioInfo,
+} from './lobby/play-boot.js';
+import { DEVICE_TOKEN_KEY, clearDeviceToken, storeDeviceToken } from './lobby/guest.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { PerfOverlay } from './core/perf-overlay.js';
@@ -62,6 +67,7 @@ import { configureErrorTelemetry, reportClientError } from './core/client-error-
 import type { ClientErrorReason } from './core/client-error-telemetry.js';
 import {
     AccessTokenRenewer, browserTokenStore, gameAuthToken, getAccessToken,
+    refreshAccessToken,
 } from './lobby/auth-tokens.js';
 import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
 import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
@@ -1879,6 +1885,212 @@ async function bootDirect(manifestUrl: string, lobby: LobbyUI): Promise<void> {
     lobby.setCurrentRoomFromJson(room);
 }
 
+/// A boot failure on a URL meant to be handed to a human must say something.
+/// `bootDirect`'s original failure mode was a console.error and a permanently
+/// blank page. This is a self-contained fixed overlay — no lobby templates,
+/// because the lobby is suppressed on every path that can reach here.
+function showBootError(title: string, detail: string, hintHtml = ''): void {
+    const existing = document.getElementById('boot-error');
+    if (existing) existing.remove();
+    const panel = document.createElement('div');
+    panel.id = 'boot-error';
+    panel.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:100000',
+        'display:flex', 'align-items:center', 'justify-content:center',
+        'background:#0b0d10', 'color:#e6e6e6',
+        'font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
+        'padding:24px',
+    ].join(';');
+    const box = document.createElement('div');
+    box.style.cssText = 'max-width:720px;border:1px solid #39424d;border-radius:6px;padding:20px 24px;background:#12161b';
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:16px;font-weight:600;color:#ff8f6b;margin-bottom:10px';
+    h.textContent = title;
+    const d = document.createElement('div');
+    // user-select so the text can be copied into a bug report.
+    d.style.cssText = 'white-space:pre-wrap;user-select:text;margin-bottom:10px';
+    d.textContent = detail;
+    box.append(h, d);
+    if (hintHtml) {
+        const hint = document.createElement('div');
+        hint.style.cssText = 'color:#9fb3c8;white-space:pre-wrap;user-select:text';
+        hint.innerHTML = hintHtml;
+        box.append(hint);
+    }
+    panel.append(box);
+    document.body.append(panel);
+}
+
+const DIRECT_START_HINT =
+    'The lobby must run with <code>--dev-direct-start</code> (it is off by default and never set in production).';
+const LOCALHOST_ONLY_HINT =
+    '?play= needs a browser on the lobby host, or an admin login — direct-start is a dev feature (LocalhostOrAdmin).';
+
+/// Options parsed off the `?play=` URL, published for S2's briefing splash.
+export let playBootOptions: PlayParams | null = null;
+
+interface PlayIdentity { token: string; userId: number; username: string }
+
+/// The auto-auth ladder (S1 D2): stored session → guest resume → guest mint.
+/// Returns null only when every rung failed — the caller then unsuppresses
+/// the lobby and shows the login form, the one path on which login renders.
+async function resolvePlayIdentity(): Promise<PlayIdentity | null> {
+    const savedUser = localStorage.getItem('springrts-username');
+    const savedToken = localStorage.getItem('springrts-token');
+    if (savedUser && savedToken) {
+        try {
+            const r = await fetch(`${CONFIG.httpUrl}/api/auth/validate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${savedToken}`, 'Content-Type': 'application/json' },
+                body: '{}',
+            });
+            const d = r.ok ? await r.json() : null;
+            if (d?.valid) return { token: savedToken, userId: d.user_id ?? 0, username: savedUser };
+            if (r.status === 401) {
+                // One attempt only. LobbyUI's retry ladder exists to survive a
+                // lobby restart mid-session; a play link should degrade to a
+                // guest mint rather than stall on it.
+                const o = await refreshAccessToken(CONFIG.httpUrl, browserTokenStore);
+                if (o.kind === 'refreshed')
+                    return { token: o.token, userId: o.data.user_id ?? 0, username: savedUser };
+            }
+        } catch { /* lobby unreachable — fall through to guest */ }
+    }
+
+    const device = browserTokenStore.get(DEVICE_TOKEN_KEY);
+    if (device) {
+        try {
+            const r = await fetch(`${CONFIG.httpUrl}/api/auth/guest/resume`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_token: device }),
+            });
+            const d = r.ok ? await r.json() : null;
+            if (d?.token) {
+                storeDeviceToken(d, browserTokenStore);
+                return { token: d.token, userId: d.user_id ?? 0, username: d.username };
+            }
+            clearDeviceToken(browserTokenStore);
+        } catch { /* fall through to mint */ }
+    }
+
+    try {
+        const g = await fetch(`${CONFIG.httpUrl}/api/auth/guest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const gd = await g.json().catch(() => ({}));
+        if (g.ok && gd.token) {
+            // Store the device token so the *next* ?play= visit resumes instead
+            // of burning the 20/min mint limiter.
+            storeDeviceToken(gd, browserTokenStore);
+            return { token: gd.token, userId: gd.user_id ?? 0, username: gd.username };
+        }
+        if (g.status === 429)
+            console.warn('[play] guest mint rate-limited (20/min):', gd?.error ?? '');
+    } catch (e) {
+        console.warn('[play] guest mint failed:', e);
+    }
+    return null;
+}
+
+/// Map a `/api/rooms/direct` failure onto text a human can act on.
+function reportDirectFailure(status: number, body: any, raw: string): void {
+    if (status === 404) {
+        showBootError('Direct start is not enabled on this lobby',
+            'POST /api/rooms/direct answered 404.', DIRECT_START_HINT);
+    } else if (status === 403) {
+        showBootError('Direct start refused', body?.error ?? raw, LOCALHOST_ONLY_HINT);
+    } else {
+        showBootError(`Direct start failed (HTTP ${status})`, body?.error ?? (raw || '(no body)'));
+    }
+}
+
+/// `?play=<scenarioId>` boot. Two modes:
+///   attach — `room`+`user`+`#token` present (the URL an MCP launch returns):
+///            adopt the already-running room, never re-POST. A bare re-POST
+///            would replace the room by name and tear down the very server
+///            the launcher just waited on.
+///   fresh  — run the auth ladder, resolve the scenario, POST the manifest.
+/// Attach falls through to fresh when the room is gone or ended, so a play
+/// link keeps working forever instead of dangling on a stale room id.
+async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
+    playBootOptions = params;
+
+    if (params.room !== undefined && params.token && params.user) {
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/rooms`);
+            const rooms = resp.ok ? await resp.json() : [];
+            const roomJson = (Array.isArray(rooms) ? rooms : []).find((r: any) => r?.id === params.room);
+            const ident = roomJson && isAttachableRoom(roomJson)
+                ? pickAttachIdentity(roomJson, params.user) : null;
+            if (roomJson && ident) {
+                console.log(`[play] attaching to room ${params.room} as ${params.user}`);
+                lobby.attachSession(params.token, ident.playerId, params.user);
+                lobby.setCurrentRoomFromJson(roomJson);
+                return;
+            }
+            console.warn(`[play] room ${params.room} is gone or not joinable — launching a fresh one.`);
+        } catch (e) {
+            console.warn('[play] attach failed, launching fresh:', e);
+        }
+    }
+
+    const identity = await resolvePlayIdentity();
+    if (!identity) {
+        // Rung 5: the only path on which login renders.
+        lobby.unsuppress();
+        lobby.showLogin();
+        const msg = document.getElementById('login-msg');
+        if (msg) msg.textContent = 'Could not sign you in automatically — please log in to play.';
+        return;
+    }
+
+    let scenarios: ScenarioInfo[] = [];
+    try {
+        const sr = await fetch(`${CONFIG.httpUrl}/api/games/${encodeURIComponent(params.gameId)}/scenarios`);
+        if (sr.ok) scenarios = await sr.json();
+    } catch { /* reported below */ }
+    const scenario = scenarios.find((s) => s.id === params.scenarioId);
+    if (!scenario) {
+        showBootError(`Unknown scenario "${params.scenarioId}"`,
+            `Game "${params.gameId}" offers: ${scenarios.map((s) => s.id).join(', ') || '(none — is the lobby up?)'}`,
+            'Newly authored scenario files need <code>POST /api/admin/scenarios/resync</code> — lobby scenario lists are a startup snapshot.');
+        return;
+    }
+
+    let manifest;
+    try {
+        manifest = buildPlayManifest(scenario, identity.username, params);
+    } catch (e) {
+        showBootError('Cannot build this game', (e as Error).message);
+        return;
+    }
+    // Re-opening the same link replaces your own stale room (the direct
+    // route is idempotent by name), which is why the name is user-scoped.
+    console.log(`[play] launching "${manifest.name}" (${manifest.map}) as ${identity.username}`);
+
+    const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${identity.token}` },
+        body: JSON.stringify(manifest),
+    });
+    const raw = await roomResp.text();
+    let room: any = {};
+    try { room = JSON.parse(raw); } catch { /* non-JSON error body */ }
+    if (!roomResp.ok) { reportDirectFailure(roomResp.status, room, raw); return; }
+
+    // Tail is bootDirect's: the direct-minted session, not the ladder's token.
+    const token = room.sessions?.[identity.username];
+    const hostPlayer = (room.players ?? []).find((p: any) => p.username === identity.username);
+    if (!token || !hostPlayer) {
+        showBootError('Game started but the session is missing',
+            '/api/rooms/direct returned no session or player row for ' + identity.username);
+        return;
+    }
+    lobby.attachSession(token, hostPlayer.player_id, identity.username);
+    lobby.setCurrentRoomFromJson(room);
+}
+
 /// Resolve which game (if any) the lobby UI should style itself for at
 /// boot time. Order of precedence:
 ///   1. `?game=<id>` URL query parameter (browser link, dev override)
@@ -1995,7 +2207,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // *suppressed* so it never puts login/room UI on screen (the async
     // game-template load would otherwise re-render and un-hide the login
     // form the runner had already hidden).
-    const lobbySuppressed = !!scenario || !!directManifestUrl;
+    // Play mode (`?play=<scenarioId>`, PLAN-test-automation S1). Unlike the
+    // two modes above it deliberately does NOT clear localStorage: the stored
+    // session is rung 2 of the auto-auth ladder. `?direct=`/`?scenario=` win
+    // if combined — that combination is a mistake, not a feature.
+    let playParams = parsePlayParams(window.location.search, window.location.hash);
+    if (playParams && (scenario || directManifestUrl)) {
+        console.warn('[play] ?play= ignored — ?direct=/?scenario= owns this boot.');
+        playParams = null;
+    }
+
+    const lobbySuppressed = !!scenario || !!directManifestUrl || !!playParams;
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
         // PLAN-quickstart.md Part B: route through enterGame so a room the
         // player detached from resyncs instead of full-booting (§3.2).
@@ -2020,6 +2242,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         lobbyUI.hide();
         bootDirect(directManifestUrl, lobbyUI).catch((err) => {
             console.error('[direct] boot failed:', err);
+            showBootError('Direct-start boot failed', String(err?.message ?? err), DIRECT_START_HINT);
+        });
+    }
+
+    if (playParams) {
+        // Same synchronous hide as ?direct=: the constructor already flipped
+        // the container to display:flex and the browser has not painted yet.
+        lobbyUI.hide();
+        bootPlay(playParams, lobbyUI).catch((err) => {
+            console.error('[play] boot failed:', err);
+            showBootError('Could not start this scenario', String(err?.message ?? err));
         });
     }
 
