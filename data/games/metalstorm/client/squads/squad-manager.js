@@ -132,6 +132,16 @@ export class SquadManager {
     this._lodIconSquads = 0;
     this._lodIconMembers = 0;      // members still DRAWN by the icon squads
 
+    // Measurement-only update() breakdown (PLAN-perf M26). `entity` is a
+    // single phase timer, so a milestone that wants to know whether the cost
+    // is the LOD re-rank, the neighbour grid, or the per-squad loop has to
+    // time them separately. OFF by default and gated on a boolean so the
+    // unarmed path costs nothing — four performance.now() calls a frame is
+    // small but not free, and every future A/B on this file would carry them.
+    // Read through `updateBreakdown`; arm with `setUpdateBreakdown(true)`.
+    this._ubOn = false;
+    this._ub = { lodMs: 0, gridMs: 0, loopMs: 0, totalMs: 0, frames: 0 };
+
     // Frame-time governor (PLAN-metalstorm-squad-performance.md §12c, §14 S2)
     // — the hardware-adaptive degrade ladder. It composes with the member
     // budget above rather than competing with it: the budget decides WHICH
@@ -212,6 +222,32 @@ export class SquadManager {
     this.cfg.lodRankInvert = !!on;
     this._lodNextAt = 0;            // re-rank on the next update, not in 250 ms
     return this.cfg.lodRankInvert;
+  }
+
+  /** Measurement-only (PLAN-perf M26): arm the update() breakdown timers.
+   *  Arming resets the accumulator, so `setUpdateBreakdown(true)` immediately
+   *  before a window and reading `updateBreakdown` at the end of it gives the
+   *  window's own means. Do not ship armed. */
+  setUpdateBreakdown(on) {
+    this._ubOn = !!on;
+    this._ub.lodMs = 0; this._ub.gridMs = 0; this._ub.loopMs = 0;
+    this._ub.totalMs = 0; this._ub.frames = 0;
+    return this._ubOn;
+  }
+
+  /** Mean ms/frame spent in the LOD re-rank, the neighbour-grid rebuild and
+   *  the per-squad loop since the timers were armed. `otherMs` is what
+   *  update() spent outside all three (wreck pool, big units, governor). */
+  get updateBreakdown() {
+    const u = this._ub, f = u.frames || 1;
+    return {
+      frames: u.frames,
+      lodMs: u.lodMs / f,
+      gridMs: u.gridMs / f,
+      loopMs: u.loopMs / f,
+      otherMs: (u.totalMs - u.lodMs - u.gridMs - u.loopMs) / f,
+      totalMs: u.totalMs / f,
+    };
   }
 
   /** Per-tier member counts and mean camera distance — the census M25 needs to
@@ -728,7 +764,10 @@ export class SquadManager {
     // Before _rebuildGrid: the grid only holds `full` squads' members, so the
     // tier assignment has to be settled or the grid and the steerers disagree
     // about who exists this frame.
+    const ubOn = this._ubOn, ub = this._ub;
+    const tLod0 = ubOn ? performance.now() : 0;
     this._applyLodBudget();
+    if (ubOn) ub.lodMs += performance.now() - tLod0;
     // cfg.neighbourCap is a live perf knob (M9 A/B'd it in-session), so size
     // the shared buffer here rather than trusting the constructor's reading.
     const cap = Math.max(0, this.cfg.neighbourCap | 0);
@@ -751,12 +790,14 @@ export class SquadManager {
       return;
     }
 
+    const tGrid0 = ubOn ? performance.now() : 0;
     if (skipSeparationEntirely) {
       this._grid.clear();
       this._denseAgg.clear();
     } else {
       this._rebuildGrid();
     }
+    if (ubOn) ub.gridMs += performance.now() - tGrid0;
     for (const bu of this._bigUnitList) bu.update(dt);
     // Both queries fill `query.buf` and return the neighbour count, so the
     // steerers have one call shape regardless of which path is live.
@@ -785,6 +826,7 @@ export class SquadManager {
     let fullIndex = 0;
     const frameNo = ++this._frameNo;
 
+    const tLoop0 = ubOn ? performance.now() : 0;
     for (const sq of this.squads.values()) {
       const tier = sq.lod;
       if (tier !== 'full') {
@@ -817,10 +859,13 @@ export class SquadManager {
       }
     }
 
+    if (ubOn) ub.loopMs += performance.now() - tLoop0;
+
     // Governor decision for NEXT frame (§12c): this frame's own update() cost
     // plus the most recent flush the adapter reported.
     const sampleMs = (performance.now() - frameStart) + this._lastFlushMs;
     updateGovernor(this._governor, sampleMs, dt * 1000, this.cfg);
+    if (ubOn) { ub.totalMs += performance.now() - frameStart; ub.frames++; }
   }
 
   /** L6's "demote farthest third" (§12c's ladder table) ranks full squads by
