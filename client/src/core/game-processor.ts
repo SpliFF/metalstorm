@@ -1213,6 +1213,15 @@ function gpConnect(msg: GpInitToWorker): void {
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
+        // PLAN-protocol-guard task 4: a wire-schema refusal. Recorded in
+        // `gpAuthFailed` too so `window.test`'s readiness probe still reports
+        // a reason rather than a blind timeout, and handed to main, which owns
+        // the reload/loop-guard decision (no sessionStorage in a worker).
+        onVersionMismatch: (m) => {
+            gpAuthFailed = m;
+            postLog(4, `[gp] wire schema refused: ${m}`);
+            postToMain({ type: 'gp:schemaMismatch', message: m });
+        },
         onServerError: (code, m) => {
             postLog(4, `[gp] server error ${code}: ${m}`);
             // PLAN-replay task 4b: a refused playback control comes back as a
@@ -1906,6 +1915,11 @@ function gpConnect(msg: GpInitToWorker): void {
             } }
         },
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
+    }, {
+        // PLAN-protocol-guard task 4 (dev harness): claim a different wire
+        // schema so the server's refusal can be driven from a browser.
+        // Absent ⇒ this build's own SCHEMA_HASH.
+        schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
     // PLAN-latency L4.1: register every command that goes on the wire, in the

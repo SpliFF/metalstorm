@@ -54,6 +54,9 @@ import { showGameOver } from './ui/game-over/game-over.js';
 import { showSpectatorBanner, hideSpectatorBanner } from './ui/spectator-banner.js';
 import { updateReplayBar, hideReplayBar, showReplayRefusal } from './ui/replay-bar.js';
 import { debugConsole } from './core/debug-console.js';
+import {
+    clearSchemaMismatchGuard, decideSchemaMismatch, renderSchemaMismatchCard,
+} from './core/schema-mismatch.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
 import type { ClientErrorReason } from './core/client-error-telemetry.js';
@@ -731,6 +734,65 @@ function showRecoveryErrorScreen(reportId: string): void {
     document.body.appendChild(overlay);
 }
 
+/**
+ * PLAN-protocol-guard.md task 4 — act on a `VersionMismatch` refusal.
+ *
+ * The decision (reload once, then give up) is `decideSchemaMismatch`; this is
+ * only its effects, which are the two things a worker cannot do: navigate and
+ * put a card on the screen. The card is `position:fixed` over everything
+ * because it has to be readable above the WebGL2 canvas — and because CDP
+ * screenshots cannot see that canvas, it is verified with
+ * `window.test.highResScreenshot()`.
+ */
+function applySchemaMismatch(message: string): void {
+    const action = decideSchemaMismatch(
+        safeSessionStorage(),
+        window.location.href,
+        `${Date.now().toString(36)}`,
+        message,
+    );
+    if (action.kind === 'reload') {
+        console.warn(`[protocol] wire schema refused (${message}) — reloading once`);
+        window.location.replace(action.url);
+        return;
+    }
+    console.error(`[protocol] wire schema still refused after a reload: ${message}`);
+    showSchemaMismatchScreen(action.message);
+}
+
+/// The give-up surface. The card itself lives in `core/schema-mismatch.ts`
+/// (testable without a browser); what belongs here is the teardown — a worker
+/// that will keep retrying a connection the server will keep refusing.
+function showSchemaMismatchScreen(message: string): void {
+    gameWorker?.terminate();
+    gameWorker = null;
+    heartbeatWatchdog.stop();
+    renderSchemaMismatchCard(document, message, quitToLobby);
+}
+
+/// A clean auth returns the one-reload budget and tidies the address bar.
+function releaseSchemaMismatchGuard(): void {
+    const clean = clearSchemaMismatchGuard(safeSessionStorage(), window.location.href);
+    if (clean !== window.location.href) {
+        history.replaceState(history.state, '', clean);
+    }
+}
+
+/// `?schemaHash=<hex>` → claim that hash; `?schemaHash=none` → send no hash
+/// (a pre-guard bundle). Anything else ⇒ undefined, i.e. this build's own.
+function schemaHashOverrideFromUrl(): string | undefined {
+    const v = new URLSearchParams(window.location.search).get('schemaHash');
+    if (v === null) return undefined;
+    return v === 'none' ? '' : v;
+}
+
+/// sessionStorage is absent or throwing in some embedded/private contexts;
+/// the policy accepts `null` and degrades explicitly rather than crashing the
+/// handler that was trying to report a problem.
+function safeSessionStorage(): Storage | null {
+    try { return window.sessionStorage ?? null; } catch { return null; }
+}
+
 /// Clear the parked-worker TTL sweep timer (§3.1).
 function clearParkTtl(): void {
     if (parkTtlTimer !== null) { clearTimeout(parkTtlTimer); parkTtlTimer = null; }
@@ -1044,6 +1106,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         switch (m?.type) {
             case 'gp:authenticated': {
                 console.log(`[gameWorker] authenticated accountId=${m.accountId} playerNum=${m.playerNum} team=${m.team} role=${m.role}`);
+                // PLAN-protocol-guard task 4: this bundle's schema was
+                // accepted, so the one-reload budget is spent on nothing and
+                // is returned — a future deploy gets its own reload. Also
+                // drops the cache-buster from the address bar.
+                releaseSchemaMismatchGuard();
                 // G4: the lobby-roster myTeamGuess used to construct economyBar
                 // can be stale/absent (spectator, late roster fetch); this is the
                 // authoritative value, so re-point the bar's team filter at it.
@@ -1362,6 +1429,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 console.log('[gameWorker] server restarting — reloading page');
                 window.location.reload();
                 break;
+            // PLAN-protocol-guard task 4: the server refused this bundle's
+            // wire schema. First time in this tab → cache-busting reload;
+            // second time → the reload did not pick up a new build, so stop
+            // and say so rather than loop.
+            case 'gp:schemaMismatch':
+                applySchemaMismatch(String(m.message ?? ''));
+                break;
             // GW4-c5b-2: the worker owns selection/pick but the drag-box overlay
             // is a DOM concern — draw it here in CSS-pixel space.
             case 'gp:dragBox':
@@ -1479,6 +1553,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // changes back here via a `gp:config` message (Bucket-3).
         standingOrderShowAllies:
             localStorage.getItem('standing-orders-show-allies') !== 'false',
+        // PLAN-protocol-guard task 4 (dev harness): `?schemaHash=<hex>` claims
+        // a drifted wire schema, `?schemaHash=none` sends no hash at all —
+        // the browser twin of the wire client's `--schema-hash`, and the only
+        // way to reach the server's refusal from a browser now that the build
+        // guards refuse a patched hash file. Dev builds only; a production
+        // bundle has no way to misdeclare itself.
+        schemaHashOverride: import.meta.env.DEV
+            ? schemaHashOverrideFromUrl() : undefined,
     };
     gameWorker.postMessage(init, [offscreen]);
 

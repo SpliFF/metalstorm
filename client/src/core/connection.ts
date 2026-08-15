@@ -1107,6 +1107,16 @@ export interface ConnectionEvents {
      *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
     onAuthenticated?: (auth: AuthenticatedInfo) => void;
     onAuthFailed?: (message: string) => void;
+    /** PLAN-protocol-guard task 4: the server refused this client's wire
+     *  schema (`AuthStatus.VersionMismatch` — a stale cached bundle, or a
+     *  handshake with no `schema_hash` at all). Distinct from `onAuthFailed`
+     *  because the remedy is a reload, not a credential; `message` carries
+     *  both hashes. Host-agnostic on purpose (Connection also runs in the
+     *  game-processor worker, which has no `sessionStorage` and no DOM) — the
+     *  reload/loop-guard decision lives in `core/schema-mismatch.ts`, driven
+     *  from main. A host that does not handle it falls back to
+     *  `onAuthFailed`, so no path silently swallows the rejection. */
+    onVersionMismatch?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
@@ -1340,8 +1350,21 @@ export class Connection {
     private controlObserver: ((data: Uint8Array) => void) | null = null;
     onControlMessage(fn: ((data: Uint8Array) => void) | null): void { this.controlObserver = fn; }
 
-    constructor(events: ConnectionEvents = {}) {
+    /**
+     * PLAN-protocol-guard task 4: the browser twin of the wire client's
+     * `--schema-hash <hex>|none`. A guard whose two halves are generated
+     * together can only exercise its passing arm — patching `schema-hash.ts`
+     * is refused by task 2's vite guard before the client even starts — so the
+     * refusal has to be driven from the *value* this client sends, not from
+     * the file. Empty string ⇒ send no `schema_hash` field at all (the
+     * pre-guard bundle). Dev-only at the call site (main.ts reads a URL param
+     * behind `import.meta.env.DEV`); lying here only ever gets you rejected.
+     */
+    private schemaHash: string = SCHEMA_HASH;
+
+    constructor(events: ConnectionEvents = {}, opts: { schemaHash?: string } = {}) {
         this.events = events;
+        if (opts.schemaHash !== undefined) this.schemaHash = opts.schemaHash;
     }
 
     get state(): ConnectionState { return this._state; }
@@ -1632,12 +1655,13 @@ export class Connection {
         // PLAN-protocol-guard task 3: the schema hash is the guard the epoch
         // integer never was — the server compares it for strict equality and
         // rejects a stale cached bundle with AuthStatus.VersionMismatch.
-        const schemaHashOff = builder.createString(SCHEMA_HASH);
+        const schemaHashOff = this.schemaHash
+            ? builder.createString(this.schemaHash) : 0;
         const hs = Handshake.createHandshake(
             builder, PROTOCOL_VERSION, clientVerOff, schemaHashOff);
         this.sendClientMessage(builder, ClientPayload.Handshake, hs);
         console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION},`
-            + ` schema ${SCHEMA_HASH.slice(0, 12)})`);
+            + ` schema ${this.schemaHash ? this.schemaHash.slice(0, 12) : '<omitted>'})`);
     }
 
     private sendAuthRequest(): void {
@@ -2268,7 +2292,17 @@ export class Connection {
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);
-                    this.events.onAuthFailed?.(errMsg);
+                    // PLAN-protocol-guard task 4: a schema/version refusal is
+                    // not a failed login — nothing the player can type fixes
+                    // it, so it takes its own branch (reload remedy) and only
+                    // falls back to the generic path if the host has no
+                    // handler for it.
+                    if (ar.status() === AuthStatus.VersionMismatch
+                        && this.events.onVersionMismatch) {
+                        this.events.onVersionMismatch(errMsg);
+                    } else {
+                        this.events.onAuthFailed?.(errMsg);
+                    }
                     this.disconnect();
                 }
                 break;

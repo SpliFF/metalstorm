@@ -71,6 +71,11 @@ export interface GpInitToWorker {
     gfx: Record<string, unknown>;
     /** Lifted from `localStorage` on main (standing-order-renderer SHOW_ALLIES). */
     standingOrderShowAllies: boolean;
+    /** PLAN-protocol-guard task 4 (dev harness): override the wire schema hash
+     *  this client claims — `''` sends no `schema_hash` at all. Absent in a
+     *  production build; the only way to drive the server's refusal from a
+     *  browser, since the build guards refuse a patched hash file. */
+    schemaHashOverride?: string;
     // NOTE: this used to carry a lobby room roster snapshot to seed
     // `liveState.players` before the LuaUI boot. It claimed lobby `player_id`
     // was the game-server playerID; it is not — it is the DB account id, and
@@ -693,6 +698,11 @@ export type GpMessageToMain =
     | { type: 'gp:playerRoster'; players: RosterPlayerInfo[] }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
+    /** PLAN-protocol-guard task 4: the game server refused this bundle's wire
+     *  schema. Main owns the remedy because the loop guard is `sessionStorage`
+     *  and the give-up surface is DOM, neither of which exists in a worker.
+     *  `message` is the server's text and carries both hashes. */
+    | { type: 'gp:schemaMismatch'; message: string }
     /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an
      *  attacker the local team can't see → a red "attack" radar blip at the
      *  firing position (x,z world elmos) on the main-thread minimap. */

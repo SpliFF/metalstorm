@@ -315,7 +315,21 @@ then the hash for strict equality, and an ABSENT hash is a rejection (a
 pre-guard bundle is stale by definition). Either way the client gets
 `AuthStatus.VersionMismatch` with both values named, and is deliberately NOT
 recorded in `handshakedClients`, so an ignored response still loses the
-following `AuthRequest`. `PROTOCOL_VERSION` is therefore no longer the drift
+following `AuthRequest`. **The browser's answer to that rejection is a reload, exactly once**
+(PLAN-protocol-guard task 4). `Connection` raises `onVersionMismatch` instead of
+the generic `onAuthFailed` (falling back to it for a host that has no handler,
+e.g. `viewport.ts`); the worker forwards it to main as `gp:schemaMismatch`,
+because the remedy needs `sessionStorage` and the DOM and a worker has neither.
+The decision is **`client/src/core/schema-mismatch.ts`** — a `sessionStorage`
+flag spends the tab's one automatic reload, the reload is cache-busted with an
+`sw_cb` query param (a same-URL reload can be answered from the cache that just
+served the rejected bundle), and a second mismatch renders a persistent card
+instead of looping. A successful auth returns the budget and strips the param.
+For driving it, `Connection`'s second constructor argument takes a
+`schemaHash` override — the browser twin of the wire client's `--schema-hash`,
+wired to `?schemaHash=<hex>|none` behind `import.meta.env.DEV`, because the
+build guards refuse a patched hash file, so the refusal can only be driven from
+the value a client claims. `PROTOCOL_VERSION` is therefore no longer the drift
 guard: it is a manual epoch for the breaks the schema text cannot see (the
 `0x02`-`0x09` binary framings, a semantic reinterpretation of an existing
 field), bumped 1 -> 2 when the hash landed. A schema-visible change needs only
