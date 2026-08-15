@@ -1761,7 +1761,11 @@ int main(int argc, char *argv[]) {
                 .contentType = "application/json",
                 .body = std::move(body),
                 .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
+                // Composed from the maps DB on every request, under a URL that
+                // never changes — immutable only if this caller stamped it
+                // (PLAN-protocol-guard task 5; `fetchMapDataHttp` does not).
+                .cacheControl = CacheControl::VersionedAssetHeader(
+                    NetworkServer::CurrentQueryString()),
             };
           }
         }
@@ -4375,7 +4379,10 @@ int main(int argc, char *argv[]) {
                 .contentType = "application/json",
                 .body = std::move(body),
                 .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
+                // Parsed from the game's own files under a URL that never
+                // changes — see the metadata.json site above (task 5).
+                .cacheControl = CacheControl::VersionedAssetHeader(
+                    NetworkServer::CurrentQueryString()),
             };
           }
         }
@@ -4401,7 +4408,8 @@ int main(int argc, char *argv[]) {
             .contentType = "application/json",
             .body = std::move(body),
             .status = 200,
-            .cacheControl = CacheControl::StaticAssetHeader(),
+            .cacheControl = CacheControl::VersionedAssetHeader(
+                NetworkServer::CurrentQueryString()),
         };
       });
 
