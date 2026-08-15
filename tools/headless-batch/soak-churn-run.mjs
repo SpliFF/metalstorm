@@ -46,7 +46,7 @@ import {
     checkChurnWindow, checkClientSurfaces, compareChurnToControl, surfaceReading,
     CLIENT_SURFACES,
 } from './lib/churn-checks.mjs';
-import { censusChurn, formatCensus } from './lib/key-census.mjs';
+import { censusChurn, censusFamily, formatCensus, formatFamilies } from './lib/key-census.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -62,6 +62,29 @@ const CHURN_TEAMS = [1, 5, 2, 6, 3, 7];
  *  whose params are just a position and a radius. */
 const ORDER_DEFEND_AREA = 0;
 
+/**
+ * Parley offers per cycle, per seat — PLAN-long-uptime **T4-1c**.
+ *
+ * 2, because `MAX_LIVE_OUTGOING` is 4 pending per team and an unanswered offer
+ * holds its slot until `PROPOSAL_TTL_FRAMES` (1 800) retires it. Sending at the
+ * cap would spend most of the window on refusals and make "how many minted"
+ * a measurement of the cap rather than of the family.
+ *
+ * Each seat aims at the NEXT seat's team (wrapping), so every offer is
+ * addressed to a party that never answers and always times out — see the
+ * driver's header for why a rejection would be the wrong thing to provoke.
+ * With one session there is no such partner, and parley is switched OFF rather
+ * than pointed at an AI team: strategos evaluates proposals, and an AI that
+ * rejects arms a 2-minute cooldown against the pair, so a single-session arm
+ * would measure the AI's disposition instead of the family's growth.
+ */
+const PARLEY_PER_CYCLE = 2;
+
+/** The monotonic-id families a long campaign grows. Both are reported per-arm;
+ *  `objective` is §17's one confirmed unbounded family and is the yardstick
+ *  `parley` is read against. */
+const ID_FAMILIES = ['parley', 'objective'];
+
 function fail(msg, detail) {
     console.error(`SOAK CHURN FAIL: ${msg}`);
     if (detail) console.error(detail);
@@ -71,7 +94,7 @@ function fail(msg, detail) {
 /** Spawn the churn driver against a server that may not exist yet. Resolves
  *  with its parsed JSON verdict; exit 2 is the harness saying it could not run
  *  (no addon, no server at all) and is reported separately from exit 1. */
-function runChurnDriver({ clientRoot, url, users, durationMs, waitMs, holdMs, gapMs }) {
+function runChurnDriver({ clientRoot, url, users, durationMs, waitMs, holdMs, gapMs, parley }) {
     const args = [
         'wire/run-wire-churn.mjs',
         '--url', url,
@@ -83,6 +106,12 @@ function runChurnDriver({ clientRoot, url, users, durationMs, waitMs, holdMs, ga
         '--standing-order-type', String(ORDER_DEFEND_AREA),
         '--quiet', '--json',
     ];
+    if (parley > 0) {
+        // The target list is derived from the SAME seat list that seats the
+        // users, so the two cannot drift into a self-target.
+        args.push('--parley', String(parley),
+            '--parley-to', users.map((_, i) => users[(i + 1) % users.length].team).join(','));
+    }
     return new Promise((resolve) => {
         const child = spawn(process.execPath, args, {
             cwd: clientRoot, stdio: ['ignore', 'pipe', 'pipe'],
@@ -108,11 +137,11 @@ function runChurnDriver({ clientRoot, url, users, durationMs, waitMs, holdMs, ga
  *  start-up. */
 async function churnArm({
     serverBin, configPath, dumpPath, dbPath, port, windowMin, repoRoot, clientRoot,
-    users, churnDriver, label,
+    users, churnDriver, parley, label,
 }) {
     const driver = churnDriver
         ? runChurnDriver({
-            clientRoot, url: `http://127.0.0.1:${port}`, users,
+            clientRoot, url: `http://127.0.0.1:${port}`, users, parley,
             // The driver must finish INSIDE the server's wall ceiling: a driver
             // still connecting while the server tears down produces refused
             // handshakes that are the harness racing itself, not a defect.
@@ -151,6 +180,7 @@ async function main() {
             port: { type: 'string', default: '19300' },
             'repo-root': { type: 'string', default: DEFAULT_REPO_ROOT },
             'min-cycles': { type: 'string', default: '2' },
+            parley: { type: 'string', default: String(PARLEY_PER_CYCLE) },
             'skip-control': { type: 'boolean', default: false },
         },
     });
@@ -179,10 +209,20 @@ async function main() {
         team: CHURN_TEAMS[i], startPos: i,
     }));
 
+    // Parley needs a second seat to aim at (see PARLEY_PER_CYCLE) — a
+    // single-session arm turns it off, out loud.
+    let parley = parseInt(values.parley, 10);
+    if (parley > 0 && sessions < 2) {
+        console.log('  parley: OFF — one session has no second seat to address, and an AI '
+            + 'counterparty would measure strategos rather than the family (T4-1c)');
+        parley = 0;
+    }
+
     await mkdir(outDir, { recursive: true });
     console.log(`soak-churn: ${values.fixture} via ${serverBin}`);
     console.log(`  ${sessions} churn session(s) on team(s) ${users.map((u) => u.team).join(',')}, `
-        + `${windowMin}-minute window`);
+        + `${windowMin}-minute window`
+        + (parley > 0 ? `, ${parley} parley offer(s)/cycle/seat` : ''));
 
     // Both arms take the SAME config with only the dump path differing. A
     // second fixture file would be a second thing to keep in step, and the
@@ -211,7 +251,7 @@ async function main() {
         results[arm.name] = await churnArm({
             serverBin, configPath: arm.configPath, dumpPath: arm.dumpPath,
             dbPath: arm.dbPath, port: port + i, windowMin, repoRoot, clientRoot,
-            users, churnDriver: arm.churn, label: `${arm.name} arm`,
+            users, churnDriver: arm.churn, parley, label: `${arm.name} arm`,
         });
         await writeFile(path.join(outDir, `${arm.name}-server.log`),
             `${results[arm.name].server.stdout}\n--- stderr ---\n${results[arm.name].server.stderr}`);
@@ -252,10 +292,36 @@ async function main() {
     // S1's population; whether that population is bounded is T4-1a's ruling on
     // the peak envelope, and a window this short observes at most one
     // reclamation (§15's `one-cycle`). Gating here would gate on the same coin.
-    const census = censusChurn(dr.json.keyDictionaryCycles ?? []);
-    await writeJson(path.join(outDir, 'key-census.json'), census);
+    const cycles = dr.json.keyDictionaryCycles ?? [];
+    const census = censusChurn(cycles);
+    // Every key the window ever saw: `newKeys` is a per-cycle DELTA, so their
+    // union — and not the last cycle's dictionary — is the population. A
+    // compaction inside the window shrinks the live dictionary, and reading
+    // only the final one would silently drop the ids it collected, which is
+    // exactly the growth a family census exists to count.
+    const allKeys = cycles.flatMap((c) => c.newKeys ?? []);
+    const families = ID_FAMILIES.map((prefix) => censusFamily(allKeys, prefix));
+    await writeJson(path.join(outDir, 'key-census.json'), { ...census, families });
     console.log('  S1 key census (T4-1e):');
     console.log(formatCensus(census));
+    console.log('  monotonic-id families (T4-1c):');
+    console.log(formatFamilies(families));
+
+    // Sent vs minted. Reported, not gated, for the reason the census is not
+    // gated — but an arm that issued offers and minted no id has measured the
+    // ECONOMY or the caps, not the family, and must never be read as "parley
+    // is bounded".
+    const parleyFamily = families.find((f) => f.prefix === 'parley');
+    if (dr.json.parleyPerCycle > 0) {
+        console.log(`  parley: ${dr.json.parleySent} offer(s) sent → `
+            + `${parleyFamily.ids} proposal(s) minted`
+            + (dr.json.parleySkipped ? `, ${dr.json.parleySkipped} skipped (self-target)` : ''));
+        if (dr.json.parleySent > 0 && parleyFamily.ids === 0) {
+            console.log('    NOTE: every offer was refused before publishing '
+                + '(cap_reached / cooldown / insufficient_authority — GG.Parley.Propose '
+                + 'discards the reason). This says nothing about the family\'s bound.');
+        }
+    }
 
     // --- Part 3: the matched control --------------------------------------
     if (values['skip-control']) {

@@ -8,7 +8,9 @@
 // one with the same line.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { keyShape, censusKeys, censusChurn, formatCensus } from '../lib/key-census.mjs';
+import {
+    keyShape, censusKeys, censusChurn, formatCensus, censusFamily, formatFamilies,
+} from '../lib/key-census.mjs';
 
 test('a key shape folds digit runs and nothing else', () => {
     assert.equal(keyShape('objective_17_state'), 'objective_<n>_state');
@@ -142,4 +144,63 @@ test('the formatted census names a growing shape and quotes its rate', () => {
     const text = formatCensus(c);
     assert.match(text, /GROWING objective_<n>_state/);
     assert.match(text, /1\.00\/cycle/);
+});
+
+// --- Monotonic-id families (T4-1c) ---------------------------------------
+//
+// A family is not a shape. `parley_1_kind` and `parley_1_duration` are two
+// shapes and one proposal, and what a weeks-long campaign pays is per
+// PROPOSAL — so the census that decides affordability has to divide by ids,
+// not count keys.
+
+test('a family census counts ids, not keys, and divides one by the other', () => {
+    const f = censusFamily([
+        'parley_1_kind', 'parley_1_state', 'parley_1_duration',
+        'parley_2_kind', 'parley_2_state', 'parley_2_duration',
+        'war_state', 'objective_9_state',
+    ], 'parley');
+    assert.equal(f.ids, 2);
+    assert.equal(f.keys, 6);
+    assert.equal(f.keysPerIdMean, 3);
+    assert.equal(f.idMin, 1);
+    assert.equal(f.idMax, 2);
+    // A foreign family and a flat key are not this family's business.
+    assert.deepEqual(f.fields.map((x) => x.field).sort(), ['duration', 'kind', 'state']);
+});
+
+test('a conditionally published field gives keys-per-id a RANGE', () => {
+    // `counterOf` is published only for a counter-offer, so a mean alone would
+    // describe a proposal that does not exist.
+    const f = censusFamily([
+        'parley_1_kind', 'parley_1_state',
+        'parley_2_kind', 'parley_2_state', 'parley_2_counterOf',
+    ], 'parley');
+    assert.equal(f.keysPerIdMin, 2);
+    assert.equal(f.keysPerIdMax, 3);
+    assert.equal(f.keysPerIdMean, 2.5);
+    assert.deepEqual(f.fields.find((x) => x.field === 'counterOf'), { field: 'counterOf', ids: 1 });
+});
+
+test('id count and id high-water are reported separately', () => {
+    // `nextId` never reuses, so a gap means ids this census could not see —
+    // an AI, a scenario, another seat. Reading idMax as a count would
+    // attribute them to the observer.
+    const f = censusFamily(['parley_1_kind', 'parley_40_kind'], 'parley');
+    assert.equal(f.ids, 2);
+    assert.equal(f.idMax, 40);
+});
+
+test('an empty family is reported as empty, never omitted', () => {
+    const f = censusFamily(['war_state'], 'parley');
+    assert.equal(f.ids, 0);
+    assert.equal(f.keys, 0);
+    assert.equal(f.idMax, null);
+    assert.match(formatFamilies([f]), /parley_<n>_\*: no id minted/);
+});
+
+test('the formatted family quotes ids, keys-per-id and its fields', () => {
+    const text = formatFamilies([censusFamily(
+        ['parley_1_kind', 'parley_1_state', 'parley_2_kind', 'parley_2_state'], 'parley')]);
+    assert.match(text, /2 id\(s\) \(1\.\.2\), 4 key\(s\) = 2\.0\/id/);
+    assert.match(text, /kind×2/);
 });

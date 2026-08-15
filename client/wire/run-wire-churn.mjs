@@ -24,6 +24,7 @@
  *   node wire/run-wire-churn.mjs --url http://127.0.0.1:19300 \
  *     --users soak0:devpass,soak1:devpass --duration-ms 120000 \
  *     [--hold-ms 4000] [--gap-ms 500] [--command 10] [--standing-order-type 0]
+ *     [--parley 2] [--parley-to 5,1] [--parley-duration 900]
  *     [--wait-for-server 60000] [--json] [--quiet]
  *
  * Exit status: 0 = the window ran and every cycle authenticated, 1 = an
@@ -44,11 +45,39 @@ const CLIENT_ROOT = path.resolve(HERE, '..');
 /** CMD_MOVE — the order a player issues most, and what the browser sends. */
 const CMD_MOVE = 10;
 
+/**
+ * Parley — PLAN-long-uptime.md **T4-1c**, the churn surface the T4-1e census
+ * could not read.
+ *
+ * §17 found exactly one unbounded rulesParams family (`objective_<n>_*`) and
+ * named a second by inspection only: `parley_<n>_*` has the same monotonic-id
+ * shape (`nextId` never reuses), and nothing in this arm had ever minted one,
+ * so the census reported it as absent rather than as bounded. It is a
+ * `RecvLuaMsg` verb, and `sendWireCommand` already puts the panel's exact bytes
+ * on the wire — so the gap was never the codec, it was that no cycle spoke.
+ *
+ * `ceasefire` is the kind chosen deliberately: its validator wants a single
+ * positive `duration` (game_parley.lua `validateCeasefire`), so an offer that
+ * fails to mint failed on the ECONOMY or the caps, never on a term this
+ * harness got wrong. What a proposal publishes is fixed by `publish()` — id,
+ * kind, from, to, state, deadline, escrow, duration — so keys-per-proposal is
+ * a constant the census can divide by.
+ *
+ * The cadence is governed by the gadget, and both governors matter:
+ * `MAX_LIVE_OUTGOING` = 4 pending per team, and `PROPOSAL_TTL_FRAMES` = 1800
+ * frames until an unanswered offer expires and gives its slot back. Aiming at
+ * a partner who is another CHURN SEAT is what keeps that loop turning — a seat
+ * never answers, so an offer always ages out, whereas a rejection would arm
+ * `REJECT_COOLDOWN_FRAMES` (3 600) against the pair and stop the family dead.
+ */
+const PARLEY_KIND = 'ceasefire';
+
 function parseArgs(argv) {
     const out = {
         url: 'http://127.0.0.1:9001', users: [], durationMs: 60_000,
         holdMs: 3_000, gapMs: 500, command: CMD_MOVE, standingOrderType: 0,
-        ordersPerCycle: 1, waitForServerMs: 0, json: false, quiet: false,
+        ordersPerCycle: 1, parleyPerCycle: 0, parleyTo: [], parleyDuration: 900,
+        waitForServerMs: 0, json: false, quiet: false,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -67,6 +96,11 @@ function parseArgs(argv) {
             case '--command': out.command = Number(next()); break;
             case '--standing-order-type': out.standingOrderType = Number(next()); break;
             case '--orders-per-cycle': out.ordersPerCycle = Number(next()); break;
+            case '--parley': out.parleyPerCycle = Number(next()); break;
+            case '--parley-to':
+                out.parleyTo = next().split(',').filter((s) => s !== '').map(Number);
+                break;
+            case '--parley-duration': out.parleyDuration = Number(next()); break;
             case '--wait-for-server': out.waitForServerMs = Number(next()); break;
             case '--json': out.json = true; break;
             case '--quiet': out.quiet = true; break;
@@ -76,6 +110,18 @@ function parseArgs(argv) {
         }
     }
     if (!out.users.length) { console.error('--users is required'); process.exit(2); }
+    // A parley needs a counterparty per slot, and a MISSING one must not
+    // silently degrade to "this slot does not parley": that is the shape in
+    // which the family stayed unmeasured for a fire and a half.
+    if (out.parleyPerCycle > 0 && out.parleyTo.length !== out.users.length) {
+        console.error(`--parley needs one --parley-to team per user `
+            + `(${out.users.length} user(s), ${out.parleyTo.length} target(s))`);
+        process.exit(2);
+    }
+    if (out.parleyTo.some((t) => !Number.isInteger(t) || t < 0)) {
+        console.error(`--parley-to must be non-negative team ids: ${out.parleyTo.join(',')}`);
+        process.exit(2);
+    }
     return out;
 }
 
@@ -173,6 +219,16 @@ try {
         cyclesStarted: 0, cyclesAuthed: 0, cyclesFailed: 0,
         sentByPayload: {}, serverErrorsByCode: {}, writeErrors: [],
         seats: [], failures: [], keyDictionaryCycles: [],
+        // Proposals ISSUED, counted separately from what the census finds
+        // minted. The two are different numbers on purpose: `GG.Parley.Propose`
+        // refuses on `cap_reached`, `cooldown` and `insufficient_authority` by
+        // returning `nil, err` to a `RecvLuaMsg` handler that discards it, so a
+        // refused proposal is indistinguishable on the wire from an accepted
+        // one. Without the sent count, a census reading zero `parley_<n>_*`
+        // keys would read as "the family is bounded" when it in fact means
+        // "every offer was turned away" — the same false-negative that let this
+        // surface look absent in the first place.
+        parleySent: 0, parleySkipped: 0,
     };
 
     // S1's census (PLAN-long-uptime T4-1e). Every session is sent the WHOLE key
@@ -207,7 +263,23 @@ try {
         for (const w of client.writeErrors) totals.writeErrors.push(w);
     }
 
-    async function slot({ user, pass }) {
+    /** One cycle's parley traffic for `slot`, tallied into `totals`. */
+    function sendParley(client, toTeam, ownTeam) {
+        if (args.parleyPerCycle <= 0) return;
+        // `self_target` is refused before anything is published, so a slot
+        // whose partner seat happens to sit on its OWN team would spend the
+        // whole window issuing offers that mint nothing and report them as
+        // sent. Count them as skipped instead and let the runner say so.
+        if (toTeam === ownTeam) { totals.parleySkipped += args.parleyPerCycle; return; }
+        for (let i = 0; i < args.parleyPerCycle; i++) {
+            client.sendWireCommand('parley.propose', {
+                toTeam, kind: PARLEY_KIND, duration: args.parleyDuration,
+            });
+            totals.parleySent++;
+        }
+    }
+
+    async function slot({ user, pass }, slotIndex) {
         while (Date.now() < windowEnd) {
             totals.cyclesStarted++;
             const client = new WireClient({
@@ -239,6 +311,11 @@ try {
                             params: [4000, 0, 4000, 600],
                         });
                     }
+                    // The seat the SERVER attributed, not the one the runner
+                    // asked for: `self_target` is decided against
+                    // `Spring.GetPlayerInfo`'s team, so a roster the server
+                    // seated differently must be caught here.
+                    sendParley(client, args.parleyTo[slotIndex], auth.team);
                     await client.flush();
                 }
                 // Hold: a create's refusal (401/402/429) comes back after the
@@ -261,8 +338,12 @@ try {
     }
 
     log(`[churn] ${args.users.length} slot(s) x ${(args.durationMs / 1000).toFixed(0)} s `
-        + `(hold ${args.holdMs} ms, gap ${args.gapMs} ms)`);
-    await Promise.all(args.users.map(slot));
+        + `(hold ${args.holdMs} ms, gap ${args.gapMs} ms)`
+        + (args.parleyPerCycle > 0
+            ? `, ${args.parleyPerCycle} ${PARLEY_KIND} proposal(s)/cycle to team(s) `
+                + `${args.parleyTo.join(',')}`
+            : ''));
+    await Promise.all(args.users.map((u, i) => slot(u, i)));
     windowClosed = true;
 
     const failures = [];
@@ -273,6 +354,9 @@ try {
         ...totals,
         standingOrderPayloadType: ClientPayload.StandingOrderCreate,
         commandPayloadType: args.command >= 0 ? ClientPayload.PlayerCommand : null,
+        parleyKind: args.parleyPerCycle > 0 ? PARLEY_KIND : null,
+        parleyPerCycle: args.parleyPerCycle,
+        parleyTo: args.parleyTo,
         durationMs: args.durationMs,
         users: args.users.map((u) => u.user),
         failures,
@@ -282,6 +366,10 @@ try {
     log(`[churn] key dictionary: ${dictSamples.length} sample(s), `
         + `${keysSeen.size} distinct key(s), final size `
         + `${dictSamples.length ? dictSamples[dictSamples.length - 1].size : 0}`);
+    if (args.parleyPerCycle > 0) {
+        log(`[churn] parley: ${totals.parleySent} offer(s) sent`
+            + (totals.parleySkipped ? `, ${totals.parleySkipped} skipped (self-target)` : ''));
+    }
     log(`[churn] cycles ${totals.cyclesAuthed} authed / ${totals.cyclesStarted} started, `
         + `${totals.cyclesFailed} failed; server errors `
         + `${JSON.stringify(totals.serverErrorsByCode)}`);

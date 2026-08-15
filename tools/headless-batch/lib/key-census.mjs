@@ -161,6 +161,74 @@ export function censusChurn(cycles) {
     };
 }
 
+/**
+ * A MONOTONIC-ID FAMILY, read as ids rather than as keys — PLAN-long-uptime
+ * **T4-1c**.
+ *
+ * `censusChurn` groups by shape, which answers "is this population growing".
+ * It cannot answer the question that decides whether growth is affordable:
+ * `objective_<n>_state` and `objective_<n>_completed_by` are two shapes and one
+ * family, and what a campaign pays per occurrence is the family's keys ÷ its
+ * ids. §17 quoted "~9-16 keys per objective" and "~19 per proposal" from
+ * INSPECTION of the publisher, because no window had ever contained a second
+ * family to count. This counts them.
+ *
+ * `ids` is the distinct id count and `idMax` the highest seen. Both are
+ * reported because they are different facts: `nextId` never reuses, so a gap
+ * between them is proposals (or objectives) minted by someone this census
+ * cannot see — an AI, a scenario, another seat — and reading `idMax` as a
+ * count would over-attribute them to this arm.
+ *
+ * `fields` is the per-id field census: a field published CONDITIONALLY (parley
+ * publishes `duration` only for the kinds that carry one, `counterOf` only for
+ * a counter-offer) shows up as present on some ids and not others, which is why
+ * keys-per-id has a range and not just a mean.
+ */
+export function censusFamily(keys, prefix) {
+    const re = new RegExp(`^${prefix}_(\\d+)_(.+)$`);
+    const byId = new Map();
+    const fieldCounts = new Map();
+    for (const key of keys) {
+        const m = re.exec(String(key));
+        if (!m) continue;
+        const id = Number(m[1]);
+        const field = m[2];
+        let fields = byId.get(id);
+        if (!fields) { fields = new Set(); byId.set(id, fields); }
+        if (!fields.has(field)) {
+            fields.add(field);
+            fieldCounts.set(field, (fieldCounts.get(field) ?? 0) + 1);
+        }
+    }
+    const ids = [...byId.keys()].sort((a, b) => a - b);
+    const perId = ids.map((id) => byId.get(id).size);
+    const total = perId.reduce((a, b) => a + b, 0);
+    return {
+        prefix,
+        ids: ids.length,
+        idMin: ids.length ? ids[0] : null,
+        idMax: ids.length ? ids[ids.length - 1] : null,
+        keys: total,
+        keysPerIdMin: perId.length ? Math.min(...perId) : 0,
+        keysPerIdMax: perId.length ? Math.max(...perId) : 0,
+        keysPerIdMean: perId.length ? total / perId.length : 0,
+        fields: [...fieldCounts.entries()]
+            .map(([field, idsWithIt]) => ({ field, ids: idsWithIt }))
+            .sort((a, b) => b.ids - a.ids || a.field.localeCompare(b.field)),
+    };
+}
+
+/** One line per family, for the families a campaign's length (not its player
+ *  count) grows. Empty families are reported too — "0 ids" from an arm that
+ *  ISSUED proposals is a finding, and silence would hide it. */
+export function formatFamilies(families) {
+    return families.map((f) => (f.ids === 0
+        ? `  ${f.prefix}_<n>_*: no id minted`
+        : `  ${f.prefix}_<n>_*: ${f.ids} id(s) (${f.idMin}..${f.idMax}), ${f.keys} key(s) = `
+            + `${f.keysPerIdMean.toFixed(1)}/id (${f.keysPerIdMin}..${f.keysPerIdMax}), `
+            + `fields ${f.fields.map((x) => `${x.field}×${x.ids}`).join(' ')}`)).join('\n');
+}
+
 /** Human-readable census, one line per shape that moved. Bounded output: shapes,
  *  not keys — the key list is in the JSON beside it. */
 export function formatCensus(census, { topStatic = 5 } = {}) {
