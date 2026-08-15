@@ -18,8 +18,12 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
 import { buildScenarioManifest } from './scenario-manifest.js';
-import { resolve, join } from 'path';
-import { readFileSync, existsSync, readdirSync, unlinkSync, rmdirSync, statSync } from 'fs';
+import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
+import { resolve, join, dirname } from 'path';
+import {
+    readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
+    rmdirSync, statSync,
+} from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -37,6 +41,9 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
 // browser URL with this widget disabled unless `testStartupSelector` is set.
 const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
 const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+
+/** Repo root for the tools with direct fs access (defs cache, scenarios). */
+const projectRoot = () => process.env.PROJECT_ROOT || resolve('.');
 const AUTH_USER = process.env.SPRING_USER || 'admin';
 const AUTH_PASS = process.env.SPRING_PASS || 'admin';
 
@@ -1255,6 +1262,94 @@ const TOOLS = [
             required: ['code'],
         },
     },
+
+    // --- Scenario authoring (S3) ---------------------------------------
+    // The loop these four close: list what exists → validate offline until
+    // clean → write (with the resync the lobby needs to SEE the file) →
+    // launch with launch_scenario. Only validate_scenario works with the
+    // stack down; the other three talk to the lobby.
+    {
+        name: 'list_scenarios',
+        description: 'List the scenarios a game ships, merging the lobby\'s discovery view (id, displayName, '
+            + 'map, tutorial/retired flags, terminal = has a victory objective, playable sides, briefing) with '
+            + 'the admin provenance view for generated wars (seed, generator params/version, createdBy/At). '
+            + 'Rows are tagged source: "authored" (a hand-written scenarios/*.lua) or "generated" (gen_*, owned '
+            + 'by the scenario DB — regenerate rather than edit those). Needs a running lobby; degrades to the '
+            + 'public view alone if the admin call is refused.',
+        inputSchema: {
+            type: 'object',
+            properties: { gameId: { type: 'string', default: 'metalstorm' } },
+        },
+    },
+    {
+        name: 'validate_scenario',
+        description: 'Offline structured validation of a scenario file — replicates BOTH parsers (the lobby\'s '
+            + 'bare lua_State discovery pass AND game_scenario.lua\'s GameStart validate()) without booting '
+            + 'anything, and without a running lobby. Returns findings[] of {severity, rule, path, message} with '
+            + 'severity error|warning|info|skipped. A scenario with zero error findings will be offered by the '
+            + 'lobby and will pass the in-game validator, modulo the live-only checks reported as "skipped". '
+            + 'Note "skipped" means NOT CHECKED, never "fine". Rule ids and what each mirrors: docs/scenarios.md §11.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                scenarioId: { type: 'string', description: 'Reads data/games/<gameId>/scenarios/<scenarioId>.lua. Either this or luaSource.' },
+                luaSource: { type: 'string', description: 'Validate source text directly — the pre-write check. Either this or scenarioId.' },
+                passability: { type: 'boolean', default: false, description: 'Also run regions_from_map.py --verify on world.map (read-only; needs the processed map + python3; slow).' },
+            },
+        },
+    },
+    {
+        name: 'write_scenario',
+        description: 'Validate, then write data/games/<gameId>/scenarios/<scenarioId>.lua, then resync the lobby '
+            + 'so the file is actually OFFERED (lobby scenario lists are a startup snapshot — a new file is '
+            + 'invisible to the picker and to launch_scenario until a resync). Error findings always block the '
+            + 'write; warnings block unless force:true. Refuses the gen_ prefix: those ids belong to the scenario '
+            + 'DB and its orphan sweep DELETES any gen_*.lua no row claims. Reports offered:true|false by '
+            + 're-reading the lobby list afterwards, because a file the lobby then silently declines to offer is '
+            + 'exactly the failure this tool exists to catch.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                scenarioId: { type: 'string', description: 'Grammar: ^[a-z0-9_]+$, max 64 chars, must not start with gen_.' },
+                luaSource: { type: 'string', description: 'The whole file. Must be a PURE Lua table literal returning a table — no VFS/Spring/GG/require at file scope.' },
+                resync: { type: 'boolean', default: true },
+                overwrite: { type: 'boolean', default: false, description: 'Required to replace an existing file.' },
+                force: { type: 'boolean', default: false, description: 'Write despite warning findings. Error findings always block.' },
+            },
+            required: ['scenarioId', 'luaSource'],
+        },
+    },
+    {
+        name: 'generate_scenario',
+        description: 'Generate a war for a map with scenariogen.py via the lobby admin route, store it in the '
+            + 'scenario DB, materialise it to scenarios/gen_*.lua and re-discover it — returning the entry '
+            + 'exactly as the Create Game picker now sees it. The seed defaults server-side to sum(ord(c) for c '
+            + 'in mapId), so re-running with no seed is an idempotent upsert of the same war rather than a new '
+            + 'one. On a map that cannot host a war the route answers 422 with the generator\'s own REJECTED '
+            + 'line naming the violated invariant — surfaced verbatim. Needs a running lobby + admin auth.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                mapId: { type: 'string', description: 'Processed map id, e.g. "meridian_basin".' },
+                seed: { type: 'integer', description: 'Defaults to sum of mapId char codes (reproducible).' },
+                sides: { type: 'integer', description: '2-8' },
+                towns: { type: 'integer', description: '0-32' },
+                outposts: { type: 'integer', description: '0-32' },
+                bases: { type: 'integer', description: '0-32' },
+                mines: { type: 'integer', description: '0-32' },
+                sites: { type: 'integer', description: '0-32' },
+                relics: { type: 'integer', description: '0-32' },
+                wrecks: { type: 'integer', description: '0-32' },
+                bridges: { type: 'integer', description: '0-32' },
+                hostility: { type: 'string', description: 'Generator enum (see scenariogen.py --hostility).' },
+                roster: { type: 'string', description: 'Generator enum (see scenariogen.py --roster).' },
+            },
+            required: ['mapId'],
+        },
+    },
 ];
 
 // --- Tool execution ---
@@ -2105,6 +2200,196 @@ async function executeTool(name, args) {
                 '',
                 'When CDP is added to spring-debug a real implementation will replace this.',
             ].join('\n');
+        }
+
+        // --- Scenario authoring (S3) -----------------------------------
+
+        case 'validate_scenario': {
+            if (!args.scenarioId && args.luaSource === undefined)
+                return 'Error: validate_scenario needs either scenarioId (read from disk) or luaSource (validate text directly).';
+            const result = await runScenarioValidation({
+                projectRoot: projectRoot(),
+                gameId: args.gameId || 'metalstorm',
+                scenarioId: args.scenarioId,
+                luaSource: args.luaSource,
+                passability: args.passability === true,
+            });
+            return JSON.stringify(result, null, 2);
+        }
+
+        case 'list_scenarios': {
+            const gameId = args.gameId || 'metalstorm';
+            const notes = [];
+
+            let discovered = [];
+            try {
+                const r = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (!r.ok) return `Error: lobby answered ${r.status} for /api/games/${gameId}/scenarios.`;
+                discovered = await r.json();
+            } catch (e) {
+                return `Error: lobby at ${LOBBY_URL} unreachable (${e.message}). `
+                     + 'validate_scenario works offline; this tool does not.';
+            }
+
+            // Provenance half. A non-admin token loses it and nothing else —
+            // the discovery view is the part an author actually needs.
+            let stored = [];
+            try {
+                const r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/list`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ gameId }),
+                }));
+                if (r.ok) stored = (await r.json()).scenarios || [];
+                else notes.push(`admin list refused (${r.status}) — generated rows carry no provenance below.`);
+            } catch (e) {
+                notes.push(`admin list unavailable (${e.message}) — generated rows carry no provenance below.`);
+            }
+
+            const byId = new Map(stored.map(s => [s.id, s]));
+            const rows = discovered.map(s => {
+                const row = { ...s, source: byId.has(s.id) || s.id.startsWith('gen_') ? 'generated' : 'authored' };
+                const p = byId.get(s.id);
+                if (p) row.provenance = {
+                    seed: p.seed, params: p.params, generatorVersion: p.generatorVersion,
+                    createdBy: p.createdBy, createdAt: p.createdAt, bytes: p.bytes,
+                };
+                return row;
+            });
+            // A stored row the lobby did NOT discover is the interesting case:
+            // the file failed to parse, or the sweep removed it.
+            for (const p of stored) {
+                if (discovered.some(d => d.id === p.id)) continue;
+                rows.push({ id: p.id, source: 'generated', discovered: false, provenance: p });
+                notes.push(`"${p.id}" has a DB row but the lobby did not discover it — the materialised file `
+                         + 'failed to parse or is missing. Try resync (write_scenario does one) and validate_scenario.');
+            }
+
+            return JSON.stringify({ gameId, count: rows.length, scenarios: rows, notes }, null, 2);
+        }
+
+        case 'write_scenario': {
+            const gameId = args.gameId || 'metalstorm';
+            const id = String(args.scenarioId || '');
+            const notes = [];
+
+            // Two guards on the same trap, on purpose: ScenarioDb owns the
+            // gen_ namespace and SyncToDisk's orphan sweep deletes any
+            // gen_*.lua no row claims, so an authored file with that name is
+            // deleted on the next resync — including the one this tool does.
+            if (id.startsWith('gen_'))
+                return `Error: "${id}" — the gen_ prefix is reserved for DB-owned generated wars. `
+                     + 'The scenario DB\'s orphan sweep deletes any gen_*.lua no row claims, so this file '
+                     + 'would be silently removed on the next resync. Use generate_scenario to make one, or '
+                     + 'pick a name without the prefix.';
+            if (!/^[a-z0-9_]+$/.test(id) || id.length > 64)
+                return `Error: "${id}" is not a valid scenario id. Grammar: ^[a-z0-9_]+$ (lowercase, digits, `
+                     + 'underscore), max 64 chars — it becomes both a filename and the `scenario` modoption.';
+
+            const root = projectRoot();
+            const file = scenarioPath(root, gameId, id);
+            const dir = dirname(file);
+            if (!existsSync(dir))
+                return `Error: ${dir} does not exist — is "${gameId}" a game this checkout ships?`;
+            if (existsSync(file) && !args.overwrite)
+                return `Error: ${file} already exists. Pass overwrite:true to replace it.`;
+
+            const validation = await runScenarioValidation({
+                projectRoot: root, gameId, scenarioId: id, luaSource: args.luaSource,
+            });
+            const blocking = validation.findings.filter(f =>
+                f.severity === 'error' || (f.severity === 'warning' && !args.force));
+            if (blocking.length)
+                return JSON.stringify({
+                    written: false,
+                    reason: validation.counts.error > 0
+                        ? 'validation errors — fix them (errors are never bypassable)'
+                        : 'validation warnings — pass force:true to write anyway',
+                    counts: validation.counts,
+                    findings: validation.findings,
+                }, null, 2);
+
+            // Temp-file + rename, same rationale as ScenarioDb::Materialise:
+            // the lobby may be mid-Discover, and a half-written file reads as
+            // a parse failure and drops the scenario from the picker.
+            const tmp = `${file}.tmp-${process.pid}`;
+            try {
+                writeFileSync(tmp, args.luaSource, 'utf8');
+                renameSync(tmp, file);
+            } catch (e) {
+                try { unlinkSync(tmp); } catch { /* nothing to clean */ }
+                return `Error writing ${file}: ${e.message}`;
+            }
+
+            const out = {
+                written: true, file, scenarioId: id, gameId,
+                counts: validation.counts, findings: validation.findings,
+            };
+
+            if (args.resync === false) {
+                notes.push('resync skipped — the lobby picker and launch_scenario will not see this file until '
+                         + 'a POST /api/admin/scenarios/resync or a lobby restart. Direct and headless boots '
+                         + 'read the VFS fresh, so those work now.');
+                out.notes = notes;
+                return JSON.stringify(out, null, 2);
+            }
+
+            try {
+                const r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/resync`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ gameId }),
+                }));
+                out.resync = r.ok ? await r.json() : `refused (${r.status})`;
+            } catch (e) {
+                out.resync = `unreachable — ${e.message}`;
+                notes.push('the lobby is down, so the file is written but not discovered. Direct/headless boots '
+                         + 'read the VFS fresh; the picker sees it on the next lobby start or manual resync.');
+            }
+
+            // Confirm rather than assume: writing a file the lobby then
+            // declines to offer is exactly the silent failure this tool is for.
+            try {
+                const r = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (r.ok) {
+                    const list = await r.json();
+                    out.offered = Array.isArray(list) && list.some(s => s.id === id);
+                    if (!out.offered)
+                        notes.push('the resync ran but the lobby still does not offer this scenario — run '
+                                 + 'validate_scenario and check the lobby log for its "not offered" warning.');
+                }
+            } catch { /* already reported by the resync branch */ }
+
+            if (notes.length) out.notes = notes;
+            return JSON.stringify(out, null, 2);
+        }
+
+        case 'generate_scenario': {
+            const gameId = args.gameId || 'metalstorm';
+            if (!args.mapId) return 'Error: generate_scenario needs a mapId.';
+            const body = { gameId, mapId: args.mapId };
+            for (const k of ['seed', 'sides', 'towns', 'outposts', 'bases', 'mines',
+                             'sites', 'relics', 'wrecks', 'bridges', 'hostility', 'roster'])
+                if (args[k] !== undefined) body[k] = args[k];
+
+            let r;
+            try {
+                r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify(body),
+                }));
+            } catch (e) {
+                return `Error: lobby at ${LOBBY_URL} unreachable (${e.message}).`;
+            }
+            const text = await r.text();
+            let payload;
+            try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+            if (!r.ok)
+                // 422 carries the generator's own REJECTED line, which names
+                // the violated invariant — strictly more useful than a summary.
+                return JSON.stringify({ ok: false, status: r.status, ...payload }, null, 2);
+            return JSON.stringify(payload, null, 2);
         }
 
         default:

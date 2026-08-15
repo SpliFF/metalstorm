@@ -202,6 +202,58 @@ row, the room screen's "War:" label, and the client's briefing splash all read.
   `POST /api/admin/scenarios/list` (admin) mirrors the same `briefing` object
   for stored/generated scenarios.
 
+The file format itself — every key, the two parsers that read it, and the
+offline validator — is [scenarios.md](scenarios.md).
+
+#### Admin scenario routes
+
+All four require the **admin** role. The MCP tools `generate_scenario`,
+`list_scenarios` and `write_scenario` wrap them (see
+[debugging-tools.md](debugging-tools.md)).
+
+**POST /api/admin/scenarios/generate**
+
+```jsonc
+{ "gameId": "metalstorm", "mapId": "meridian_basin",
+  "seed": 1234,                                   // optional
+  "sides": 2, "towns": 6, "outposts": 4, "bases": 2, "mines": 3,
+  "sites": 3, "relics": 1, "wrecks": 5, "bridges": 1,
+  "hostility": "…", "roster": "…" }               // generator enums
+```
+
+Runs `tools/mapgen/scenariogen.py`, stores the result in the scenario DB,
+materialises it to `scenarios/gen_*.lua` and re-discovers it. Responds `200`
+with `{ok, created, scenario}` where `scenario` is the picker view plus
+provenance.
+
+- **`seed` defaults to `sum(ord(c) for c in mapId)`**, not to a clock — a
+  generated war is reproducible from `(map, seed, version)` or it is not
+  reproducible at all. So re-running with no seed is an **idempotent upsert**
+  (`created: false` the second time), not a new war.
+- Integer knobs are **range-clamped and silently dropped** when out of range:
+  `sides` 2-8, every other int 0-32. String knobs are allowlisted.
+  `sites`/`relics`/`wrecks`/`bridges` — the prop and landmark layer — were
+  CLI-only before this route forwarded them.
+- **`422`** with `{ok: false, error, exitCode}` when the generator rejects the
+  map; `error` is the generator's own `REJECTED` line, which names the violated
+  invariant (and, for the reachability gate, which components the armies were
+  stranded in). Not a `500`: the map is the problem, not the server.
+
+**POST /api/admin/scenarios/list** `{gameId?}` → `{ok, scenarios[]}` — the
+stored rows with provenance (`seed`, `params`, `generatorVersion`, `createdBy`,
+`createdAt`, `bytes`) *and* the discovered view of each (`discovered`,
+`terminal`, `sides`, `briefing`). The two halves come from different places on
+purpose: a materialised file that failed to parse reads `discovered: false`
+instead of echoing the row back and looking healthy.
+
+**POST /api/admin/scenarios/resync** `{gameId?}` → `{ok, games[{gameId, written,
+orphansRemoved, failed}]}` — rebuilds every generated `.lua` from its row,
+sweeps orphans, and re-Discovers the whole directory. This is the de-facto hot
+reload: **authored** files appear in the picker without a lobby restart, and the
+sweep only ever touches `gen_*`, so it is safe to run after hand-writing a file.
+
+**POST /api/admin/scenarios/delete** `{id}` → drops the row **and** the file.
+
 ### Factions
 
 #### GET /api/factions/{gameId}

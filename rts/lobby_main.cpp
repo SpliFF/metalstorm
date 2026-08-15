@@ -262,6 +262,14 @@ RunScenarioGen(const std::string &mapsDir, const std::string &mapId,
   addInt("--outposts", "outposts", 0, 32);
   addInt("--bases", "bases", 0, 32);
   addInt("--mines", "mines", 0, 32);
+  // The prop/landmark layer (scenariogen.py:3015-3022). CLI-only until now,
+  // which meant an author driving generation over HTTP could shape the
+  // military layout but not the terrain it fights over. Same 0-32 clamp as
+  // the neighbours, and the generator's own argparse re-validates.
+  addInt("--sites", "sites", 0, 32);
+  addInt("--relics", "relics", 0, 32);
+  addInt("--wrecks", "wrecks", 0, 32);
+  addInt("--bridges", "bridges", 0, 32);
   const auto addEnum = [&](const char *flag, const char *key) {
     if (!knobs.contains(key) || !knobs[key].is_string())
       return;
@@ -2838,7 +2846,7 @@ int main(int argc, char *argv[]) {
 
   // POST /api/admin/scenarios/generate
   //   {gameId, mapId, seed?, sides?, towns?, outposts?, bases?, mines?,
-  //    hostility?, roster?}
+  //    sites?, relics?, wrecks?, bridges?, hostility?, roster?}
   // Generate a war for `mapId`, store it, materialise it, and return the
   // entry exactly as the Create Game picker will now see it.
   net.AddHttpPost(
