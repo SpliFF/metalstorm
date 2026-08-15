@@ -60,4 +60,35 @@ describe('command-console widget', () => {
         );
         expect(source).toContain("'command-console': () => import('../../native-widgets/command-console.js')");
     });
+
+    /**
+     * M6 voice. The state machine and the port are tested properly in
+     * `ui/native-ui/voice-capture.test.ts`; what only this file can check is the
+     * WIRING, and both facts below are ones a refactor could quietly break with
+     * every other test still green.
+     */
+    describe('push-to-talk wiring', () => {
+        const source = readFileSync(
+            join(dirname(fileURLToPath(import.meta.url)), 'command-console.js'), 'utf8',
+        );
+
+        it('creates the mic only behind the feature detect', () => {
+            // An unavailable API must produce NO button — not a disabled one, not
+            // a hidden one in the tab order (§4 "hide the mic affordance cleanly
+            // where unavailable"). The early return is the whole guarantee.
+            expect(source).toContain('if (!isVoiceCaptureAvailable()) return;');
+            const guardAt = source.indexOf('if (!isVoiceCaptureAvailable()) return;');
+            const micAt = source.indexOf("document.createElement('button')");
+            expect(guardAt).toBeGreaterThan(-1);
+            expect(micAt).toBeGreaterThan(guardAt);
+        });
+
+        it('submits a spoken sentence through the typed sentence\'s function', () => {
+            // The one line that makes voice an input method rather than a second
+            // parser: it sets the same field and calls the same submit().
+            const onSubmit = source.slice(source.indexOf('onSubmit: (transcript)'));
+            expect(onSubmit).toContain('state.inputEl.value = transcript');
+            expect(onSubmit.slice(0, onSubmit.indexOf('onEmpty'))).toContain('void submit()');
+        });
+    });
 });

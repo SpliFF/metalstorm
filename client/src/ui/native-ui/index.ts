@@ -101,3 +101,14 @@ export { QueryEngine, CensusCache, censusCacheHolder, NOT_SPOTTED } from './quer
 export type { Census, CensusUnit, CensusPort, QueryEngineDeps } from './query-engine.js';
 export { matchLocalPattern } from './nl-local-patterns.js';
 export type { LocalPatternDeps, LocalPatternMatch } from './nl-local-patterns.js';
+
+// Voice capture / push-to-talk (M6, §4)
+export {
+    isVoiceCaptureAvailable, createWebSpeechVoicePort, createPushToTalk,
+    createSpeechOutPort, isSpeakEnabled, readPushToTalkCode, isTextEntryTarget,
+    describeSpeechError, DEFAULT_PTT_CODE, DEFAULT_SETTLE_MS, PTT_KEY_STORAGE, SPEAK_FLAG_KEY,
+} from './voice-capture.js';
+export type {
+    VoicePort, VoiceError, VoiceErrorKind, VoiceBackend, VoiceGlobals,
+    PushToTalk, PushToTalkState, PushToTalkDeps, SpeechOutPort,
+} from './voice-capture.js';

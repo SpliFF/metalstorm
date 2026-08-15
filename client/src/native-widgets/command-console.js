@@ -22,6 +22,12 @@
  * M4 adds the server proxy as a second producer of the SAME envelope, and M6
  * adds push-to-talk into this same input; neither changes this widget.
  *
+ * M6 (voice) held to that: holding the push-to-talk key streams the interim
+ * transcript into `#cc-input` and the release calls `submit()` — the same
+ * function the Send button calls, reading the same field. There is no
+ * voice-specific command path, so a spoken order and a typed one cannot diverge
+ * in what they mean, what they cost, or what they say back.
+ *
  * This widget is deliberately DUMB. It owns DOM, scroll position and event
  * wiring; it owns no parsing, no verb table and no decision about what a
  * sentence means. All of that lives in `ui/native-ui/` (console-exchange.ts,
@@ -49,6 +55,10 @@ import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js'
 import { answerLocally, isCancel, resubmissionText } from '../ui/native-ui/nl-clarify.js';
 import { validateNLResponse } from '../ui/native-ui/nl-envelope.js';
 import { executeNLResponse } from '../ui/native-ui/nl-executor.js';
+import {
+    isVoiceCaptureAvailable, createWebSpeechVoicePort, createPushToTalk,
+    createSpeechOutPort, readPushToTalkCode, isTextEntryTarget,
+} from '../ui/native-ui/voice-capture.js';
 import { injectStyle } from '../ui/ui.js';
 import consoleCss from './command-console.css?raw';
 
@@ -78,6 +88,15 @@ const state = {
      * nothing outstanding.
      */
     pending: null,
+    /** M6 voice. All null when the browser has no speech API — the mic button
+     *  is then never created (see `setupVoice`). */
+    voice: null,
+    /** Speaks `game:` lines when the flag is on. Always present; a disabled one
+     *  is a no-op, so no caller has to branch. */
+    speaker: null,
+    /** What was in the input field when the hold started, restored on cancel —
+     *  a half-typed order must survive an accidental key press. */
+    typedBeforeHold: '',
 };
 
 /** Exchanges (you+game pairs) the proxy accepts. */
@@ -100,6 +119,9 @@ function init(ctx) {
             <button type="submit" class="nui-btn nui-btn--primary" id="cc-send">Send</button>
         </form>
     `;
+    // The mic is APPENDED by setupVoice when — and only when — the browser has a
+    // speech API. Building it into the markup above and hiding it later would
+    // leave a hidden control in the tab order on every non-Chromium browser.
 
     state.container = container;
     state.logEl = container.querySelector('#cc-log');
@@ -141,14 +163,192 @@ function init(ctx) {
         if (e.key === 'Escape') state.inputEl.blur();
     });
 
-    say('system', 'Type an order in plain words. Try "defend <region>" — or "help".');
+    setupVoice(container);
+
+    say('system', state.voice
+        ? `Type an order in plain words, or hold ${state.voice.keyLabel} and say it. Try "defend <region>" — or "help".`
+        : 'Type an order in plain words. Try "defend <region>" — or "help".');
 
     console.log('[command-console] Initialized');
 }
 
+// ───────────────────────────── voice (M6) ─────────────────────────────
+
+/**
+ * Push-to-talk, or nothing at all.
+ *
+ * `isVoiceCaptureAvailable` is asked once. When it says no (Firefox, Safari,
+ * any headless build without the API) this function returns having created no
+ * button, bound no key and printed no warning: a mic the browser cannot honour
+ * is an affordance that lies, and a console message about it is addressed to
+ * nobody who can act on it. `state.voice` stays null and every voice path below
+ * is unreachable.
+ *
+ * Nothing here opens the microphone. `port.start()` is called from
+ * `PushToTalk.press()` only, which is reachable only from a real key-down or
+ * pointer-down — a user gesture, which is also what the browser requires before
+ * it will prompt for permission at all.
+ */
+function setupVoice(container) {
+    state.speaker = createSpeechOutPort();
+
+    if (!isVoiceCaptureAvailable()) return;
+    const port = createWebSpeechVoicePort();
+    if (!port) return;
+
+    const code = readPushToTalkCode();
+    const keyLabel = code.startsWith('Key') ? code.slice(3) : code;
+
+    const mic = document.createElement('button');
+    mic.type = 'button';
+    mic.id = 'cc-mic';
+    mic.className = 'cc-mic';
+    mic.setAttribute('aria-pressed', 'false');
+    mic.setAttribute('aria-label', `Hold to talk (${keyLabel})`);
+    mic.title = `Hold to talk — or hold ${keyLabel}. Esc while holding cancels.`;
+    mic.innerHTML = '<span class="cc-mic__dot" aria-hidden="true"></span><span class="cc-mic__glyph" aria-hidden="true">🎙</span>';
+    container.querySelector('#cc-form').insertBefore(mic, container.querySelector('#cc-send'));
+
+    const ptt = createPushToTalk({
+        port,
+        onState: (s) => renderMicState(s),
+        onInterim: (text) => {
+            // The interim goes in the INPUT FIELD, not the transcript: it is not
+            // yet anything the game was told, and a log line per partial would
+            // bury the last exchange under a stutter of half-sentences.
+            if (state.inputEl) state.inputEl.value = text;
+        },
+        onSubmit: (transcript) => {
+            if (state.inputEl) state.inputEl.value = transcript;
+            // The SAME function the Send button calls, reading the same field.
+            // This one line is the whole "voice is an input method, not a second
+            // parser" claim, and it is why voice inherits clarification chips,
+            // history, the offline fallback and every refusal wording for free.
+            void submit().catch((err) => {
+                console.error('[command-console] voice submit failed:', err);
+                say('refused', 'Something went wrong handling that — nothing sent.');
+            });
+        },
+        onEmpty: () => {
+            restoreTyped();
+            say('system', "I didn't catch that — hold the key and speak, or type it.");
+        },
+        onCancel: () => {
+            restoreTyped();
+            say('system', 'voice cancelled — nothing sent.');
+        },
+        onError: (err) => {
+            restoreTyped();
+            say('refused', err.message);
+        },
+    });
+
+    state.voice = { port, ptt, mic, code, keyLabel };
+
+    // ── mic button: press and hold ──
+    mic.addEventListener('pointerdown', (e) => {
+        e.preventDefault();                 // don't steal focus from the input
+        // Capture the pointer so the release is seen even if the cursor has
+        // wandered off the button by then — otherwise a drag off the mic leaves
+        // it hot with nobody listening for the key-up.
+        try { mic.setPointerCapture(e.pointerId); } catch { /* not supported */ }
+        beginHold();
+    });
+    const endPointer = (e) => {
+        if (state.voice?.ptt.state === 'off') return;
+        try { mic.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+        ptt.release();
+    };
+    mic.addEventListener('pointerup', endPointer);
+    mic.addEventListener('pointercancel', () => ptt.cancel());
+
+    // ── the bindable key ──
+    // CAPTURE phase: main.ts's global Escape handler (quit-to-lobby) and the
+    // worker's order hotkeys both listen on window in the bubble phase, so
+    // getting here first is what lets Esc mean "cancel the hold" while a hold is
+    // in flight, and mean "quit dialog" at every other moment.
+    const onKeyDown = (e) => {
+        if (e.key === 'Escape' && state.voice.ptt.state !== 'off') {
+            ptt.cancel();
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        if (e.code !== state.voice.code) return;
+        // Modifiers are somebody else's binding (Ctrl-V is paste), and `repeat`
+        // is the OS auto-repeating a key that is already held.
+        if (e.repeat || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+        // Typing into any field — including this console's own input — must
+        // never open the mic.
+        if (isTextEntryTarget(e.target)) return;
+        e.preventDefault();
+        beginHold();
+    };
+    const onKeyUp = (e) => {
+        if (e.code !== state.voice.code) return;
+        if (state.voice.ptt.state === 'off') return;
+        e.preventDefault();
+        ptt.release();
+    };
+    // A key held while the tab loses focus never delivers its key-up. Without
+    // this the mic would stay hot behind another window, which is precisely the
+    // thing §4 promises cannot happen.
+    const onBlur = () => { if (state.voice?.ptt.state !== 'off') ptt.cancel(); };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('blur', onBlur);
+    state.unsubs.push(() => {
+        window.removeEventListener('keydown', onKeyDown, true);
+        window.removeEventListener('keyup', onKeyUp, true);
+        window.removeEventListener('blur', onBlur);
+        ptt.dispose();
+    });
+}
+
+function beginHold() {
+    if (!state.voice || state.voice.ptt.state !== 'off') return;
+    state.typedBeforeHold = state.inputEl?.value ?? '';
+    state.voice.ptt.press();
+}
+
+/** Put back whatever was half-typed when the hold started. A cancelled or empty
+ *  hold must not eat an order the player was in the middle of writing. */
+function restoreTyped() {
+    if (state.inputEl) state.inputEl.value = state.typedBeforeHold;
+}
+
+/**
+ * The mic is HOT or it is OFF, and it looks like exactly one of those (§4
+ * "mic state must be unambiguous").
+ *
+ * `listening` is the only hot state: `settling` has already called `stop()` on
+ * the port, so the microphone is closed and showing it as live would be a lie in
+ * the direction that matters. It gets its own dim "thinking" look instead.
+ */
+function renderMicState(s) {
+    const mic = state.voice?.mic;
+    if (!mic) return;
+    mic.classList.toggle('cc-mic--hot', s === 'listening');
+    mic.classList.toggle('cc-mic--settling', s === 'settling');
+    mic.setAttribute('aria-pressed', s === 'listening' ? 'true' : 'false');
+    state.container?.classList.toggle('command-console--listening', s === 'listening');
+    if (state.inputEl) {
+        state.inputEl.placeholder = s === 'listening'
+            ? 'Listening — release to send, Esc to cancel'
+            : 'Type an order: "defend Northgate", "idle tanks hold Slag Forge high"';
+    }
+}
+
 function dispose() {
+    // Runs FIRST, and before anything else is torn down: the voice unsub
+    // cancels any hold in flight and disposes the port, so the microphone can
+    // never outlive the panel that opened it.
     for (const unsub of state.unsubs) unsub();
     state.unsubs = [];
+    state.voice = null;
+    state.speaker?.cancel();
+    state.speaker = null;
 
     if (state.container) {
         state.container.remove();
@@ -686,6 +886,12 @@ function renderLine(line) {
     say(line.kind, line.text, [...(line.notes ?? [])], line.options?.length
         ? { options: [...line.options], pick: line.pick ?? 1 }
         : {});
+    // Optional spoken response (§4), off unless `springrts-nl-speak` is set. A
+    // disabled speaker is a no-op, so there is nothing to branch on here.
+    // `system` lines are skipped: they are housekeeping ("voice cancelled"),
+    // and the flag was earned by ANSWERS — a query result the player asked for
+    // out loud while looking at the battlefield rather than at the log.
+    if (line.kind !== 'system') state.speaker?.speak(line.text);
 }
 
 /** The closed vocabulary, read out of the shipped data rather than restated
