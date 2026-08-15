@@ -135,10 +135,12 @@ Configure in `.claude/settings.local.json`:
 | `list_processes` | | List game server processes (via lobby HTTP) |
 | `get_lua_source` | `gamePath`, `filePath` | Read a Lua source file from disk |
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
-| `query_db` | `query`, `db` | SQL query against game or debug database |
+| `query_db` | `query`, `db` | SQL query against game or debug database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too |
 | `list_sessions` | | List recent game sessions |
-| `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client` | see `.claude/skills/spring-debug` | Service lifecycle management (`restart_client` = Vite pane via mprocs control channel) |
-| `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed` | see `.claude/skills/spring-test` | Scripted test verbs (server-side) |
+| `get_frame` | `roomId` | Current sim `frame` + `simFps` + `clients` via the public `GET :port/api/metrics`. No exec, no auth — answers while the sim is paused, pre-`GameStart`, or the exec queue is wedged, and survives `SPRING_PROD` (where `/api/exec` is compiled out) |
+| `end_game` | `roomId` (required), `graceful` (default `true`), `timeoutMs` (default `10000`) | Graceful teardown: SIGTERM → poll → escalate to SIGKILL. SIGTERM is what gives the server a clean loop exit, war-log drain and **exit checkpoint** (the only site where a world becomes resumable); SIGKILL skips all of it. Returns `{roomId, pid, exited, escalatedToKill, waitedMs}` |
+| `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client` | see `.claude/skills/spring-debug` | Service lifecycle management (`restart_client` = Vite pane via mprocs control channel). **`kill_game` is deprecated** — it is now an alias for `end_game(graceful:false)` and, like `end_game`, **requires `roomId`**: called bare it refuses and lists candidate rooms instead of SIGKILLing whichever game it found first |
+| `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed`, `revive_team`, `set_stockpile`, `profile` | see `.claude/skills/spring-test` | Scripted test verbs (server-side). `revive_team {team?}` flips dead teams alive again (pair with `set_cheats`); `set_stockpile {unitId, count, queued?}` insta-fills a stockpile weapon; `profile {target: lua\|sim, action: on\|off\|reset\|status\|report, topN?}` drives the two server-side profilers (`sim` results also surface under `/api/metrics` → `simFrame`) |
 | `browser_test`, `evaluate_widget_lua` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md) |
 
 The full, current tool list (with input schemas) lives in `tools/debug-mcp/server.js`; the skills in `.claude/skills/` document the recipes and pitfalls for using them. This table is a map, not the source of truth — it can drift from the server as tools are added.
@@ -169,7 +171,7 @@ session, not just `launch_game`. Three recurring traps:
    already-logged-in browser* so that user is the host and auto-connects.
 2. **Stale game/lobby after a rebuild.** Replacing a binary on disk does not touch
    a running process. After `ninja … spring-server`, kill the running game
-   (`kill_game`, or `pkill -f build/debug/spring-server`) before launching, or
+   (`end_game(roomId)`, or `pkill -f build/debug/spring-server`) before launching, or
    you'll test the old binary. After rebuilding the lobby, `restart_lobby`.
 3. **Port/process leftovers.** All game servers bind `:9100`; a half-dead server
    keeps the UDP/QUIC socket and the next launch exits immediately. Confirm it's

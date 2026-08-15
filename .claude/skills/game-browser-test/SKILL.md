@@ -71,8 +71,11 @@ without fighting over the single shared `chrome-profile` lock (the
    dance after a failed attempt yields `Not in this room's roster`; start
    clean instead. Poll for `window.widgets && window.test` to confirm the
    session (and LuaUI worker) came up.
-5. **Clean up only your rooms.** `kill_game(yourRoomId)` when done. Never
-   kill or restart a room you didn't launch.
+5. **Clean up only your rooms.** `end_game(yourRoomId)` when done (graceful
+   SIGTERM with automatic SIGKILL escalation; the deprecated `kill_game` is
+   just `end_game(graceful:false)`). Never kill or restart a room you didn't
+   launch — both verbs now *require* the roomId and refuse with a candidate
+   list without one.
 6. **Scope log reads to your room.** `get_logs` and `search_logs` default
    to `roomId: 0` (all rooms) — with concurrent sessions that returns
    other games' entries and buries yours. Always pass your own

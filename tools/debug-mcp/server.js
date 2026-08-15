@@ -199,6 +199,15 @@ async function fetchJson(url) {
     return resp.json();
 }
 
+// GET :port/api/metrics — RouteAuth::Public, served off the HTTP thread, so it
+// answers while the sim is paused or the exec queue is wedged, and it survives
+// SPRING_PROD (where /api/exec is compiled out). Base payload is
+// PerfMetrics::ToJSON(): {frame, tickUs, simFps, entities, clients, ais,
+// combatEvents} plus a `simFrame` block.
+async function fetchMetrics(serverUrl) {
+    return fetchJson(`${serverUrl}/api/metrics`);
+}
+
 /// Resolve `rel` against `base`, falling back to case-insensitive
 /// component matching. Mirrors the behaviour the lobby's static
 /// handler used to provide for ZK-style mixed-case filenames
@@ -451,6 +460,60 @@ function killProcess(pid, signal = 'SIGKILL') {
     catch { return false; }
 }
 
+// EPERM means the process exists but isn't ours — still alive. ESRCH is the
+// only "gone" answer signal 0 gives us.
+function pidAlive(pid) {
+    try { process.kill(pid, 0); return true; }
+    catch (e) { return e.code === 'EPERM'; }
+}
+
+// SIGTERM → poll → SIGKILL, mirroring tools/scripts/spring-services.sh
+// stop_pattern but per-pid and with a longer window: spring-server's signal
+// handler turns SIGTERM into a clean loop exit that drains the war log and
+// writes the exit checkpoint (server_main.cpp) — the one site where a world
+// becomes resumable. A server deep in map/defs precache won't poll keepRunning
+// until the load finishes, hence the escalation.
+async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 250 } = {}) {
+    const t0 = Date.now();
+    let escalatedToKill = false;
+    if (graceful) {
+        try { process.kill(pid, 'SIGTERM'); }
+        catch { return { exited: !pidAlive(pid), escalatedToKill, waitedMs: 0 }; }
+        while (Date.now() - t0 < timeoutMs) {
+            if (!pidAlive(pid)) return { exited: true, escalatedToKill, waitedMs: Date.now() - t0 };
+            await new Promise(r => setTimeout(r, pollMs));
+        }
+        escalatedToKill = true;
+    }
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    // SIGKILL can't be blocked, but the kernel (and the lobby, which reaps its
+    // spring-server children) needs a beat.
+    const killDeadline = Date.now() + 2000;
+    while (Date.now() < killDeadline) {
+        if (!pidAlive(pid)) break;
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return { exited: !pidAlive(pid), escalatedToKill, waitedMs: Date.now() - t0 };
+}
+
+// Destructive verbs never guess which game they mean: without an explicit
+// roomId they refuse and enumerate. (Read-oriented tools keep getGameServerUrl's
+// permissive auto-pick — that's a feature there.)
+function resolveRoomTargetStrict(servers, roomId) {
+    const candidates = servers.filter(s => s.state !== 'ended');
+    const list = (candidates.length ? candidates : servers)
+        .map(s => `  room ${s.room_id} (state=${s.state}, pid=${s.pid}, map=${s.map_id})`)
+        .join('\n') || '  (none)';
+    if (roomId === undefined || roomId <= 0) {
+        return { error: `Error: roomId is required. Candidates:\n${list}\nRe-run with the roomId you mean.` };
+    }
+    const target = servers.find(s => s.room_id === roomId);
+    if (!target) {
+        return { error: `Error: no game server for room ${roomId}. Candidates:\n${list}` };
+    }
+    return { target };
+}
+
 // Every payload spring-server writes under cache/defs/<key>/. The `.bin`
 // entries are the pre-v14 FlatBuffer format; since 63287c0e4e the bake emits
 // brotli-compressed Lua source (`.lua.br`) plus `power.json`. Listing only the
@@ -593,7 +656,7 @@ const TOOLS = [
         inputSchema: {
             type: 'object',
             properties: {
-                query: { type: 'string', description: 'SQL query (read-only — INSERT/UPDATE/DELETE rejected)' },
+                query: { type: 'string', description: 'SQL query — only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads)' },
             },
             required: ['query'],
         },
@@ -694,12 +757,74 @@ const TOOLS = [
     },
     {
         name: 'kill_game',
-        description: 'Force-kill the spring-server process for a room (SIGKILL). Use when restart_game cannot reach the server (e.g. stuck in "starting" state). The lobby will mark the room ended on its next health-check cycle.',
+        description: 'DEPRECATED — alias for end_game(graceful:false). Force-kills the spring-server process for a room (SIGKILL, no exit checkpoint). Prefer end_game. roomId is required.',
         inputSchema: {
             type: 'object',
             properties: {
-                roomId: { type: 'number', description: 'Room ID (0 or omit for first non-ended game)' },
+                roomId: { type: 'number', description: 'Room ID (required — omitting it now refuses with a candidate list)' },
             },
+        },
+    },
+    {
+        name: 'end_game',
+        description: 'Gracefully stop the spring-server for a room: SIGTERM (clean shutdown, war-log drain + exit checkpoint) then poll, escalating to SIGKILL on timeout. Prefer this over kill_game.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID (required).' },
+                graceful: { type: 'boolean', default: true, description: 'false → SIGKILL immediately (same as deprecated kill_game).' },
+                timeoutMs: { type: 'number', default: 10000, description: 'How long to wait for a graceful exit before escalating to SIGKILL.' },
+            },
+            required: ['roomId'],
+        },
+    },
+    {
+        name: 'get_frame',
+        description: 'Current sim frame + simFps via the public /api/metrics endpoint (no exec, no auth, works while paused).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+        },
+    },
+    {
+        name: 'revive_team',
+        description: 'Flip a dead team (or all dead teams) back to alive so units can be spawned onto it. Pairs with set_cheats to stop the game-over check re-killing it.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                team: { type: 'number', description: 'Team ID. Omit to revive all dead teams.' },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+        },
+    },
+    {
+        name: 'set_stockpile',
+        description: "Insta-fill a unit's stockpile weapon (missiles etc.) — skips the build cycle. Wraps the server `stockpile` verb.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                count: { type: 'number', description: 'Stockpiled shots to set.' },
+                queued: { type: 'number', default: 0 },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+            required: ['unitId', 'count'],
+        },
+    },
+    {
+        name: 'profile',
+        description: 'Server-side profilers. target=lua → per-callin synced Lua wall-time; target=sim → SimFrame phase split (native sim / unit scripts / Lua call-ins, also surfaced under /api/metrics simFrame). action: on|off|reset|status|report.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                target: { type: 'string', enum: ['lua', 'sim'] },
+                action: { type: 'string', enum: ['on', 'off', 'reset', 'status', 'report'], default: 'report' },
+                topN: { type: 'number', description: 'Row cap for target=lua report (default 25).' },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+            required: ['target'],
         },
     },
     {
@@ -1034,19 +1159,21 @@ async function executeTool(name, args) {
         }
 
         case 'query_db': {
-            // Read-only query directly against SQLite
-            const queryLower = args.query.trim().toLowerCase();
-            if (queryLower.startsWith('insert') || queryLower.startsWith('update') ||
-                queryLower.startsWith('delete') || queryLower.startsWith('drop') ||
-                queryLower.startsWith('alter') || queryLower.startsWith('create')) {
-                return 'Error: only read-only queries are allowed';
-            }
+            // Read-only query directly against SQLite. better-sqlite3 sets
+            // stmt.reader exactly when the prepared statement returns rows —
+            // a parser-level test, unlike the old prefix blacklist which let
+            // `WITH t AS (…) INSERT …`, a leading comment, or `REPLACE INTO`
+            // straight through. The readonly handle stays as defence in depth.
             try {
                 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-                const rows = db.prepare(args.query).all();
-                db.close();
-                if (!rows.length) return '(empty result)';
-                return JSON.stringify(rows, null, 2);
+                try {
+                    const stmt = db.prepare(args.query);
+                    if (!stmt.reader)
+                        return 'Error: only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads).';
+                    const rows = stmt.all();
+                    if (!rows.length) return '(empty result)';
+                    return JSON.stringify(rows, null, 2);
+                } finally { db.close(); }
             } catch (err) {
                 return `Error: ${err.message}`;
             }
@@ -1181,20 +1308,70 @@ async function executeTool(name, args) {
         }
 
         case 'kill_game': {
+            // Deprecated alias. The old no-roomId branch SIGKILLed the first
+            // non-ended server, which on a two-game box kills the wrong one.
+            const out = await executeTool('end_game', { roomId: args.roomId, graceful: false });
+            return typeof out === 'string' && out.startsWith('Error:')
+                ? `${out}\n(Prefer end_game for a graceful stop.)`
+                : out;
+        }
+
+        case 'end_game': {
             const servers = await getGameServers();
-            let target;
-            if (args.roomId !== undefined && args.roomId > 0) {
-                target = servers.find(s => s.room_id === args.roomId);
+            const { target, error } = resolveRoomTargetStrict(servers, args.roomId);
+            if (error) return error;
+            const r = await endProcess(target.pid, {
+                graceful: args.graceful !== false,
+                timeoutMs: args.timeoutMs ?? 10000,
+            });
+            return JSON.stringify({
+                roomId: target.room_id,
+                pid: target.pid,
+                ...r,
+                note: 'Lobby marks the room ended on its next health check.',
+            }, null, 2);
+        }
+
+        case 'get_frame': {
+            const server = await getGameServerUrl(args.roomId);
+            if (!server) {
+                const servers = await getGameServers();
+                if (!servers.length) return 'No game servers found. Is the lobby running and is a game in progress?';
+                return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
+            }
+            const m = await fetchMetrics(server.url);
+            return JSON.stringify({
+                roomId: server.room_id,
+                frame: m.frame,
+                simFps: m.simFps,
+                clients: m.clients,
+            }, null, 2);
+        }
+
+        case 'revive_team': {
+            const cmd = args.team !== undefined ? `revive_team ${args.team}` : 'revive_team all';
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_stockpile': {
+            const cmd = `stockpile ${args.unitId} ${args.count} ${args.queued ?? 0}`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'profile': {
+            const action = args.action || 'report';
+            // Both C++ parsers slice at offset 12 ("lua profile "/"sim profile "),
+            // so the verb strings below are exactly what they expect.
+            let cmd = `${args.target} profile`;
+            if (action === 'report') {
+                if (args.target === 'lua' && args.topN !== undefined) cmd += ` ${args.topN}`;
             } else {
-                target = servers.find(s => s.state !== 'ended');
+                cmd += ` ${action}`;
             }
-            if (!target) {
-                return `No matching game server. Available: ${servers.map(s => `room ${s.room_id} (state=${s.state}, pid=${s.pid})`).join(', ') || '(none)'}`;
-            }
-            const ok = killProcess(target.pid);
-            return ok
-                ? `Killed spring-server pid=${target.pid} for room ${target.room_id}. Lobby will mark it ended on next health check.`
-                : `Failed to send SIGKILL to pid=${target.pid} (process may be gone, or owned by another user).`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'launch_game': {

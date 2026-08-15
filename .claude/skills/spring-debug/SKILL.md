@@ -16,7 +16,10 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `get_logs` | Fetch recent log entries (filter by level, section, scope, room) | Checking server output, finding errors |
 | `search_logs` | Full-text search across all logs | Finding specific errors or patterns |
 | `exec_lua` | Execute Lua code in LuaRules, LuaGaia, or server scope | Testing gadgets, inspecting game state |
-| `query_db` | Run read-only SQL against the lobby database | Checking users, sessions, room state |
+| `query_db` | Run read-only SQL against the lobby database (only row-returning statements: SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads) | Checking users, sessions, room state |
+| `end_game` | Gracefully stop a room's spring-server: SIGTERM (clean exit + war-log drain + exit checkpoint) → poll → SIGKILL on timeout. `{roomId, graceful=true, timeoutMs=10000}` → `{exited, escalatedToKill, waitedMs}` | Ending a game you launched — **the default teardown verb** |
+| `kill_game` | **DEPRECATED** alias for `end_game(graceful:false)` (immediate SIGKILL, no checkpoint) | Only when a graceful stop is pointless (server wedged in precache) |
+| `get_frame` | Sim `frame`/`simFps`/`clients` via the public `/api/metrics` — no exec, no auth | Cheap liveness poll; works paused, pre-GameStart, and under `SPRING_PROD` |
 | `list_processes` | List game server subprocesses managed by the lobby | Checking if a game is running |
 | `list_sessions` | List recent game sessions from the log server | Post-mortem, history |
 | `get_game_state` | Get sim frame, teams, unit count from game server | Checking if sim is ticking |
@@ -126,10 +129,11 @@ Stale rooms are the single biggest time-sink in a test session. `list_processes`
 
 6. **Clean up games you're done with.** Stale rooms are the main time-sink — don't leave them behind:
    - In the browser, `await window.lobby.leave()` when finished. Room lifecycle is **leave-only** by design (there is no force-end/close endpoint); when the last member leaves, the lobby `DeleteRoom`s it and reaps the game server.
-   - For a server stuck in `starting` (no client ever attached), use `kill_game(roomId)` — the lobby marks the room ended on its next health check.
-   - A just-launched server self-reaps at frame -1 if no one connects, so abandoned launches don't linger forever — but `leave()`/`kill_game` is immediate and keeps `list_processes` readable.
+   - For a server stuck in `starting` (no client ever attached), use `end_game(roomId)` — the lobby marks the room ended on its next health check. `end_game` **requires the roomId** (as does its deprecated alias `kill_game`): called bare it refuses with a candidate list rather than killing whichever game it found first, which on a two-game box was the wrong one.
+   - A just-launched server self-reaps at frame -1 if no one connects, so abandoned launches don't linger forever — but `leave()`/`end_game` is immediate and keeps `list_processes` readable.
+   - Prefer `end_game` over `kill_game`: SIGTERM lets the server drain its war log and write the **exit checkpoint** (the only site where a world becomes resumable); SIGKILL skips it and leaves a stale `game_status` row. Escalation to SIGKILL is automatic after `timeoutMs` (default 10s).
 
-**Canonical browser-test loop:** in-browser as the logged-in user → `createRoom` → `addAI` → `ready(true)` → `startGame` → poll `window.test.deps.connection.authenticated` → drive with `window.test.*`; `leave()` when done. **MCP-only loop (no browser):** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame >= 0` → drive every room-scoped tool with that one `roomId` → `kill_game(roomId)` when done.
+**Canonical browser-test loop:** in-browser as the logged-in user → `createRoom` → `addAI` → `ready(true)` → `startGame` → poll `window.test.deps.connection.authenticated` → drive with `window.test.*`; `leave()` when done. **MCP-only loop (no browser):** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame >= 0` → drive every room-scoped tool with that one `roomId` → `end_game(roomId)` when done.
 
 ## Camera control
 
