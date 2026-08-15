@@ -1389,6 +1389,21 @@ sections are format-complete but carry no bytes: the blobs are PLAN-persistence'
 `StateStreamer::TickAI` feeds phase 4 itself, because its position relative to
 standing-order evaluation inside the streamer tick is load-bearing.
 
+**A recording is bound to the wire schema it was made against** (PLAN-protocol-guard
+task 7). `Header::schemaHash` carries `Protocol::SCHEMA_HASH`, and
+`replay::Player::Load` refuses a file whose stamp is missing or different, naming
+both hashes — the rule is `replay::CheckSchemaHash` in **`rts/Server/ReplayCompatPolicy.h`**,
+the handshake guard's rule with the client replaced by the file. It is not
+belt-and-braces on top of `engineHash`: that field is a stand-in nobody acts on,
+while a record's payload is an **undecoded** `ClientMessage` frame, so a field that
+moved in `protocol.fbs` does not fail to parse on re-feed — it parses as whatever
+now occupies its slot, and the replay confidently plays a game nobody played.
+The gate is at **re-execution ingest only**: `Load`/`LoadSummary` decode no payload,
+so `--replay-export` and the replay browser still open any recording, including every
+pre-guard `.msr` already on disk (those are unplayable, not unreadable; §2.2 of the
+plan rules out a converter). A test fixture that builds its own `replay::Header`
+must stamp it or the driver refuses it before any ordering behaviour is reached.
+
 Three invariants the implementation depends on, each of which was a real bug first:
 
 - **Feed at the journal's tick stamp, never a fresh `sim.GetFrameNum()`.**

@@ -10,6 +10,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/ProtocolSchemaHash.h"  // SCHEMA_HASH, stamped into the replay header
 #include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
@@ -1627,6 +1628,12 @@ int main(int argc, char* argv[])
         // prevents a wrong replay from being trusted.
         rhdr.engineHash   = "proto" + std::to_string(Protocol::CURRENT_PROTOCOL_VERSION) +
                             "-" + std::string(__DATE__ " " __TIME__);
+        // The one identity field in this header that is EXACT and enforced
+        // (PLAN-protocol-guard task 7). engineHash above is a stand-in nobody
+        // acts on; this is the sha256 of the binary wire schema the records
+        // below are encoded against, and `Player::Load` refuses a file whose
+        // stamp does not match the replaying build — see ReplayCompatPolicy.h.
+        rhdr.schemaHash   = Protocol::SCHEMA_HASH;
         rhdr.gameId       = gameId;
         rhdr.gameVersion  = gameVersion;
         rhdr.mapId        = mapId;
