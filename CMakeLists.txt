@@ -442,6 +442,10 @@ set(LOBBY_SERVER_SOURCES
     # table (and the faction override deletes from it); the game server writes
     # it. Pure sqlite, no sim — same shape as GameServersDb below.
     rts/Server/WarPlayerBindings.cpp
+    # PLAN-metalstorm-lobby.md §8 task 9a: the friends graph. LOBBY ONLY —
+    # unlike the bindings above, the game server neither reads nor writes it,
+    # so it is deliberately not in the shared set.
+    rts/Server/Friends.cpp
     # PLAN-metalstorm-lobby.md task 8a: rotating refresh tokens + per-war
     # reconnect tokens. The LOBBY mints both and the GAME server validates the
     # war half, so it belongs to the shared server sources, not to either one.
@@ -579,6 +583,9 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
+        # task 9a — test_friends.cpp drives the real store against an
+        # in-memory db, and the two policy headers beside it are pure.
+        ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Totp.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GuestAccounts.cpp

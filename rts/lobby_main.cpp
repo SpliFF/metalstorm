@@ -29,6 +29,8 @@
 #include "Server/CacheControl.h"
 #include "Server/DevBuildGate.h"
 #include "Server/FactionData.h"
+#include "Server/FriendPresence.h"
+#include "Server/Friends.h"
 #include "Server/GameDiscovery.h"
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
@@ -408,6 +410,16 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// CacheControl::IsNoCache() is: it is a process-wide operator setting, not a
 /// property of the room being started.
 static std::string gReplayDir;
+
+/// PLAN-metalstorm-lobby.md §8, task 9a: "when did this account last make an
+/// authenticated request", the only source of the `online` presence state.
+///
+/// File scope because its one writer (the route-auth dispatch callback, wired
+/// in `main` before any route exists) and its one reader (the friends list
+/// route) are set up hundreds of lines apart, and because it is genuinely
+/// process-wide — the same reason `gReplayDir` above is. Not a database table:
+/// see FriendPresence.h for why, and for what a lobby restart costs.
+static PresenceTracker gPresence;
 
 /// Rooms that are WATCHING a replay rather than hosting a game (PLAN-replay
 /// task 4c), roomId → the `.msr` basename being served.
@@ -1044,6 +1056,11 @@ int main(int argc, char *argv[]) {
   // bump: a row here is the only copy of the thing.
   WarPlayerBindings::EnsureTable(mapDb);
 
+  // friend_edges — the §8 social graph (task 9a). Lobby-only: unlike the
+  // bindings above, nothing in the game server reads or writes it, so this is
+  // the single creation site rather than one of two.
+  Friends::EnsureTable(mapDb);
+
   // game_events — the war's strategic history, appended by the game server and
   // read here as the while-you-were-away digest (PLAN-persistence §4, task
   // 4b). Created from the lobby too, for the same reason and under the same
@@ -1521,7 +1538,16 @@ int main(int argc, char *argv[]) {
   // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
   net.SetRouteAuthCallbacks({
       .validateToken = [&db](const std::string &authHeader) -> int64_t {
-        return HttpAuth::ValidateAuth(db, authHeader);
+        const int64_t id = HttpAuth::ValidateAuth(db, authHeader);
+        // Task 9a: the ONE presence funnel. Every RouteAuth::TokenRequired /
+        // AdminOnly route in this process is dispatched through this callback
+        // before its handler runs, so stamping here (and nowhere else) is what
+        // makes "online in the lobby" a single fact rather than a set of
+        // per-route ones that drift. `requireAuth` deliberately does NOT
+        // stamp: it re-validates inside handlers the dispatcher has already
+        // admitted. In-memory by design — see FriendPresence.h.
+        if (id > 0) gPresence.Touch(id, static_cast<int64_t>(std::time(nullptr)));
+        return id;
       },
       .isAdmin = [&db](int64_t userId) -> bool {
         auto user = db.FindUserById(userId);
@@ -4871,6 +4897,221 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, j.dump());
       });
 
+  // ── Task 9a: friends, presence and "join my friend" (§8) ────────────────
+  //
+  // §8 calls friends "the primary discovery path in a persistent world —
+  // people play where their friends are". Four routes, all TokenRequired:
+  // the graph is per-account and there is nothing here a stranger may read.
+  //
+  // The presence half is assembled here rather than in Friends.cpp because
+  // its three sources belong to three different owners — the binding table
+  // (written by the game server), the room registry (in-memory, this process)
+  // and gPresence (HTTP activity) — and the store has no business knowing
+  // about any of them. FriendPresence.h holds the rule; this is the gathering.
+
+  /// One account's presence, from every source the lobby actually has.
+  auto presenceFactsFor = [&](int64_t accountId, int64_t now) -> PresenceFacts {
+    PresenceFacts f;
+    f.lobbyLastSeen = gPresence.LastSeen(accountId);
+    // Newest binding first (WarPlayerBindings::ForAccount orders it), so the
+    // first row that still points at a live war is the answer. A binding to a
+    // room that has since been deleted is skipped rather than reported: the
+    // seat is real but the war is not, and a friends list offering to join it
+    // sends the player at a room id nothing will resolve.
+    for (const auto &b : WarPlayerBindings::ForAccount(db.Handle(), accountId)) {
+      const auto *room = rooms.GetRoom(b.roomId);
+      if (!room || room->sessionKind != SessionKind::PersistentWar)
+        continue;
+      f.warRoomId = b.roomId;
+      f.warTeam = b.team;
+      f.warLastSeen = b.lastSeenAt;
+      break;
+    }
+    for (const auto *room : rooms.GetAllRooms()) {
+      if (room && room->FindPlayer(static_cast<uint32_t>(accountId))) {
+        f.roomId = room->id;
+        break;
+      }
+    }
+    (void)now;
+    return f;
+  };
+
+  /// Resolve a `{"username": ...}` body to an account, or an error response.
+  auto friendTarget = [&](const std::string &body, int64_t selfId,
+                          std::optional<UserRecord> &out) -> std::optional<HttpResponse> {
+    const std::string name = HttpAuth::JsonField(body, "username");
+    if (name.empty())
+      return HttpAuth::JsonResponse(400, R"({"error":"missing username"})");
+    auto target = db.FindUser(name);
+    if (!target)
+      return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+    if (target->id == selfId)
+      return HttpAuth::JsonResponse(400, R"({"error":"you cannot friend yourself"})");
+    out = std::move(target);
+    return std::nullopt;
+  };
+
+  // POST /api/friends/list — the list, with presence and where each friend is.
+  //
+  // POST despite reading nothing, for the reason /api/auth/totp/status states:
+  // an AddHttpGet handler is not handed the request headers, so a GET route
+  // cannot learn WHICH account the dispatcher just admitted — and this
+  // response is per-caller by construction.
+  net.AddHttpPost(
+      "/api/friends/list", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto &e : Friends::ListFor(db.Handle(), userId)) {
+          nlohmann::json fj;
+          fj["account_id"] = e.accountId;
+          fj["username"] = e.username;
+          if (!e.factionId.empty())
+            fj["faction"] = e.factionId;
+          fj["edge"] = FriendEdgeToString(e.edge);
+          fj["since"] = e.since;
+          // Presence is published for MUTUAL friends only. An outgoing
+          // request must not turn into a tracker for somebody who has not
+          // answered it — "add them and watch when they are online" is
+          // exactly the shape of surveillance a social graph should not hand
+          // out for free, and an incoming request is the same fact from the
+          // other end.
+          if (e.edge != FriendEdge::Mutual) {
+            fj["presence"] = "unknown";
+          } else {
+            const auto pf = presenceFactsFor(e.accountId, now);
+            const auto state = DecidePresence(pf, now);
+            fj["presence"] = PresenceStateToString(state);
+            if (state == PresenceState::Fighting) {
+              fj["war_room_id"] = pf.warRoomId;
+              fj["team"] = pf.warTeam;
+              if (const auto *room = rooms.GetRoom(pf.warRoomId))
+                fj["war_name"] = room->name;
+            }
+          }
+          out.push_back(std::move(fj));
+        }
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/friends/add — "I consider you a friend."
+  //
+  // There is no separate accept route: calling this on somebody who has
+  // already added you completes the friendship (Friends.h). `edge` in the
+  // response says which of the two just happened.
+  net.AddHttpPost(
+      "/api/friends/add", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (!Friends::Add(db.Handle(), userId, target->id, now))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not add friend"})");
+        const auto edge = Friends::EdgeBetween(db.Handle(), userId, target->id);
+        SLOG(SPRING_LOG_NOTICE, "friends: account %lld → %s: %s",
+             (long long)userId, target->username.c_str(), FriendEdgeToString(edge));
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = target->username;
+        j["edge"] = FriendEdgeToString(edge);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/friends/remove — withdraw, decline or unfriend. All one verb,
+  // because they are all "there is no edge between us any more", and the
+  // removal is symmetric (Friends::Remove).
+  net.AddHttpPost(
+      "/api/friends/remove", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        const int removed = Friends::Remove(db.Handle(), userId, target->id);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["removed"] = removed;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/friends/join — "take me to where my friend is fighting."
+  //
+  // Answers, it does not seat: the reply names the war and which side the
+  // caller would land on, and the client then calls the ordinary
+  // `/api/rooms/join`. That is task 3's "one spawn body, not two" applied
+  // again — a second join path here would be a copy that skips the fork
+  // brakes, the resume decision and the audit row.
+  //
+  // §8 says "join their side"; §1b says a faction is permanent and §2.3 says
+  // the side follows the faction. So the outcome distinguishes `same_side`
+  // from `opposing_side` rather than reporting one `ok` — see FriendPresence.h.
+  net.AddHttpPost(
+      "/api/friends/join", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        // Mutual only. Following a stranger (or somebody who has not answered
+        // your request) around the world is not a feature.
+        if (Friends::EdgeBetween(db.Handle(), userId, target->id) !=
+            FriendEdge::Mutual)
+          return HttpAuth::JsonResponse(403, R"({"error":"not a mutual friend"})");
+
+        auto me = db.FindUserById(userId);
+        if (!me)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        FriendJoinFacts f;
+        f.myFaction = me->factionId.value_or("");
+        const auto their = presenceFactsFor(target->id, now);
+        f.friendInWar = DecidePresence(their, now) == PresenceState::Fighting;
+        f.friendTeam = their.warTeam;
+        const GameRoom *room =
+            f.friendInWar ? rooms.GetRoom(their.warRoomId) : nullptr;
+        if (room) {
+          f.sides = room->SideTeams();
+          f.myCapacity = CapacityForSideIn(room->SideCapacities(), f.myFaction,
+                                           WAR_SIDE_CAPACITY_DEFAULT);
+          if (const auto myTeam = TeamForFactionIn(f.sides, f.myFaction)) {
+            for (const auto &b :
+                 WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+              if (b.accountId == userId) { f.iAmBound = true; continue; }
+              if (b.team == static_cast<int>(*myTeam)) f.myBound++;
+            }
+          }
+        } else {
+          f.friendInWar = false;
+        }
+
+        const FriendJoinDecision d = DecideFriendJoin(f);
+        nlohmann::json j;
+        j["outcome"] = FriendJoinOutcomeToString(d.outcome);
+        j["friend"] = target->username;
+        if (FriendJoinSeats(d.outcome) && room != nullptr) {
+          j["room_id"] = room->id;
+          j["room_name"] = room->name;
+          j["team"] = d.myTeam;
+          j["friend_team"] = f.friendTeam;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "friends: account %lld → join '%s' → %s (room %u, team %d)",
+             (long long)userId, target->username.c_str(),
+             FriendJoinOutcomeToString(d.outcome), room ? room->id : 0u,
+             d.myTeam);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
   // POST /api/rooms/join — join a room
   net.AddHttpPost(
       "/api/rooms/join", RouteAuth::TokenRequired,
@@ -5893,6 +6134,15 @@ int main(int argc, char *argv[]) {
                                         static_cast<int64_t>(std::time(nullptr)));
       if (guests > 0)
         SLOG(SPRING_LOG_INFO, "swept %d abandoned guest account(s)", guests);
+
+      // Task 9a: friend edges whose other end the sweep above just deleted.
+      // Ordered AFTER the guest prune deliberately — running it first would
+      // leave this fire's own deletions dangling until the next hour. The
+      // guest sweep has no idea this table exists (and should not: it deletes
+      // accounts, not social graphs), so the cleanup belongs here.
+      const int edges = Friends::PruneOrphans(maintenanceDb.Handle());
+      if (edges > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d orphaned friend edge(s)", edges);
     }
 
     // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).
