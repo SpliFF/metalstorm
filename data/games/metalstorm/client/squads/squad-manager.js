@@ -22,6 +22,13 @@ const KEY_STRIDE = 65536;
 // Nearest-first squad ordering for the member-budget LOD policy. Module-level
 // so the per-pass sort doesn't allocate a comparator closure.
 function byLodDistance(a, b) { return a._lodD2 - b._lodD2; }
+// Farthest-first: the same ranking reversed, so a measurement session can make
+// the tiers demote the NEAREST squads instead of the farthest ones. That is the
+// only way to ask whether a tier's measured per-member slope is a property of
+// members or a property of *which* members it happens to remove (PLAN-perf
+// M25). Never for shipping — `setLodRankInvert(true)` demotes exactly what the
+// player is looking at.
+function byLodDistanceDesc(a, b) { return b._lodD2 - a._lodD2; }
 
 export class SquadManager {
   constructor(backend, config = {}) {
@@ -195,6 +202,37 @@ export class SquadManager {
     return this.cfg.iconMemberCount;
   }
 
+  /** Measurement-only knob (PLAN-perf M25): reverse the LOD ranking so both
+   *  budgets demote the NEAREST squads rather than the farthest. A tier's
+   *  per-member slope is only a per-member number if it is the same either way;
+   *  if it is not, the slope is a property of the population the tier reaches
+   *  and cannot be differenced against a whole-population floor. Returns the
+   *  state in force. Do not ship armed. */
+  setLodRankInvert(on) {
+    this.cfg.lodRankInvert = !!on;
+    this._lodNextAt = 0;            // re-rank on the next update, not in 250 ms
+    return this.cfg.lodRankInvert;
+  }
+
+  /** Per-tier member counts and mean camera distance — the census M25 needs to
+   *  say WHICH members a tier removed, not just how many. Distances come from
+   *  `_lodD2`, i.e. the ranking's own view, refreshed on its re-rank cadence. */
+  get lodDistanceCensus() {
+    const acc = {};
+    for (const sq of this.squads.values()) {
+      const t = sq.lod || 'full';
+      const a = acc[t] || (acc[t] = { squads: 0, members: 0, sumD: 0 });
+      const n = sq.aliveCount | 0;
+      a.squads++; a.members += n;
+      a.sumD += Math.sqrt(sq._lodD2 || 0) * n;   // member-weighted
+    }
+    for (const t of Object.keys(acc)) {
+      acc[t].meanDist = acc[t].members > 0 ? acc[t].sumD / acc[t].members : 0;
+      delete acc[t].sumD;
+    }
+    return acc;
+  }
+
   /** What the policy did on its last pass — the measurement read-out, and the
    *  thing to check before believing an A/B arm ("did it actually demote?").
    *  `drawnMembers` is the whole point of M23: the number the per-member floor
@@ -283,7 +321,7 @@ export class SquadManager {
       sq._lodD2 = dx * dx + dy * dy + dz * dz;
       rank.push(sq);
     }
-    rank.sort(byLodDistance);
+    rank.sort(this.cfg.lodRankInvert ? byLodDistanceDesc : byLodDistance);
 
     // The budget is a HARD CAP, so a squad already at `full` holds only up to
     // the budget itself; hysteresis is spent on the way back UP, where a

@@ -526,3 +526,60 @@ describe('drawn-member budget — the second threshold', () => {
     expect(alive).toBe(80);
   });
 });
+
+// --- The M25 measurement instrument -----------------------------------------
+//
+// Both of these exist to answer "is this tier's per-member slope a property of
+// members, or of WHICH members it happens to remove?" — the question that
+// settled PLAN-perf M25. They are measurement-only, and `lodRankInvert` in
+// particular must never ship armed; these tests pin that default.
+describe('LOD rank inversion + distance census (PLAN-perf M25)', () => {
+  it('ships disarmed — the nearest squads are steered by default', () => {
+    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+    expect(DEFAULT_CONFIG.lodRankInvert).toBe(false);
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    expect(mgr.squads.get(1).lod).toBe('full');
+    expect(mgr.squads.get(10).lod).toBe('centroid');
+  });
+
+  it('inverted, the budget demotes the NEAREST squads instead of the farthest', () => {
+    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+    mgr.setViewPos(0, 0, 0);
+    expect(mgr.setLodRankInvert(true)).toBe(true);
+    mgr.update(1 / 30);
+
+    // Same budget, same 3 squads' worth of members — the other end of the map.
+    expect(mgr.lodStats).toMatchObject({ fullSquads: 3, fullMembers: 24 });
+    expect(mgr.squads.get(10).lod).toBe('full');
+    expect(mgr.squads.get(1).lod).toBe('centroid');
+  });
+
+  it('inverting is reversible inside one session, like every other A/B knob', () => {
+    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+    mgr.setViewPos(0, 0, 0);
+    mgr.setLodRankInvert(true);
+    mgr.update(1 / 30);
+    expect(mgr.squads.get(10).lod).toBe('full');
+
+    expect(mgr.setLodRankInvert(false)).toBe(false);
+    mgr.update(1 / 30);
+    expect(mgr.squads.get(1).lod).toBe('full');
+    expect(mgr.squads.get(10).lod).toBe('centroid');
+  });
+
+  it('the census reports each tier member-weighted, and farther for the demoted tier', () => {
+    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+
+    const census = mgr.lodDistanceCensus;
+    expect(census.full.squads).toBe(3);
+    expect(census.full.members).toBe(24);
+    expect(census.centroid.members).toBe(56);
+    // Squads sit at z = 100..1000; the demoted ones are the far half.
+    expect(census.centroid.meanDist).toBeGreaterThan(census.full.meanDist);
+    // Member-weighted, not squad-weighted: 8 members each at z = 100/200/300.
+    expect(census.full.meanDist).toBeCloseTo(200, 5);
+  });
+});

@@ -156,26 +156,31 @@ export const DEFAULT_CONFIG = {
   // the shipping client sets it). Must be >= lodFullMemberBudget to mean
   // anything; a smaller value is ignored.
   //
-  // 8 000 is measured (M23, XL900, 1920x1200): `entity` is linear in drawn
-  // members at 0.261 us each over 10 850 -> 6 889, so 8 000 buys ~2 000 fewer
-  // members for ~-0.38 ms of `entity` and only bites past ~690 sim units. It is
-  // deliberately NOT the aggressive setting: 5 500 (= the steering budget, the
-  // lowest legal value) buys ~-0.94 ms but iconises 430 of 780 squads, and the
-  // thinning is visible at a zoomed-out pose. The 2 500-member band between the
-  // two budgets is squads that keep their full roster while losing only their
-  // steering — the cheap demotion first, the visible one last.
+  // 8 000 is measured (M23, XL900, 1920x1200). It is deliberately NOT the
+  // aggressive setting: 5 500 (= the steering budget, the lowest legal value)
+  // iconises 430 of 780 squads and the thinning is visible at a zoomed-out pose.
+  // The 2 500-member band between the two budgets is squads that keep their full
+  // roster while losing only their steering — the cheap demotion first, the
+  // visible one last.
   //
-  // ⚠️ This is a per-machine number like `lodFullMemberBudget`, and it is
-  // currently under-valued by the backend: `freeSlot` never lowers a pool's
-  // `highWater`, so releasing a member frees its slot but the pool keeps
-  // uploading and drawing it. That is why a removed member is worth 0.261 us
-  // here and not the ~0.35 us/member floor M21 measured. Raise this once the
-  // pools compact (PLAN-perf M24).
+  // ⚠️ `entity` is NOT linear in drawn members (PLAN-perf M25, 2026-08-15), so
+  // do not price a change to this knob off a single us/member figure. Measured
+  // at XL900 / 856 squads: the marginal cost of a drawn member is ~0.35 us in
+  // the bottom band (0 -> 2 568) and ~0.11 us in the top (8 723 -> 10 640),
+  // against a whole-population average of 0.278 us. A budget cut near the top of
+  // the range therefore buys the LEAST per member removed. (An earlier version
+  // of this comment blamed the gap on the pools never compacting; M24 compacted
+  // them and it moved nothing.)
   lodDrawnMemberBudget: 8000,
   // How many members an `icon` squad keeps. 0 is the pre-M23 behaviour (the
   // squad disappears) and is measurement-only — it is the upper bound on what
   // the tier can ever buy, not a shippable fidelity.
   iconMemberCount: 3,
+  // Measurement-only (PLAN-perf M25): reverse the LOD ranking so both budgets
+  // demote the NEAREST squads. Exists so a tier's per-member slope can be
+  // re-measured on a different population; shipping armed would demote exactly
+  // what the player is looking at.
+  lodRankInvert: false,
 
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.
