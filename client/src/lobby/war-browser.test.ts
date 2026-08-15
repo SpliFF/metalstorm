@@ -106,6 +106,40 @@ describe('filterWars', () => {
     });
 });
 
+describe('filterWars friends-here (task 9a)', () => {
+    const withFriend = row({ id: 1 });
+    const without = row({ id: 2 });
+    const wars = [withFriend, without];
+
+    it('keeps the wars a friend is standing in right now', () => {
+        expect(filterWars(wars, 'friends-here', 'compact', new Set([1])).map(w => w.id))
+            .toEqual([1]);
+    });
+
+    it('keeps a war closed to my faction — the refusal is the point', () => {
+        // §8's join must be able to say "your faction fields no side here" out
+        // loud. Narrowing this filter to seatable wars would hide the war and
+        // the refusal with it.
+        const closed = row({ id: 3, war: war({ sides: [
+            { team: 0, faction: 'robots', bound: 0, open: 8 },
+        ] }) });
+        expect(filterWars([...wars, closed], 'friends-here', 'compact', new Set([3]))
+            .map(w => w.id)).toEqual([3]);
+    });
+
+    it('shows nothing — not everything — when no friend is in a war', () => {
+        expect(filterWars(wars, 'friends-here', 'compact', new Set())).toHaveLength(0);
+    });
+
+    it('shows nothing when the friends list never arrived', () => {
+        // A lobby with no friends routes, or a fetch that failed. The other
+        // filters must be unaffected by the missing argument, which is the
+        // reason it is optional rather than required.
+        expect(filterWars(wars, 'friends-here', 'compact')).toHaveLength(0);
+        expect(filterWars(wars, 'all', 'compact')).toHaveLength(2);
+    });
+});
+
 describe('formatSide', () => {
     it('quotes seats held against capacity', () => {
         expect(formatSide({ team: 0, faction: 'compact', bound: 2, open: 6 }, 8, false))

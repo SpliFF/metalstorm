@@ -22,6 +22,12 @@ import {
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
 import {
+    friendActions, friendFactionLabel, friendJoinNeedsConfirm, friendStatusLine,
+    friendWarRooms,
+    formatFriendJoin, formatFriendsHere, pendingRequestCount, sortFriends,
+    type FriendJoinResult, type FriendRow,
+} from './friends';
+import {
     classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
     type TotpStatus,
 } from './totp';
@@ -287,6 +293,11 @@ export class LobbyUI {
     /// fighting" — and is remembered for the session, not persisted: it is a
     /// view, and a player who comes back tomorrow is asking it fresh.
     private warFilter: WarFilter = 'my-faction';
+    /// The friends list (§8, task 9a), or null on a lobby whose friends routes
+    /// do not answer. Null and empty are different states and the panel reads
+    /// them differently: null hides the whole feature, `[]` says "no friends
+    /// yet" and offers the add box.
+    private friends: FriendRow[] | null = null;
     /// Tracks the room state at last full render so patchRoom() can
     /// detect when the action buttons need to change (state bracket
     /// shift) and fall back to a full re-render.
@@ -1632,6 +1643,7 @@ export class LobbyUI {
         this.renderGameOptions();
         this.renderRoomList();
         this.wireReplayPanel();
+        this.wireFriendsPanel();
         this.wireDeployButton();
     }
 
@@ -1673,6 +1685,195 @@ export class LobbyUI {
                 btn.disabled = false;
             }
         };
+    }
+
+    // ============== FRIENDS (PLAN-metalstorm-lobby §8, task 9a) ==============
+    //
+    // The server half answers four routes and this is everything that reads
+    // them: the panel, the add box, and the "Friends here" war filter, whose
+    // only input is `friendWarRooms(this.friends)`.
+    //
+    // Polled with the room list rather than streamed. Presence here is derived
+    // from three sources with 120–150 s freshness windows (FriendPresence.h),
+    // so a per-event push would carry no fact the next poll does not, and the
+    // lobby deliberately has no presence heartbeat to hang one on.
+
+    private wireFriendsPanel(): void {
+        const btn = document.getElementById('show-friends-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('friends-panel');
+        if (!btn || !panel) return;
+        btn.onclick = () => {
+            const showing = panel.style.display !== 'none';
+            panel.style.display = showing ? 'none' : 'block';
+            if (!showing) void this.refreshFriends();
+        };
+
+        const form = document.getElementById('friend-add-form') as HTMLFormElement | null;
+        const input = document.getElementById('friend-add-name') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const name = input.value.trim();
+                if (!name) return;
+                input.value = '';
+                void this.friendRequest('/api/friends/add', name);
+            };
+        }
+
+        // Probed once per browser render, exactly like the replay panel: the
+        // button only appears on a lobby that actually has the routes.
+        void this.refreshFriends().then(() => {
+            if (this.friends === null) return;
+            btn.style.display = '';
+        });
+    }
+
+    /// Fetch the friends list. Leaves `this.friends` null — and the whole
+    /// feature invisible — when the route does not answer.
+    private async refreshFriends(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/friends/list');
+            this.friends = Array.isArray(resp) ? resp as FriendRow[] : null;
+        } catch {
+            this.friends = null;
+        }
+        this.renderFriendsList();
+        // The war browser reads the same list: a friend who just went into a
+        // war changes which rows "Friends here" keeps.
+        if (this.friends !== null) this.renderWarList();
+    }
+
+    /// add / remove, and the two words that are the same two routes: accept is
+    /// `add` from the other end, decline and cancel are both `remove`
+    /// (Friends.h). One helper, because the panel must not grow a route the
+    /// server does not have.
+    private async friendRequest(path: string, username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        try {
+            const r = await this.lobbyPost(path, { username });
+            if (msg) {
+                // `edge` is what actually happened, which is not always what
+                // was asked for: adding somebody who already added you
+                // completes the friendship rather than sending a request, and
+                // saying "request sent" there would be wrong on the one click
+                // the player most wants confirmed.
+                const text = r?.error
+                    ? String(r.error)
+                    : r?.edge === 'mutual'
+                        ? `You and ${username} are now friends.`
+                        : r?.edge === 'outgoing'
+                            ? `Friend request sent to ${username}.`
+                            : r?.removed !== undefined
+                                ? `${username} removed.`
+                                : 'Done.';
+                msg.textContent = text;
+                msg.className = r?.error ? 'friend-msg friend-msg-error' : 'friend-msg';
+                msg.style.display = '';
+            }
+        } catch {
+            if (msg) {
+                msg.textContent = 'The lobby did not answer.';
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+        }
+        await this.refreshFriends();
+    }
+
+    /// "Take me to where my friend is fighting" (§8).
+    ///
+    /// Two steps on purpose: `/api/friends/join` ANSWERS — it names the war
+    /// and the side — and the ordinary `/api/rooms/join` does the seating, so
+    /// this path cannot skip the fork brakes, the resume decision or the audit
+    /// row that path owns. The sentence is shown before the join either way,
+    /// because on a cross-faction friend the successful click seats the player
+    /// OPPOSITE them and that is not something to discover on the map.
+    private async joinFriend(username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        const r = await this.lobbyPost('/api/friends/join', { username }) as FriendJoinResult;
+        if (!r || !r.outcome) {
+            if (msg) {
+                msg.textContent = `Could not join ${username}.`;
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+            return;
+        }
+        const { text, seats } = formatFriendJoin(r);
+        const confirm = seats && friendJoinNeedsConfirm(r.outcome);
+        if (msg) {
+            msg.textContent = text;
+            msg.className = confirm
+                ? 'friend-msg friend-msg-warn'
+                : seats ? 'friend-msg' : 'friend-msg friend-msg-error';
+            msg.style.display = '';
+        }
+        if (!seats || !r.room_id) return;
+        if (!confirm) { this.joinRoom(r.room_id, /*asSpectator=*/false); return; }
+        // The warning needs somewhere to stand. Seating immediately writes the
+        // sentence and replaces it with the room screen in the same tick —
+        // verified in the browser, where it was on screen for a frame — so the
+        // surprising outcome, and only that one, costs a second click.
+        const roomId = r.room_id;
+        const go = document.createElement('button');
+        go.className = 'friend-confirm-btn';
+        go.textContent = `Join anyway — fight against ${r.friend}`;
+        go.onclick = () => this.joinRoom(roomId, /*asSpectator=*/false);
+        msg?.appendChild(document.createElement('br'));
+        msg?.appendChild(go);
+    }
+
+    private renderFriendsList(): void {
+        const panel = document.getElementById('friends-panel');
+        const el = document.getElementById('friends-list');
+        const btn = document.getElementById('show-friends-btn');
+        if (!panel || !el) return;
+        if (this.friends === null) { panel.style.display = 'none'; return; }
+
+        // The pending count rides on the closed button: an incoming request is
+        // the only thing here that asks the player a question.
+        if (btn) {
+            const pending = pendingRequestCount(this.friends);
+            btn.textContent = pending > 0 ? `Friends (${pending})` : 'Friends';
+            btn.className = pending > 0 ? 'friends-btn-pending' : '';
+        }
+
+        if (this.friends.length === 0) {
+            el.innerHTML = '<div class="empty-state">No friends yet — add one ' +
+                           'by username above.</div>';
+            return;
+        }
+
+        el.innerHTML = sortFriends(this.friends).map(f => {
+            const faction = friendFactionLabel(f);
+            const factionHtml = faction
+                ? `<span class="friend-faction">${this.esc(faction)}</span>` : '';
+            const actions = friendActions(f).map(a =>
+                `<button class="friend-action-btn${a.primary ? '' : ' secondary'}" ` +
+                `data-action="${a.kind}" data-name="${this.escAttr(f.username)}">` +
+                `${this.esc(a.label)}</button>`).join('');
+            return `<div class="friend-entry friend-${f.edge}">` +
+                   `<div class="friend-main"><span class="friend-name">` +
+                   `${this.esc(f.username)}</span>${factionHtml}` +
+                   `<span class="friend-presence friend-presence-${f.presence}">` +
+                   `${this.esc(friendStatusLine(f))}</span></div>` +
+                   `<div class="friend-actions">${actions}</div></div>`;
+        }).join('');
+
+        el.querySelectorAll('.friend-action-btn').forEach(b => {
+            (b as HTMLElement).onclick = () => {
+                const name = b.getAttribute('data-name')!;
+                switch (b.getAttribute('data-action')) {
+                    case 'accept': void this.friendRequest('/api/friends/add', name); break;
+                    // Decline and cancel are the same verb from the two ends:
+                    // "there is no edge between us any more".
+                    case 'decline':
+                    case 'cancel':
+                    case 'remove': void this.friendRequest('/api/friends/remove', name); break;
+                    case 'join': void this.joinFriend(name); break;
+                }
+            };
+        });
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
@@ -2094,7 +2295,14 @@ export class LobbyUI {
         const deployBtn = document.getElementById('deploy-btn');
         if (deployBtn) deployBtn.style.display = this.myFaction ? '' : 'none';
 
-        filters.innerHTML = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+        // The friends chip only exists on a lobby whose friends routes answer.
+        // A chip that can only ever be empty advertises a feature this lobby
+        // does not have — the same call the Friends button itself makes.
+        if (this.friends === null && this.warFilter === 'friends-here')
+            this.warFilter = 'my-faction';
+        const filterKeys = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+            .filter(f => f !== 'friends-here' || this.friends !== null);
+        filters.innerHTML = filterKeys
             .map(f => `<button class="war-filter-chip${f === this.warFilter ? ' active' : ''}"` +
                       ` data-filter="${f}">${this.esc(WAR_FILTER_LABELS[f])}</button>`)
             .join('');
@@ -2105,7 +2313,9 @@ export class LobbyUI {
             };
         });
 
-        const shown = filterWars(wars, this.warFilter, this.myFaction);
+        const friends = this.friends ?? [];
+        const friendRooms = friendWarRooms(friends);
+        const shown = filterWars(wars, this.warFilter, this.myFaction, friendRooms);
         if (shown.length === 0) {
             // Named per filter: "no wars" and "none for your faction" send a
             // player to two different places, and the second one is the whole
@@ -2114,7 +2324,12 @@ export class LobbyUI {
                 ? 'No war is fielding your faction right now.'
                 : this.warFilter === 'my-wars'
                     ? 'You hold no seat in any war yet.'
-                    : 'No wars are running.';
+                    : this.warFilter === 'friends-here'
+                        // Says which fact is missing: presence, not friendship.
+                        // "You have no friends" would be wrong for a player
+                        // whose friends are simply not fighting right now.
+                        ? 'None of your friends are in a war right now.'
+                        : 'No wars are running.';
             list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
@@ -2169,6 +2384,14 @@ export class LobbyUI {
                 ? 'war-yours war-yours-lost' : 'war-yours';
             const yoursHtml = yours
                 ? `<div class="${yoursCls}">${this.esc(yours)}</div>` : '';
+            // Who of MINE is in this war (task 9a). Rendered in every filter,
+            // not only under "Friends here": the filter is a way of finding
+            // these rows and the line is the reason they were kept, and a
+            // marker that appears only inside its own filter cannot be
+            // discovered by anyone who has not already found it.
+            const friendsHere = formatFriendsHere(friends, row.id);
+            const friendsHtml = friendsHere
+                ? `<div class="war-friends">${this.esc(friendsHere)}</div>` : '';
             const badge = warStateBadge(row.war);
             const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
             const warStateIsKnown =
@@ -2198,6 +2421,7 @@ export class LobbyUI {
                 detail: this.esc(formatWarDetail(row, nowSec)),
                 detail_title: refusal,
                 control: this.esc(formatControl(row.war)),
+                friends_html: friendsHtml,
                 yours_html: yoursHtml,
                 preview_html: previewHtml,
                 digest_html: digestHtml,

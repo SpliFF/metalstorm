@@ -7,6 +7,14 @@
              empty "Replays" panel would read as a broken feature rather than
              an unconfigured one. -->
         <button id="show-replays-btn" style="display:none">▶ Replays</button>
+        <!-- Friends (PLAN-metalstorm-lobby.md §8, task 9a client half). Hidden
+             until the friends routes answer, for the replay panel's reason: a
+             lobby without them 404s, and an empty "Friends" panel reads as a
+             broken feature rather than an absent one. The label carries the
+             pending-request count, because an unanswered request is the one
+             thing in this panel that is asking the player a question and a
+             closed panel would swallow it. -->
+        <button id="show-friends-btn" style="display:none">Friends</button>
         <!-- Account + logout (PLAN-endtoend.md D45). Until this existed the
              only way off an account was clearing localStorage by hand, so a
              shared machine could not be handed over. `account_name` is
@@ -115,6 +123,21 @@
         </div>
         <div id="deploy-result" class="deploy-result" style="display:none"></div>
         <div id="war-list" class="war-list"></div>
+    </div>
+    <!-- The friends panel (§8, task 9a). Above the room list and below the
+         wars, because it is a way INTO a war: its only action is "take me to
+         where my friend is fighting". -->
+    <div id="friends-panel" class="friends-panel" style="display:none">
+        <div class="friends-head">
+            <h3>Friends</h3>
+            <form id="friend-add-form" class="friend-add">
+                <input type="text" id="friend-add-name" class="friend-add-name"
+                       placeholder="Add by username" autocomplete="off">
+                <button type="submit" id="friend-add-btn" class="secondary">Add</button>
+            </form>
+        </div>
+        <p id="friend-msg" class="friend-msg" style="display:none"></p>
+        <div id="friends-list" class="friends-list"></div>
     </div>
     <div id="room-list" class="room-list"></div>
     <div id="replay-panel" class="replay-panel" style="display:none">

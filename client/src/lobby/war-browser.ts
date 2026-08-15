@@ -118,11 +118,12 @@ export interface WarRow {
 
 /// Which wars the browser is showing. `my-faction` is the default because it
 /// is the question §4 says a player is actually asking.
-export type WarFilter = 'my-faction' | 'my-wars' | 'all';
+export type WarFilter = 'my-faction' | 'my-wars' | 'friends-here' | 'all';
 
 export const WAR_FILTER_LABELS: Record<WarFilter, string> = {
     'my-faction': 'My faction',
     'my-wars': 'My wars',
+    'friends-here': 'Friends here',
     'all': 'All wars',
 };
 
@@ -147,7 +148,15 @@ export function hasRoomForFaction(war: WarInfo, faction: string): boolean {
     return side.unlimited === true || side.open > 0;
 }
 
-export function filterWars(wars: WarRow[], filter: WarFilter, faction: string): WarRow[] {
+/// `friendRooms` is the set of war rooms a mutual friend is fighting in right
+/// now (`friendWarRooms`, task 9a). Optional because every other filter is a
+/// function of the rows alone, and a caller with no friends list — a lobby
+/// older than the friends routes, or a fetch that failed — must get the same
+/// answer it always did rather than an empty browser.
+export function filterWars(
+    wars: WarRow[], filter: WarFilter, faction: string,
+    friendRooms?: ReadonlySet<number>,
+): WarRow[] {
     switch (filter) {
         case 'my-faction':
             // Wars my faction FIELDS A SIDE IN — not wars I can squeeze into.
@@ -162,6 +171,18 @@ export function filterWars(wars: WarRow[], filter: WarFilter, faction: string): 
             // player has a week of history in. The fallback keeps a client
             // ahead of its lobby working on the old bit.
             return sortMyWars(wars.filter(w => w.enlisted ?? w.returning));
+        case 'friends-here':
+            // §4's friends filter (task 9a). PRESENCE, not the social graph:
+            // the row belongs here because a friend is standing in this war
+            // this minute, which is a fact with a 150 s freshness window on
+            // the server. A war a friend fought in yesterday is not "here",
+            // and no filter chip should imply it is.
+            //
+            // Not narrowed to wars this account can be seated in: a friend
+            // fighting in a war closed to your faction is exactly the case
+            // §8's join has to be able to REFUSE out loud, and hiding the war
+            // hides the refusal too.
+            return wars.filter(w => friendRooms?.has(w.id) ?? false);
         case 'all':
             return wars;
     }

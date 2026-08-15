@@ -1030,6 +1030,31 @@ exists — every other broadcast in `lobby_main.cpp` fires on a room mutation, w
 right for a room and wrong for a war, whose populations and front move without anyone
 touching the row.
 
+**The friends panel and the "Friends here" filter** (`client/src/lobby/friends.ts`,
+task 9a's client half) are the only readers of the four `/api/friends/*` routes.
+The model is pure and the panel is the DOM around it, for the reason the rest of
+this lane splits that way: every decision here is about what an ABSENCE means.
+Three rules the client re-states rather than inherits. **A pending edge publishes
+no presence** — a non-mutual row arrives as `unknown`, and rendering it as
+"Offline" would republish exactly the tracking the server refused to hand out, so
+an unanswered request renders the request and no faction chip. **A row is
+ordered by what it asks of the player**, not by presence alone: an incoming
+request outranks a friend standing in a war, because it is the only row asking a
+question, and an outgoing one sorts below an offline friend. **The filter is fed
+by presence, not by the graph** — `friendWarRooms` keeps `fighting` rows only
+(`staging` is lobby-room membership, which would empty the list the moment
+anyone looked), and it does NOT narrow to wars the account can be seated in,
+because a friend fighting in a war closed to your faction is precisely the
+refusal `/api/friends/join` exists to say out loud. Join is two steps and stays
+two: the route answers, `/api/rooms/join` seats, so the fork brakes and the audit
+row are not bypassed — and `opposing_side`, the successful outcome that puts you
+against your friend, **costs a second click** (`friendJoinNeedsConfirm`), because
+seating immediately wrote the warning and replaced it with the room screen in the
+same tick. Classes built from the wire's own words (`friend-<edge>`,
+`friend-presence-<state>`) are enumerated in `lobby-css-coverage.test.ts`: no
+regex over the markup can find them, so a new server state would otherwise ship
+unstyled.
+
 **What the card says about a frozen war** (PLAN-persistence task 4a): the badge is
 `war.state`, not the `live` bit — Live / Resuming / Hibernated / Interrupted /
 Restarting / Not started — because one bit says the same word about a war that saved

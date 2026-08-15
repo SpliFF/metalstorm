@@ -100,6 +100,50 @@ describe('lobby.css covers the controls lobby markup renders', () => {
         expect(unstyled).toEqual([]);
     });
 
+    it('styles the friends panel, including the classes built from data (task 9a)', () => {
+        // The same seam again, and here it is worse than a template: the row
+        // classes are assembled from the wire's own words
+        // (`friend-${edge}`, `friend-presence-${presence}`), so no regex over
+        // the markup can find them and a missing rule is invisible to every
+        // DOM assertion. They are enumerated against the two server enums —
+        // FriendEdgeToString and PresenceStateToString — so a new state on the
+        // server fails here rather than rendering unstyled.
+        const html = readFileSync(join(LOBBY_SRC, 'browser', 'browser.html'), 'utf8');
+        const panel = html.slice(html.indexOf('id="friends-panel"'));
+        const classes = new Set<string>();
+        for (const m of panel.matchAll(/<(\w+)\b[^>]*?\sclass="([^"{]+)"/g)) {
+            if (m[1] === 'button') continue;
+            for (const cls of m[2].trim().split(/\s+/)) classes.add(cls);
+        }
+        expect(classes.has('friends-list')).toBe(true);
+        for (const cls of [
+            'friend-entry', 'friend-main', 'friend-name', 'friend-faction',
+            'friend-actions', 'friend-msg', 'friend-msg-error', 'friend-msg-warn',
+            'friend-incoming', 'friend-outgoing', 'friend-mutual', 'friend-none',
+            'friend-presence',
+            'friend-presence-fighting', 'friend-presence-staging',
+            'friend-presence-online', 'friend-presence-offline',
+            'friend-presence-unknown',
+            'war-friends',
+        ]) classes.add(cls);
+        const unstyled = [...classes]
+            .filter(c => !new RegExp(`\\.${c}\\b`).test(CSS));
+        expect(unstyled).toEqual([]);
+
+        // "Named in the file" is too weak for the three classes that carry the
+        // panel's meaning: `.war-friends` is also named by a layout rule, so
+        // deleting its colour rule alone left the check green. Each of these
+        // has to own the declaration it exists for.
+        // Every block, not the first: `.war-friends` is named by a layout rule
+        // (`.war-entry .war-friends`) as well as its own, and `ruleFor` would
+        // hand back whichever comes first in the file.
+        expect(allRulesFor('war-friends'), '.war-friends has no colour').toMatch(/color:/);
+        expect(allRulesFor('friend-entry'), '.friend-entry has no background')
+            .toMatch(/background:/);
+        expect(allRulesFor('friend-presence-fighting'),
+               'a fighting friend is not marked').toMatch(/color:/);
+    });
+
     it('stops the war card inheriting the room card"s join-button placement', () => {
         // `.join-btn` is pinned `grid-row: 1 / -1` for the room card, where it
         // is a grid item. In a war card it is a flex child of `.war-actions`,
@@ -120,6 +164,18 @@ describe('lobby.css covers the controls lobby markup renders', () => {
         expect(ruleFor('ai-profile-select')).toMatch(/min-width:\s*0/);
     });
 });
+
+/// Every declaration block whose selector list names `cls`, joined. Use this
+/// for a class that legitimately carries more than one rule — a layout one and
+/// a paint one — where the first block alone answers the wrong question.
+function allRulesFor(cls: string): string {
+    const blocks: string[] = [];
+    for (const m of CSS.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        const selectors = m[1].split(',').map(s => s.trim());
+        if (selectors.some(s => new RegExp(`\\.${cls}$`).test(s))) blocks.push(m[2]);
+    }
+    return blocks.join(' ');
+}
 
 /// The declaration block of the first rule whose selector list names `cls`.
 function ruleFor(cls: string): string {

@@ -388,6 +388,7 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .war-entry .room-preview,
 .war-entry .war-digest,
 .war-entry .war-yours,
+.war-entry .war-friends,
 .war-entry .war-control { grid-column: 1; }
 /* "Your games" (PLAN-persistence task 4c) — the one line on the card that is
    about the PLAYER rather than about the war: their side, their absence, and
@@ -405,6 +406,14 @@ button.link-button:hover { background: none; color: #7fdcff; }
    world are still theirs — so it must not be painted in the same green as
    "your side: Union". */
 .war-yours-lost { color: #d9a06a; }
+/* "Bob is fighting here" (task 9a). A different accent from `.war-yours`
+   because it is a fact about somebody ELSE, and on a "Friends here" list every
+   row carries one — two greens would read as one thing said twice. */
+.war-friends {
+    color: #c9a0ff;
+    font-size: 12px;
+}
+.war-friends:empty { display: none; }
 .war-control { color: #7a8496; font-size: 12px; }
 .war-control:empty { display: none; }
 /* The while-you-were-away digest (PLAN-persistence task 4b). Sits in the
@@ -540,6 +549,103 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .replay-detail { grid-column: 1; color: #888; font-size: 12px; }
 .watch-btn { grid-row: 1 / 4; grid-column: 2; }
 .replay-error { color: #ff6b6b; font-size: 12px; padding: 8px 0; }
+
+/* ---- Friends (PLAN-metalstorm-lobby.md §8, task 9a) ---- */
+
+.friends-panel {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+}
+.friends-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.friends-head h3 { margin: 0; font-size: 15px; }
+/* The add box sits at the far end of the head row for the reason `.deploy-btn`
+   does: it is the panel's only creating action and must not read as one more
+   thing in the list. */
+.friend-add { display: flex; gap: 8px; margin-left: auto; }
+.friend-add-name {
+    background: #0f1626;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    color: #dfe6f0;
+    padding: 5px 10px;
+    font-size: 12px;
+    min-width: 160px;
+}
+.friend-add-name:focus { outline: none; border-color: #4cc9f0; }
+/* One line for what just happened, in three readings: neutral, a refusal, and
+   the successful join that has to read as a warning (`opposing_side`). */
+.friend-msg { font-size: 12px; color: #9aa4b5; margin: 0 0 10px; }
+.friend-msg-error { color: #ff6b6b; }
+.friend-msg-warn { color: #f0a04c; }
+.friends-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+.friend-entry {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    background: #0f1626;
+    border-radius: 8px;
+    border-left: 3px solid #2a3550;
+}
+/* An unanswered request is the only row here that is asking a question, so it
+   is the only one that gets a coloured edge — the same device the war cards
+   use to mark the row that needs the player. */
+.friend-incoming { border-left-color: #f0a04c; }
+.friend-outgoing { opacity: 0.75; }
+/* The two quiet edges, stated rather than left to the base rule: the panel
+   renders `friend-<edge>` straight off the wire's own word, so every value
+   FriendEdgeToString can produce needs a rule here or a new server state
+   ships unstyled. */
+.friend-mutual { border-left-color: #2a3550; }
+.friend-none { border-left-color: #2a3550; }
+.friend-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.friend-name { font-weight: 600; }
+.friend-faction {
+    background: #16304a;
+    color: #4cc9f0;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+}
+.friend-presence { color: #7a8496; font-size: 12px; }
+/* Presence is the panel's whole point, so the two states worth acting on are
+   the two that are not grey. `unknown` stays grey deliberately: it is what a
+   non-mutual row publishes, and colouring it would dress an absence as news. */
+.friend-presence-fighting { color: #7fd4a8; }
+.friend-presence-staging { color: #4cc9f0; }
+.friend-presence-online { color: #9aa4b5; }
+.friend-presence-offline { color: #7a8496; }
+.friend-presence-unknown { color: #7a8496; }
+/* The second click on a cross-faction join. Amber like the sentence above it,
+   because it is the same warning continued and not a new offer. */
+.friend-confirm-btn {
+    margin-top: 6px;
+    background: #f0a04c;
+    color: #241a0c;
+    font-size: 12px;
+    padding: 4px 12px;
+}
+.friend-confirm-btn:hover { background: #f7b978; }
+.friend-actions { display: flex; gap: 6px; margin-left: auto; }
+.friend-action-btn { font-size: 12px; padding: 4px 12px; }
+/* The closed panel's button, when somebody is waiting on an answer. The whole
+   button changes colour rather than just its text: the header's other buttons
+   are filled cyan, and amber text on that fill was both unreadable and easy to
+   miss — checked in the browser, which is the only place it could be. */
+.friends-btn-pending { background: #f0a04c; color: #241a0c; }
+.friends-btn-pending:hover { background: #f7b978; }
 
 .create-form {
     margin-top: 16px;
