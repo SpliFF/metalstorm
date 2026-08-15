@@ -64,9 +64,17 @@ Exposed after `startGame()` finishes. Removed by `quitToLobby()`.
 | `test.focusOn(x, z, durationMs?)` | Animate the camera to an XZ point. |
 | `test.setCameraHeight(h)` | Force the camera to height `h` over the current target. |
 | `test.pause()` / `test.resume()` / `test.paused` | Freeze / resume the render loop (sim keeps running). |
-| `test.screenshot()` | Returns the canvas as a `image/png` data URL. |
+| `test.captureFrame({format?, quality?, maxDim?, region?, stats?, render?})` | **Deterministic capture** — the worker renders and reads pixels in ONE task, so it can never return a between-frames black frame. Returns `{dataUrl, width, height, frameId, gameFrame, stats?}`; `stats:true` adds worker-side `{min,max,mean}` luminance. Prefer this over `screenshot()`. |
+| `test.screenshot()` | Legacy: canvas → `image/png` data URL, read whenever the message is processed (can catch a between-render moment). |
 | `test.saveScreenshot(name?)` | Triggers a browser download of the canvas as PNG. |
-| `test.highResScreenshot(w, h)` | Off-screen render at arbitrary resolution. |
+| `test.highResScreenshot(w, h)` | Off-screen RTT render at that exact resolution (it honours its args now — it used to void them). |
+| `test.readyState()` | One round-trip, **zero HTTP** readiness: `{worker:{alive,sceneStateAgeMs}, connection:{authenticated,authFailed,receivedState}, frame:{gameFrame,anchored,newestBaseFrame}, render:{frameId,meshCount,terrainMeshCount}}`. Never throws. Use this instead of polling room state. |
+| `test.clientFrame()` | Synchronous latest sim frame from the ~10 Hz feed (-1 before it starts). |
+| `test.lockInput(on)` / `test.cameraSettle()` / `test.withStableCamera(fn, {toleranceElmos?})` | Camera input lock (drops held keys — a CDP keydown never gets its keyup), transition-settle await, and a run-with-drift-report wrapper that always unlocks. |
+| `test.perfCapture(windowMs?, {squad?})` | Reset → wait a REAL window → dump. Closes the reset-then-dump-immediately trap. |
+| `test.census()`, `test.factoryQueue()`, `test.pendingBuilds()`, `test.buildChips()`, `test.snapshotStats()`, `test.directives()`, `test.overlayOrders(id)`, `test.markerCount()`, `test.orderAckStats(reset?)`, `test.selectUnits(ids)` | Worker state queries (bindings for cases the worker always had). |
+| `test.clientOrder(ids, cmdId, params?, opts?)` | Order down the **real client path** (optimistic overlay + wire encode). `test.order()` bypasses the client entirely via `/api/exec`. |
+| `test.widgets()` / `test.setWidget(name, on)` | LuaUI widget list / toggle. `[]` until the Lua runtime boots. URL param `?disableWidgets=a,b` does it at startup. |
 | `test.select([ids])` / `test.selection` | Replace / read the current selection. |
 | `test.spawnAndFocus(def, x, z, team?, opts?)` | Spawn one unit and animate the camera onto it. Returns the new unit ID. |
 | `test.stageCombat(atkDef, tgtDef, x, z, atkTeam?, tgtTeam?, sep?)` | Spawn an attacker + target, issue an attack order. Returns `{attackerId, targetId}`. |
@@ -127,8 +135,15 @@ spawn_unit(...)
 pause_sim({ paused: true })             # freeze sim state
 browser_test({ method: "pause" })       # freeze rendering
 browser_test({ method: "focus", args: [<id>, { durationMs: 0 }] })
-browser_test({ method: "saveScreenshot", args: ["combat-step-1.png"] })
+browser_test({ method: "captureFrame", args: [{ stats: true }] })
 ```
+
+`captureFrame` renders and reads in one worker task, so it needs neither the
+pause nor a retry loop to avoid a black frame. A paused capture still renders
+by default (so pause → focus → capture shows the new view); for two
+byte-identical captures of ONE frame, pause and pass `{render: false}`.
+For an A/B (toggle → capture → toggle → capture) wrap each arm in
+`withStableCamera` so a stray held key cannot pan between the arms.
 
 ### Reset between cases
 

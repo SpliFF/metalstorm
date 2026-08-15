@@ -150,34 +150,41 @@ Key tools for game testing:
 | `lighthouse_audit` | Run Lighthouse for performance/accessibility checks |
 
 **`take_screenshot` caveat — WebGL canvases capture BLACK.** CDP screenshots
-cannot see a WebGL2 canvas created with `preserveDrawingBuffer:false` (ours).
+cannot read our game canvas: it is an OffscreenCanvas transferred to the render
+worker, so the compositor is all CDP sees. (The worker engine *is* created with
+`preserveDrawingBuffer: true` — game-processor.ts:2287 — which is why a
+worker-side read can be made deterministic and a CDP one cannot.)
 A black/empty game area in a screenshot does NOT mean nothing rendered. Use
-`window.test.highResScreenshot()` (renders with the buffer preserved), a real
+`window.test.captureFrame({stats:true})` (the worker owns the frame), a real
 human-viewed browser, or data-level checks (`window.__gp` mesh/texture counts)
 instead of trusting the pixel capture.
 
-**`highResScreenshot()` does NOT preserve the buffer either — it is
-`screenshot()`, which is a bare `canvas.convertToBlob()` in the worker.**
-(Read it: `test-harness.ts` `highResScreenshot` voids its args and calls
-`screenshot()`; `game-processor.ts`'s `screenshot` case converts the live
-canvas.) So it races the compositor exactly like CDP does, just less often —
-and `test.pause()` does not help, because the buffer is already gone by the time
-the async blob is read. For any **A/B comparison** (toggle a plugin, shoot,
-toggle back, shoot) that race is fatal: one arm silently returns a fully black
-PNG and you "measure" a 100 % effect. Do the render, the capture *and* the pixel
-reduction inside **one** `window.__gp(...)` expression so nothing can present in
-between — `evalJs` awaits promises, so:
+**Use `test.captureFrame()` — it closes the black-capture race by
+construction.** The worker renders and reads pixels in ONE task, so nothing can
+present in between; `stats: true` computes min/max/mean luminance worker-side
+over the downsampled pixels (Rec.601 — the same weights `render-sanity` uses).
+That replaces the hand-rolled one-expression `window.__gp(...)` render+read+
+reduce recipe this section used to prescribe:
 
 ```js
-await window.__gp('(async()=>{ const s=self.__entityRenderer.scene; s.render();' +
-  ' const b=await s.getEngine().getRenderingCanvas().convertToBlob({type:"image/png"});' +
-  ' const bmp=await createImageBitmap(b); /* draw to OffscreenCanvas, getImageData, reduce */' +
-  ' return {mean, hf}; })()');
+await window.test.captureFrame({ maxDim: 64, stats: true });
+// → {dataUrl, width, height, frameId, gameFrame, stats:{min, max, mean}}
 ```
 
-Two useful reductions: *mean luminance* (does the change shift overall
-brightness?) and *hf* = mean |ΔL| between horizontally adjacent pixels (is there
-grain?). Both are objective and survive being quoted in a plan file.
+`screenshot()` (the old verb) is still a bare `canvas.convertToBlob()` read
+whenever the message happens to be processed, so it can still catch a
+between-render moment. For any **A/B comparison** (toggle a plugin, shoot,
+toggle back, shoot) that race is fatal: one arm silently returns a fully black
+PNG and you "measure" a 100 % effect. Use `captureFrame` for both arms; under
+`test.pause()` two consecutive captures return the same `frameId`.
+
+`highResScreenshot(w, h)` now honours its arguments (an offscreen RTT at that
+exact size); it used to void them and fall through to `screenshot()`.
+
+Beyond mean luminance, *hf* = mean |ΔL| between horizontally adjacent pixels
+(is there grain?) is worth computing from the returned `dataUrl` when the
+question is detail rather than brightness. Both are objective and survive being
+quoted in a plan file.
 
 **Corollary, learned the hard way: a black frame is not always the capture.**
 On `scorched_crossing_v2.4` the terrain really does render black once the splat
@@ -188,7 +195,7 @@ check `scene.getActiveMeshes().length`, `material.isReady(mesh)`, the effect's
 `getCompilationError()` and `engine.getFps()`; if the loop is healthy and the
 pixels are 0, the pixels are the truth.
 
-**…and the exact converse — `highResScreenshot()` cannot see the DOM.** It
+**…and the exact converse — a canvas capture cannot see the DOM.** It
 renders the *canvas*, so no HTML overlay is in it: not the game-over overlay,
 not the quit confirm, not the HUD panels, not a toast. Reaching for it out of
 habit gives you a picture of a live-looking game with the overlay you were
@@ -198,7 +205,7 @@ did. Pick by what you are looking at:
 
 | Looking at | Use |
 |---|---|
-| terrain, units, projectiles, lighting | `window.test.highResScreenshot()` |
+| terrain, units, projectiles, lighting | `window.test.captureFrame({stats:true})` (or `highResScreenshot(w,h)` for a big one) |
 | any overlay / HUD / panel / dialog | CDP `take_screenshot`, or query it: `document.getElementById('game-over-overlay')?.innerText` |
 
 When in doubt, assert on the DOM — it is cheaper and unambiguous.
@@ -220,18 +227,23 @@ and the numbers looked like a perfectly ordinary warm-up curve (38.0 → 43.6 �
 39.0 → 43.9 → 43.5 ms p95) while the camera travelled from (8192, 620, 7480) to
 (6583, 398, 951). Before pinning:
 
+**The fix is `test.lockInput(true)`** — it clears the worker camera's held
+keys and drags and ignores every further user intent, while leaving
+programmatic camera calls working. `withStableCamera` wraps the whole pattern
+(lock → settle → pose snapshot → run → pose recheck → unlock in `finally`) and
+hands back the drift measurement:
+
 ```js
-const cv = document.querySelector('canvas');
-cv.dispatchEvent(new PointerEvent('pointerleave',
-  {clientX: 640, clientY: 400, bubbles: true, pointerId: 1, pointerType: 'mouse'}));
-window.dispatchEvent(new Event('blur'));   // RTSCamera.blur(): keys + drag + mouseInCanvas
-await window.test.deps.workerCall('setCameraPose', [pose, 0]);
+const { result, drift } = await window.test.withStableCamera(
+    () => window.test.perfCapture(30000), { toleranceElmos: 1 });
+if (!drift.withinTolerance) throw new Error(`camera drifted ${drift.posDriftElmos} elmos`);
 ```
 
-Then re-read `await window.test.cameraPose()` **at the end** of every
-measurement / comparison window and discard the window if it moved. A synthetic
-pointer re-centre alone does **not** fix it — the held keys are the dominant
-term. This bites screenshot A/Bs exactly as hard as it bites perf captures.
+A synthetic pointer re-centre alone does **not** fix it — the held keys are the
+dominant term, and the lock is the only thing that drops them (the pre-P5
+workaround, `window.dispatchEvent(new Event('blur'))`, clears them once but
+nothing stops the next synthetic keydown). This bites screenshot A/Bs exactly
+as hard as it bites perf captures, so lock for both.
 
 **⚠️ Changing the render resolution is one-way — read the buffer back.**
 `window.__gp('__perfToggles.renderScale(s)')` calls

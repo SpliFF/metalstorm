@@ -90,7 +90,10 @@ lobby.selectedGameId='bar';
 const map=lobby.availableMaps.find(m=>m.id.includes('wanderlust'))?.id||lobby.availableMaps[0].id;
 await lobby.createRoom('drive', map);
 await lobby.addAI('null',1); await lobby.ready(true); await lobby.startGame();
-// ...wait for window.test && window.__gp && lobby.currentRoom.state>=4 (room is Active)
+// ...wait for window.test && window.__gp, then for the client's own readiness:
+//   (await test.readyState()).render.terrainMeshCount > 0
+// NOT lobby.currentRoom.state>=4 — an in-game client's cached room state never
+// reaches Active (it has left the lobby SSE feed).
 ```
 
 Then frame + screenshot (camera is client-side; no admin needed):
@@ -98,7 +101,8 @@ Then frame + screenshot (camera is client-side; no admin needed):
 ```js
 // angled, HUD-clear 3/4 view — aim a ground point offset from the unit
 await test.cameraSnapToGround(829, 1298, {height:150, pitchDeg:28, durationMs:0});
-// then take_screenshot (chrome-devtools MCP). Inspect the render worker with:
+// then `await test.captureFrame({stats:true})` for the CANVAS (deterministic,
+// never black) and/or take_screenshot for DOM+HUD. Inspect the render worker with:
 await window.__gp(`(()=>{const er=self.__entityRenderer; return er.scene.meshes.length;})()`);
 ```
 

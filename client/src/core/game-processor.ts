@@ -15,7 +15,12 @@
  * Extracted from lua-widget-worker.ts as part of PLAN-refactor-p3.md WP2c.
  */
 
-import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial,
+    RenderTargetTexture } from '@babylonjs/core';
+// P5: high-res RTT screenshot. Imported from its module path (not the barrel)
+// so the DumpTools side-effects it needs come along in a tree-shaken build.
+import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
+import { luminanceStats } from './frame-stats.js';
 import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
     GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
@@ -323,6 +328,10 @@ let gpTrackingCamera = false;
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// P5: in-flight `captureFrame` task. A capture owns one rendered frame; a
+/// second call while one is pending awaits the SAME promise (both callers get
+/// that frame) instead of racing a second render into the same buffer.
+let gpCaptureInFlight: Promise<unknown> | null = null;
 /// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
 /// `gp:resync` can re-open the game connection with the same creds/map without
 /// a fresh boot. Null until gpConnect runs.
@@ -4023,6 +4032,15 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'perfReset':
             gpFrameProfiler.reset();
             return null;
+        // — P5 item 4: the squad perf counters live inside the runtime-served
+        //   squad module, which is free not to expose them. These cases existed
+        //   nowhere before, so window.test.squadPerf() threw `unknown test
+        //   method` on EVERY build; null is the honest answer. —
+        case 'squadPerf':
+            return (gpSquadSystem as { perf?: () => unknown } | null)?.perf?.() ?? null;
+        case 'squadPerfReset':
+            (gpSquadSystem as { resetPerf?: () => void } | null)?.resetPerf?.();
+            return null;
         // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
         //   most-expensive-first, same shape/convention as uiProfileDump. —
         case 'entityFxFenceDump':
@@ -4302,17 +4320,197 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                 ? gpClipPlayer?.state()
                 : gpClipPlayer?.state(num(0))) ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
+        //   Reads whenever the message happens to be processed, so it can catch
+        //   a between-render moment. Prefer 'captureFrame' below.
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
             if (!canvas) throw new Error('no rendering canvas');
             const blob = await canvas.convertToBlob({ type: 'image/png' });
-            const bytes = new Uint8Array(await blob.arrayBuffer());
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return `data:image/png;base64,${btoa(binary)}`;
+            return gpBlobToDataUrl(blob, 'image/png');
+        }
+        // — P5 item 1: deterministic capture — render and read pixels in ONE
+        //   worker task. The canvas is created with preserveDrawingBuffer
+        //   (gp:init), so historical black captures were *timing* (a read with
+        //   no render behind it), which this closes by construction. —
+        case 'captureFrame': {
+            if (gpCaptureInFlight) return gpCaptureInFlight;
+            const opts = obj<{
+                format?: 'png' | 'jpeg'; quality?: number; maxDim?: number;
+                region?: { x: number; y: number; width: number; height: number };
+                stats?: boolean; render?: boolean;
+            }>(0, {});
+            const scene = gpScene, engine = gpEngine;
+            if (!scene || !engine) throw new Error('no scene — worker not initialised');
+            gpCaptureInFlight = (async () => {
+                // 1. Own the frame. Paused → the render loop early-returns, so
+                //    we render explicitly (a paused capture still reflects the
+                //    CURRENT camera/state — pause+focusOn+capture is a real
+                //    workflow — which is why a paused capture advances frameId).
+                //    Running → hook the frame the loop renders. The 2 s fallback
+                //    covers a pause that raced the observer registration, and a
+                //    wedged loop (R2).
+                //    `render: false` reads the preserved drawing buffer with no
+                //    render at all: byte-identical on repeat, and the only way
+                //    to compare two captures of ONE frame. It is only honest
+                //    while paused — a running loop overwrites the buffer.
+                if (opts.render === false) {
+                    /* read the preserved buffer as-is */
+                } else if (gpRenderPaused) {
+                    scene.render();
+                } else {
+                    await new Promise<void>((resolve) => {
+                        let done = false;
+                        const finish = (renderOurselves: boolean): void => {
+                            if (done) return;
+                            done = true;
+                            if (renderOurselves) {
+                                scene.onAfterRenderObservable.remove(obs);
+                                scene.render();
+                            }
+                            resolve();
+                        };
+                        const t = setTimeout(() => finish(true), 2000);
+                        const obs = scene.onAfterRenderObservable.addOnce(() => {
+                            clearTimeout(t);
+                            finish(false);
+                        });
+                    });
+                }
+                // 2. Downsample + encode in the same task. Nothing else renders
+                //    in between (the worker is single-threaded and every await
+                //    below is on our own canvas ops), and the preserved drawing
+                //    buffer keeps the frame stable regardless.
+                const src = engine.getRenderingCanvas() as unknown as OffscreenCanvas;
+                const r = opts.region ?? { x: 0, y: 0, width: src.width, height: src.height };
+                const maxDim = opts.maxDim ?? 1280;
+                const scale = Math.min(1, maxDim / Math.max(1, Math.max(r.width, r.height)));
+                const w = Math.max(1, Math.round(r.width * scale));
+                const h = Math.max(1, Math.round(r.height * scale));
+                const out = new OffscreenCanvas(w, h);
+                const ctx = out.getContext('2d', { willReadFrequently: true });
+                if (!ctx) throw new Error('no 2d context for the capture downsample');
+                ctx.drawImage(src as unknown as CanvasImageSource,
+                    r.x, r.y, r.width, r.height, 0, 0, w, h);
+                let stats: { min: number; max: number; mean: number } | undefined;
+                if (opts.stats) stats = luminanceStats(ctx.getImageData(0, 0, w, h).data);
+                const type = opts.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+                const blob = await out.convertToBlob({ type, quality: opts.quality });
+                return {
+                    dataUrl: await gpBlobToDataUrl(blob, type),
+                    width: w, height: h,
+                    // scene.getFrameId() counts RENDERS of this scene, so it
+                    // identifies the captured pixels. engine.frameId counts
+                    // render-LOOP ticks, which keep advancing while paused (the
+                    // loop returns early) and so cannot identify a frame.
+                    frameId: scene.getFrameId(),
+                    gameFrame: liveState.gameFrame,
+                    ...(stats ? { stats } : {}),
+                };
+            })().finally(() => { gpCaptureInFlight = null; });
+            return gpCaptureInFlight;
+        }
+        // — P5 item 1: honest high-res capture. The engine + camera are
+        //   worker-resident (the GW8 deferral's blocker), so Babylon's RTT
+        //   screenshot helper works here. It routes through DumpTools, which
+        //   needs an OffscreenCanvas-capable environment — if that path throws
+        //   in this worker we fall back to a manual RTT read (R3). —
+        case 'highResScreenshot': {
+            const scene = gpScene, engine = gpEngine, camera = gpCamera;
+            if (!scene || !engine || !camera) throw new Error('no scene — worker not initialised');
+            const width = num(0, 1920), height = num(1, 1080);
+            try {
+                return await CreateScreenshotUsingRenderTargetAsync(
+                    engine, camera, { width, height });
+            } catch (e) {
+                postLog(3, `[gp] screenshot tools unavailable (${String(e)}) — manual RTT`);
+                return await gpManualRttScreenshot(scene, camera, width, height);
+            }
+        }
+        // — P5 item 2: one-round-trip readiness probe (connection + render
+        //   census). Zero HTTP. The terrain regex is textually identical to
+        //   render-sanity.ts's SCENE_CENSUS_EXPR — keep them in step. —
+        case 'readyProbe': {
+            let meshCount = 0, terrainMeshCount = 0;
+            if (gpScene) {
+                meshCount = gpScene.meshes.length;
+                for (const m of gpScene.meshes) {
+                    if (/^terrain(_|Lod\d+_)/.test(m.name)) terrainMeshCount++;
+                }
+            }
+            return {
+                authenticated: gpCtx.connection?.authenticated ?? false,
+                authFailed: gpAuthFailed,
+                receivedState: gpFirstStateReceived,
+                frameId: gpEngine?.frameId ?? -1,
+                meshCount,
+                terrainMeshCount,
+            };
+        }
+        // — P5 item 5: test input lock + transition-settle await. —
+        case 'lockInput':
+            cam?.setInputLocked(args[0] !== false);
+            return cam?.isInputLocked ?? false;
+        case 'cameraSettle': {
+            if (!cam) return false;
+            await Promise.race([
+                cam.waitForSettle(),
+                new Promise<void>((res) => setTimeout(res, num(0, 10000))),
+            ]);
+            return true;
+        }
+        // — P5 item 6: LuaUI widget list / toggle over gp:test. The legacy
+        //   fire-and-forget widget messages carry no correlation id, so main
+        //   could never read a reply; these are request/response. —
+        case 'widgetList':
+            return getWidgetList();          // '' until the LuaUI runtime boots
+        case 'setWidget': {
+            const name = String(args[0] ?? '');
+            if (args[1] === false) disableWidget(name);
+            else await enableWidget(name);   // async: re-fetches the source
+            return getWidgetList();
         }
         default:
             throw new Error(`unknown test method '${method}'`);
+    }
+}
+
+/// Blob → data URL, worker-side (there is no FileReader in a worker). Chunked
+/// so a multi-MB PNG doesn't blow the argument limit of String.fromCharCode.
+async function gpBlobToDataUrl(blob: Blob, type: string): Promise<string> {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return `data:${type};base64,${btoa(binary)}`;
+}
+
+/// R3 fallback for `highResScreenshot` when Babylon's DumpTools-backed helper
+/// is unusable in this worker: render the scene once into an offscreen RTT,
+/// read it back, Y-flip (GL origin is bottom-left), and encode.
+async function gpManualRttScreenshot(
+    scene: Scene, camera: FreeCamera, width: number, height: number,
+): Promise<string> {
+    const rtt = new RenderTargetTexture('hiRes', { width, height }, scene, false);
+    try {
+        rtt.renderList = scene.meshes.slice();
+        rtt.activeCamera = camera;
+        rtt.render();
+        const raw = await rtt.readPixels();
+        if (!raw) throw new Error('RTT readPixels returned nothing');
+        const src = new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.byteLength);
+        const flipped = new Uint8ClampedArray(src.length);
+        const stride = width * 4;
+        for (let y = 0; y < height; y++) {
+            flipped.set(src.subarray((height - 1 - y) * stride, (height - y) * stride), y * stride);
+        }
+        const out = new OffscreenCanvas(width, height);
+        const ctx = out.getContext('2d');
+        if (!ctx) throw new Error('no 2d context for the RTT readback');
+        ctx.putImageData(new ImageData(flipped, width, height), 0, 0);
+        return await gpBlobToDataUrl(await out.convertToBlob({ type: 'image/png' }), 'image/png');
+    } finally {
+        rtt.dispose();
     }
 }
 

@@ -46,7 +46,6 @@ import { PerfOverlay } from './core/perf-overlay.js';
 // The main-thread perf-overlay (F11) re-plumb is deferred to perf checkpoint PC-1.
 import { clientSettings } from './core/client-settings.js';
 import { sendCameraViewport } from './core/viewport.js';
-import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { CameraInput } from './core/camera-input.js';
@@ -151,6 +150,11 @@ let evalReqResolve: ((v: string) => void) | null = null;
 let lastSceneState: {
     selectedUnitIds: number[];
     camera: { x: number; y: number; z: number; tx: number; ty: number; tz: number };
+    /// P5 item 2: the frame the feed last reported, plus its receipt time, so
+    /// `test.clientFrame()` is synchronous and `test.readyState()` can report
+    /// how stale that number is without a round-trip.
+    gameFrame: number;
+    atMs: number;
 } | null = null;
 /// PLAN-playable.md G3a: mirrors whether the worker has a build placement armed
 /// (from gp:sceneState.buildGhost). Read by the global ESC handler so ESC
@@ -637,7 +641,6 @@ function quitToLobby(): void {
     recoveryLadder.reset();
     gpRecoverPending.clear();
     r2RespawnInFlight = false;
-    uninstallCameraWindowApi();
     // The NL local ports (§6.2/§6.4). Both hold worker-bound closures, and the
     // camera port also holds a follow interval — a follow that outlived its
     // worker would re-snap a camera that no longer exists, every 400 ms.
@@ -1259,7 +1262,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 briefingSplash?.notifyReady();
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
-                lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
+                lastSceneState = {
+                    selectedUnitIds: m.selectedUnitIds, camera: m.camera,
+                    gameFrame: m.gameFrame, atMs: performance.now(),
+                };
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
                 // L-pre.3: cache the worker's presentation-clock snapshot and
@@ -1829,11 +1835,47 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             if (!c) return null;
             return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
         },
+        // P5: readiness sources — both read the caches this module already
+        // fills from the gp:sceneState feed, so readyState() costs one
+        // workerCall and clientFrame() costs none.
+        getSceneFrame: () => {
+            const c = lastSceneState;
+            if (!c) return null;
+            return { gameFrame: c.gameFrame, ageMs: performance.now() - c.atMs };
+        },
+        getTiming: () => {
+            const t = lastTimingState;
+            if (!t) return null;
+            return { anchored: t.anchored, newestFrame: t.newestFrame };
+        },
         // Read through the module-level binding, not a captured value: the
         // minimap is disposed and rebuilt on every startGame()/quitToLobby().
         getMinimap: () => minimap,
     });
     (window as any).test = testHarness;
+
+    // P5 item 6: `?disableWidgets=unit_ghost,gui_chat` — dev/test switch to turn
+    // named LuaUI widgets off for this session. The worker's disableWidget
+    // no-ops before the Lua runtime boots (and LuaUI boots only after auth +
+    // defs), so poll the widget list until it answers rather than firing blind.
+    const disableWidgetsParam = new URLSearchParams(window.location.search).get('disableWidgets');
+    if (disableWidgetsParam) {
+        const names = disableWidgetsParam.split(',').map((x) => x.trim()).filter(Boolean);
+        void (async () => {
+            for (let i = 0; i < 60; i++) {
+                const list = await workerCall('widgetList', []).catch(() => '');
+                if (typeof list === 'string' && list.length > 0) {
+                    for (const n of names) {
+                        await workerCall('setWidget', [n, false]).catch(() => {});
+                    }
+                    console.log(`[disableWidgets] disabled: ${names.join(', ')}`);
+                    return;
+                }
+                await new Promise((r) => window.setTimeout(r, 1000));
+            }
+            console.warn('[disableWidgets] LuaUI never booted — nothing disabled');
+        })();
+    }
 
     // PLAN-metalstorm-command-language.md §6.2/§6.4 (M3) — the two ports the
     // natural-language console needs from this thread, installed here because
