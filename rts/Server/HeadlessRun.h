@@ -96,6 +96,11 @@ struct Config {
     // map/game/aiSlots). Values are strings on the wire — CGameSetup stores
     // them as strings and Spring.GetModOptions() hands them to Lua as strings —
     // so JSON numbers/bools are coerced rather than rejected.
+    //
+    // A TOP-LEVEL `"scenario"` string in the manifest is folded in here as the
+    // `scenario` modoption, replacing any `modOptions.scenario` in the same
+    // file — that is the spelling every other manifest consumer requires, so
+    // one manifest now boots identically as a room and as a headless run.
     std::vector<std::pair<std::string, std::string>> modOptions;
 };
 

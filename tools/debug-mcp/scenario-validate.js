@@ -126,6 +126,7 @@ export function validateScenario(scn, opts = {}) {
     checkRegions(scn, add);
     checkFeatures(scn, add, opts, checkName);
     checkAi(scn, add, opts);
+    checkObjectiveChaining(scn, add);
     checkReservedBlocks(scn, add);
     checkMcpLayer(scn, add, opts);
 
@@ -432,6 +433,54 @@ function checkAi(scn, add, opts) {
             if (!s || typeof s !== 'object' || Array.isArray(s) || !isNum(s.amount))
                 add('error', 'ai-stipend', `${path}.stipend`, '"stipend" needs a numeric "amount"');
         }
+    });
+}
+
+/**
+ * Objective chaining (game_scenario.lua's objectives block in `validate`).
+ * Mirrors the loader exactly, because the alternative is a chain the author
+ * believes exists: a mis-shaped `phases` is skipped by GG.Objectives.Create's
+ * `#def.phases > 0` guard and the parent quietly becomes an ordinary objective.
+ */
+function checkObjectiveChaining(scn, add) {
+    seq(scn.objectives).forEach((o, i) => {
+        const path = `objectives[${i + 1}]`;
+        if (!o || typeof o !== 'object') return;
+        if (o.phases !== undefined) {
+            if (!isSeqLike(o.phases) || seq(o.phases).length === 0) {
+                add('error', 'objective-phases', `${path}.phases`,
+                    '"phases" must be a non-empty array of phases (each an array of child objectives)');
+            } else {
+                seq(o.phases).forEach((children, pi) => {
+                    const ppath = `${path}.phases[${pi + 1}]`;
+                    if (!isSeqLike(children) || seq(children).length === 0) {
+                        add('error', 'objective-phases', ppath,
+                            'each phase must be a non-empty array of child objectives');
+                        return;
+                    }
+                    seq(children).forEach((c, ci) => {
+                        const cpath = `${ppath}[${ci + 1}]`;
+                        if (!c || typeof c !== 'object') {
+                            add('error', 'objective-phases', cpath, 'child must be a table');
+                            return;
+                        }
+                        if (!isStr(c.type))
+                            add('error', 'objective-phases', cpath, 'child needs a string "type"');
+                        if (c.phases !== undefined)
+                            add('error', 'objective-phases', cpath,
+                                'nested phases are not supported (one level of chaining only)');
+                    });
+                });
+            }
+        }
+        for (const field of ['parentId', 'linkedId']) {
+            if (o[field] !== undefined && !isNum(o[field]))
+                add('error', 'objective-chain-id', `${path}.${field}`,
+                    `"${field}" must be a numeric runtime objective id — a scenario file cannot `
+                    + 'know an id the engine has not minted yet; use `phases` to author a chain');
+        }
+        if (o.phase !== undefined && !isNum(o.phase))
+            add('error', 'objective-chain-id', `${path}.phase`, '"phase" must be a number');
     });
 }
 

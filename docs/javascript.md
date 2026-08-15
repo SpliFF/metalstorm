@@ -383,6 +383,14 @@ Paragraph two.]],                       -- blank lines separate paragraphs
 
 Scenarios live in [client/src/scenarios/](../client/src/scenarios/) and are launched via `?scenario=<name>` (e.g. `?scenario=weapon-showcase&only=missile&dwellMs=60000`). The runner ([client/src/scenarios/runner.ts](../client/src/scenarios/runner.ts)) auto-logs in as `test1:test`, waits for first frame, runs `scenario.setup(h)`, then `scenario.run(h)` if defined.
 
+A TS scenario declares its room in `Scenario` ([types.ts](../client/src/scenarios/types.ts)):
+`map`, `gameId`, `aiSlots`, `playerTeam`/`playerStartPos`, plus — for wars that
+want game-side staged content — `scenario` (a `data/games/<gameId>/scenarios/<id>.lua`
+id) and `modoptions`. `scenario` goes into the manifest **top-level**, never as a
+modoption (a modoption-only spelling is overwritten by the map default). Omitting
+it means "map default"; `scenario: ''` means "explicitly none" — the runner sends
+the empty string rather than dropping the key, so those stay different launches.
+
 > **Direct start is the default room path (PLAN-quickstart Part A).** The runner serialises its scenario into one `POST /api/rooms/direct` call (pre-authorised token, room driven straight to Active) — no login/leaveAll/create/addAI/ready/start dance. The legacy lobby-walk survives **only** behind `?via=lobby`, kept deliberately as a `lobby-flow` regression scenario that exercises the full lobby surface; it is no longer the tax every test pays. Prefer the default direct path for all new bench scenarios.
 
 **ZK cold-boot is ~150 s** because of unit-script loading. For iterative debugging (render/material/shader fixes), reloading the page for every change is painful.

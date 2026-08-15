@@ -439,6 +439,13 @@ local function onChildResolved(child, ctx)
     if not child.parentId then return end
     local parent = lookupObjective(child.parentId)
     if not parent or parent.state ~= 'active' then return end
+    -- A parent created WITHOUT `phases` has no phaseDefs/phaseIdx/phaseChildren
+    -- — reachable from content now that scenarios forward `parentId` verbatim,
+    -- and every line below would raise on nil (inside resolveObjective, which
+    -- gadgetHandler answers by removing this gadget: one bad scenario field
+    -- would kill the whole objectives evaluator). It simply takes no part in
+    -- its self-declared child's resolution.
+    if not parent.phaseDefs then return end
 
     if child.state ~= 'complete' then
         -- A failed/expired phase child fails the whole chain (documented
@@ -451,7 +458,7 @@ local function onChildResolved(child, ctx)
         Attribution.credit(parent.participation, playerID, w)
     end
 
-    for _, cid in ipairs(parent.phaseChildren) do
+    for _, cid in ipairs(parent.phaseChildren or {}) do
         local c = lookupObjective(cid)
         if c and c.state == 'active' then return end   -- phase not fully resolved yet
     end

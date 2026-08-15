@@ -251,6 +251,34 @@ test('ai-region: a slate key this map\'s graph does not declare (warning, not er
     assert.ok(!has(f, 'error', 'ai-region'));
 });
 
+test('objective-phases: a chain the loader would skip rather than build', () => {
+    // Every shape here leaves the parent a plain objective at runtime, with no
+    // error anywhere — the author only finds out because the tutorial's second
+    // beat never arrives.
+    const bad = (phases) => findings(BASE.replace("{ type = 'destroy_all', victory = true }",
+        `{ type = 'destroy_all', victory = true, phases = ${phases} }`));
+    assert.ok(has(bad("'later'"), 'error', 'objective-phases'));
+    assert.ok(has(bad('{ {} }'), 'error', 'objective-phases'));
+    assert.ok(has(bad('{ { { reward = 1 } } }'), 'error', 'objective-phases'));
+    assert.ok(has(bad("{ { { type = 'kill', phases = { { { type = 'kill' } } } } } }"),
+        'error', 'objective-phases'));
+});
+
+test('objective-phases: the authorable one-level chain passes', () => {
+    const f = findings(BASE.replace("{ type = 'destroy_all', victory = true }",
+        "{ type = 'control', params = { regionKey = 'r1' }, victory = true, bounty = 10, phase = 1, "
+        + "phases = { { { type = 'control', region = 'r1', reward = 40 } }, "
+        + "{ { type = 'control', region = 'r2', reward = 80 } } } }"));
+    assert.ok(!has(f, 'error', 'objective-phases'), JSON.stringify(f));
+    assert.ok(!has(f, 'error', 'objective-chain-id'), JSON.stringify(f));
+});
+
+test('objective-chain-id: parentId is a runtime id, not a name', () => {
+    const f = findings(BASE.replace("{ type = 'destroy_all', victory = true }",
+        "{ type = 'destroy_all', victory = true, parentId = 'the_first_one', linkedId = {} }"));
+    assert.equal(f.filter((x) => x.rule === 'objective-chain-id' && x.severity === 'error').length, 2);
+});
+
 test('standing-orders-noop: the top-level orders block is loudly ignored', () => {
     const f = findings(BASE.replace('objectives =', "orders = { { cmd = 'FIGHT' } },\n  objectives ="));
     assert.ok(has(f, 'warning', 'standing-orders-noop'));

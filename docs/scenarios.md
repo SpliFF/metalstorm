@@ -73,9 +73,13 @@ the same `applyRoomScenario`/`chooseScenario` default-resolution the Create Game
 dialog uses (`rts/lobby_main.cpp`). The room's final choice comes back in the
 response `modoptions`, so a mismatch is visible there — check it.
 
-**Headless configs are the opposite**: they read `modOptions.scenario` only
-(there is no top-level passthrough yet — that is S4.3). Do not copy a manifest
-between the two paths without moving the key.
+**Headless configs take the same top-level key** (`rts/Server/HeadlessRun.cpp`
+folds it onto the `scenario` modoption), so one manifest boots the same war both
+ways — add a `headless` block to the file above and it runs headless unchanged.
+Within a headless config the top-level `scenario` **wins over** any
+`modOptions.scenario` in the same file, and an explicit `--modoption scenario=`
+on the command line still beats both. `"scenario": ""` means *explicitly no
+scenario* everywhere, as distinct from omitting the key (map default).
 
 **b. `launch_scenario` (MCP)** — one call from nothing to a running war; builds
 the manifest for you, so the trap above is not yours to remember. See
@@ -199,6 +203,44 @@ hall had been destroyed — which is why both are hard-validated.
 The flat convenience fields `region` / `targetUnitID` / `duration` /
 `holdFrames` / `notBefore` fold into the evaluator's `params` sub-table at stage
 time (`region` becomes `params.regionKey`). See [§8](#8-victory-and-objectives).
+
+**Chaining — `phases`.** An objective can be a sequence of beats: phase 2's
+children are created only when every child of phase 1 completes. This is the
+authoring surface for tutorials and multi-stage wars.
+
+```lua
+objectives = {
+  { type = 'control', scope = 'strategic', forTeam = 0,
+    reward = 200, bounty = 0,
+    params = { regionKey = 'r1_1' },      -- the PARENT is a real objective too
+    phases = {
+      { { type = 'control', region = 'r1_1', reward = 40, holdFrames = 300 } },
+      { { type = 'control', region = 'r2_1', reward = 80, holdFrames = 300 } },
+    } },
+}
+```
+
+- Children are authored in **exactly the same dialect** as top-level objectives
+  — the flat fields fold for them too.
+- The parent **is itself an objective of its declared type** and must validate:
+  a `phases` parent with bad `params` is rejected outright and *the whole chain
+  silently does not exist*. Give it valid params (its own predicate can be one
+  it never satisfies, e.g. a huge `holdFrames`; its progress is its children's).
+- A child that **fails or expires fails the entire chain**. There is no
+  partial-phase recovery.
+- Children inherit `forTeam` from the parent unless they set their own.
+- **One level only.** A child carrying its own `phases` is a load error.
+- Sibling fields: `bounty` (extra pot, default 0) and `phase` (a published
+  label; the engine overwrites it on parents as phases advance).
+- `parentId` / `linkedId` take **runtime objective ids** and exist for
+  programmatic callers (a gadget re-staging through the same helpers). A
+  scenario *file* cannot know an id that has not been minted yet — use `phases`.
+  They are validated as numbers, and a child naming a non-`phases` parent is
+  ignored rather than killing the objectives gadget.
+
+Objectives whose targets are populated at frame 30 (`_populateTargetsFrom`)
+carry all of the above too, but their children are minted at frame 30 with them
+— a deferred chain can never reference a frame-0 objective.
 
 ### 4.7 `ai`
 
@@ -427,6 +469,8 @@ behaviour the rule reproduces.
 | `ai-team` / `ai-profile` / `ai-stipend` | error | sim `validate` | Non-numeric `team`, non-string `profile`, `stipend` with no numeric `amount`. |
 | `ai-slate` | error | sim `validate` | `slate` not a table, an unimplemented `kinds` entry, or an empty `kinds`. |
 | `ai-region` | warning | sim `validate` (live graph) | A slate region key the map's **on-disk** graph does not declare. The live graph is authoritative, so this is advisory. |
+| `objective-phases` | error | sim `validate` | `phases` is not a non-empty array of non-empty arrays of typed child tables, or a child declares its own `phases` (one level only). A mis-shaped chain is *skipped*, so the parent silently becomes an ordinary objective. |
+| `objective-chain-id` | error | sim `validate` | `parentId`/`linkedId`/`phase` is not a number. They take runtime ids a file cannot know — author chains with `phases`. |
 | `standing-orders-noop` | warning | sim loader | A non-empty top-level `orders` block — ignored entirely. |
 | `ephemeral` | info | — | `ephemeral = true` on what looks like an authored file. |
 | `gen-prefix` | warning | `ScenarioDb::ValidateId` | The id starts `gen_`, which the DB owns and its sweep deletes. |

@@ -243,6 +243,12 @@ force-disabled under `--headless-run`, so the sim starts and ticks with zero cli
     { "aiId": "basic_ai", "team": 0, "startPos": 0, "profile": "aggressive" },
     { "aiId": "basic_ai", "team": 1, "startPos": 1, "profile": "default" }
   ],
+  "scenario": "crossing_standoff",    // TOP-LEVEL, same spelling as the direct
+                                      // manifest — folded onto the `scenario`
+                                      // modoption, and it wins over a
+                                      // modOptions.scenario in the same file.
+                                      // "" = explicitly none; omit = map default.
+                                      // `--modoption scenario=` still beats both.
   "modOptions": {                     // same key=value pairs as --modoption
     "startunits": "skirmish",         // values are strings; bools/numbers are coerced
     "combatwatch": "0"
@@ -568,7 +574,9 @@ is the difference between a simulated day costing hours and costing days.
 **Four things the ladder fixture has to get right, each of which produced a
 clean-looking and worthless report first (measured 2026-08-12, task 4):**
 
-- **`modOptions.scenario` is required.** Without it `game_scenario.lua` stages
+- **A scenario is required** (top-level `"scenario"`, or `modOptions.scenario` —
+  the top-level spelling wins and is the one that also works as a room
+  manifest). Without one `game_scenario.lua` stages
   nothing, so a Metalstorm war is 8 units a side with no economy and no contact:
   the report's vacuity check fails the arm with `peak damage 0 / deaths 0`, and
   every slope in it is a slope through an empty world.

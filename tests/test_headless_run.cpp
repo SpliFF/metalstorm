@@ -194,6 +194,52 @@ TEST_CASE("ParseConfig: modOptions") {
     CHECK(e.modOptions.empty());
 }
 
+TEST_CASE("ParseConfig: top-level scenario (S4.3)") {
+    // The manifest asymmetry this closes: every other consumer of a launch
+    // manifest requires `scenario` at the TOP LEVEL (the lobby overwrites a
+    // modoption-only spelling with the map's default), while headless accepted
+    // ONLY the modoption — so no single file booted the same war both ways.
+    auto opts = [](const Config& c) {
+        std::unordered_map<std::string, std::string> m(c.modOptions.begin(), c.modOptions.end());
+        return m;
+    };
+    std::string err;
+
+    Config a;
+    REQUIRE(ParseConfig(R"({"map":"meridian_basin","scenario":"crossing_standoff"})", a, err));
+    CHECK(opts(a)["scenario"] == "crossing_standoff");
+    CHECK(a.modOptions.size() == 1);
+
+    // Both spellings in one file: top-level is authoritative, and exactly ONE
+    // pair survives (two `scenario` modoptions would make the winner depend on
+    // whichever end of the list server_main happened to read).
+    Config b;
+    REQUIRE(ParseConfig(
+        R"({"scenario":"crossing_standoff","modOptions":{"scenario":"stale","waves":"3"}})",
+        b, err));
+    CHECK(opts(b)["scenario"] == "crossing_standoff");
+    CHECK(opts(b)["waves"] == "3");
+    CHECK(b.modOptions.size() == 2);
+
+    // "" is the "explicitly no scenario" spelling — forwarded, not dropped.
+    Config c;
+    REQUIRE(ParseConfig(R"({"scenario":""})", c, err));
+    REQUIRE(c.modOptions.size() == 1);
+    CHECK(c.modOptions[0].first == "scenario");
+    CHECK(c.modOptions[0].second.empty());
+
+    // Regression: no scenario anywhere means no pair invented.
+    Config d;
+    REQUIRE(ParseConfig(R"({"map":"meridian_basin"})", d, err));
+    CHECK(d.modOptions.empty());
+
+    // A non-string scenario is ignored like any other malformed field, rather
+    // than aborting the run at start-up.
+    Config e;
+    REQUIRE(ParseConfig(R"({"scenario":42})", e, err));
+    CHECK(e.modOptions.empty());
+}
+
 TEST_CASE("ParseConfig: tickMode variants") {
     auto parse = [](const char* tm, Config& c) {
         std::string j = std::string("{\"headless\":{\"tickMode\":\"") + tm + "\"}}";

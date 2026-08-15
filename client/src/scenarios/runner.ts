@@ -307,6 +307,13 @@ export class ScenarioRunner {
                 ...(s.playerStartPos !== undefined ? { startPos: s.playerStartPos } : {}),
                 spectator: false,
             }],
+            // TOP-LEVEL `scenario`, never `modoptions.scenario`: the lobby's
+            // chooseScenario overwrites a modoption-only spelling with the
+            // map's default. `!== undefined` (not truthiness) because `''` is
+            // the authored spelling for "explicitly no scenario", which a
+            // falsy check would silently turn back into the map default.
+            ...(s.scenario !== undefined ? { scenario: s.scenario } : {}),
+            ...(s.modoptions ? { modoptions: s.modoptions } : {}),
             autoStart: true,
         };
 

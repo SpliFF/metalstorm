@@ -110,6 +110,29 @@ bool ParseConfig(const std::string& jsonText, Config& out, std::string& err) {
         }
     }
 
+    // Top-level `scenario` — parity with the /api/rooms/direct manifest, where
+    // the top-level field is the authoritative spelling (a manifest that says
+    // only `modOptions.scenario` is overwritten by the map's own default on the
+    // lobby path). Without this, no single manifest shape worked everywhere:
+    // the same file had to be spelled one way for a room and another for a
+    // headless run. Mapped onto modOptions so server_main's application and
+    // precedence need no change; an explicit `--modoption scenario=` still wins
+    // over both, exactly as it does for every other key.
+    //
+    // Within the file, top-level beats modOptions.scenario. An empty string is
+    // forwarded as an empty modoption, which the loader reads as "no scenario"
+    // — the same "explicitly none" spelling the direct manifest has.
+    if (j.contains("scenario") && j["scenario"].is_string()) {
+        const std::string scn = j["scenario"].get<std::string>();
+        out.modOptions.erase(
+            std::remove_if(out.modOptions.begin(), out.modOptions.end(),
+                           [](const std::pair<std::string, std::string>& kv) {
+                               return kv.first == "scenario";
+                           }),
+            out.modOptions.end());
+        out.modOptions.emplace_back("scenario", scn);
+    }
+
     // --- The `headless` block (run behaviour) ---
     if (!j.contains("headless"))
         return true;  // manifest with no headless block: defaults (realtime, no stops)
