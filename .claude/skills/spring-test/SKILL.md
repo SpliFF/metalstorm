@@ -7,42 +7,48 @@ user-invocable: false
 
 # Spring RTS Web Test Framework
 
-Three coordinated layers:
-
-1. **Server-side verbs** — extensions to `LuaExecEngine`'s `server` exec scope (`spawn`, `kill`, `damage`, `order`, `clear`, `log`, `unit_state`, `combat_summary`). A leading `json ` token on a read verb (`json state`, `json units 0`, `json unit_state <id>`, `json spawn …`) returns a JSON object instead of free text — never regex-scrape these; shapes in [docs/debugging-tools.md](../../../docs/debugging-tools.md#structured-server-verbs-json-prefix).
-2. **Browser-side `window.test` (TestHarness)** — exposes camera focus, render-loop pause, screenshot, selection control, and composite helpers (`spawnAndFocus`, `stageCombat`).
-3. **MCP tools** — thin wrappers over both layers so Claude can drive a session without a tab open.
-
-The browser API and the MCP tools call the same server verbs underneath — pick whichever fits the workflow. Either changes the same sim state in the same way.
-
-## Quick reference
-
-### Instant game launch (no lobby UI)
-
-**`launch_scenario` is the primary launch.** One call resolves a scenario, builds the `/api/rooms/direct` manifest in memory (scenario as the **top-level** field), POSTs it, and waits — no lobby UI, no login, no roster dance. It returns `{roomId, port, sessions, browserUrl, phase, frame}`; the `browserUrl` (`?play=…&room=<id>#token=…`) auto-auths and **attaches** to that exact room, and carries `skipBriefing=1` so automation never stalls on the briefing splash (drop it to test the splash itself).
+**The default loop** — every recipe below is a variation of this:
 
 ```
 launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
-# wait:"ticking" only when a browser will attach — a human seat holds GameStart
-end_game({ roomId: <id> })          # graceful teardown when done
+# → {roomId, port, sessions, browserUrl, phase, frame}
+# attach a browser to browserUrl if the test needs eyes or a ticking sim
+spawn_unit / give_order / get_unit_state / …        # structured JSON returns
+client_screenshot({ maxDim: 640 })                  # look at it (via the relay, no CDP)
+end_game({ roomId })                                # graceful teardown — always finish here
 ```
 
-`launch_direct({manifest})` is the raw-manifest sibling for custom rosters/modoptions. `launch_game` is now for **lobby-flow regression testing only** — it POSTs to `/api/rooms/*` to create a room, add an AI, mark ready, and start — all under one auth token.
+Three coordinated layers underneath:
+
+1. **Server-side verbs** — extensions to `LuaExecEngine`'s `server` exec scope (`spawn`, `kill`, `damage`, `order`, `clear`, `log`, `unit_state`, `combat_summary`). A leading `json ` token on a read verb (`json state`, `json units 0`, `json unit_state <id>`, `json spawn …`) returns a JSON object instead of free text — never regex-scrape these; shapes in [docs/debugging-tools.md](../../../docs/debugging-tools.md#structured-server-verbs-json-prefix). The MCP tools use the `json ` form for you and return objects.
+2. **Browser-side `window.test` (TestHarness)** — camera focus, render-loop pause, deterministic frame capture, selection control, and composite helpers (`spawnAndFocus`, `stageCombat`).
+3. **MCP tools** — wrappers over both layers, including a relay that runs browser-side calls in a connected client **without a CDP session**.
+
+The browser API and the MCP tools call the same server verbs underneath — pick whichever fits the workflow. Either changes the same sim state in the same way.
+
+## Getting a test game: `launch_scenario`
+
+**`launch_scenario` is THE way to get a test game.** One call resolves a scenario, builds the `/api/rooms/direct` manifest in memory (scenario as the **top-level** field), POSTs it, and waits — no lobby UI, no login, no roster dance. It returns `{roomId, port, sessions, browserUrl, phase, frame}`.
 
 ```
-launch_game({ gameId: "papertanks", mapId: "wanderlust2.1", ai: "null" })
+launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
 ```
 
-Returns `{ roomId, gameServerPort, ... }`. Pair it with `list_processes` to confirm the spring-server PID.
+- **`wait:'ready'` is the reachable target.** The default roster seats a human (`admin`), and the sim holds `GameStart` at frame −1 until that client connects — so `wait:'ticking'` (the schema default) **can never complete browserless** on a human roster. Launch with `wait:'ready'`, attach a browser, then `wait_for_game({roomId, until:'ticking'})`.
+- **Attaching a browser:** navigate any browser (chrome-devtools MCP page, or a headless Chrome) to the returned `browserUrl` — `?play=…&room=<id>#token=…` auto-auths as the host's own direct-minted session and **attaches** to that exact room, carrying `skipBriefing=1` so automation never stalls on the briefing splash (drop it to test the splash itself). No login step, no roster mismatch possible.
+- **Browserless runs** (exec-driven sweeps): pass `idleGraceSeconds` — the default 120 s startup grace self-exits an unattended server at frame −1. `wait:'ready'` is as far as a human-roster sim gets without a client; roster AI-only if you need ticking without a browser. (`headless:true` omits the `browserUrl` and warns about the idle clock.)
+- **Teardown:** `end_game({roomId})` — graceful SIGTERM with a drain-quality report. Always finish here.
 
-### MCP tools added by this skill
+`launch_direct({manifest})` is the raw-manifest sibling for custom rosters/modoptions/`sessionKind`/idle timers. `launch_game` exists for **lobby-flow regression testing only** (create room → add AI → ready → start under one auth token) — it re-introduces the browser-user-vs-roster coupling that `launch_scenario` makes impossible; that discipline lives in the **game-browser-test** skill.
+
+## MCP tools added by this skill
 
 | Tool | Purpose |
 |------|---------|
 | `spawn_unit({defName, x, z, team?, count?})` | Spawn one or more units. Y is auto-resolved from the heightmap. `count > 1` lays them out in a grid. Returns `{spawned, ids:[…]}` — feed `ids` straight into `give_order`/`get_unit_state`. |
 | `kill_unit({unitId, selfDestruct?, reclaimed?})` | Destroy a unit (optionally with self-destruct VFX or wreckage drop). |
 | `damage_unit({unitId, amount, paralyze?})` | Apply damage. Returns the new HP. |
-| `give_order({unitId, cmdId, params?, opts?})` | Issue any CMD.* order. Numeric cmdId — see `client/src/core/command-buffer.ts` for the table. |
+| `give_order({unitId, cmdId, params?, opts?})` | Issue any CMD.* order. Numeric cmdId — see the table below. |
 | `clear_units({team?})` | Wipe everything (or one team's units). |
 | `get_unit_state({unitId})` | Health, position, weapons, per-weapon target/range/reload — as an **object**: `{id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]}`. `weapons[].index` is the unit's own slot (null slots are skipped). |
 | `set_debug_logging({combat?, sound?, weapon?, explosion?, order?, unit?, script?})` | Flip subsystem flags. Returns post-call status. |
@@ -53,10 +59,17 @@ Returns `{ roomId, gameServerPort, ... }`. Pair it with `list_processes` to conf
 | `set_stockpile({unitId, count, queued?})` | Insta-fill a unit's stockpile weapon (missiles etc.), skipping the whole build cycle — sets `numStockpiled` directly, so it works where `Spring.SetUnitStockpile` silently no-ops on a null stockpile weapon. |
 | `profile({target, action?, topN?})` | Server-side profilers. `target:"lua"` → per-callin synced-Lua wall time (`topN` caps the report, default 25); `target:"sim"` → SimFrame phase split (native sim / unit scripts / Lua call-ins), which also appears under `/api/metrics` → `simFrame` once enabled. `action`: `on\|off\|reset\|status\|report` (default `report`). |
 | `get_frame({roomId?})` | Sim `frame` + `simFps` + `clients` straight off the public `/api/metrics` route — no exec round-trip, so it answers while the sim is paused or still pre-`GameStart` (`frame: -1`). |
-| `browser_test({method, args?})` | Call any `window.test.<method>(args…)` **in the connected browser** and return its result — the relay does it for you (P7). Falls back to printing the chrome-devtools snippet when a gate refuses. **Refuses the server-bound methods by name** (`spawn`, `kill`, `damage`, `order`, `clear`, `state`, `units`, `unitState`, `frame`, `lua`, `server`, `simPause`, `simSpeed`, …) and names the server-side tool instead — see the deadlock note below. |
-| `client_eval({code, target?, roomId?, clientId?, timeoutMs?})` | Arbitrary code in the browser. `target`: `js` (main globals) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (Lua in the LuaUI runtime) · `test` (an expression with the harness's members in scope, no `test.` prefix). |
+
+## Browser work without CDP: the relay tools
+
+These run code **in the connected browser** over the game server's wire and return the answer — no chrome-devtools session needed (they work against any attached client, including a headless one):
+
+| Tool | Purpose |
+|------|---------|
+| `client_screenshot({maxDim?, quality?, roomId?, clientId?})` | A real image you can **see** — relays `captureFrame({maxDim, stats:true})` and returns an MCP image block plus the capture metadata. `maxDim` clamped to 2048. This replaces the pause→focus→capture→copy-the-dataURL dance for a quick look. |
 | `client_ready({roomId?, clientId?})` | The **browser's** readiness (`readyState()`): renderer, defs, LuaUI, newest frame, feed age. `wait_for_game` is the server-side question — a game can be server-ready while the tab still ingests defs. |
-| `client_screenshot({maxDim?, quality?, roomId?, clientId?})` | A real image you can **see** — relays `captureFrame({maxDim, stats:true})` and returns an MCP image block plus the capture metadata. `maxDim` clamped to 2048. This replaces the pause→focus→`browser_test captureFrame`→copy-the-dataURL dance for a quick look. |
+| `client_eval({code, target?, roomId?, clientId?, timeoutMs?})` | Arbitrary code in the browser. `target`: `js` (main globals) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (Lua in the LuaUI runtime) · `test` (an expression with the harness's members in scope, no `test.` prefix). |
+| `browser_test({method, args?})` | Call any `window.test.<method>(args…)` and return its result. Falls back to printing the chrome-devtools snippet when a gate refuses. **Refuses the server-bound methods by name** (`spawn`, `kill`, `damage`, `order`, `clear`, `state`, `units`, `unitState`, `frame`, `lua`, `server`, `simPause`, `simSpeed`, …) and names the server-side tool instead — see the deadlock note below. |
 
 **The relay's three gates.** Every browser-bound tool answers for real when all
 three pass, and otherwise prints its old snippet with the reason on the first
@@ -72,48 +85,46 @@ line: (1) the route is compiled out under `SPRING_PROD`; (2) only an
 > `spawn_at_camera` already does the right thing: it relays only the camera read
 > and spawns server-side.
 
-### Browser-side `window.test` (TestHarness)
+## Browser-side `window.test` (TestHarness)
 
-Exposed after `startGame()` finishes. Removed by `quitToLobby()`.
+Exposed after `startGame()` finishes. Removed by `quitToLobby()`. Full shapes: [docs/javascript.md](../../../docs/javascript.md#windowtest--test-harness).
 
 | Method | Purpose |
 |--------|---------|
-| `test.spawn(def, x, z, team?, count?)` | Same as `spawn_unit` MCP tool. |
-| `test.kill(id, selfDestruct?, reclaimed?)`, `test.damage(id, amount, paralyze?)` | Same as MCP. |
-| `test.order(id, cmdId, params?, opts?)` | Issue a single command. |
-| `test.clear(team?)` | Wipe all units (or one team). |
-| `test.log(subsystem, on)` / `test.setLogging({...})` / `test.logStatus()` | Debug-flag toggles. |
-| `test.serverJson(verb, ...args)` | Any converted `server` verb in **structured** form: `serverJson('state')`, `serverJson('units', 0)`, `serverJson('unit_state', 42)`, `serverJson('spawn', def, x, z, team, count)`, `serverJson('cheats','status')`. Returns a parsed object; throws on an unconverted verb or a game server predating the `json ` prefix. |
-| `test.state()` / `test.frame()` / `test.units(team?)` / `test.unitState(id)` / `test.combatSummary()` | Read-only sim queries. |
-| `test.simPause()` / `test.simResume()` / `test.simSpeed(n)` | Server-side time control. |
-| `test.focus(id, {durationMs?, height?})` | Animate the camera over a unit. |
-| `test.focusOn(x, z, durationMs?)` | Animate the camera to an XZ point. |
-| `test.setCameraHeight(h)` | Force the camera to height `h` over the current target. |
-| `test.pause()` / `test.resume()` / `test.paused` | Freeze / resume the render loop (sim keeps running). |
-| `test.captureFrame({format?, quality?, maxDim?, region?, stats?, render?})` | **Deterministic capture** — the worker renders and reads pixels in ONE task, so it can never return a between-frames black frame. Returns `{dataUrl, width, height, frameId, gameFrame, stats?}`; `stats:true` adds worker-side `{min,max,mean}` luminance. Prefer this over `screenshot()`. |
-| `test.screenshot()` | Legacy: canvas → `image/png` data URL, read whenever the message is processed (can catch a between-render moment). |
-| `test.saveScreenshot(name?)` | Triggers a browser download of the canvas as PNG. |
-| `test.highResScreenshot(w, h)` | Off-screen RTT render at that exact resolution (it honours its args now — it used to void them). |
+| `test.captureFrame({format?, quality?, maxDim?, region?, stats?, render?})` | **Deterministic capture** — the worker renders and reads pixels in ONE task, so it can never return a between-frames black frame. Returns `{dataUrl, width, height, frameId, gameFrame, stats?}`; `stats:true` adds worker-side `{min,max,mean}` luminance. The canonical screenshot. |
 | `test.readyState()` | One round-trip, **zero HTTP** readiness: `{worker:{alive,sceneStateAgeMs}, connection:{authenticated,authFailed,receivedState}, frame:{gameFrame,anchored,newestBaseFrame}, render:{frameId,meshCount,terrainMeshCount}}`. Never throws. Use this instead of polling room state. |
-| `test.clientFrame()` | Synchronous latest sim frame from the ~10 Hz feed (-1 before it starts). |
-| `test.lockInput(on)` / `test.cameraSettle()` / `test.withStableCamera(fn, {toleranceElmos?})` | Camera input lock (drops held keys — a CDP keydown never gets its keyup), transition-settle await, and a run-with-drift-report wrapper that always unlocks. |
+| `test.lockInput(on)` / `test.cameraSettle()` / `test.withStableCamera(fn, {toleranceElmos?})` | Camera input lock (drops held keys — a CDP keydown never gets its keyup), transition-settle await, and a run-with-drift-report wrapper that always unlocks. Wrap every A/B and perf window in `withStableCamera`. |
 | `test.perfCapture(windowMs?, {squad?})` | Reset → wait a REAL window → dump. Closes the reset-then-dump-immediately trap. |
 | `test.census()`, `test.factoryQueue()`, `test.pendingBuilds()`, `test.buildChips()`, `test.snapshotStats()`, `test.directives()`, `test.overlayOrders(id)`, `test.markerCount()`, `test.orderAckStats(reset?)`, `test.selectUnits(ids)` | Worker state queries (bindings for cases the worker always had). |
-| `test.clientOrder(ids, cmdId, params?, opts?)` | Order down the **real client path** (optimistic overlay + wire encode). `test.order()` bypasses the client entirely via `/api/exec`. |
+| `test.serverJson(verb, ...args)` | Any converted `server` verb in **structured** form: `serverJson('state')`, `serverJson('units', 0)`, `serverJson('unit_state', 42)`, `serverJson('spawn', def, x, z, team, count)`, `serverJson('cheats','status')`. Returns a parsed object; throws on an unconverted verb or a game server predating the `json ` prefix. |
+| `test.spawn(def, x, z, team?, count?)` | Same as `spawn_unit` MCP tool. |
+| `test.kill(id, selfDestruct?, reclaimed?)`, `test.damage(id, amount, paralyze?)` | Same as MCP. |
+| `test.order(id, cmdId, params?, opts?)` | Issue a single command (via `/api/exec`, bypassing the client). |
+| `test.clientOrder(ids, cmdId, params?, opts?)` | Order down the **real client path** (optimistic overlay + wire encode). |
+| `test.clear(team?)` | Wipe all units (or one team). |
+| `test.log(subsystem, on)` / `test.setLogging({...})` / `test.logStatus()` | Debug-flag toggles. |
+| `test.state()` / `test.frame()` / `test.units(team?)` / `test.unitState(id)` / `test.combatSummary()` | Read-only sim queries (free-text; prefer `serverJson`). |
+| `test.simPause()` / `test.simResume()` / `test.simSpeed(n)` | Server-side time control. |
+| `test.focus(id, {durationMs?, height?})` / `test.focusOn(x, z, durationMs?)` / `test.setCameraHeight(h)` | Camera animation (see the spring-debug skill's Camera control section for the snap/fit family and the pitfalls). |
+| `test.pause()` / `test.resume()` / `test.paused` | Freeze / resume the render loop (sim keeps running). |
+| `test.screenshot()` | Legacy: canvas → `image/png` data URL, read whenever the message is processed (can catch a between-render moment). Prefer `captureFrame`. |
+| `test.saveScreenshot(name?)` | Triggers a browser download of the canvas as PNG. |
+| `test.highResScreenshot(w, h)` | Off-screen RTT render at that exact resolution (it honours its args now — it used to void them). |
+| `test.clientFrame()` | Synchronous latest sim frame from the ~10 Hz feed (-1 before it starts). |
 | `test.widgets()` / `test.setWidget(name, on)` | LuaUI widget list / toggle. `[]` until the Lua runtime boots. URL param `?disableWidgets=a,b` does it at startup. |
 | `test.select([ids])` / `test.selection` | Replace / read the current selection. |
 | `test.spawnAndFocus(def, x, z, team?, opts?)` | Spawn one unit and animate the camera onto it. Returns the new unit ID. |
 | `test.stageCombat(atkDef, tgtDef, x, z, atkTeam?, tgtTeam?, sep?)` | Spawn an attacker + target, issue an attack order. Returns `{attackerId, targetId}`. |
 | `test.lua(code)` | Drop down to the LuaRules synced state for anything the verbs don't cover. |
-| `test.perfDump()`, `test.uiProfileStart/Dump/Stop()`, `test.netSim*()`, `test.netStats()` | Performance profiling — see the [Performance Profiling](#performance-profiling) section below. |
+| `test.perfDump()`, `test.uiProfileStart/Dump/Stop()`, `test.netSim*()`, `test.netStats()` | Performance profiling — see below. |
 
 ## Performance Profiling
 
-Three permanent, independent profiling tools also live on `window.test` — drive them the same way as any other method, via `browser_test`. Full reference (output shapes, methodology, budgets, pitfalls): **[docs/debugging-performance.md](../../../docs/debugging-performance.md)**.
+Three permanent, independent profiling tools also live on `window.test` — drive them via `browser_test` or `client_eval({target:'test'})`. Full reference (output shapes, methodology, budgets, pitfalls): **[docs/debugging-performance.md](../../../docs/debugging-performance.md)**.
 
 | Method | Purpose |
 |--------|---------|
-| `test.perfDump(windowMs?)` / `test.perfReset()` | Always-on per-phase (camera/entity/fx/decals/render/ui/total) frame-time distribution (mean/p50/p95/p99/max) from the permanent FrameProfiler. |
+| `test.perfDump(windowMs?)` / `test.perfReset()` | Always-on per-phase (camera/entity/fx/decals/render/ui/total) frame-time distribution (mean/p50/p95/p99/max) from the permanent FrameProfiler. `perfCapture(windowMs)` wraps reset → real wait → dump. |
 | `test.uiProfileStart()` / `test.uiProfileDump(topN?)` / `test.uiProfileStop()` | Per-widget LuaUI (Fengari) cost breakdown — which widget/callin is expensive inside the `ui` phase. **Off by default**; brackets a measurement session. Call `uiProfileDump` before `uiProfileStop`, not after — stop clears the data first. |
 | `test.netSim({delayMs, jitterMs, lossProb})` / `test.netSimOff()` / `test.netSimPreset("lan"\|"wan"\|"intercont")` | Inject artificial latency/jitter/loss on the state channel — reproduce WAN conditions on localhost. |
 | `test.netStats()` | Cumulative inbound/outbound bandwidth tally, per decoded message type. |
@@ -127,34 +138,33 @@ browser_test({ method: "uiProfileStop" })
 
 ## Recipes
 
-### From scratch: launch a session, spawn a tank, focus on it
+### From scratch: launch a session, spawn a tank, look at it
 
 ```
 launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
 # → returns when the server accepts connections; no "wait a beat" guesswork.
-#   Use wait:"ticking" ONLY if a browser will attach: the default roster seats a
-#   human (admin), and the sim holds at frame -1 until that client connects —
-#   navigate to the returned browserUrl, then wait_for_game({roomId, until:"ticking"}).
+# navigate a browser to the returned browserUrl, then:
+wait_for_game({ roomId: <id>, until: "ticking" })
 spawn_unit({ defName: "ms_scout", x: 4096, z: 4096, team: 0, count: 1 })
-# The browser tab does this itself now — no snippet to paste (P7 relay):
 browser_test({ method: "focus", args: [<id from spawn_unit>] })
 client_screenshot({ maxDim: 640 })      # and look at it
 end_game({ roomId: <id> })              # graceful teardown — always finish here
 ```
 
-### Verify weapon firing logs
+### Verify weapon firing logs (browserless)
 
 ```
+launch_scenario({ scenarioId: "crossing_standoff", wait: "ready", headless: true, idleGraceSeconds: 600 })
 set_debug_logging({ combat: true, sound: true, weapon: true })
-# stage two units — spawn_unit returns the ids as JSON, no exec string parsing
 spawn_unit({ defName: "ms_scout", x: 4000, z: 4000, team: 0, count: 1 })
 spawn_unit({ defName: "ms_scout", x: 4200, z: 4000, team: 1, count: 1 })
 give_order({ unitId: <atk>, cmdId: 20, params: [<tgt>] })  # CMD.ATTACK = 20
-# Tail the firing logs
-get_logs({ section: "weapon", limit: 20 })
-get_logs({ section: "combat", limit: 20 })
-get_logs({ section: "sound",  limit: 20 })
+get_logs({ section: "weapon", limit: 20, roomId: <id> })
+get_logs({ section: "combat", limit: 20, roomId: <id> })
+end_game({ roomId: <id> })
 ```
+
+(A human-roster sim stays at frame −1 without a browser; spawns and orders still execute pre-GameStart, but nothing moves. Roster AI-only via `launch_direct` if the test needs a ticking sim with no client.)
 
 ### Take a deterministic screenshot
 
@@ -222,14 +232,11 @@ The MCP tools auto-authenticate as `admin/admin` (override via `SPRING_USER`/`SP
 
 **Dev accounts:** `admin` / `admin` and `test1` / `test`.
 
-**Browser ↔ game roster gotcha:** the game server builds a fixed player roster at launch from the room's host + AI slots. A browser session can only connect (WebRTC auth) if it is logged in as a user **in that roster** — otherwise the game logs `auth failed: Not in this room's roster` and the connection is rejected. So `launch_game` must run under the **same username the browser is logged in as**. The browser auto-logs in as `test1`; pass `username: "test1"` to `launch_game` (or re-login the browser as `admin` before launching with the default). After `launch_game` creates+starts the room, drive the browser with `window.lobby.joinRoom(<roomId>)` to connect and render.
-
-**Isolated browser sessions (concurrent Claude sessions):** the chrome-devtools MCP runs with `--isolated`, so each session gets its own fresh browser and several ZK games may be running at once. Always **track the `roomId` your own `launch_game` returned and only `joinRoom` that exact id** — never assume the only/first game in `list_processes` is yours, and only `end_game` rooms you launched. The fresh profile also has no saved login: do a credential login + `lobby.attachSession(token, user_id, username)` **before** the first `joinRoom`, then launch + join immediately (no `leave()`/rejoin churn) or you get `no valid token` / `Not in this room's roster`. Full checklist in the **game-browser-test** skill ("Isolated mode + session discipline").
+On the `launch_scenario` path none of the browser-login machinery applies — the `browserUrl` carries the host's own session. The **roster coupling** trap (a game server only admits browser users in its launch-time roster, so `launch_game` must run as the same user the browser is logged in as) only exists on the `launch_game` lobby-flow path; that discipline, and the isolated-profile login recipe for concurrent sessions, live in the **game-browser-test** skill ("Isolated mode + session discipline").
 
 ## When to prefer this over alternatives
 
 - **Over the debug console**: scripted reproducible test cases beat hand-typed verbs.
-- **Over `exec_lua`**: the new verbs are shorter, validate parameters, and emit consistent "spawned N unit(s): ID,ID,ID" output that's easy to parse.
-- **Over clicking through the lobby**: `launch_game` + `window.test` skips the auth/room dance entirely.
-
-Browser automation: when you need to drive `window.test`, use `mcp__chrome-devtools__evaluate_script` only. **Never** use `mcp__claude-in-chrome__*` (loses page context).
+- **Over `exec_lua`**: the verbs are shorter, validate parameters, and return structured JSON (`{spawned, ids}`, `{id, hp, weapons[]}`) instead of text to scrape.
+- **Over clicking through the lobby**: `launch_scenario` + the relay tools skip the auth/room dance entirely.
+- **Over CDP for browser work**: `client_eval`/`client_screenshot`/`browser_test` answer without a devtools session when a client is connected. When you do need real CDP (DOM, network, clicks), use `mcp__chrome-devtools__*` only — **never** `mcp__claude-in-chrome__*` (loses page context).
