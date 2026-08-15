@@ -24,6 +24,7 @@
 #include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
+#include "PreAuthPolicy.h"
 #include "PlayerRosterBroadcast.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
@@ -129,6 +130,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         postgame::RejectsClientPayload(
             static_cast<uint8_t>(clientMsg->payload_type()))) {
         auto err = Protocol::BuildServerError(409, "Game over");
+        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+        return;
+    }
+
+    // ── Pre-auth gate (PLAN-protocol-guard task 6). ────────────────────────
+    // The allow-list is exactly three verbs — Handshake, AuthRequest, Ping —
+    // and the reasoning for each (plus the one named limit: a connection with
+    // no session has no rate budget at all) lives in PreAuthPolicy.h, which is
+    // also where a newly added union member is forced to declare itself.
+    //
+    // Every other case below ALSO checks its own session, and those checks are
+    // kept: several combine it with a team or role test, and their per-verb
+    // reply text is more useful than this one. This is the by-construction
+    // half — the audit found the hand-written checks complete, but complete as
+    // a property of 40-odd separate lines rather than of the design.
+    //
+    // Placed after the journal record for the same reason the post-game gate
+    // is: a verb refused live must be refused identically on replay.
+    if (preauth::RequiresSession(
+            static_cast<uint8_t>(clientMsg->payload_type())) &&
+        sessions.GetSession(msg.clientId) == nullptr) {
+        SLOG(SPRING_LOG_DEBUG,
+            "refusing verb type=%d from client %u — no session",
+            (int)clientMsg->payload_type(), msg.clientId);
+        auto err = Protocol::BuildServerError(401, "Not authenticated");
         rtcServer.SendReliable(msg.clientId, err.data(), err.size());
         return;
     }

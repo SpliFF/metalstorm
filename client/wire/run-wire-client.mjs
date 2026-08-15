@@ -28,7 +28,11 @@
  *       [--pass secret] [--expect-auth ok|reject] [--expect-player-num N]
  *       [--command 10 --squads 1,2 --params 100,0,100] [--hold-ms 2000] [--json]
  *       [--wire-command guidance.veto --wire-field goalId=obj:1]
- *       [--schema-hash <hex>|none]
+ *       [--schema-hash <hex>|none] [--pre-auth-probe]
+ *
+ * `--pre-auth-probe` sends one session-requiring verb in the window between
+ * the Handshake and the AuthRequest and asserts the server refuses it with a
+ * 401 and still admits the auth that follows (PLAN-protocol-guard task 6).
  *
  * `--schema-hash` overrides the wire schema hash sent in the Handshake, and
  * `none` omits the field entirely. It exists for the same reason
@@ -54,7 +58,7 @@ function parseArgs(argv) {
         expectAuth: 'ok', expectPlayerNum: null, command: null,
         squads: [], params: [], options: 0, holdMs: 1500, json: false, quiet: false,
         pinMismatch: false, waitForServerMs: 0, wireCommands: [],
-        schemaHash: null,
+        schemaHash: null, preAuthProbe: false,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -82,6 +86,11 @@ function parseArgs(argv) {
                 out.schemaHash = (v === 'none') ? '' : v;
                 break;
             }
+            // Sends one PlayerCommand between the Handshake and the
+            // AuthRequest — the only window where a connection is handshaked
+            // and has no session — and asserts the server answered 401 and
+            // then admitted the auth anyway (PLAN-protocol-guard task 6).
+            case '--pre-auth-probe': out.preAuthProbe = true; break;
             case '--wait-for-server': out.waitForServerMs = Number(next()); break;
             // `--wire-command guidance.veto --wire-field goalId=obj:1` — one
             // synced-Lua message per `--wire-command`, sent in the order given,
@@ -225,6 +234,7 @@ try {
         token: args.token || undefined, WebTransportCtor: wt.WebTransport, log,
         // null = send this build's own hash, i.e. what a real client sends.
         schemaHash: args.schemaHash === null ? undefined : args.schemaHash,
+        preAuthProbe: args.preAuthProbe,
         // The browser needs the hashes in the constructor; this client pins
         // through the hook, so it is handed nothing.
         sessionOptions: () => ({}),
@@ -261,6 +271,25 @@ try {
     }
 
     const failures = [];
+    if (args.preAuthProbe) {
+        // Two claims, and the second is the one worth running a stack for: the
+        // gate must refuse the verb AND leave the connection admissible. A
+        // guard that dropped the session, or that answered nothing at all,
+        // would pass a "was it refused?" check by accident.
+        // TWO 401s: one per probe verb. `PlayerCommand` was already refused by
+        // its own case, so only the second — `PlayerLeaveIntent`, which used
+        // to break in silence — attributes the refusal to the central gate.
+        const refusals = client.serverErrors.filter((e) => e.code === 401);
+        if (refusals.length < 2) {
+            failures.push(`--pre-auth-probe: expected 2 x 401 for the two pre-auth `
+                + `verbs, got ${refusals.length} `
+                + `(server errors: ${JSON.stringify(client.serverErrors)})`);
+        }
+        if (!auth.ok) {
+            failures.push('--pre-auth-probe: the refusal poisoned the connection '
+                + `— auth then failed with ${AuthStatus[auth.status]} (${auth.message})`);
+        }
+    }
     if (args.expectAuth === 'ok' && !auth.ok) {
         failures.push(`expected auth OK, got ${AuthStatus[auth.status]} (${auth.message})`);
     }

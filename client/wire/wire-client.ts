@@ -31,6 +31,7 @@ import { ClientPayload } from '../src/protocol/spring-web/client-payload.js';
 import { Handshake } from '../src/protocol/spring-web/handshake.js';
 import { AuthRequest } from '../src/protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../src/protocol/spring-web/player-command.js';
+import { PlayerLeaveIntent } from '../src/protocol/spring-web/player-leave-intent.js';
 import { StandingOrderCreate } from '../src/protocol/spring-web/standing-order-create.js';
 import { LuaRulesMsg } from '../src/protocol/spring-web/lua-rules-msg.js';
 import { encodeWire } from '../src/ui/native-ui/guidance-wire.js';
@@ -84,6 +85,17 @@ export interface WireClientOptions {
      * from a wrong hash and has to be drivable separately.
      */
     schemaHash?: string;
+    /**
+     * Send one session-requiring verb (a `PlayerCommand`) between the
+     * Handshake and the AuthRequest, i.e. from a connection that has no
+     * session yet. Exists for the same reason `schemaHash` does: the pre-auth
+     * gate (PLAN-protocol-guard task 6) can only be exercised by a client that
+     * deliberately misbehaves, and no real client ever does. The server must
+     * answer `401 Not authenticated` and the auth that follows must still
+     * succeed — a gate that also poisoned the connection would be a worse bug
+     * than the one it closes.
+     */
+    preAuthProbe?: boolean;
     log?: (msg: string) => void;
     /** Injected fetch, so the harness is testable without a network. */
     fetchImpl?: typeof fetch;
@@ -234,6 +246,20 @@ export class WireClient {
         void this.readControl(control.readable);
 
         this.sendHandshake();
+        // Between the two, deliberately: the only window in a connection's
+        // life where it is handshaked but has no session.
+        if (this.opts.preAuthProbe) {
+            // TWO verbs, and the second is the one that attributes the answer.
+            // `PlayerCommand` has carried its own session check for as long as
+            // the case has existed, so a 401 for it proves nothing about the
+            // central gate. `PlayerLeaveIntent` used to `break` in silence —
+            // one 401 for it is the gate and nothing else.
+            this.sendPlayerCommand({ commandId: 10, squadIds: [], params: [] });
+            const b = new flatbuffers.Builder(32);
+            const pli = PlayerLeaveIntent.createPlayerLeaveIntent(b, 3);
+            this.sendClientMessage(b, ClientPayload.PlayerLeaveIntent, pli);
+            this.log('[wire] sent a pre-auth PlayerCommand + PlayerLeaveIntent (probe)');
+        }
         this.sendAuthRequest();
         return info;
     }

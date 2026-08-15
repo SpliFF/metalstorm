@@ -333,7 +333,26 @@ the value a client claims. `PROTOCOL_VERSION` is therefore no longer the drift
 guard: it is a manual epoch for the breaks the schema text cannot see (the
 `0x02`-`0x09` binary framings, a semantic reinterpretation of an existing
 field), bumped 1 -> 2 when the hash landed. A schema-visible change needs only
-the regen script. The harness's node entry
+the regen script.
+
+**Which verbs a connection may use before it has a session** is one rule, in
+**`rts/Server/PreAuthPolicy.h`** (PLAN-protocol-guard task 6), applied once
+ahead of the dispatch switch rather than per case. Exactly three of the 45
+`ClientPayload` members are open — `Handshake` (the admission gate itself),
+`AuthRequest` (open to the session gate, but refused without a recorded
+handshake) and `Ping` (the client sends it before auth, every 30 s) — and
+everything else is answered `401 Not authenticated`. Because a session exists
+only via `AuthRequest`, and `AuthRequest` needs a handshake, that is
+transitively a schema-hash requirement on every other verb. The switch's own
+per-case session checks stay as defence in depth; the audit that produced the
+header found them complete, but complete as a property of 40-odd separately
+written lines. `IsOpenPreAuth` has no `default:`, so a new union member fails
+to compile until it is classified. The gate sits **after** the journal record,
+for the same reason the post-game gate does: a verb refused live must be
+refused identically on replay. Driving it needs a client that misbehaves on
+purpose, so the wire harness gained `--pre-auth-probe`: one `PlayerCommand`
+plus one `PlayerLeaveIntent` sent between the Handshake and the AuthRequest,
+asserting two 401s and an auth that still succeeds. The harness's node entry
 point (`client/wire/run-wire-client.mjs`) is where node-only concerns live: node
 has no WebTransport, and the package that supplies one implements cert pinning
 through a global hook rather than `serverCertificateHashes`. Server-side the frame
