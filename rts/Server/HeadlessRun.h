@@ -127,6 +127,15 @@ StopReason EvaluateStop(const StopConditions& cond, int64_t maxWallSec,
 // "do not pace"). `gameSpeed` is GAME_SPEED (sim frames per game-second).
 int64_t TickIntervalMicros(TickMode mode, float tickMultiple, int gameSpeed);
 
+// Whether the synced-Lua predicate is due for a poll at this frame: once per
+// game-second (every `gameSpeed` frames), never at frame 0 (pre-GameStart).
+// The cadence used to be every 30 GAME-SECONDS (frame 900 first), which meant
+// any run whose frame limit fired earlier exited having never evaluated its
+// luaCondition even once — silently, since an unevaluated predicate produces
+// no output at all. Once per second keeps the cost invisible next to a sim
+// tick while bounding the stop latency to under a game-second.
+bool LuaConditionPollDue(int64_t frame, int gameSpeed);
+
 // Human-readable name for logs / the stats dump status field.
 const char* StopReasonName(StopReason r);
 

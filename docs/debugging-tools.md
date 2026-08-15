@@ -404,6 +404,16 @@ child process to exit.
 `stopAt` precedence: `luaCondition`-errored > `gameOver` > `frame` > `luaCondition` >
 `--max-wall-min` (always active as the outermost runaway guard).
 
+`luaCondition` runs in the **synced LuaRules state** (full `Spring.*`/`GG` access)
+and is polled **once per game-second** (every 30 frames, first poll at frame 30) —
+so a stop lands within a game-second of the condition becoming true, and even a
+short run evaluates it. Both spellings work: a bare expression
+(`"GG.Balance.Done"`) or a full chunk (`"Spring.Echo('probe'); return
+Spring.GetGameFrame() > 100"` — a chunk that returns nothing reads as false). A
+predicate that fails to compile or raises stops the run with `lua-error` rather
+than hanging it; a satisfied one stops with `lua-condition` (the stats dump's
+`status` field uses the same names).
+
 `modOptions` fills the same role for a manifest that `--modoption key=value` fills on
 the command line — synced gadgets read them via `Spring.GetModOptions()` and the
 defs-cache key includes them. Precedence is **per key**: an explicit `--modoption`

@@ -43,6 +43,12 @@ int64_t TickIntervalMicros(TickMode mode, float tickMultiple, int gameSpeed) {
     return static_cast<int64_t>(1'000'000.0 / (gameSpeed * mult));
 }
 
+bool LuaConditionPollDue(int64_t frame, int gameSpeed) {
+    if (gameSpeed <= 0)
+        gameSpeed = 30;
+    return frame > 0 && (frame % gameSpeed) == 0;
+}
+
 const char* StopReasonName(StopReason r) {
     switch (r) {
         case StopReason::None:         return "none";

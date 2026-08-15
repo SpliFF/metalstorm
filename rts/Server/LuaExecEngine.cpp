@@ -863,15 +863,22 @@ SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
     }
 
     const int top = lua_gettop(L);
-    // Wrap in `return (...)` so a bare expression like "GG.Balance.Done" yields
-    // a value we can test. Restore the stack on every path so a per-30s poll
-    // can't leak stack slots over a multi-hour run.
+    // Predicates arrive in two spellings and both must work: a bare expression
+    // ("GG.Balance.Done") and a full chunk ("Spring.Echo('x'); return f()").
+    // Try the `return (...)` wrap first so an expression yields a testable
+    // value; if that fails to COMPILE, load the raw text as a chunk (whose own
+    // `return` supplies the value — a chunk returning nothing reads as false).
+    // Restore the stack on every path so a per-second poll can't leak stack
+    // slots over a multi-hour run.
     const std::string chunk = "return (" + expr + ")";
     if (luaL_loadstring(L, chunk.c_str()) != LUA_OK) {
-        const char* msg = lua_tostring(L, -1);
-        errOut = msg ? msg : "syntax error";
         lua_settop(L, top);
-        return SyncedPredicateResult::Error;
+        if (luaL_loadstring(L, expr.c_str()) != LUA_OK) {
+            const char* msg = lua_tostring(L, -1);
+            errOut = msg ? msg : "syntax error";
+            lua_settop(L, top);
+            return SyncedPredicateResult::Error;
+        }
     }
     if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
         const char* msg = lua_tostring(L, -1);

@@ -3251,11 +3251,14 @@ int main(int argc, char* argv[])
         // Only reached under --headless-run, so a normal game never enters this
         // block (regression bar). Evaluated after the tick + streamer, so the
         // game-over relay and frame count reflect this frame. The synced-Lua
-        // predicate is polled every 30 game-seconds (§1) and its result latched.
+        // predicate is polled once per game-second and its result latched.
+        // (It was every 30 game-seconds, first poll at frame 900 — so any run
+        // whose frame limit fired earlier exited having never evaluated its
+        // luaCondition even once, with zero output to say so. FU1.)
         if (headlessCfg.enabled) {
             if (headlessCfg.stopAt.luaCondition && !headlessLuaMet &&
-                !headlessLuaErrored && frame > 0 &&
-                (frame % (GAME_SPEED * 30)) == 0) {
+                !headlessLuaErrored &&
+                headless::LuaConditionPollDue(frame, GAME_SPEED)) {
                 std::string perr;
                 const auto pr = EvalSyncedPredicate(
                     *headlessCfg.stopAt.luaCondition, perr);

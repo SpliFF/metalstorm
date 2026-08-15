@@ -103,6 +103,28 @@ TEST_CASE("TickIntervalMicros: pacing maths") {
     CHECK(TickIntervalMicros(TickMode::Realtime, 1.0f, 0) == 33333);
 }
 
+TEST_CASE("LuaConditionPollDue: once per game-second, from frame 30 (FU1)") {
+    // The regression this pins: the poll gate used to be every 30 GAME-SECONDS
+    // (frame % 900), so a run with stopAt.frame <= 900 exited via frame-limit
+    // having never evaluated its luaCondition even once — silently, since an
+    // unevaluated predicate produces no output at all.
+    CHECK_FALSE(LuaConditionPollDue(0, 30));   // pre-GameStart, nothing to poll
+    CHECK_FALSE(LuaConditionPollDue(29, 30));
+    CHECK(LuaConditionPollDue(30, 30));        // first poll inside a short run
+    CHECK_FALSE(LuaConditionPollDue(31, 30));
+    CHECK(LuaConditionPollDue(60, 30));
+
+    // A 300-frame run (a common short fixture) must poll at least once — this
+    // is exactly the check the old 900-frame cadence failed.
+    bool polled = false;
+    for (int64_t f = 1; f <= 300; ++f)
+        polled = polled || LuaConditionPollDue(f, 30);
+    CHECK(polled);
+
+    // Degenerate gameSpeed falls back to 30, same as TickIntervalMicros.
+    CHECK(LuaConditionPollDue(30, 0));
+}
+
 TEST_CASE("StopReasonName covers every reason") {
     CHECK(std::string(StopReasonName(StopReason::None)) == "none");
     CHECK(std::string(StopReasonName(StopReason::FrameLimit)) == "frame-limit");
