@@ -2354,7 +2354,7 @@ export class LobbyUI {
         const muteList = this.chatMuteList
             ? `<div class="chat-mutes"><div class="chat-mutes-head">` +
               `${this.chatMuteList.length} mute(s) in force` +
-              `<button id="chat-mutes-close" class="chat-tab-close">×</button></div>` +
+              `<button id="chat-mutes-close" class="chat-mutes-close">×</button></div>` +
               (this.chatMuteList.length
                   ? this.chatMuteList.map(m =>
                         `<div class="chat-mutes-row">` +

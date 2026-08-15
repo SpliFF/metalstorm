@@ -793,6 +793,18 @@ button.link-button:hover { background: none; color: #7fdcff; }
     margin-bottom: 4px;
 }
 .chat-mutes-row { color: #dfe6f0; font-variant-numeric: tabular-nums; }
+/* Its own rule rather than `.chat-tab-close`, which is a bare colour on a
+   `<span>`: worn by a `<button>` it inherits the lobby's filled-cyan default
+   and a dismiss cross reads as the panel's primary action. Only the
+   screenshot showed it. */
+.chat-mutes-close {
+    background: none;
+    color: #7a8496;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+}
+.chat-mutes-close:hover { color: #ff6b6b; }
 .chat-compose { display: flex; gap: 8px; margin-top: 8px; }
 .chat-input {
     flex: 1;
