@@ -1,6 +1,7 @@
 // RoomManager — game room lifecycle management.
 
 #include "RoomManager.h"
+#include "Chat.h"
 #include "WarPlayerBindings.h"
 #include "GameEventsDb.h"
 #include "GameServersDb.h"
@@ -454,6 +455,12 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     AuthTokens::DeleteWarReconnectForRoom(db, roomId);
     // A readiness flag and a digest — the three rows keyed on room_id alone.
     GameServersDb::DeleteForRoom(db, roomId);
+    // A CONVERSATION. §3.3 says a room's channels are deleted with the room,
+    // and the reused-id rule above is why it is not merely tidiness: the next
+    // war on this number would open with the previous one's chat already in
+    // its scrollback, addressed to players who were never in it. Takes the
+    // ally and spectator channels with it (Chat::DeleteRoom).
+    Chat::DeleteRoom(db, roomId);
     //
     // Deliberately NOT deleted here, and named so each is a decision rather
     // than an omission — these are the rest of the room-keyed census:

@@ -29,8 +29,10 @@
 #include "Server/CacheControl.h"
 #include "Server/DevBuildGate.h"
 #include "Server/FactionData.h"
+#include "Server/Chat.h"
 #include "Server/FriendPresence.h"
 #include "Server/Friends.h"
+#include "Server/SSETickets.h"
 #include "Server/GameDiscovery.h"
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
@@ -1061,6 +1063,12 @@ int main(int argc, char *argv[]) {
   // the single creation site rather than one of two.
   Friends::EnsureTable(mapDb);
 
+  // chat_messages + chat_ignores — the one chat service (PLAN-lobby §3, task
+  // 9b). Lobby-only in the same sense friend_edges is: the in-game panel is a
+  // consumer of this service over the same HTTP surface, not a second writer
+  // in the game-server process, which is what §3's "one chat service" buys.
+  Chat::EnsureTables(mapDb);
+
   // game_events — the war's strategic history, appended by the game server and
   // read here as the while-you-were-away digest (PLAN-persistence §4, task
   // 4b). Created from the lobby too, for the same reason and under the same
@@ -1557,6 +1565,19 @@ int main(int argc, char *argv[]) {
 
   // SSE channel for real-time room list pushes (replaces client polling)
   uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
+
+  // Chat delivery (PLAN-lobby §3.2, task 9b). IDENTIFIED, unlike the room
+  // stream above: the room list is the same document for everybody, chat is
+  // not — a PM has two recipients and an ignore list is enforced on delivery,
+  // so every frame on this channel is addressed. See
+  // NetworkServer::AddIdentifiedSSE for why the credential is a ticket in the
+  // query string rather than the session token.
+  static SSETickets gChatTickets;
+  uint32_t chatStreamChannel = net.AddIdentifiedSSE("/api/chat/stream");
+  net.SetSSESubscriberResolver([](const std::string &query) -> int64_t {
+    return gChatTickets.Redeem(SSETickets::TicketFromQuery(query),
+                               static_cast<int64_t>(std::time(nullptr)));
+  });
 
   // Maps endpoint — full metadata from SQLite
   net.AddHttpGet(
@@ -5112,6 +5133,336 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, j.dump());
       });
 
+  // ── Chat (PLAN-lobby.md §3, task 9b) ─────────────────────────────────────
+  //
+  // Five routes over one store. Every one of them is a POST, including the
+  // two that only read: an AddHttpGet handler is not handed the request
+  // headers, so a GET route cannot learn which account the dispatcher
+  // admitted — the same reason /api/friends/list states, and here it is not
+  // merely inconvenient but wrong, because both reads are per-caller by
+  // construction (a history filtered by the caller's ignore list, a channel
+  // list that is the caller's own).
+  //
+  // The state below is process-local and touched only from route handlers and
+  // the SSE resolver, all of which run on the NetworkServer network thread —
+  // the same single-threaded property the SQLite handle already depends on.
+  static ChatChannels gChatChannels;
+  static ChatFlood gChatFlood;
+
+  /// One resolution of "what conversation is this, and who hears it".
+  ///
+  /// Send and history BOTH go through it, and that is the point: a scope
+  /// whose membership was checked on the way in but not on the way out is a
+  /// channel you cannot post to and can still read.
+  struct ChatResolution {
+    ChatScope scope = ChatScope::Main;
+    std::string target;             ///< canonical, server-built
+    std::vector<int64_t> recipients; ///< everyone who hears it, sender included
+  };
+  auto resolveChatScope =
+      [&](int64_t userId, const std::string &scopeWord, const std::string &rawTarget,
+          ChatResolution &out) -> std::optional<HttpResponse> {
+    if (!ChatScopeFromString(scopeWord, out.scope))
+      return HttpAuth::JsonResponse(400, R"({"error":"unknown scope"})");
+
+    // A room-shaped scope names a room by id; parse once for all three.
+    const uint32_t roomId =
+        static_cast<uint32_t>(std::strtoul(rawTarget.c_str(), nullptr, 10));
+    const GameRoom *room = roomId ? rooms.GetRoom(roomId) : nullptr;
+    // Room membership keys on the ACCOUNT id — `RoomPlayer::playerId` is the
+    // account, which is what presenceFactsFor above already relies on.
+    const RoomPlayer *me =
+        room ? room->FindPlayer(static_cast<uint32_t>(userId)) : nullptr;
+
+    switch (out.scope) {
+      case ChatScope::Main:
+        out.target = Chat::MainTarget();
+        out.recipients = gChatChannels.Members(out.target);
+        break;
+
+      case ChatScope::Channel: {
+        const std::string name = Chat::NormalizeChannel(rawTarget);
+        if (name.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad channel name"})");
+        // Opt-in (§3.1): you speak in a channel you are standing in. Refused
+        // rather than auto-joined — a send that silently subscribes you is
+        // how a client ends up in channels nobody asked for.
+        if (!gChatChannels.IsMember(userId, name))
+          return HttpAuth::JsonResponse(403, R"({"error":"join the channel first"})");
+        out.target = name;
+        out.recipients = gChatChannels.Members(name);
+        break;
+      }
+
+      case ChatScope::Room: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        out.target = Chat::RoomTarget(roomId);
+        for (const auto &p : room->players)
+          out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Ally: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        // A spectator holds no team, so there is no ally channel to be in —
+        // and `team` on a spectator row is a leftover value, not a seat.
+        if (me->isSpectator)
+          return HttpAuth::JsonResponse(403, R"({"error":"spectators have no team"})");
+        // The TEAM comes off the roster, never off the request. A client that
+        // could name its own team could name the enemy's, and ally chat is
+        // the one scope where that is worth a match.
+        out.target = Chat::AllyTarget(roomId, me->team);
+        for (const auto &p : room->players)
+          if (!p.isSpectator && p.team == me->team)
+            out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Spectator: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        if (!me->isSpectator && !me->spectateOnly)
+          return HttpAuth::JsonResponse(403, R"({"error":"not a spectator here"})");
+        out.target = Chat::SpectatorTarget(roomId);
+        for (const auto &p : room->players)
+          if (p.isSpectator || p.spectateOnly)
+            out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Pm: {
+        auto other = db.FindUser(rawTarget);
+        if (!other)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        if (other->id == userId)
+          return HttpAuth::JsonResponse(400, R"({"error":"you cannot PM yourself"})");
+        out.target = Chat::PmTarget(userId, other->id);
+        out.recipients = {userId, other->id};
+        break;
+      }
+    }
+    return std::nullopt;
+  };
+
+  // POST /api/chat/ticket — the credential an EventSource can carry.
+  //
+  // See SSETickets.h: the stream cannot send an Authorization header, so the
+  // client trades its real token for a short-lived, single-purpose one here.
+  // Joining `#main` happens on the same call because §3.1 makes it
+  // default-joined, and a client that has just asked for a stream is exactly
+  // the client that wants it.
+  net.AddHttpPost(
+      "/api/chat/ticket", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string ticket = HttpAuth::GenerateToken();
+        gChatTickets.Mint(ticket, userId, static_cast<int64_t>(std::time(nullptr)));
+        gChatChannels.Join(userId, Chat::MainTarget());
+        nlohmann::json j;
+        j["ticket"] = ticket;
+        j["ttl"] = kSSETicketTtlSec;
+        j["stream"] = "/api/chat/stream?ticket=" + ticket;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/send — { scope, target, text }
+  net.AddHttpPost(
+      "/api/chat/send", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string scopeWord = HttpAuth::JsonField(body, "scope");
+        const std::string rawTarget = HttpAuth::JsonField(body, "target");
+        const std::string rawText = HttpAuth::JsonField(body, "text");
+
+        std::string text, err;
+        if (!Chat::ValidateText(rawText, text, err))
+          return HttpAuth::JsonResponse(400, "{\"error\":\"" + err + "\"}");
+
+        ChatResolution res;
+        if (auto bad = resolveChatScope(userId, scopeWord, rawTarget, res))
+          return *bad;
+
+        // Flood control runs AFTER the scope check so a refused scope is not
+        // also charged a token — the budget is for what you said, not for
+        // what you got wrong.
+        const double nowSec =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        switch (gChatFlood.Check(userId, nowSec)) {
+          case ChatSendVerdict::Dropped:
+            return HttpAuth::JsonResponse(
+                429, R"({"error":"slow down","dropped":true})");
+          case ChatSendVerdict::Muted: {
+            nlohmann::json m;
+            m["error"] = "muted for flooding";
+            m["muted"] = true;
+            m["seconds"] = kChatMuteSec;
+            return HttpAuth::JsonResponse(429, m.dump());
+          }
+          case ChatSendVerdict::Allow:
+            break;
+        }
+
+        auto self = db.FindUserById(userId);
+        const std::string fromName = self ? self->username : std::string("player");
+        const int64_t ts = static_cast<int64_t>(std::time(nullptr));
+        const int64_t id = Chat::Append(mapDb, res.scope, res.target, userId,
+                                        fromName, text, ts);
+        if (id == 0)
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store message"})");
+
+        // Ignore is applied to the DELIVERY list, not to the store: the line
+        // was said, it belongs in the room's record, and the people who chose
+        // not to hear it simply do not get the frame (History applies the
+        // same filter to the backfill).
+        const auto deliver = Chat::FilterIgnored(mapDb, userId, res.recipients);
+        nlohmann::json ev;
+        ev["id"] = id;
+        ev["scope"] = ChatScopeToString(res.scope);
+        ev["target"] = res.target;
+        ev["from"] = fromName;
+        ev["fromId"] = userId;
+        ev["text"] = text;
+        ev["ts"] = ts;
+        net.SendSSETo(chatStreamChannel, deliver, ev.dump(), "chat");
+
+        nlohmann::json j;
+        j["ok"] = true;
+        j["id"] = id;
+        j["scope"] = ChatScopeToString(res.scope);
+        j["target"] = res.target;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/history — { scope, target, before, limit }
+  //
+  // §3.3's "backfills the UI on join — solves the classic 'empty channel on
+  // connect' annoyance". Newest-first; `before` is a message id, so a page
+  // stays stable while people keep talking.
+  net.AddHttpPost(
+      "/api/chat/history", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        int64_t before = 0;
+        int limit = 50;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object()) {
+            before = j.value("before", (int64_t)0);
+            limit = j.value("limit", 50);
+          }
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+
+        ChatResolution res;
+        if (auto bad = resolveChatScope(userId, HttpAuth::JsonField(body, "scope"),
+                                        HttpAuth::JsonField(body, "target"), res))
+          return *bad;
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto &m :
+             Chat::History(mapDb, res.scope, res.target, userId, before, limit)) {
+          nlohmann::json mj;
+          mj["id"] = m.id;
+          mj["from"] = m.fromName;
+          mj["fromId"] = m.fromId;
+          mj["text"] = m.text;
+          mj["ts"] = m.ts;
+          if (m.system)
+            mj["system"] = true;
+          out.push_back(std::move(mj));
+        }
+        nlohmann::json j;
+        j["scope"] = ChatScopeToString(res.scope);
+        j["target"] = res.target;
+        j["messages"] = std::move(out);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/ignore — { username, on }
+  net.AddHttpPost(
+      "/api/chat/ignore", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string name = HttpAuth::JsonField(body, "username");
+        if (name.empty()) {
+          // No target named: answer with the list. One route, because "who do
+          // I ignore" and "ignore this person" are the same object.
+          nlohmann::json out = nlohmann::json::array();
+          for (int64_t id : Chat::IgnoreList(mapDb, userId)) {
+            nlohmann::json ij;
+            ij["account_id"] = id;
+            if (auto u = db.FindUserById(id))
+              ij["username"] = u->username;
+            out.push_back(std::move(ij));
+          }
+          return HttpAuth::JsonResponse(200, out.dump());
+        }
+        auto target = db.FindUser(name);
+        if (!target)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        bool on = true;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object())
+            on = j.value("on", true);
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+        if (!Chat::SetIgnore(mapDb, userId, target->id, on))
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot ignore that account"})");
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = target->username;
+        j["ignored"] = on;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/channel — { channel, join } — join/leave a named channel.
+  //
+  // Membership is process-local (ChatChannels): being in `#help` is a
+  // property of a connected client, not of an account.
+  net.AddHttpPost(
+      "/api/chat/channel", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string name =
+            Chat::NormalizeChannel(HttpAuth::JsonField(body, "channel"));
+        if (name.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad channel name"})");
+        bool join = true;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object())
+            join = j.value("join", true);
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+        // `#main` is default-joined and cannot be left: §3.1 makes it the
+        // scope everyone online is in, and a client that could leave it would
+        // silently stop hearing the one channel an admin broadcast reaches.
+        if (name == Chat::MainTarget() && !join)
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot leave #main"})");
+        if (join)
+          gChatChannels.Join(userId, name);
+        else
+          gChatChannels.Leave(userId, name);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["channel"] = name;
+        j["joined"] = join;
+        j["channels"] = gChatChannels.ChannelsFor(userId);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
   // POST /api/rooms/join — join a room
   net.AddHttpPost(
       "/api/rooms/join", RouteAuth::TokenRequired,
@@ -6143,6 +6494,15 @@ int main(int argc, char *argv[]) {
       const int edges = Friends::PruneOrphans(maintenanceDb.Handle());
       if (edges > 0)
         SLOG(SPRING_LOG_INFO, "swept %d orphaned friend edge(s)", edges);
+
+      // Task 9b: §3.3's retention. `#main` is a ring buffer, named channels
+      // keep a month, and room channels are reaped by DeleteRoomFromDb — what
+      // this catches there is rows whose room went away without one (a lobby
+      // killed mid-room). PMs are kept; see Chat::Prune.
+      const int chat = Chat::Prune(maintenanceDb.Handle(),
+                                   static_cast<int64_t>(std::time(nullptr)));
+      if (chat > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d chat message(s) past retention", chat);
     }
 
     // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).

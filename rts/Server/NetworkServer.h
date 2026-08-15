@@ -129,10 +129,48 @@ public:
     /// Must be called before Start().
     uint32_t AddSSE(const std::string& pattern);
 
+    /// Register an SSE endpoint whose subscribers are IDENTIFIED — every
+    /// connection to it is resolved to an account id before the stream opens,
+    /// and an unresolved one is refused with 401 instead of being admitted
+    /// anonymously. Must be called before Start(), and requires
+    /// SetSSESubscriberResolver().
+    ///
+    /// **Why this exists** (PLAN-lobby.md §3, task 9b): an anonymous
+    /// broadcast channel cannot carry chat. A PM has two recipients and an
+    /// ignore list is "filtered server-side on delivery" — both are
+    /// statements about WHICH subscriber gets a frame, and a channel whose
+    /// subscribers have no identity can only answer "all of them". Filtering
+    /// in the client would put every private message on every machine and
+    /// call it privacy.
+    ///
+    /// **Why a resolver over the query string and not the Authorization
+    /// header:** an SSE stream is opened by `EventSource`, which cannot set
+    /// headers — the same limitation that already forces /api/friends/list to
+    /// be a POST. The credential therefore has to travel in the URL, so it
+    /// must not BE the session token (URLs reach access logs, `Referer` and
+    /// browser history); the lobby mints a short-lived, single-purpose stream
+    /// ticket instead. This class does not know that — it is handed the raw
+    /// query string and hands back whatever the owner resolves it to.
+    uint32_t AddIdentifiedSSE(const std::string& pattern);
+
+    /// Map an SSE request's raw query string to an account id (0 = refuse).
+    /// Called on the network thread, so it must be thread-safe.
+    void SetSSESubscriberResolver(std::function<int64_t(const std::string& query)> fn);
+
     /// Push an SSE event to all connected subscribers of a channel.
     /// Thread-safe: can be called from any thread.
     void SendSSE(uint32_t channelId, const std::string& data,
                  const std::string& event = "");
+
+    /// Push an SSE event to the named subscribers only. Every other
+    /// subscriber of the channel — including one with no identity — receives
+    /// nothing. An empty recipient list delivers to nobody (NOT to everybody:
+    /// a fan-out that resolved to zero recipients is a message with no
+    /// audience, and the one thing it must never do is degrade into a
+    /// broadcast).
+    /// Thread-safe: can be called from any thread.
+    void SendSSETo(uint32_t channelId, const std::vector<int64_t>& recipients,
+                   const std::string& data, const std::string& event = "");
 
     /// Wire the callbacks DispatchPost uses to enforce TokenRequired/AdminOnly/
     /// LocalhostOrAdmin. Must be called before Start() if any registered POST

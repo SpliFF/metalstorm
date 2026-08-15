@@ -446,6 +446,11 @@ set(LOBBY_SERVER_SOURCES
     # unlike the bindings above, the game server neither reads nor writes it,
     # so it is deliberately not in the shared set.
     rts/Server/Friends.cpp
+    # PLAN-lobby.md §3 task 9b: the chat service. In the SHARED set rather
+    # than the lobby's own, unlike Friends above, because RoomManager.cpp
+    # calls Chat::DeleteRoom — a room's channels die with the room, and the
+    # room-deletion chokepoint is linked into both binaries.
+    rts/Server/Chat.cpp
     # PLAN-metalstorm-lobby.md task 8a: rotating refresh tokens + per-war
     # reconnect tokens. The LOBBY mints both and the GAME server validates the
     # war half, so it belongs to the shared server sources, not to either one.
@@ -586,6 +591,9 @@ if(TEST_SOURCES)
         # task 9a — test_friends.cpp drives the real store against an
         # in-memory db, and the two policy headers beside it are pure.
         ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp
+        # task 9b — test_chat.cpp drives the real store the same way, and
+        # RoomManager.cpp above needs Chat::DeleteRoom to link at all.
+        ${CMAKE_SOURCE_DIR}/rts/Server/Chat.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Totp.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GuestAccounts.cpp

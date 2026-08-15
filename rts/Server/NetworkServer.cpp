@@ -204,6 +204,10 @@ struct H2StreamData {
     // SSE stream (kept open, not EOF)
     bool isSSE = false;
     uint32_t sseChannelId = UINT32_MAX;
+    /// Account this stream belongs to on an identified channel, 0 on an
+    /// anonymous one. Resolved once when the stream opens — a subscriber
+    /// cannot change who it is without reconnecting.
+    int64_t sseSubscriber = 0;
     std::vector<std::string> sseQueue;
 };
 
@@ -237,6 +241,7 @@ struct ServerConn {
     // SSE over HTTP/1.1
     bool h1IsSSE = false;
     uint32_t h1SSEChannelId = UINT32_MAX;
+    int64_t h1SSESubscriber = 0;  // see H2StreamData::sseSubscriber
 
     // ── HTTP/2 state ──
     nghttp2_session* h2session = nullptr;
@@ -267,12 +272,27 @@ struct NetworkServer::Impl {
     const RouteAuthCallbacks* authCallbacks = nullptr;
 
     // SSE channels
-    struct SSEChannel { std::string pattern; };
+    struct SSEChannel { std::string pattern; bool identified = false; };
     std::vector<SSEChannel> sseChannels;
+    /// Query string → account id for identified channels. Owned by the
+    /// server that registered them; called on the network thread.
+    std::function<int64_t(const std::string&)> sseSubscriberResolver;
 
     // Thread-safe SSE event queue
     std::mutex sseMutex;
-    struct SSEEvent { uint32_t channelId; std::string data; std::string event; };
+    struct SSEEvent {
+        uint32_t channelId;
+        std::string data;
+        std::string event;
+        /// Empty AND `targeted == false` means broadcast. The flag is
+        /// separate from emptiness on purpose: a targeted send whose
+        /// recipient list came back empty (everyone ignored the sender,
+        /// nobody in the room is connected) must deliver to nobody, and
+        /// "empty means everyone" would turn exactly that case into a
+        /// broadcast of a private message.
+        std::vector<int64_t> recipients;
+        bool targeted = false;
+    };
     std::vector<SSEEvent> sseQueue;
 
     // ── Route dispatch ──
@@ -376,6 +396,21 @@ struct NetworkServer::Impl {
         return -1;
     }
 
+    /// Who is opening this SSE stream. Anonymous channels resolve to 0 and
+    /// are admitted; an identified channel with no resolver, or one whose
+    /// resolver refuses the query, returns 0 and the caller must refuse the
+    /// connection — never open it anonymously, or a stream that failed
+    /// authentication would silently receive every broadcast on the channel.
+    int64_t ResolveSSESubscriber(int channelId, const std::string& url) {
+        if (channelId < 0 || (size_t)channelId >= sseChannels.size()) return 0;
+        if (!sseChannels[channelId].identified) return 0;
+        if (!sseSubscriberResolver) return 0;
+        const auto qpos = url.find('?');
+        const std::string query =
+            (qpos != std::string::npos) ? url.substr(qpos + 1) : "";
+        return sseSubscriberResolver(query);
+    }
+
     // ── HTTP/1.1 helpers ──
 
     void H1WriteResponse(ServerConn& c, const HttpResponse& resp, bool omitBody = false) {
@@ -444,17 +479,32 @@ struct NetworkServer::Impl {
             // Check SSE first (HEAD on an SSE endpoint is meaningless;
             // fall through to a regular GET dispatch + body suppression).
             const bool isHead = (c.h1Method == "HEAD");
+            bool wasSSE = false;
             if (!isHead) {
                 int sseId = MatchSSEChannel(c.h1Path);
                 if (sseId >= 0) {
-                    c.h1IsSSE = true;
-                    c.h1SSEChannelId = (uint32_t)sseId;
-                    H1WriteSSEHeaders(c);
-                    return;  // Don't reset — keep connection open for SSE
+                    wasSSE = true;
+                    const bool identified = sseChannels[sseId].identified;
+                    const int64_t subscriber = ResolveSSESubscriber(sseId, c.h1Path);
+                    if (identified && subscriber <= 0) {
+                        // Refused. The connection stays an ordinary keep-alive
+                        // one and is NOT marked as a subscriber — an
+                        // identified channel that admitted an unresolved
+                        // stream would deliver its broadcasts to it.
+                        H1WriteResponse(c, JsonError(401, "unauthorized"));
+                    } else {
+                        c.h1IsSSE = true;
+                        c.h1SSEChannelId = (uint32_t)sseId;
+                        c.h1SSESubscriber = subscriber;
+                        H1WriteSSEHeaders(c);
+                        return;  // Don't reset — keep connection open for SSE
+                    }
                 }
             }
-            auto resp = DispatchGet(c.h1Path, c.remoteIsLoopback);
-            H1WriteResponse(c, resp, /*omitBody=*/isHead);
+            if (!wasSSE) {
+                auto resp = DispatchGet(c.h1Path, c.remoteIsLoopback);
+                H1WriteResponse(c, resp, /*omitBody=*/isHead);
+            }
         } else if (c.h1Method == "POST") {
             auto resp = DispatchPost(c.h1Path, c.h1ReadBuf.substr(
                 c.h1ReadBuf.find("\r\n\r\n") + 4, c.h1ContentLength), c.h1Headers);
@@ -687,8 +737,15 @@ struct NetworkServer::Impl {
             if (!isHead) {
                 int sseId = MatchSSEChannel(stream.path);
                 if (sseId >= 0) {
+                    const bool identified = sseChannels[sseId].identified;
+                    const int64_t subscriber = ResolveSSESubscriber(sseId, stream.path);
+                    if (identified && subscriber <= 0) {
+                        H2SubmitResponse(conn, stream, JsonError(401, "unauthorized"));
+                        return;
+                    }
                     stream.isSSE = true;
                     stream.sseChannelId = (uint32_t)sseId;
+                    stream.sseSubscriber = subscriber;
                     H2SubmitSSEHeaders(conn, stream);
                     return;
                 }
@@ -917,20 +974,32 @@ struct NetworkServer::Impl {
             frame += ev.data;
             frame += "\n\n";
 
+            // A targeted event reaches only the named subscribers. Anonymous
+            // streams (subscriber 0) are never named, so they receive nothing
+            // — which is what makes an anonymous channel unusable for
+            // targeted sends rather than quietly leaky.
+            auto wanted = [&ev](int64_t subscriber) {
+                if (!ev.targeted) return true;
+                return std::find(ev.recipients.begin(), ev.recipients.end(),
+                                 subscriber) != ev.recipients.end();
+            };
+
             // Send to all matching subscribers
             for (auto& [fd, conn] : connections) {
                 if (!conn) continue;
 
                 // HTTP/1.1 SSE subscriber
                 if (conn->protocol == ServerConn::HTTP1 && conn->h1IsSSE &&
-                    conn->h1SSEChannelId == ev.channelId) {
+                    conn->h1SSEChannelId == ev.channelId &&
+                    wanted(conn->h1SSESubscriber)) {
                     conn->writeBuf += frame;
                 }
 
                 // HTTP/2 SSE streams
                 if (conn->protocol == ServerConn::HTTP2) {
                     for (auto& [sid, stream] : conn->h2streams) {
-                        if (stream.isSSE && stream.sseChannelId == ev.channelId) {
+                        if (stream.isSSE && stream.sseChannelId == ev.channelId &&
+                            wanted(stream.sseSubscriber)) {
                             stream.sseQueue.push_back(frame);
                             nghttp2_session_resume_data(conn->h2session, sid);
                         }
@@ -992,15 +1061,36 @@ HttpResponse NetworkServer::SafeInvokeForTest(const std::string& path,
 
 uint32_t NetworkServer::AddSSE(const std::string& pattern) {
     uint32_t id = (uint32_t)impl->sseChannels.size();
-    impl->sseChannels.push_back({pattern});
+    impl->sseChannels.push_back({pattern, /*identified=*/false});
     return id;
+}
+
+uint32_t NetworkServer::AddIdentifiedSSE(const std::string& pattern) {
+    uint32_t id = (uint32_t)impl->sseChannels.size();
+    impl->sseChannels.push_back({pattern, /*identified=*/true});
+    return id;
+}
+
+void NetworkServer::SetSSESubscriberResolver(
+        std::function<int64_t(const std::string& query)> fn) {
+    impl->sseSubscriberResolver = std::move(fn);
 }
 
 void NetworkServer::SendSSE(uint32_t channelId, const std::string& data,
                              const std::string& event) {
     {
         std::lock_guard<std::mutex> lock(impl->sseMutex);
-        impl->sseQueue.push_back({channelId, data, event});
+        impl->sseQueue.push_back({channelId, data, event, {}, /*targeted=*/false});
+    }
+    impl->WakeEventLoop();
+}
+
+void NetworkServer::SendSSETo(uint32_t channelId,
+                              const std::vector<int64_t>& recipients,
+                              const std::string& data, const std::string& event) {
+    {
+        std::lock_guard<std::mutex> lock(impl->sseMutex);
+        impl->sseQueue.push_back({channelId, data, event, recipients, /*targeted=*/true});
     }
     impl->WakeEventLoop();
 }
