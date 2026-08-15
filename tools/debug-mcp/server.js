@@ -22,6 +22,10 @@ import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { classifyEndResponse } from './room-end.js';
 import {
+    classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
+    probeSqliteAnnotations, dbDivergenceWarning,
+} from './sqlite-health.js';
+import {
     STACK_PATTERNS, STACK_PORTS, STATUS_STALE_SEC,
     parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries, classifyStack,
     planCleanup, summarize, isStackPort, CLEANABLE_KINDS,
@@ -48,6 +52,30 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
 // browser URL with this widget disabled unless `testStartupSelector` is set.
 const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
 const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+
+// --- SQLite boot self-check (FU2) ---
+//
+// better-sqlite3 loads its native binding lazily, in the Database constructor,
+// so a NODE_MODULE_VERSION mismatch does NOT fail the import above — it fails
+// every `new Database(...)`, which the per-tool try/catches used to swallow as
+// "no rows" (empty process lists, gameStatus {available:false}, probe_game
+// stuck at 'spawning'). Probe ONCE at boot and fail loudly instead. A missing
+// DB file is deliberately NOT this condition (fileMustExist:true throws a
+// plain SqliteError, which classifyBindingError rejects) and keeps its
+// existing per-tool handling.
+let sqliteUnavailable = null; // the reason string, or null when SQLite works
+try {
+    const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    db.close();
+} catch (err) {
+    const mismatch = classifyBindingError(err);
+    if (mismatch) {
+        const info = { ...mismatch, nodeVersion: process.version };
+        sqliteUnavailable = bindingMismatchReason(info);
+        // ONE line, on stderr — stdout is the MCP protocol channel.
+        console.error(bindingMismatchBanner(info));
+    }
+}
 
 /** Repo root for the tools with direct fs access (defs cache, scenarios). */
 const projectRoot = () => process.env.PROJECT_ROOT || resolve('.');
@@ -170,26 +198,36 @@ async function authedFetch(makeReq) {
 // /api/processes; the game_servers SQLite table only holds entries when
 // a lobby restart has staged hand-off info. Query the lobby first and
 // fall back to SQLite for offline/post-mortem use.
-async function getGameServers() {
+// getGameServersWithSource additionally names which source answered:
+// probeGame's SPRING_DB-divergence warning only makes sense when the LOBBY
+// (not the SQLite fallback) vouched for the process row.
+async function getGameServersWithSource() {
     try {
         const resp = await fetch(`${LOBBY_URL}/api/processes`);
         if (resp.ok) {
             const rows = await resp.json();
             // Normalise to the SQLite shape so callers don't care.
-            return rows.map(r => ({
-                room_id: r.room_id, port: r.port, pid: r.pid,
-                map_id: r.map, game_id: r.game, state: r.state,
-            }));
+            return {
+                source: 'lobby',
+                rows: rows.map(r => ({
+                    room_id: r.room_id, port: r.port, pid: r.pid,
+                    map_id: r.map, game_id: r.game, state: r.state,
+                })),
+            };
         }
     } catch { /* fall through */ }
     try {
         const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
         const rows = db.prepare('SELECT room_id, port, pid, map_id, game_id, state FROM game_servers').all();
         db.close();
-        return rows;
+        return { source: 'sqlite', rows };
     } catch {
-        return [];
+        return { source: 'none', rows: [] };
     }
+}
+
+async function getGameServers() {
+    return (await getGameServersWithSource()).rows;
 }
 
 async function getGameServerUrl(roomId) {
@@ -233,7 +271,7 @@ function probeResult(phase, fields) {
 }
 
 async function probeGame(roomId) {
-    const servers = await getGameServers();
+    const { source, rows: servers } = await getGameServersWithSource();
     const row = servers.find(s => s.room_id === roomId);
     if (!row) {
         return probeResult('dead', { roomId, detail: `no process row for room ${roomId}` });
@@ -247,19 +285,35 @@ async function probeGame(roomId) {
 
     // Readonly, opened and closed per probe: a cached handle would hold a WAL
     // snapshot and read ever-staler heartbeats.
-    let st = null;
+    let st = null, sqliteOpened = false;
     try {
         const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
         try {
             st = db.prepare(
                 'SELECT ready, client_count, pid, port, updated_at FROM game_status WHERE room_id = ?',
             ).get(roomId) ?? null;
+            sqliteOpened = true;
         } finally { db.close(); }
-    } catch { /* no DB / no table yet → treat as no status row */ }
+    } catch { /* no DB / no table yet → treat as no status row; a broken
+                 native binding was already flagged at boot (sqliteUnavailable) */ }
 
-    const base = { roomId, pid: row.pid, port: st?.port || row.port };
+    // The two ways this read can lie, made loud (sqlite-health.js): a broken
+    // native binding → sqliteUnavailable rides every result; the lobby vouching
+    // for a process that has no game_status row while SQLite reads fine →
+    // the SPRING_DB-divergence `warning`. Neither changes the phase.
+    const health = probeSqliteAnnotations({
+        processSource: source, bindingReason: sqliteUnavailable,
+        sqliteOpened, statusRow: st, port: row.port,
+    });
+
+    const base = { roomId, pid: row.pid, port: st?.port || row.port, ...health };
     if (!st) {
-        return probeResult('spawning', { ...base, detail: 'process up, no game_status row yet' });
+        return probeResult('spawning', {
+            ...base,
+            detail: sqliteUnavailable
+                ? 'process up; game_status unreadable (see sqliteUnavailable)'
+                : 'process up, no game_status row yet',
+        });
     }
     if (st.pid !== row.pid) {
         // A corpse's row describing a *new* incarnation of the same room.
@@ -874,7 +928,12 @@ function readGameStatusRows() {
             };
         } finally { db.close(); }
     } catch {
-        return { available: false, rows: [] };
+        // `available:false` is honest for a missing file; a broken native
+        // binding additionally names itself so the caller can't read this
+        // as "no games have published status yet".
+        return sqliteUnavailable
+            ? { available: false, rows: [], sqliteUnavailable }
+            : { available: false, rows: [] };
     }
 }
 
@@ -1847,10 +1906,16 @@ async function executeTool(name, args) {
         }
 
         case 'list_processes': {
-            const servers = await getGameServers();
+            const { source, rows: servers } = await getGameServersWithSource();
             // Kept as prose: callers (and skill docs) read this exact string as
-            // "nothing is running", and JSON `{count:0}` would break them.
-            if (!servers.length) return 'No game server processes found.';
+            // "nothing is running", and JSON `{count:0}` would break them. With
+            // the binding broken the SQLite fallback can't be consulted, so an
+            // empty list is NOT proof of nothing running — say so.
+            if (!servers.length) {
+                return sqliteUnavailable
+                    ? `No game server processes found. sqliteUnavailable: ${sqliteUnavailable}`
+                    : 'No game server processes found.';
+            }
 
             const status = readGameStatusRows();
             const byRoom = new Map(status.rows.map(r => [r.room_id, r]));
@@ -1858,7 +1923,7 @@ async function executeTool(name, args) {
             const ids = await Promise.allSettled(
                 servers.map(s => (s.port ? fetchIdentity(s.port) : Promise.resolve(null))),
             );
-            return JSON.stringify({
+            const out = {
                 servers: servers.map((s, i) => {
                     const st = byRoom.get(s.room_id);
                     return {
@@ -1872,23 +1937,48 @@ async function executeTool(name, args) {
                     };
                 }),
                 count: servers.length,
-            }, null, 2);
+            };
+            // Loud-failure annotations (sqlite-health.js): the `null` status
+            // fields above must never read as "no heartbeat published".
+            if (sqliteUnavailable) out.sqliteUnavailable = sqliteUnavailable;
+            // pid > 0: a hibernated room's pid-0 row is not a running server
+            // (and pidAlive(0) would signal our own process group).
+            const missing = (source === 'lobby' && status.available)
+                ? servers.filter(s => s.pid > 0 && pidAlive(s.pid) && !byRoom.has(s.room_id))
+                : [];
+            if (missing.length) out.warning = dbDivergenceWarning(missing[0].port);
+            return JSON.stringify(out, null, 2);
         }
 
         case 'list_stack': {
             const { census, findings } = await collectStackFindings({ probeHashes: !!args.probeHashes });
-            return JSON.stringify({
+            const out = {
                 findings,
                 processes: census.processes,
                 ports: census.ports.available
                     ? census.ports.listeners.filter(l => isStackPort(l.port))
                     : { available: false },
                 authority: { source: census.authority.source, rows: census.authority.rows },
-                gameStatus: census.gameStatus.available ? census.gameStatus.rows : { available: false },
+                gameStatus: census.gameStatus.available
+                    ? census.gameStatus.rows
+                    // readGameStatusRows names a broken native binding; keep it.
+                    : { available: false, ...(census.gameStatus.sqliteUnavailable
+                        ? { sqliteUnavailable: census.gameStatus.sqliteUnavailable } : {}) },
                 binaries: census.binaries,
                 mprocs: mprocsStatus(census.ports.listeners || []),
                 summary: summarize(findings),
-            }, null, 2);
+            };
+            if (sqliteUnavailable) out.sqliteUnavailable = sqliteUnavailable;
+            // SPRING_DB-divergence signature (sqlite-health.js): the lobby is
+            // the authority for a live server the game_status table has never
+            // heard of. pid > 0 skips hibernated rows.
+            if (census.authority.source === 'lobby' && census.gameStatus.available) {
+                const known = new Set(census.gameStatus.rows.map(r => r.room_id));
+                const missing = census.authority.rows.filter(r =>
+                    r.pid > 0 && pidAlive(r.pid) && !known.has(r.room_id));
+                if (missing.length) out.warning = dbDivergenceWarning(missing[0].port);
+            }
+            return JSON.stringify(out, null, 2);
         }
 
         case 'cleanup_stack': {
@@ -1952,6 +2042,7 @@ async function executeTool(name, args) {
             // a parser-level test, unlike the old prefix blacklist which let
             // `WITH t AS (…) INSERT …`, a leading comment, or `REPLACE INTO`
             // straight through. The readonly handle stays as defence in depth.
+            if (sqliteUnavailable) return `Error: sqliteUnavailable: ${sqliteUnavailable}`;
             try {
                 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
                 try {
@@ -2384,6 +2475,10 @@ async function executeTool(name, args) {
                         : `WARNING: game server was still in phase '${probe.phase}' after 120s (${probe.detail}) — still warming or wedged. See lastLogs / probe_game.`,
                 browserUrl,
             };
+            // Loud-failure annotations from the probe (sqlite-health.js) —
+            // a phase stuck at 'spawning' must carry its reason to the caller.
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) out.warning = probe.warning;
             if (!ready) {
                 const tail = await roomLogTail(targetRoomId);
                 out.lastLogs = tail.lines;
@@ -2506,6 +2601,9 @@ async function executeTool(name, args) {
                 frame: probe.frame,
                 notes,
             };
+            // Loud-failure annotations from the probe (sqlite-health.js).
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) notes.push(probe.warning);
             if (probe.phase === 'dead' || timedOut) {
                 const tail = await roomLogTail(roomId);
                 out.lastLogs = tail.lines;
@@ -2576,6 +2674,9 @@ async function executeTool(name, args) {
                 frame: probe.frame,
                 notes,
             };
+            // Loud-failure annotations from the probe (sqlite-health.js).
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) notes.push(probe.warning);
             if (probe.phase === 'dead' || probe.timedOut) {
                 const tail = await roomLogTail(roomId);
                 out.lastLogs = tail.lines;
