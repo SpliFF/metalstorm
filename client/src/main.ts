@@ -1353,9 +1353,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // canvas.width/height, i.e. CSS px × effectiveDpr(), not CSS px — so
             // this also divides by the same scale factor main.ts used to size the
             // canvas before flipping to DOM (CSS-px, top-down) space. The legacy
-            // lua-widget-manager.applyMinimapGeometry this replaces skipped that
-            // conversion (pre-GW4 the canvas may have been unscaled 1:1); ported
-            // forward correctly rather than reproducing that gap.
+            // legacy applyMinimapGeometry this replaces (lua-widget-manager,
+            // deleted post-GW4) skipped that conversion (pre-GW4 the canvas may
+            // have been unscaled 1:1); ported forward correctly rather than
+            // reproducing that gap.
             case 'minimapGeometry': {
                 if (minimap) {
                     const visible = m.visible !== false && m.w > 0 && m.h > 0;
@@ -1399,8 +1400,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // path (NormalizeSoundPath = `sounds/<name>`), which omits the
             // `sounds/<subdir>/` component — so every sound that lives in a
             // subdirectory (weapons/, bombs/, …) 404s. In the GW4 worker
-            // architecture this message lands here, not on the legacy
-            // LuaWidgetManager; mirror its handler (lua-widget-manager.ts).
+            // architecture this message lands here (the legacy LuaWidgetManager
+            // handler it mirrors was deleted post-GW4).
             case 'soundItems': {
                 const items = m.items as Record<string, import('./core/audio.js').SoundItem>;
                 const map = new Map<string, import('./core/audio.js').SoundItem>();
@@ -1578,9 +1579,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 animatedCursor?.setActive(m.name || null);
                 break;
             // GW4-c5b-3 / WP3b: all worker→main storage writes arrive here.
-            // Mirrors lua-widget-manager.ts:1228–1241 exactly so both paths
-            // (GW4 game-processor worker and legacy LuaWidgetManager) behave
-            // identically. springConfig.* writes are also mirrored into
+            // Mirrors the legacy LuaWidgetManager storage handler (deleted
+            // post-GW4) so both historical paths behaved identically.
+            // springConfig.* writes are also mirrored into
             // clientSettings so live subscribers (shadow quality, etc.) apply
             // the change immediately.
             case 'storage:set':
