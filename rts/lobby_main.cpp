@@ -2388,7 +2388,8 @@ int main(int argc, char *argv[]) {
       });
 
   // POST /api/admin/drain {timeout_ms, escalate} — the deploy drain
-  // (PLAN-persistence task 3c).
+  // (PLAN-persistence task 3c). The SINGLE-room specialization of everything
+  // below is POST /api/admin/rooms/end, registered right after this handler.
   //
   // SIGTERM every game server this lobby owns, wait for each to checkpoint and
   // exit, and report which worlds survived. This is the operator's step BEFORE
@@ -2581,6 +2582,163 @@ int main(int argc, char *argv[]) {
         out["engine_hash"] = gameServerEngineHash();
         out["summary"] = headline;
         out["detail"] = detail;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/rooms/end {roomId, timeout_ms, escalate} — /api/admin/drain
+  // specialized to ONE room: SIGTERM its game server, wait for the exit
+  // checkpoint, verify it against the snapshot store, report. An operator /
+  // test-harness verb (AdminOnly), deliberately NOT a revival of the removed
+  // player-facing /api/rooms/end — see the design note beside the room routes:
+  // player room lifecycle stays leave-driven.
+  //
+  // TWO THINGS THIS HANDLER DELIBERATELY DOES NOT DO (drain's rules, verbatim):
+  //   * it does not touch room state, `gameServers` or `game_servers`. The
+  //     hibernated/crashed classification and the recycle-or-hold decision are
+  //     the health loop's, and this lane has twice paid for a second copy of a
+  //     policy. Consequence for callers: the room does NOT read "ended" in this
+  //     response — the lobby flips it asynchronously, a fraction of a second
+  //     later, exactly as it does for an idle hibernation.
+  //   * it does not hold shared state across the wait. The target is snapshotted
+  //     into locals in one pass (gameId and mapId copied too, so nothing is
+  //     re-read afterwards) and the wait polls a local pid only — the health
+  //     loop runs on the main thread and erases from `gameServers`, so a handler
+  //     holding an iterator across a ten-second sleep would be a use-after-erase
+  //     rather than mere contention.
+  //
+  // Synchronous like drain, and blocking for the same accepted reason — but
+  // capped at 30 s rather than 120 s: this is a routine per-test teardown that
+  // must never wedge the lobby's HTTP thread for minutes, not a once-per-deploy
+  // wall.
+  net.AddHttpPost(
+      "/api/admin/rooms/end", RouteAuth::AdminOnly,
+      [mapDb, &db, &rooms, &gameServers,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.contains("roomId") ||
+            !j["roomId"].is_number_integer() ||
+            j["roomId"].get<int64_t>() <= 0)
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"roomId (positive integer) is required"})");
+        const uint32_t roomId = static_cast<uint32_t>(j["roomId"].get<int64_t>());
+        int timeoutMs = j.value("timeout_ms", 10000);
+        if (timeoutMs < 100)
+          timeoutMs = 100;
+        if (timeoutMs > 30000)
+          timeoutMs = 30000;
+        const bool escalate = j.value("escalate", true);
+
+        // ---- one pass over the shared state, then nothing but locals ----
+        deploydrain::DrainTarget target;
+        warresume::SnapshotFacts before;
+        std::string gameId, mapHash;
+        bool known = false;
+        {
+          auto gsIt = gameServers.find(roomId);
+          if (gsIt != gameServers.end()) {
+            known = true;
+            target.roomId = roomId;
+            target.pid = gsIt->second.pid;
+            target.alive = target.pid > 0 && isProcessAlive(target.pid);
+            target.isReplay = gReplayRooms.count(roomId) > 0;
+          }
+          if (const auto *room = rooms.GetRoom(roomId)) {
+            known = true;
+            target.roomId = roomId;
+            target.kind = room->sessionKind;
+            gameId = room->gameId;
+            // Drain's spelling (`BinaryIdentity.mapHash = room->mapId`): if it
+            // is wrong it is wrong in one shared place, not two disagreeing
+            // ones.
+            mapHash = room->mapId;
+            if (target.kind == SessionKind::PersistentWar)
+              before = warresume::LatestSnapshot(mapDb, gameId, roomId);
+          }
+        }
+        // A room the lobby never heard of is a 404; a KNOWN room whose process
+        // is already gone is a truthful 200 with outcome "not_running" — the
+        // caller wanted it stopped and it is.
+        if (!known)
+          return HttpAuth::JsonResponse(404, R"({"error":"unknown roomId"})");
+
+        bool exited = false, escalated = false;
+        int64_t waitedMs = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto elapsedMs = [&t0]() -> int64_t {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - t0)
+              .count();
+        };
+
+        if (deploydrain::DecideDrainAction(target) ==
+            deploydrain::DrainAction::Signal) {
+          kill(target.pid, SIGTERM);
+          SLOG(SPRING_LOG_NOTICE,
+               "rooms/end: '%s' SIGTERM pid=%d room=%u, waiting up to %d ms",
+               uname.c_str(), target.pid, roomId, timeoutMs);
+          while (elapsedMs() < timeoutMs && isProcessAlive(target.pid))
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          exited = !isProcessAlive(target.pid);
+          waitedMs = elapsedMs();
+          if (!exited && escalate) {
+            kill(target.pid, SIGKILL);
+            escalated = true;
+            // A SIGKILLed pid goes away promptly, but not instantly, and the
+            // outcome must not depend on how fast this loop got back to it.
+            for (int i = 0; i < 20 && isProcessAlive(target.pid); ++i)
+              std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            exited = !isProcessAlive(target.pid);
+            waitedMs = elapsedMs();
+          }
+        }
+
+        // The store is read AFTER the exit: a checkpoint is committed by the
+        // dying process, so a read taken any earlier proves nothing.
+        warresume::SnapshotFacts after;
+        if (target.kind == SessionKind::PersistentWar && !gameId.empty())
+          after = warresume::LatestSnapshot(mapDb, gameId, roomId);
+        auto r = deploydrain::BuildResult(target, exited, escalated, waitedMs,
+                                          before, after);
+        // "Resumable until the rebuild" — eligibility under the CURRENT binary.
+        warresume::BinaryIdentity cur;
+        cur.engineHash = gameServerEngineHash();
+        cur.mapHash = mapHash;
+        r.eligibility =
+            warresume::DecideResumeEligibility(after, cur).eligibility;
+        const std::string line = deploydrain::Describe(r);
+        SLOG(r.lossy ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE, "rooms/end: %s",
+             line.c_str());
+
+        // `room=<id>` MUST lead the digest: the room-timeline audit view's
+        // anchored matcher is what attributes this row to the room.
+        db.LogAudit(uid, uname, "room_end", gameId.empty() ? "room" : gameId,
+                    "room=" + std::to_string(roomId) +
+                        " pid=" + std::to_string(target.pid) +
+                        " outcome=" + deploydrain::ToString(r.outcome) +
+                        " escalated=" + (escalated ? "1" : "0") +
+                        " waited_ms=" + std::to_string(waitedMs));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["roomId"] = r.roomId;
+        out["pid"] = r.pid;
+        out["kind"] =
+            r.kind == SessionKind::PersistentWar ? "persistent_war" : "skirmish";
+        out["exited"] = exited;
+        out["escalated"] = escalated;
+        out["waitedMs"] = waitedMs;
+        out["outcome"] = deploydrain::ToString(r.outcome);
+        out["frame"] = r.frame;
+        out["label"] = r.label;
+        out["lossy"] = r.lossy;
+        out["resume_eligibility"] = warresume::ToString(r.eligibility);
+        out["engine_hash"] = gameServerEngineHash();
+        out["describe"] = line;
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
@@ -4703,6 +4861,10 @@ int main(int argc, char *argv[]) {
   //   - Last human leaves non-persistent room → room abandoned, game killed
   //   - Host leaves with others present → host transferred
   //   - Persistent room → stays alive with 0 humans
+  // The ADMIN single-room stop is POST /api/admin/rooms/end (beside
+  // /api/admin/drain): an operator / test-harness verb, not a player one. It
+  // signals the game server and reports the exit; it does not reintroduce
+  // player-driven room ending, and it does not touch room state at all.
 
   // POST /api/wars/join-preview — what will happen to ME if I join these wars?
   //

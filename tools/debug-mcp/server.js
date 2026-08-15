@@ -20,6 +20,7 @@ import Database from 'better-sqlite3';
 import { buildScenarioManifest } from './scenario-manifest.js';
 import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
+import { classifyEndResponse } from './room-end.js';
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
@@ -659,7 +660,7 @@ function pidAlive(pid) {
 // writes the exit checkpoint (server_main.cpp) — the one site where a world
 // becomes resumable. A server deep in map/defs precache won't poll keepRunning
 // until the load finishes, hence the escalation.
-async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 250 } = {}) {
+async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 250, escalate = true } = {}) {
     const t0 = Date.now();
     let escalatedToKill = false;
     if (graceful) {
@@ -669,6 +670,9 @@ async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 25
             if (!pidAlive(pid)) return { exited: true, escalatedToKill, waitedMs: Date.now() - t0 };
             await new Promise(r => setTimeout(r, pollMs));
         }
+        // The caller can decline the escalation — a stuck server left alive is
+        // sometimes the point (it is still attachable to a debugger).
+        if (!escalate) return { exited: false, escalatedToKill, waitedMs: Date.now() - t0 };
         escalatedToKill = true;
     }
     try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
@@ -953,13 +957,14 @@ const TOOLS = [
     },
     {
         name: 'end_game',
-        description: 'Gracefully stop the spring-server for a room: SIGTERM (clean shutdown, war-log drain + exit checkpoint) then poll, escalating to SIGKILL on timeout. Prefer this over kill_game.',
+        description: "Gracefully stop ONE room's game server. Prefers the lobby's POST /api/admin/rooms/end, which returns a drain-quality report: the exit checkpoint verified against the snapshot store (outcome, frame, lossy) plus resume eligibility. A route-level 404 means a lobby binary older than P4 — falls back to a direct SIGTERM/poll/SIGKILL from the MCP process (source:'sigterm-fallback'); an auth/validation failure is reported, never silently downgraded. NOTE: the room flips to \"ended\" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game if you need to observe it. To stop a room cleanly WITH a report use this, not a same-name launch_direct relaunch (that SIGTERMs, deletes and respawns). kill_game is the deprecated graceful:false alias.",
         inputSchema: {
             type: 'object',
             properties: {
-                roomId: { type: 'number', description: 'Room ID (required).' },
-                graceful: { type: 'boolean', default: true, description: 'false → SIGKILL immediately (same as deprecated kill_game).' },
-                timeoutMs: { type: 'number', default: 10000, description: 'How long to wait for a graceful exit before escalating to SIGKILL.' },
+                roomId: { type: 'number', description: 'Room ID (required — omitting it refuses with a candidate list).' },
+                graceful: { type: 'boolean', default: true, description: 'false → SIGKILL immediately from the MCP process (same as deprecated kill_game); no server report, no exit checkpoint.' },
+                timeoutMs: { type: 'number', default: 10000, description: 'How long to wait for the exit checkpoint before escalating to SIGKILL. The server caps this at 30000.' },
+                escalate: { type: 'boolean', default: true, description: 'SIGKILL if the server has not exited within timeoutMs. false leaves a stuck server alive and reports outcome "still_alive".' },
             },
             required: ['roomId'],
         },
@@ -1668,18 +1673,56 @@ async function executeTool(name, args) {
         }
 
         case 'end_game': {
-            const servers = await getGameServers();
-            const { target, error } = resolveRoomTargetStrict(servers, args.roomId);
+            const timeoutMs = args.timeoutMs ?? 10000;
+            const escalate = args.escalate !== false;
+
+            // The MCP-local signal path: used for graceful:false (the kill_game
+            // alias) and as the pre-P4-lobby fallback. It needs a local pid, so
+            // it resolves strictly — a destructive verb never guesses a target.
+            const bySignal = async (graceful) => {
+                const servers = await getGameServers();
+                const { target, error } = resolveRoomTargetStrict(servers, args.roomId);
+                if (error) return { error };
+                const r = await endProcess(target.pid, { graceful, timeoutMs, escalate });
+                return { result: { roomId: target.room_id, pid: target.pid, ...r } };
+            };
+
+            if (args.graceful === false) {
+                const { error, result } = await bySignal(false);
+                if (error) return error;
+                return JSON.stringify({
+                    source: 'sigkill', ...result,
+                    note: 'Lobby marks the room ended on its next health check.',
+                }, null, 2);
+            }
+
+            if (!(args.roomId > 0)) {
+                // Refuse-with-candidates before touching the network.
+                const { error } = await bySignal(true);
+                return error || 'Error: roomId is required.';
+            }
+
+            const resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/rooms/end`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ roomId: args.roomId, timeout_ms: timeoutMs, escalate }),
+            }));
+            const decision = classifyEndResponse(resp.status, await resp.text());
+            if (decision.action === 'error') return `Error: ${decision.error}`;
+            if (decision.action === 'report') {
+                return JSON.stringify({
+                    source: '/api/admin/rooms/end', ...decision.report,
+                    note: 'The room flips to "ended" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game to observe it.',
+                }, null, 2);
+            }
+            // Route-level 404 ⇒ a lobby binary older than P4 (this route has no
+            // feature latch, unlike /api/rooms/direct).
+            const { error, result } = await bySignal(true);
             if (error) return error;
-            const r = await endProcess(target.pid, {
-                graceful: args.graceful !== false,
-                timeoutMs: args.timeoutMs ?? 10000,
-            });
             return JSON.stringify({
-                roomId: target.room_id,
-                pid: target.pid,
-                ...r,
-                note: 'Lobby marks the room ended on its next health check.',
+                source: 'sigterm-fallback',
+                note: 'This lobby predates POST /api/admin/rooms/end — signalled locally, so no checkpoint verification or resume eligibility is available. The room flips to "ended" on the lobby\'s next health check.',
+                ...result,
             }, null, 2);
         }
 

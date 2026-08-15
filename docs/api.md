@@ -333,6 +333,45 @@ it causes exactly as it classifies an idle hibernation, a fraction of a second l
 
 **Errors:** 401 (no/invalid token), 403 (not an admin)
 
+#### POST /api/admin/rooms/end
+
+**Admin only.** `/api/admin/drain` specialized to **one** room: SIGTERM that room's game
+server, wait for the exit checkpoint, verify it against the snapshot store, and return the
+same per-room drain report. Audited as `room_end`. This is an operator / test-harness verb
+("this room is wedged", "tear this test room down cleanly") — it is *not* a revival of the
+removed player-facing `/api/rooms/end`: player room lifecycle stays entirely
+`/api/rooms/leave`-driven.
+
+```bash
+curl -X POST http://localhost:8011/api/admin/rooms/end \
+  -H "Authorization: Bearer <token>" -d '{"roomId":7,"timeout_ms":10000,"escalate":true}'
+```
+
+`roomId` is required and must be a positive integer. `timeout_ms` (default 10000) is clamped
+to **[100, 30000]** — a tighter ceiling than drain's 120 s on purpose: this is a routine
+per-test teardown, and like drain it blocks the lobby's HTTP thread while it waits.
+`escalate` (default true) SIGKILLs a server that has not exited by then.
+
+```json
+{"ok":true,"roomId":7,"pid":55703,"kind":"persistent_war","exited":true,"escalated":false,
+ "waitedMs":117,"outcome":"checkpointed","frame":9238,"label":"hibernate:signal",
+ "lossy":false,"resume_eligibility":"resumable","engine_hash":"88499c90ffab2e37",
+ "describe":"war room 7: checkpointed at frame 9238 (hibernate:signal) and exited after 117 ms"}
+```
+
+`outcome`, `lossy`, `resume_eligibility` and `engine_hash` mean exactly what they mean in the
+drain report above. A **known room whose process is already gone** is a 200 with
+`outcome:"not_running"`, not an error — the caller wanted it stopped and it is.
+
+Room states are **not** changed by this route either: the room flips to ended asynchronously,
+when the health loop observes the exit. Poll `/api/rooms` (or the MCP `probe_game`) if you
+need to see it.
+
+**Errors:** 400 `{"error":"roomId (positive integer) is required"}`, 401 (no/invalid token),
+403 (not an admin), 404 `{"error":"unknown roomId"}` (the lobby has no such room). Note the
+404 body: a *route-level* 404 (a lobby binary predating this endpoint) has no JSON body, which
+is how the MCP `end_game` tool decides whether to fall back to a local SIGTERM.
+
 #### Resume states on a war's room card
 
 A war's room JSON carries `war.state` — `live` / `resuming` / `hibernated` / `crashed` /
