@@ -282,7 +282,7 @@ http://localhost:8012/?play=crossing_standoff&game=metalstorm&room=12&user=admin
 | `ai` | AI id for every other playable side, default `strategos`. `&ai=` (empty) requests no AI slots. |
 | `map` | Map override; default is the scenario's declared map. |
 | `room`, `user` + `#token=` | **Attach mode** — adopt an already-running room instead of launching one. This is the form `launch_scenario` returns. |
-| `skipBriefing` | Reserved for the S2 briefing splash; parsed and threaded today, no-op until that lands. |
+| `skipBriefing` | `1` suppresses the scenario briefing splash (below). `launch_scenario`'s generated URL sets it so automation never waits on a button. |
 
 Two modes, both in [`main.ts`'s `bootPlay`](../client/src/main.ts), with the
 pure derivation in [`client/src/lobby/play-boot.ts`](../client/src/lobby/play-boot.ts):
@@ -311,6 +311,73 @@ Traps:
 - `?direct=` and `?scenario=` win if combined with `?play=` (console warning).
 - Any boot failure now paints a copyable `#boot-error` overlay instead of the
   old blank page — that applies to `?direct=` too.
+
+### The scenario briefing splash
+
+A scenario that authors a `briefing` block (see
+[scenario files](#scenario-briefings)) shows a full-screen splash over the
+loading canvas: banner, title, story paragraphs, field advice, par time, and a
+**Begin** button that is disabled and labelled `Preparing battlefield…` until
+the client's first rendered frame arrives, then arms.
+
+The game boots **underneath** it. The splash never gates the connection, the
+spawn or the sim — a lobby-launched war can hold other humans, and one player's
+reading speed must not pause a shared server. Begin only removes DOM.
+
+It mounts on every cold boot into a room whose `scenario` modoption names a
+briefing-bearing scenario — both the lobby path and `?direct=`. It does **not**
+mount when:
+
+- `?skipBriefing=1` is in the URL (read once, at the mount decision);
+- the room carries no `scenario` modoption;
+- the scenario ships no briefing, or the `GET /api/games/<game>/scenarios`
+  fetch fails (every bail is silent — the splash is an enhancement);
+- the entry is a **resync** re-entry rather than a cold boot.
+
+Component: [`client/src/ui/briefing/`](../client/src/ui/briefing/) —
+`briefing.html` / `.css` / `.ts`, registered in the per-game template loader, so
+a game can reskin it at `data/games/<id>/ui/briefing/*` like any other surface.
+Authored prose reaches the DOM through `textContent` only: a briefing can come
+from the `generated_scenarios` table, so it is untrusted data and never goes
+through `renderTemplate` (which does no HTML escaping).
+
+For automation: the splash is DOM, so a canvas capture is unaffected by it, but
+a harness that drives DOM or clicks should pass `skipBriefing=1`.
+
+<a id="scenario-briefings"></a>
+### Authoring a scenario briefing
+
+Add an optional top-level `briefing` table to
+`data/games/<game>/scenarios/<id>.lua`. Every field is optional; the block is
+ignored unless `story` or `tips` carries content.
+
+```lua
+briefing = {
+    title      = 'The Standoff',        -- falls back to the scenario's `name`
+    subtitle   = 'Scorched Crossing',
+    story      = [[Paragraph one.
+
+Paragraph two.]],                       -- blank lines separate paragraphs
+    tips       = { 'Hold the middle.' },-- max 12; non-strings skipped
+    image      = 'scenarios/img/x.jpg', -- relative to the GAME root; 3:1 banner
+    parTimeSec = 900,                   -- positive seconds, or omit
+}
+```
+
+- **It must stay a pure Lua table literal.** The lobby parses scenario files
+  with a bare `lua_State` (no VFS, no `Spring.*`, no `require`); a computed
+  value at file scope does not fail loudly — it makes the *whole scenario*
+  vanish from the lobby's list. The easiest way to break it is an unescaped
+  apostrophe in a single-quoted tip.
+- The sim ignores the block entirely (`game_scenario.lua`'s `validate()` has no
+  unknown-key sweep) — it is display-only metadata.
+- No `image` means the splash falls back to `/api/maps/thumb/<mapId>`, so a
+  scenario never has to ship art to get a banner. An image that 404s hides the
+  banner rather than breaking the splash. Paths containing `..` or starting
+  with `/` are dropped server-side.
+- **Edits are invisible until the lobby restarts** or
+  `POST /api/admin/scenarios/resync` runs — the lobby snapshots scenarios at
+  startup.
 
 ### Driving scenarios for iterative testing
 

@@ -90,6 +90,49 @@ struct ScenarioSide {
     bool hasCapacity = false;
 };
 
+/// The authored briefing splash content (PLAN-test-automation S2).
+///
+/// DISPLAY-ONLY METADATA. The sim never reads it: `game_scenario.lua`'s
+/// validate() walks only the sections it knows and has no unknown-top-level-key
+/// sweep, so a `briefing` block is inert to the loader by construction. It
+/// exists so one scenario file can carry its own narrative — the story, the
+/// field advice, the banner — instead of splitting a war across a content file
+/// and a UI file.
+///
+/// Every field is optional. `present` is the only thing a consumer should
+/// branch on, and it is true only when the block carried actual reading matter
+/// (story or tips) — a `briefing = {}` or BAR's string-valued `briefing` is
+/// parsed to an absent briefing rather than an empty splash.
+struct ScenarioBriefing {
+    /// Headline. Empty means the client falls back to ScenarioInfo::displayName.
+    std::string title;
+
+    /// One-line kicker under the title.
+    std::string subtitle;
+
+    /// Multi-paragraph narrative; blank lines separate paragraphs (the client
+    /// splits on them). Authored as a Lua `[[long string]]`.
+    std::string story;
+
+    /// Gameplay advice, one string per line item, in authored order. Capped at
+    /// 12 at parse time; non-string entries are skipped individually rather
+    /// than truncating the list.
+    std::vector<std::string> tips;
+
+    /// Banner image path relative to the GAME root (`data/games/<id>/`),
+    /// served by the client-origin `/api/games/data/` route. Empty = none, and
+    /// the client falls back to the map thumbnail. A path containing `..` or
+    /// starting with `/` is dropped at parse time (ContentServer.cpp:49
+    /// posture) so a traversal shape never reaches a client.
+    std::string image;
+
+    /// Target completion time in seconds (BAR's `partime` prior art). 0 = none.
+    int parTimeSec = 0;
+
+    /// True iff story or tips carried content — see the struct note.
+    bool present = false;
+};
+
 } // namespace ScenarioDiscovery
 
 namespace ScenarioDiscovery {
@@ -146,6 +189,10 @@ struct ScenarioInfo {
     /// scenario that declares no sides — callers then fall back to the
     /// legacy two-team room.
     std::vector<ScenarioSide> sides;
+
+    /// The `briefing` block, if the scenario authored one. Display-only —
+    /// see ScenarioBriefing. `briefing.present` is false when absent.
+    ScenarioBriefing briefing;
 };
 
 /// The playable sides of `info` — every entry of `sides` that is not an NPC.

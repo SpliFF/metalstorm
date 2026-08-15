@@ -158,6 +158,50 @@ A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tool
 | `GET /api/vfs/game/{gameId}/*` | Game source files (Lua, images, JSON) | 5 min |
 | `GET /api/games/data/{gameId}/*` | Preprocessed game assets (unit .glb models) | immutable |
 
+#### GET /api/games/{gameId}/scenarios
+
+Public. Every scenario the game ships under `scenarios/*.lua`, plus any
+generated ones materialised there. This is what the Create Game dialog's War
+row, the room screen's "War:" label, and the client's briefing splash all read.
+
+```json
+[
+  {
+    "id": "crossing_standoff",
+    "displayName": "Scorched Crossing — The Standoff",
+    "map": "scorched_crossing_v2.4",
+    "tutorial": false,
+    "retired": false,
+    "terminal": true,
+    "sides": [ {"faction": "compact", "team": 0, "staged": true},
+               {"faction": "union",   "team": 1, "staged": true} ],
+    "briefing": {
+      "title": "The Standoff",
+      "subtitle": "Scorched Crossing",
+      "story": "The armistice died at dawn…\n\nBetween them lies Raven Basin…",
+      "tips": ["Hold the middle.", "Artillery outranges tanks."],
+      "image": "scenarios/img/crossing_standoff.jpg",
+      "parTimeSec": 900
+    }
+  }
+]
+```
+
+- `terminal` is whether any objective carries `victory = true`. A war without
+  one can never end — surfaced here rather than discovered 40 minutes in.
+- `retired` wars are listed but never offered; the room screen still needs to
+  resolve their names.
+- `briefing` is **display-only** splash content and the whole key is **absent**
+  when the scenario ships none (clients test `"briefing" in entry`). Every
+  field inside it is optional too. Authoring format and traps:
+  [javascript.md](javascript.md#scenario-briefings). `image` is relative to the
+  game root — serve it from `GET /api/games/data/{gameId}/{image}`; paths
+  containing `..` or starting with `/` are dropped server-side.
+- The list is a **startup snapshot**: a new or edited `scenarios/*.lua` needs
+  `POST /api/admin/scenarios/resync` (or a lobby restart) to appear here.
+  `POST /api/admin/scenarios/list` (admin) mirrors the same `briefing` object
+  for stored/generated scenarios.
+
 ### Factions
 
 #### GET /api/factions/{gameId}

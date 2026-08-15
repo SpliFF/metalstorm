@@ -56,6 +56,18 @@ room named `play:<id>:<username>`. Boot failures paint a `#boot-error` overlay
 instead of a blank page — read its text before debugging anything else. Rules
 1–6 below still govern `launch_game` and every room-scoped MCP call.
 
+**The briefing splash (S2) — why `skipBriefing=1` is in that URL.** A scenario
+that authors a `briefing` block mounts a full-screen DOM overlay
+(`#briefing-overlay`) over the loading canvas, with a **Begin** button that
+stays disabled until the first rendered frame. `launch_scenario`'s `browserUrl`
+sets `skipBriefing=1` so it never mounts. A **bare** `?play=<id>` or a
+`?direct=` boot of a briefing-bearing scenario **does** show it — the game runs
+underneath, so canvas captures and `window.test` are unaffected, but anything
+that drives DOM or clicks should either append `&skipBriefing=1` or click
+`#briefing-begin-btn` once it is enabled. To screenshot the splash itself, use
+a browser-level page screenshot: `test.captureFrame()` captures the canvas
+only, never DOM overlays.
+
 **Discipline — track your own game, every time:**
 
 1. **Own the roomId.** Capture the `roomId` that *your* `launch_game`

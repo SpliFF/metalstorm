@@ -56,6 +56,8 @@ import { ScenarioRunner } from './scenarios/runner.js';
 import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
 import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
+import { showBriefingSplash, type BriefingHandle } from './ui/briefing/briefing.js';
+import { parseScenarioList } from './lobby/scenario-picker.js';
 import { showSpectatorBanner, hideSpectatorBanner } from './ui/spectator-banner.js';
 import { updateReplayBar, hideReplayBar, showReplayRefusal } from './ui/replay-bar.js';
 import { debugConsole } from './core/debug-console.js';
@@ -550,6 +552,11 @@ let parkTtlTimer: number | null = null;
 let firstFrameSeen = false;
 /// Last startGame() target, so a full-boot re-entry fallback knows what to boot.
 let lastGameArgs: { port: number; mapId: string; gameId: string } | null = null;
+/// The scenario briefing splash (S2) mounted over the current boot, if any.
+/// Null whenever no splash is up — which is the normal case: `?skipBriefing=1`,
+/// a room with no `scenario` modoption, a scenario with no briefing, and every
+/// resync re-entry all leave it null.
+let briefingSplash: BriefingHandle | null = null;
 
 // --- Game Scene ---
 
@@ -673,6 +680,10 @@ function quitToLobby(): void {
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
     document.getElementById('recovery-error-overlay')?.remove();
+    // S2: a player who quits while still reading the briefing must not find
+    // the story pinned over the lobby.
+    briefingSplash?.dismiss();
+    briefingSplash = null;
 
     // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
@@ -891,15 +902,71 @@ function disposeParkedWorker(): void {
  * per E5, or an expired TTL) it is a clean full boot. A stale parked worker, if
  * any, is terminated by startGame's own defensive teardown.
  */
-function enterGame(gameServerPort: number, mapId: string, gameId: string): void {
+function enterGame(
+    gameServerPort: number, mapId: string, gameId: string,
+    modOptions: Record<string, string> = {},
+): void {
     const roomId = localStorage.getItem('springrts-game-room') ?? '';
     if (detachSession.planReentry(roomId, gameServerPort, Date.now()) === 'resync') {
+        // Resync re-entry never shows a briefing: the player has already read
+        // it and is coming back to a battle in progress.
         resyncReenter();
         return;
     }
     clearParkTtl();
     detachSession.clear();
     startGame(gameServerPort, mapId, gameId);
+    // S2: after startGame is kicked off, never before — the splash is an
+    // overlay on a boot that is already happening, not a gate on it. The
+    // recovery/reenter callers pass no modOptions, so an R2 respawn re-boots
+    // straight into the game instead of re-telling the story mid-crash.
+    void maybeShowBriefing(gameId, mapId, modOptions);
+}
+
+/**
+ * Mount the scenario briefing splash for this boot, if this boot deserves one
+ * (PLAN-test-automation S2).
+ *
+ * Every bail is silent and non-fatal: the splash is an enhancement, and a
+ * scenario metadata fetch that 404s or a game that ships no briefings must
+ * cost nothing but the splash. It also races the load — if the game becomes
+ * ready before the metadata arrives, the splash mounts already-armed rather
+ * than showing a spinner over a game that is up.
+ */
+async function maybeShowBriefing(
+    gameId: string, mapId: string, modOptions: Record<string, string>,
+): Promise<void> {
+    briefingSplash?.dismiss();
+    briefingSplash = null;
+    try {
+        // Read once, at the mount decision. Automation sets it so a harness
+        // never waits on a button (launch_scenario's browserUrl appends it).
+        if (new URLSearchParams(window.location.search).get('skipBriefing') === '1') return;
+        const scenarioId = modOptions.scenario;
+        if (!scenarioId || !gameId) return;
+
+        const res = await fetch(`/api/games/${encodeURIComponent(gameId)}/scenarios`);
+        if (!res.ok) return;
+        const entry = parseScenarioList(await res.json())
+            .find(s => s.id === scenarioId);
+        if (!entry?.briefing) return;
+
+        // Authored art if there is any, else the map thumbnail — a scenario
+        // never has to ship a banner to get a splash with a picture.
+        const imageUrl = entry.briefing.image
+            ? `/api/games/data/${encodeURIComponent(gameId)}/${entry.briefing.image}`
+            : (mapId ? `/api/maps/thumb/${encodeURIComponent(mapId)}` : null);
+
+        briefingSplash = showBriefingSplash(gameTemplates, entry.briefing, {
+            fallbackTitle: entry.displayName,
+            imageUrl,
+            onBegin: () => { briefingSplash = null; },
+        });
+        // The fetch above is async; the first frame may already have landed.
+        if (firstFrameSeen) briefingSplash.notifyReady();
+    } catch (err) {
+        console.debug('[briefing] no splash for this boot:', err);
+    }
 }
 
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
@@ -1186,6 +1253,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // state once it is rendering, so the first one marks the point
                 // detach becomes available.
                 firstFrameSeen = true;
+                // S2: the first scene state is the honest "the battlefield is
+                // there" signal — it only flows once the worker is connected
+                // and rendering. That, and nothing weaker, arms Begin.
+                briefingSplash?.notifyReady();
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
                 lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
@@ -1334,6 +1405,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }
             case 'gp:gameOver':
                 console.warn(`[main] gp:gameOver frame=${m.frame} winners=[${(m.winningAllyTeams ?? []).join(',')}] won=${m.won} — showing overlay`);
+                // S2: a war can end under an unread briefing (a short scenario,
+                // or a player who walked away). The result outranks the story.
+                briefingSplash?.dismiss();
+                briefingSplash = null;
                 showGameOver(gameTemplates, m.frame, {
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,
@@ -2218,10 +2293,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const lobbySuppressed = !!scenario || !!directManifestUrl || !!playParams;
-    lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
+    lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string,
+                           modOptions: Record<string, string>) => {
         // PLAN-quickstart.md Part B: route through enterGame so a room the
         // player detached from resyncs instead of full-booting (§3.2).
-        enterGame(gameServerPort, mapId, gameId);
+        // The room's modoptions ride along so enterGame can decide whether
+        // this boot stages a scenario with a briefing (S2). Both boot paths
+        // funnel through here: lobby-launched rooms and `?direct=` manifests.
+        enterGame(gameServerPort, mapId, gameId, modOptions);
     }, getDefaultLobbyTemplates(), lobbySuppressed);
     (window as any).lobby = lobbyUI;
 

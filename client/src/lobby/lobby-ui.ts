@@ -230,7 +230,7 @@ export class LobbyUI {
     /// would otherwise double-fire. Reset on the state>=5 (Ended) branch
     /// below so a later restart of the *same* persistent room re-arms it.
     private gameStartedForRoomId: number | null = null;
-    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
+    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void;
     /// PLAN-quickstart.md Part B: true while a detached game session is
     /// parked (worker alive, `currentRoom` still points at that game). Guards
     /// `updateCurrentRoomFromJson`'s gameRunning branch — while detached, a
@@ -394,7 +394,7 @@ export class LobbyUI {
     private suppressed = false;
 
     constructor(
-        onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void,
+        onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void,
         templates?: LobbyTemplates,
         suppressed = false,
     ) {
@@ -800,7 +800,7 @@ export class LobbyUI {
                         CONFIG.httpUrl, this.authToken, this.currentRoom.id,
                         browserTokenStore);
                 }
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
                 return;
             case 'refresh-room-game-gone':
                 // E4: the game ended while a session was parked — dispose the
@@ -3432,7 +3432,7 @@ export class LobbyUI {
                 this.inGame = true;
                 this.gameStartedForRoomId = this.currentRoom.id;
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             }
         });
         // "End Game" and "Close Room" buttons removed — room lifecycle
@@ -3890,7 +3890,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             return;
         }
 

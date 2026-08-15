@@ -787,6 +787,36 @@ static bool isProcessAlive(pid_t pid) {
   return (errno != ESRCH); // EPERM means alive but not ours; still "alive"
 }
 
+// A scenario's briefing block as the client sees it (PLAN-test-automation S2).
+//
+// ONE encoder, two routes: GET /api/games/<id>/scenarios (the Create Game
+// picker and the client splash) and POST /api/admin/scenarios/list (so an
+// admin can see whether a stored/generated war carries a briefing without
+// opening the file). They shared a copy-pasted body once and drifted; they
+// share this instead.
+//
+// Absent fields are OMITTED rather than emitted empty — a consumer tests
+// `"briefing" in entry` and then `entry.briefing.image ?? fallback`. Callers
+// must check `b.present` first; this never returns "no briefing", only the
+// encoding of one.
+static nlohmann::json
+briefingJson(const ScenarioDiscovery::ScenarioBriefing &b) {
+  nlohmann::json bj = nlohmann::json::object();
+  if (!b.title.empty())
+    bj["title"] = b.title;
+  if (!b.subtitle.empty())
+    bj["subtitle"] = b.subtitle;
+  if (!b.story.empty())
+    bj["story"] = b.story;
+  if (!b.tips.empty())
+    bj["tips"] = b.tips;
+  if (!b.image.empty())
+    bj["image"] = b.image;
+  if (b.parTimeSec > 0)
+    bj["parTimeSec"] = b.parTimeSec;
+  return bj;
+}
+
 int main(int argc, char *argv[]) {
   savedArgc = argc;
   savedArgv = argv;
@@ -2798,6 +2828,11 @@ int main(int argc, char *argv[]) {
                          {"staged", s.staged}});
     }
     j["sides"] = std::move(sides);
+    // Display-only splash content (S2), same encoding as the public
+    // /api/games/<id>/scenarios route. Omitted entirely when the war ships
+    // none, so "no briefing" and "an empty briefing" stay distinguishable.
+    if (info != nullptr && info->briefing.present)
+      j["briefing"] = briefingJson(info->briefing);
     return j;
   };
 
@@ -4352,6 +4387,12 @@ int main(int argc, char *argv[]) {
               sidesArr.push_back(std::move(sd));
             }
             sj["sides"] = std::move(sidesArr);
+            // The authored briefing splash content (S2): title, story, tips,
+            // banner image, par time. Display-only — the sim never reads it.
+            // The key is absent for a war that ships no briefing, which is
+            // how the client decides whether to mount the splash at all.
+            if (s.briefing.present)
+              sj["briefing"] = briefingJson(s.briefing);
             arr.push_back(std::move(sj));
           }
           const std::string body = arr.dump();

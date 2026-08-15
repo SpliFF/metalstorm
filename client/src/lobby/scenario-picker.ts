@@ -18,6 +18,34 @@
 // knows the difference, and that is the requirement — a generated war has to be
 // selectable in the picker exactly like an authored one.
 
+/// The authored briefing splash content of one scenario (PLAN-test-automation
+/// S2), as `GET /api/games/<id>/scenarios` emits it.
+///
+/// Display-only: the sim never reads it, and neither does anything in the
+/// lobby's own logic — it exists for the loading splash
+/// (`ui/briefing/briefing.ts`). Every field is optional except `tips`, which
+/// this parser normalises to an array so consumers never guard it.
+///
+/// TREAT EVERY STRING AS UNTRUSTED DATA. A briefing can come from the
+/// `generated_scenarios` table, not just a shipped file, so it must reach the
+/// DOM through `textContent` only — never `innerHTML`, never `renderTemplate`
+/// (ui/ui.ts does no HTML escaping).
+export interface ScenarioBriefing {
+    /// Headline. Absent means the splash falls back to `displayName`.
+    title?: string;
+    subtitle?: string;
+    /// Multi-paragraph narrative; blank lines separate paragraphs.
+    story?: string;
+    /// Field advice, in authored order. Always present, possibly empty.
+    tips: string[];
+    /// Banner path relative to the game root, served by
+    /// `/api/games/data/<gameId>/<image>`. Absent means fall back to the map
+    /// thumbnail — a scenario never has to ship art to get a splash.
+    image?: string;
+    /// Target completion time in seconds. Absent means the splash hides the row.
+    parTimeSec?: number;
+}
+
 /// One entry from `GET /api/games/<id>/scenarios` — a war template, either
 /// shipped under `scenarios/<id>.lua` or generated and materialised there.
 export interface AvailableScenarioInfo {
@@ -43,6 +71,48 @@ export interface AvailableScenarioInfo {
     /// means the war has no terminal condition and cannot end — surfaced
     /// in the picker rather than discovered 40 minutes in.
     terminal: boolean;
+    /// The authored splash content, absent when the war ships none. The
+    /// absence IS the signal — it is what the client's mount decision reads.
+    briefing?: ScenarioBriefing;
+}
+
+/// Normalise one entry's `briefing`, or undefined when it carries none.
+///
+/// Same degrade-never-drop posture as the list parser: an older server sends
+/// no key, BAR's format sends a bare string at it, and a generated war could
+/// in principle send anything. None of those may cost the caller its scenario
+/// entry — the worst outcome is a war with no splash.
+function parseBriefing(raw: unknown): ScenarioBriefing | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const b = raw as Record<string, unknown>;
+
+    const str = (v: unknown): string | undefined =>
+        typeof v === 'string' && v !== '' ? v : undefined;
+
+    const tips = Array.isArray(b.tips)
+        ? b.tips.filter((t): t is string => typeof t === 'string' && t !== '')
+        : [];
+
+    // Positive finite seconds only. A negative or NaN par time would render as
+    // "Par time -1:-5" — a row that is worse than no row.
+    const parRaw = typeof b.parTimeSec === 'number' ? b.parTimeSec : NaN;
+    const parTimeSec = Number.isFinite(parRaw) && parRaw > 0
+        ? Math.round(parRaw) : undefined;
+
+    const story = str(b.story);
+    // Mirrors the server's `present` rule: chrome without reading matter is
+    // not a briefing, and mounting one would put an empty overlay in front of
+    // the loading screen.
+    if (!story && tips.length === 0) return undefined;
+
+    return {
+        title: str(b.title),
+        subtitle: str(b.subtitle),
+        story,
+        tips,
+        image: str(b.image),
+        parTimeSec,
+    };
 }
 
 /// Normalise the endpoint's JSON. Tolerant by design: a missing field must
@@ -65,6 +135,7 @@ export function parseScenarioList(raw: unknown): AvailableScenarioInfo[] {
             // offering exactly what it offered before.
             retired: !!s.retired,
             terminal: !!s.terminal,
+            briefing: parseBriefing(s.briefing),
         }))
         .filter(s => s.id !== '');
 }
