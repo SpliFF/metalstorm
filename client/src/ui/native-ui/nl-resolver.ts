@@ -35,8 +35,10 @@ import {
 import type { NamedEntity, EntityType } from './named-entity-index.js';
 import type { OrgGroupSummary } from './ui-store.js';
 import type { ClassVocabulary, RoleMatch } from './class-vocabulary.js';
-import type {
-    NLCommandIntent, NLGuidance, NLPriority, NLSubject, NLTarget, NLWhen,
+import {
+    MAX_CLARIFY_OPTIONS,
+    type NLCommandIntent, type NLGuidance, type NLPriority, type NLSubject,
+    type NLTarget, type NLWhen,
 } from './nl-envelope.js';
 import type { ResolvedGuidance } from './guidance-wire.js';
 
@@ -63,13 +65,63 @@ const FORCE_TYPES: EntityType[] = ['group', 'platoon', 'army'];
 
 export type Resolution<T> =
     | { kind: 'ok'; value: T }
-    | { kind: 'clarify'; question: string; options?: string[] }
+    | {
+          kind: 'clarify';
+          question: string;
+          options?: string[];
+          /** How many options the answer takes (M5). Omitted ⇒ one. */
+          pick?: number;
+          /**
+           * The chosen option is a NAME that can be substituted straight back
+           * into the envelope — so the console can answer this question
+           * LOCALLY: patch the stopped envelope (`nl-clarify.ts`) and re-run it
+           * with no round trip. That is what makes a chip tap instant, and what
+           * makes the whole clarification flow work with the proxy disabled.
+           *
+           * Absent ⇒ no substitution would resolve any differently, so the
+           * answer has to go back to the model. The exact-duplicate-name branch
+           * below is exactly that case: when two regions are both literally
+           * called "West Scarp", replacing the name with itself asks the same
+           * question forever.
+           */
+          patchable?: true;
+      }
     | { kind: 'refuse'; reason: string };
+
+/** The chip that means "never mind". Recognised by the console rather than
+ *  resubmitted, and deliberately one shared spelling so a player learns it once. */
+export const CANCEL_OPTION = 'cancel';
 
 const ok = <T>(value: T): Resolution<T> => ({ kind: 'ok', value });
 const refuse = <T>(reason: string): Resolution<T> => ({ kind: 'refuse', reason });
-const clarify = <T>(question: string, options?: string[]): Resolution<T> =>
-    ({ kind: 'clarify', question, ...(options ? { options } : {}) });
+
+/**
+ * Ask. `patchable` defaults to TRUE, because every question this file asks
+ * except one offers names that mean something when substituted — see the field
+ * doc on `Resolution`.
+ */
+const clarify = <T>(
+    question: string,
+    options?: string[],
+    opts: { pick?: number; patchable?: boolean } = {},
+): Resolution<T> => ({
+    kind: 'clarify',
+    question,
+    ...(options ? { options } : {}),
+    ...(opts.pick !== undefined ? { pick: opts.pick } : {}),
+    ...(opts.patchable === false ? {} : { patchable: true as const }),
+});
+
+/**
+ * Callsigns offered when there are more squads than the sentence asked for.
+ * `MAX_CLARIFY_OPTIONS` counts the `cancel` chip too, so this is one fewer. A
+ * player with more candidates than fit is better served naming a squad than
+ * reading a longer list.
+ */
+const MAX_CLARIFY_NAMES = MAX_CLARIFY_OPTIONS - 1;
+
+/** The store's own "0 = none assigned" convention IS the idle test (§5). */
+const isIdle = (group: OrgGroupSummary): boolean => group.currentDirectiveId === 0;
 
 /** The slice of `NamedEntityIndex` the resolver reads. */
 export interface ResolverIndex {
@@ -144,10 +196,13 @@ export class NLResolver {
         if (exact.length === 1) return ok(exact[0]);
         if (exact.length > 1) {
             // Two things genuinely share a name. Nothing to score between them,
-            // so the player has to say which.
+            // so the player has to say which — and NOT patchable: the options
+            // differ only by the type suffix this line adds for display, so
+            // substituting one back would ask the identical question again.
             return clarify(
                 `More than one ${noun} is called "${query}" — which one?`,
                 exact.map(describeEntity),
+                { patchable: false },
             );
         }
 
@@ -257,7 +312,9 @@ export class NLResolver {
      * Fewer candidates than asked for → clarify (the plan's "I only have one
      * tank squad — send Chimera Squad alone?"). None at all → refuse: forming a
      * group from loose units costs authority and touches AI locks, so it is
-     * never done implicitly (§5).
+     * never done implicitly (§5). MORE candidates than asked for, all equally
+     * available → clarify too (M5); see the comment at that branch for why
+     * distance is not allowed to settle it.
      */
     resolveClassCount(
         subject: Extract<NLSubject, { type: 'class-count' }>,
@@ -306,7 +363,36 @@ export class NLResolver {
                 `You only have ${candidates.length} ${unit} ` +
                 `${candidates.length === 1 ? 'squad' : 'squads'}, not ${subject.count} — ` +
                 `send ${joinOptions(names)}?`,
-                [...names, 'cancel'],
+                [...names, CANCEL_OPTION],
+                { pick: Math.min(candidates.length, subject.count) },
+            );
+        }
+
+        // ── more squads available than the sentence asked for (M5) ──
+        //
+        // Ranking still decides WHICH, but only when the boundary between taken
+        // and left-behind is a real distinction. Availability is: a squad
+        // already holding a line is a worse pick than one standing around, and
+        // a player would agree. Distance and size are NOT — they are tie-breaks
+        // between equals, and using one to choose which of four idle armies
+        // drives across the map is precisely the guess §5 forbids ("a points win
+        // is not evidence about which one the player meant").
+        //
+        // So: if the availability tier the cut falls in offers more squads than
+        // are being taken from it, the choice inside that tier is arbitrary and
+        // the player is asked. Two idle squads and a busy one, asked for two,
+        // still goes straight through — the idle tier is exactly consumed.
+        const idle = ranked.filter(isIdle);
+        const tier = subject.count <= idle.length ? idle : ranked.filter((g) => !isIdle(g));
+        const takenFromTier = subject.count <= idle.length ? subject.count : subject.count - idle.length;
+
+        if (tier.length > takenFromTier) {
+            const names = ranked.slice(0, MAX_CLARIFY_NAMES).map((g) => groupName(g));
+            return clarify(
+                `You have ${candidates.length} ${unit} squads and asked for ${subject.count} — ` +
+                `which ${countWord(subject.count)}?`,
+                [...names, CANCEL_OPTION],
+                { pick: subject.count },
             );
         }
 
@@ -525,8 +611,8 @@ export class NLResolver {
         };
 
         return [...groups].sort((a, b) => {
-            const idleA = a.currentDirectiveId === 0 ? 0 : 1;
-            const idleB = b.currentDirectiveId === 0 ? 0 : 1;
+            const idleA = isIdle(a) ? 0 : 1;
+            const idleB = isIdle(b) ? 0 : 1;
             if (idleA !== idleB) return idleA - idleB;
             const dA = distance(a);
             const dB = distance(b);
@@ -607,6 +693,12 @@ function describeEntity_(hit: { entity: NamedEntity }): string {
 function joinOptions(names: string[]): string {
     if (names.length <= 1) return names[0] ?? '';
     return `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}`;
+}
+
+/** "which TWO?" reads better than "which 2?" in a question that is also spoken
+ *  aloud (M6). Only the small numbers a count-of-groups can be. */
+function countWord(n: number): string {
+    return ['zero', 'one', 'two', 'three', 'four'][n] ?? String(n);
 }
 
 /** "tanks" → "tank squad" for a count of one. Crude on purpose: it only has to

@@ -469,6 +469,14 @@ export class CensusCache implements CensusPort {
                 this.fetchedAt = this.now();
             }
         } catch (e) {
+            // Audited M5 (§7 "no silent drops"): a warn, not a transcript line.
+            // A failed refresh is not itself an answer to anything — the player
+            // sees the consequence instead, and the consequence is honest by
+            // construction: the previous snapshot serves until `CENSUS_STALE_MS`
+            // and then `snapshot()` returns null, at which point every query
+            // refuses with "I can't see your units" rather than answering zero.
+            // Printing "census refresh failed" into the transcript would be
+            // telling the player about our plumbing in the middle of their game.
             console.warn('[query-engine] census refresh failed:', e);
         }
     }

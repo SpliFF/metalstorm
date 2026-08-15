@@ -333,6 +333,12 @@ export function buildNLResponseSchema(opts: SchemaOptions = {}): Record<string, 
                     description: 'Up to 6 concrete choices, each a name from the context.',
                     items: { type: 'string' },
                 },
+                pick: {
+                    type: 'integer',
+                    description:
+                        'How many of the options the answer needs. Omit for one. Use it when '
+                        + 'the sentence asked for several ("which two of these four squads?").',
+                },
             }, ['question']),
         }, ['actions']),
     };

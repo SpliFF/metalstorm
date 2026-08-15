@@ -924,6 +924,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "pick": {
+          "type": "integer",
+          "description": "How many of the options the answer needs. Omit for one. Use it when the sentence asked for several (\"which two of these four squads?\")."
         }
       },
       "required": [

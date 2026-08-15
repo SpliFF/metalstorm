@@ -176,6 +176,19 @@ export interface NLClarification {
     question: string;
     /** Rendered as chips; picking one resubmits. */
     options?: string[];
+    /**
+     * How many options the answer needs. Omitted ⇒ one.
+     *
+     * Added in M5, for the one question that genuinely takes a plural answer:
+     * "you have four idle tank squads and asked for two — which two?". Without
+     * it the console would have to guess whether chips are radio buttons or
+     * checkboxes, and a one-at-a-time flow would ask the same question again
+     * for the second pick, which is how a two-tap interaction becomes four.
+     *
+     * Never larger than `options.length`, and never larger than `MAX_ACTIONS`
+     * — a pick that cannot fit in an envelope is a question with no answer.
+     */
+    pick?: number;
 }
 
 export interface NLResponse {
@@ -197,6 +210,11 @@ export const NL_PRIORITIES: readonly NLPriority[] = ['low', 'normal', 'high', 'u
 /** Max actions in one envelope (plan §1 "0..4"). A longer list is a runaway
  *  model, not a multi-step plan. */
 export const MAX_ACTIONS = 4;
+
+/** Chips the console will render for one question. Past about this many, a
+ *  question stops being a choice and becomes a list to read — name the squad
+ *  instead. `cancel` counts against it. */
+export const MAX_CLARIFY_OPTIONS = 6;
 
 /** Every untrusted free string (names, questions, reasons) is capped. Plan §9.7
  *  prompt-injection hygiene: names are DATA, and data has a size. */
@@ -312,11 +330,24 @@ export function validateNLResponse(input: unknown, opts: ValidateOptions = {}): 
             }
             if (c.options !== undefined) {
                 if (!Array.isArray(c.options)) push('clarify.options must be an array');
-                else if (c.options.length > 6) push('clarify.options has more than 6 entries');
-                else c.options.forEach((o, i) => {
+                else if (c.options.length > MAX_CLARIFY_OPTIONS) {
+                    push(`clarify.options has more than ${MAX_CLARIFY_OPTIONS} entries`);
+                } else c.options.forEach((o, i) => {
                     if (typeof o !== 'string' || !o.trim()) push(`clarify.options[${i}] must be a non-empty string`);
                     else if (o.length > MAX_REF_LENGTH) push(`clarify.options[${i}] exceeds ${MAX_REF_LENGTH} chars`);
                 });
+            }
+            // A `pick` the options can't satisfy is a question with no answer,
+            // and one above MAX_ACTIONS is an answer no envelope can hold.
+            if (c.pick !== undefined) {
+                const options = Array.isArray(c.options) ? c.options.length : 0;
+                if (typeof c.pick !== 'number' || !Number.isInteger(c.pick) || c.pick < 1) {
+                    push('clarify.pick must be an integer of at least 1');
+                } else if (c.pick > MAX_ACTIONS) {
+                    push(`clarify.pick exceeds ${MAX_ACTIONS} (the action ceiling)`);
+                } else if (c.pick > options) {
+                    push(`clarify.pick is ${c.pick} but only ${options} options were offered`);
+                }
             }
         }
     }

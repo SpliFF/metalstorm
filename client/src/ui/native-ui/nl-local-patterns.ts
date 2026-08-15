@@ -9,6 +9,7 @@
  *     "where is Chimera Squad" / "locate the enemy tanks" → query locate
  *     "show me the whole map"             → camera fitMap
  *     "follow Hammerfall"                 → camera follow
+ *     "move 2 tank squads to Randtown"    → class-count order (M5)
  *
  * These are CLOSED PATTERNS, not NLP. Each is an anchored regular expression
  * over a leading phrase, and everything after the phrase is passed on as a NAME
@@ -33,7 +34,8 @@
  * would get a rail-sized minimap for a sentence that asked for the opposite.
  */
 
-import type { NLAction, NLQuery, NLScale, NLUiAction } from './nl-envelope.js';
+import type { NLAction, NLPriority, NLQuery, NLScale, NLUiAction } from './nl-envelope.js';
+import type { CommandVerb } from './compile-table.js';
 import type { ClassVocabulary } from './class-vocabulary.js';
 
 export interface LocalPatternMatch {
@@ -113,7 +115,11 @@ export function matchLocalPattern(
     if (!text) return null;
 
     return (
-        matchWholeMap(text)
+        matchClassCountOrder(text, deps)   // before everything: "send two tank
+                                           // squads to X" starts like nothing
+                                           // else here, and the slot-filler has
+                                           // no subject slot that can hold it
+        ?? matchWholeMap(text)
         ?? matchZoomStep(text)
         ?? matchUnfollow(text)
         ?? matchPanel(text, deps)          // before the camera patterns: "show me
@@ -127,6 +133,89 @@ export function matchLocalPattern(
         ?? matchStatus(text)
         ?? null
     );
+}
+
+// ────────────────────── a counted class of squads ──────────────────────
+
+/**
+ * "move 2 tank squads to Randtown" — the plan's own example utterance, and the
+ * one shape of order the slot-filler structurally cannot carry.
+ *
+ * `free-text-accelerator.ts` fills a `CommandSubject`, whose cases are group /
+ * idle-filter / ai / selection: there is nowhere in it to put "two of the tank
+ * squads, you pick which". The envelope has had `class-count` since M1 and the
+ * resolver has ranked and fanned it out since M1 — only the offline PRODUCER was
+ * missing, so the sentence worked through the proxy and refused without it.
+ *
+ * That gap mattered more than it looks: `class-count` is the subject that raises
+ * the M5 "which two?" question, so the whole clarification flow was reachable
+ * only with an API key. It is a closed pattern like the rest of this file — a
+ * count, a class phrase the shipped vocabulary recognises, a place name handed
+ * on unresolved.
+ */
+const CLASS_COUNT_ORDER = new RegExp(
+    '^(?:(move|send|get|push|take|order|attack|assault|hit|defend|hold|garrison|guard|screen|scout)\\s+)?'
+    + '(\\d{1,2}|one|two|three|four)\\s+'          // the count
+    + '(?:of\\s+(?:my|our|the)\\s+)?'
+    + '(.+?)\\s+'                                  // the class phrase
+    + '(?:squads?|groups?|platoons?|flights?|units?)\\s+'
+    + '(?:to|into|onto|towards?|at|on|over\\s+to)\\s+'
+    + '(.+?)'                                      // the place
+    + '(?:\\s+(low|normal|high|urgent)(?:\\s+priority)?)?\\s*$',
+    'i',
+);
+
+const WORD_COUNTS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4 };
+
+/**
+ * Which verb a leading word means. Deliberately the same readings the M0
+ * slot-filler uses, so "defend Northgate" and "defend 2 tank squads to
+ * Northgate" cannot come to mean different things — and `move`/`send` map to
+ * `secure`, which is what the accelerator has always compiled a move-to-a-place
+ * order into.
+ */
+const CLASS_COUNT_VERBS: Record<string, CommandVerb> = {
+    move: 'secure', send: 'secure', get: 'secure', push: 'secure',
+    take: 'secure', order: 'secure',
+    attack: 'attack', assault: 'attack', hit: 'attack',
+    defend: 'defend', guard: 'defend', garrison: 'defend',
+    hold: 'hold', screen: 'screen', scout: 'scout',
+};
+
+function matchClassCountOrder(text: string, deps: LocalPatternDeps): LocalPatternMatch | null {
+    const m = CLASS_COUNT_ORDER.exec(text);
+    if (!m) return null;
+
+    const [, verbWord, countWord, classPhrase, placePhrase, priorityWord] = m;
+
+    const count = WORD_COUNTS[countWord.toLowerCase()] ?? Number(countWord);
+    if (!Number.isInteger(count) || count < 1 || count > 16) return null;
+
+    // The class phrase must be one the SHIPPED vocabulary knows. Anything else
+    // falls through to the accelerator and its refusal — "send 2 doom squads to
+    // Randtown" is not an order this pattern gets to invent a class for.
+    const phrase = stripSideWords(cleanRef(classPhrase));
+    if (!phrase || !deps.vocabulary.lookup(phrase)) return null;
+
+    const place = cleanRef(placePhrase);
+    if (!place) return null;
+
+    const verb = CLASS_COUNT_VERBS[(verbWord ?? 'move').toLowerCase()] ?? 'secure';
+    const priority = priorityWord?.toLowerCase() as NLPriority | undefined;
+
+    return {
+        action: {
+            kind: 'command',
+            intent: {
+                verb,
+                subject: { type: 'class-count', class: phrase, count },
+                target: { type: 'entity-ref', name: place },
+                ...(priority ? { priority } : {}),
+            },
+        },
+        // The order, not its outcome — resolution can still ask which squads.
+        say: `${verb} ${place} with ${count} ${phrase} ${count === 1 ? 'squad' : 'squads'}`,
+    };
 }
 
 // ─────────────────────────── camera ───────────────────────────

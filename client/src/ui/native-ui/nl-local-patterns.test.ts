@@ -203,13 +203,51 @@ describe('queries', () => {
     });
 });
 
+describe('a counted class of squads (M5)', () => {
+    it('claims the plan\'s own example utterance', () => {
+        expect(action('move 2 tank squads to Randtown')).toEqual({
+            kind: 'command',
+            intent: {
+                verb: 'secure',
+                subject: { type: 'class-count', class: 'tank', count: 2 },
+                target: { type: 'entity-ref', name: 'Randtown' },
+            },
+        });
+    });
+
+    it('reads spelled-out counts, a leading verb and a trailing priority', () => {
+        expect(action('send three infantry platoons to Osprey Fen urgent')).toEqual({
+            kind: 'command',
+            intent: {
+                verb: 'secure',
+                subject: { type: 'class-count', class: 'infantry', count: 3 },
+                target: { type: 'entity-ref', name: 'Osprey Fen' },
+                priority: 'urgent',
+            },
+        });
+        expect(action('attack Slag Forge')).toBeNull();      // no count — slot-filler's
+    });
+
+    it('maps the verb the same way the slot-filler does', () => {
+        const defend = action('defend Northgate with 2 tank squads');
+        expect(defend).toBeNull();                            // not this shape
+        expect((action('hold 2 tank squads at Northgate') as
+            { intent: { verb: string } }).intent.verb).toBe('hold');
+    });
+
+    it('refuses to invent a class the shipped vocabulary does not ship', () => {
+        // Falls through to the slot-filler, which refuses with its own copy —
+        // this pattern never gets to name a class the sim has never heard of.
+        expect(match('send 2 doom squads to Randtown')).toBeNull();
+    });
+});
+
 describe('what it must NOT claim', () => {
     it('leaves every army-moving sentence to the slot-filler', () => {
         for (const utterance of [
             'defend Northgate',
             'Chimera Squad attack Slag Forge high',
             'idle heavy tanks hold Sector B9',
-            'move 2 tank squads to Randtown',
             'name this group Hammerfall',
             'rename Chimera Platoon to Hammerfall',
             'prioritise metal collection',

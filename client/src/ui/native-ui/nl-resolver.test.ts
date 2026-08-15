@@ -215,17 +215,43 @@ describe('class-count: candidates and ranking', () => {
         }
     });
 
+    // basin has exactly two idle tank squads, so a count of 2 consumes the idle
+    // tier exactly and resolves without a question (see the M5 excess rule). The
+    // ORDER of the two is what these pin: nearest-to-target first.
     it('among idle squads, nearest to the target wins', () => {
-        const found = resolver('basin').resolveClassCount({ type: 'class-count', class: 'tanks', count: 1 }, target);
+        const found = resolver('basin').resolveClassCount({ type: 'class-count', class: 'tanks', count: 2 }, target);
         expect(found.kind).toBe('ok');
-        if (found.kind === 'ok') expect(found.value.groups[0].groupId).toBe(1);
+        if (found.kind === 'ok') expect(found.value.groups.map((g) => g.groupId)).toEqual([1, 3]);
     });
 
     it('the nearest tier follows the target, not a fixed order', () => {
         const far = { x: 3000, z: 3000 };   // Slag Forge — Warhound is on top of it
-        const found = resolver('basin').resolveClassCount({ type: 'class-count', class: 'tanks', count: 1 }, far);
-        if (found.kind === 'ok') expect(found.value.groups[0].groupId).toBe(3);
+        const found = resolver('basin').resolveClassCount({ type: 'class-count', class: 'tanks', count: 2 }, far);
+        if (found.kind === 'ok') expect(found.value.groups.map((g) => g.groupId)).toEqual([3, 1]);
         else expect.fail('expected an ok resolution');
+    });
+
+    it('more equally-idle squads than the sentence asked for is a question (M5)', () => {
+        // THE acceptance case: three idle tank squads, "two tank squads" — the
+        // ranking would happily pick two, but which two of your armies drive
+        // across the map is not a decision a distance tie-break gets to make.
+        const found = resolver('three-idle-tanks')
+            .resolveClassCount({ type: 'class-count', class: 'tanks', count: 2 }, target);
+        if (found.kind !== 'clarify') return expect.fail('expected a question');
+        expect(found.pick).toBe(2);
+        expect(found.patchable).toBe(true);
+        expect(found.options).toEqual([
+            'Chimera Squad', 'Basilisk Squad', 'Warhound Squad', 'cancel',
+        ]);
+        expect(found.question).toContain('which two');
+    });
+
+    it('an exactly-consumed idle tier does not ask', () => {
+        // The other half of the rule, and the reason it is about availability
+        // rather than count: basin has three tank squads but only two idle ones,
+        // so "two tank squads" has exactly one answer and goes straight through.
+        const found = resolver('basin').resolveClassCount({ type: 'class-count', class: 'tanks', count: 2 }, target);
+        expect(found.kind).toBe('ok');
     });
 
     it('with no group positions on the wire, largest wins instead', () => {

@@ -46,6 +46,9 @@ import { matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { cameraPortHolder, createNLCameraPort } from '../ui/native-ui/camera-port.js';
 import { uiActionRegistry, createNLUiActionPort } from '../ui/native-ui/ui-action-registry.js';
 import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js';
+import { answerLocally, isCancel, resubmissionText } from '../ui/native-ui/nl-clarify.js';
+import { validateNLResponse } from '../ui/native-ui/nl-envelope.js';
+import { executeNLResponse } from '../ui/native-ui/nl-executor.js';
 import { injectStyle } from '../ui/ui.js';
 import consoleCss from './command-console.css?raw';
 
@@ -59,10 +62,26 @@ const state = {
     container: null,
     logEl: null,
     inputEl: null,
-    /** [{ who: 'you'|'game', kind: 'you'|'ok'|'refused'|'system', text, notes }] */
+    /** [{ who, kind, text, notes, options?, pick?, chosen?, dead? }] */
     log: [],
     unsubs: [],
+    /**
+     * The last ≤2 exchanges, oldest first, alternating you/game — the `history`
+     * the proxy accepts (§3, `kMaxHistoryEntries = 4`). Carried by chip
+     * resubmissions AND by free-typed follow-ups, which is what makes "the
+     * second one" resolve.
+     */
+    history: [],
+    /**
+     * The question currently on screen, as `nl-clarify.ts`'s
+     * `PendingClarification` plus the chips already ticked. Null when there is
+     * nothing outstanding.
+     */
+    pending: null,
 };
+
+/** Exchanges (you+game pairs) the proxy accepts. */
+const MAX_HISTORY_EXCHANGES = 2;
 
 function init(ctx) {
     state.ctx = ctx;
@@ -101,6 +120,19 @@ function init(ctx) {
         });
     });
 
+    // One delegated listener for every chip, now and forever: `renderLog`
+    // replaces the log's innerHTML on each line, so per-button listeners would
+    // be re-bound (and leaked) on every transcript update.
+    state.logEl.addEventListener('click', (e) => {
+        const chip = e.target.closest?.('.cc-chip');
+        if (!chip || chip.disabled) return;
+        e.preventDefault();
+        void onChip(chip).catch((err) => {
+            console.error('[command-console] chip failed:', err);
+            say('refused', 'Something went wrong handling that answer — nothing sent.');
+        });
+    });
+
     // The game binds camera/hotkeys on window keydown; those handlers already
     // skip INPUT targets, but stop the propagation anyway so a future binding
     // can't start eating letters the player is typing into an order.
@@ -131,27 +163,63 @@ function dispose() {
 }
 
 /** Append one transcript line (+ optional dim transparency notes) and scroll. */
-function say(kind, text, notes = []) {
+function say(kind, text, notes = [], extra = {}) {
     const who = kind === 'you' ? 'you' : kind === 'system' ? '' : 'game';
-    state.log.push({ who, kind, text, notes });
+    state.log.push({ who, kind, text, notes, chosen: [], ...extra });
     if (state.log.length > MAX_LOG_LINES) state.log.splice(0, state.log.length - MAX_LOG_LINES);
     renderLog();
+    return state.log[state.log.length - 1];
 }
 
 function renderLog() {
     if (!state.logEl) return;
     state.logEl.innerHTML = state.log
-        .map((entry) => `
+        .map((entry, i) => `
             <div class="cc-line cc-line--${entry.kind}">
                 <span class="cc-line__who">${entry.who ? `${entry.who}:` : ''}</span>
                 <span class="cc-line__text">${escapeHtml(entry.text)}</span>
             </div>
             ${entry.notes.map((n) => `<div class="cc-note">${escapeHtml(n)}</div>`).join('')}
+            ${renderChips(entry, i)}
         `)
         .join('');
     // Newest line always visible — the answer to what you just typed must not
     // require a scroll.
     state.logEl.scrollTop = state.logEl.scrollHeight;
+}
+
+/**
+ * The clarification chips (§4 "clarification chips (click = resubmit with the
+ * option appended)").
+ *
+ * A question that needs several picks (`pick > 1`) renders as toggles plus a
+ * confirm button, because asking once per squad would turn a two-tap answer
+ * into four taps and two more model calls. One pick fires immediately — a
+ * confirm step on a single choice is a click that says nothing.
+ *
+ * `dead` chips are the ones belonging to a question that has been answered or
+ * superseded. They stay on screen, disabled, with the chosen one marked: the
+ * transcript is a record of what was asked and what was picked, and silently
+ * removing the question would leave an answer with nothing above it.
+ */
+function renderChips(entry, index) {
+    if (!entry.options?.length) return '';
+    const pick = entry.pick ?? 1;
+    const chips = entry.options.map((option, j) => {
+        const on = entry.chosen.includes(option);
+        const classes = ['cc-chip'];
+        if (on) classes.push('cc-chip--on');
+        if (entry.dead) classes.push('cc-chip--dead');
+        return `<button type="button" class="${classes.join(' ')}"
+            ${entry.dead ? 'disabled' : ''}
+            data-line="${index}" data-option="${j}">${escapeHtml(option)}</button>`;
+    }).join('');
+    const confirm = pick > 1 && !entry.dead
+        ? `<button type="button" class="cc-chip cc-chip--go"
+             ${entry.chosen.length === pick ? '' : 'disabled'}
+             data-line="${index}" data-confirm="1">send ${entry.chosen.length}/${pick}</button>`
+        : '';
+    return `<div class="cc-chips">${chips}${confirm}</div>`;
 }
 
 /**
@@ -291,6 +359,133 @@ function buildLocalPorts(resolver) {
     return ports;
 }
 
+// ───────────────────────── clarification chips ─────────────────────────
+
+/**
+ * A chip was tapped.
+ *
+ * Three outcomes, in the order they are checked:
+ *   1. `cancel` — the question is closed and nothing is sent. A player who has
+ *      changed their mind must not have to answer a question to escape it.
+ *   2. still collecting (`pick > 1` and fewer ticked than needed) — the chip
+ *      toggles and nothing else happens.
+ *   3. answered — `nl-clarify.ts` decides whether the answer can be applied to
+ *      the envelope we already hold, or has to go back to the model.
+ */
+async function onChip(chip) {
+    // The silent returns in this function are audited (§7 "no silent drops"):
+    // each one is a tap that ASKED for nothing to happen — a frozen chip, a
+    // toggle that is still collecting picks. The moment a tap means "do it",
+    // every path below prints something.
+    const entry = state.log[Number(chip.dataset.line)];
+    if (!entry || entry.dead) return;
+
+    const pick = entry.pick ?? 1;
+
+    if (!chip.dataset.confirm) {
+        const option = entry.options[Number(chip.dataset.option)];
+        if (option === undefined) return;
+
+        if (isCancel(option)) {
+            closeQuestion(entry, [option]);
+            say('system', 'cancelled — nothing sent.');
+            return;
+        }
+
+        if (pick > 1) {
+            // Toggle. `cancel` is never part of a multi-pick answer, so ticking
+            // a real option clears it and vice versa.
+            entry.chosen = entry.chosen.includes(option)
+                ? entry.chosen.filter((o) => o !== option)
+                : [...entry.chosen.filter((o) => !isCancel(o)), option].slice(-pick);
+            renderLog();
+            return;
+        }
+        entry.chosen = [option];
+    }
+
+    if (entry.chosen.length !== pick) return;
+
+    const chosen = [...entry.chosen];
+    const pending = state.pending;
+    closeQuestion(entry, chosen);
+
+    if (!pending) {
+        // The question scrolled out of the live state (a new sentence was typed
+        // in the meantime, which supersedes it). Say so rather than acting on a
+        // premise that has moved.
+        say('refused', 'That question is out of date now — say it again.');
+        return;
+    }
+
+    await answerQuestion(pending, chosen);
+}
+
+/** Mark a question answered: chips freeze, the choice is recorded. */
+function closeQuestion(entry, chosen) {
+    entry.chosen = chosen;
+    entry.dead = true;
+    state.pending = null;
+    renderLog();
+}
+
+/**
+ * Answer the outstanding question, locally if we can and through the model if
+ * we can't (see `nl-clarify.ts` for which is which).
+ *
+ * The local path is the one that matters for the common case: the question came
+ * from the resolver, out of an envelope this client already validated, so
+ * putting the chosen callsigns back in and re-running costs nothing, takes no
+ * round trip, and works with the proxy disabled — which is the only reason the
+ * flow is usable at all when `SPRING_NL_API_KEY` is unset.
+ */
+async function answerQuestion(pending, chosen) {
+    say('you', chosen.join(' and '));
+
+    const patched = answerLocally(pending, chosen);
+    if (patched) {
+        await runEnvelope(patched, pending.utterance);
+        return;
+    }
+    await runUtteranceText(resubmissionText(pending.utterance, chosen));
+}
+
+/**
+ * Execute an envelope we built ourselves — the answered-locally path.
+ *
+ * It still goes through `validateNLResponse`, for the same reason the local
+ * parser's own envelopes do: a patcher that produced a shape the contract
+ * rejects should say so here, not have the executor discover it three layers
+ * down. Nothing here can reach `sendCommand` except through the executor.
+ */
+async function runEnvelope(response, utterance) {
+    if (!state.ctx?.sendCommand) {
+        say('refused', 'Not connected to the game — nothing sent.');
+        return;
+    }
+    await censusCacheHolder.current?.refresh();
+
+    const resolver = buildResolver();
+    const validation = validateNLResponse(response, {
+        vocabulary: classVocabulary.current,
+        panelIds: uiActionRegistry.ids(),
+    });
+    if (!validation.ok) {
+        say('refused',
+            `I couldn't put that answer in a form the game accepts: ${validation.errors[0]}.`,
+            validation.errors.slice(1, 4));
+        return;
+    }
+
+    const report = executeNLResponse(validation.value, {
+        sendCommand: state.ctx.sendCommand,
+        resolver,
+        console: { say: renderLine },
+        ...buildLocalPorts(resolver),
+    });
+    rememberExchange(utterance, { report });
+}
+
 /**
  * Async only at this boundary.
  *
@@ -312,6 +507,22 @@ async function submit() {
         return;
     }
 
+    // A new sentence supersedes an outstanding question: its chips freeze
+    // unanswered rather than staying live behind the new exchange, where a
+    // later tap would act on a board two orders old.
+    if (state.pending) {
+        const asked = state.log.find((l) => l.options?.length && !l.dead);
+        if (asked) { asked.dead = true; renderLog(); }
+        state.pending = null;
+    }
+
+    await runUtteranceText(utterance);
+}
+
+/** One sentence through the whole path. Shared by the input field and by a chip
+ *  resubmission, so a follow-up carries exactly the same context and history a
+ *  typed sentence would. */
+async function runUtteranceText(utterance) {
     if (!state.ctx?.sendCommand) {
         // Never report an order as issued when there was nothing to issue it
         // through — the connection isn't wired (or was torn down). Checked
@@ -348,6 +559,28 @@ async function submit() {
     });
 
     rememberExchange(utterance, result);
+    rememberQuestion(utterance, result);
+}
+
+/**
+ * Hold on to an unanswered question so a chip tap knows what it is answering.
+ *
+ * `response` and `clarifyContext` come from the run that just stopped — with
+ * them, `nl-clarify.ts` can put the chosen name back where the question came
+ * from and re-run locally. Without them (a question the MODEL asked) the answer
+ * has to be resubmitted, and both cases end up here identically so the console
+ * never has to know which is which.
+ */
+function rememberQuestion(utterance, result) {
+    const clarify = result?.report?.clarification;
+    if (!clarify?.options?.length) { state.pending = null; return; }
+    state.pending = {
+        utterance,
+        response: result.response,
+        context: result.report.clarifyContext,
+        options: clarify.options,
+        pick: clarify.pick ?? 1,
+    };
 }
 
 /**
@@ -419,18 +652,25 @@ function numericRulesParam(key) {
 }
 
 /**
- * Keep the last exchange so a follow-up ("and the infantry too") has something
- * to attach to.
+ * Keep the last two exchanges so a follow-up ("the second one", "and the
+ * infantry too") has something to attach to.
  *
- * Capped at ONE exchange — two strings — even though the proxy accepts two.
- * M5 owns the clarification round-trip and will spend the second exchange
- * deliberately; sending history we have no flow for today would only make
- * every request bigger and every cached prefix miss more often.
+ * Two, not more: that is what the proxy accepts (§3, `kMaxHistoryEntries = 4` =
+ * 2 user + 2 assistant) and it is what a clarification round-trip needs — the
+ * question the game asked, and the sentence that provoked it. Older turns
+ * describe a board that has since moved, and every one of them is paid for on
+ * every request.
+ *
+ * The game's side of an exchange is the first line that ASSERTS something — a
+ * question, a refusal or an outcome. The `say` acknowledgement is skipped
+ * because it restates the order rather than its result, and history that says
+ * "Moving Chimera to Randtown" for a move that was then refused would teach the
+ * model the opposite of what happened.
  */
 function rememberExchange(utterance, result) {
     const spoken = result?.report?.lines?.find((l) => l.kind !== 'system')?.text;
     if (!spoken) { state.history = []; return; }
-    state.history = [utterance, spoken];
+    state.history = [...state.history, utterance, spoken].slice(-MAX_HISTORY_EXCHANGES * 2);
 }
 
 /**
@@ -438,15 +678,14 @@ function rememberExchange(utterance, result) {
  * this only decides how it looks, which is the same division of labour the rest
  * of the widget follows.
  *
- * A question's candidate list rides in as a dim note. Clickable chips that
- * resubmit are M5's job (plan §4) — rendering the options as text now means the
- * player can always see what they are choosing between, without this widget
- * growing a resubmission flow it would have to hand over later.
+ * A question's candidate list becomes tappable chips (M5). The options ride on
+ * the log entry rather than being flattened into the text, because a chip has to
+ * remember which option it is when the whole log re-renders.
  */
 function renderLine(line) {
-    const notes = [...(line.notes ?? [])];
-    if (line.options?.length) notes.push(`options: ${line.options.join(' · ')}`);
-    say(line.kind, line.text, notes);
+    say(line.kind, line.text, [...(line.notes ?? [])], line.options?.length
+        ? { options: [...line.options], pick: line.pick ?? 1 }
+        : {});
 }
 
 /** The closed vocabulary, read out of the shipped data rather than restated

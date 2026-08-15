@@ -100,7 +100,12 @@ describe('the envelope is names-only (design pillar 4)', () => {
      * `slot`, `percent`, `radius`, `amount`, `rateCap`) — an id or a coordinate
      * would show up as an unexpected number and fail here.
      */
-    const NUMERIC_FIELDS = new Set(['count', 'scale', 'slot', 'percent', 'radius', 'amount', 'rateCap', 'x', 'z']);
+    const NUMERIC_FIELDS = new Set([
+        'count', 'scale', 'slot', 'percent', 'radius', 'amount', 'rateCap', 'x', 'z',
+        // `clarify.pick` (M5) — how many options the answer takes. A count of
+        // choices, not a reference to anything on the board.
+        'pick',
+    ]);
 
     for (const fixture of fixtures) {
         it(`${fixture.file} · ${fixture.name} carries no ids`, () => {

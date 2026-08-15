@@ -31,6 +31,7 @@ import { planUtterance, type ExchangeDeps, type ExchangeOutcome } from './consol
 import type { AcceleratorResult } from './free-text-accelerator.js';
 import { matchLocalPattern, type LocalPatternDeps } from './nl-local-patterns.js';
 import {
+    MAX_ACTIONS,
     validateNLResponse,
     type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
     type NLWhen, type ValidationResult,
@@ -128,6 +129,56 @@ function cleanName(raw: string): string {
  * depending on whether the proxy happened to be up.
  */
 export function acceleratorToEnvelope(utterance: string, deps: AdapterDeps): LocalParse {
+    const clauses = splitClauses(utterance);
+    if (clauses) {
+        const parts = clauses.map((clause) => parseOne(clause, deps));
+        // All or nothing: one clause the local path can't execute means the
+        // conjunction was part of a name, not a list of orders. See
+        // `splitClauses`.
+        const executable = parts.every((p) =>
+            p.response.actions.length > 0 && p.response.actions.every((a) => a.kind !== 'refuse'));
+        if (executable && parts.reduce((n, p) => n + p.response.actions.length, 0) <= MAX_ACTIONS) {
+            const says = parts.map((p) => p.response.say).filter((s): s is string => !!s);
+            return {
+                notes: parts.flatMap((p) => p.notes),
+                response: {
+                    ...(says.length ? { say: clampText(says.join('; ')) } : {}),
+                    actions: parts.flatMap((p) => p.response.actions),
+                },
+            };
+        }
+    }
+    return parseOne(utterance, deps);
+}
+
+/**
+ * "defend Northgate and show me the minimap" → two clauses, or null.
+ *
+ * Null means "treat the whole thing as one sentence", and it is the answer
+ * whenever ANY clause fails to parse on its own. That all-or-nothing rule is
+ * what keeps the split safe: "defend the grain silo and osprey fen" splits into
+ * a clause and a fragment, the fragment produces no action, and the sentence
+ * goes to the slot-filler whole — where "and osprey fen" ends up in the
+ * unmatched-words note, exactly as before this existed. So this can only ever
+ * ADD sentences the local path executes; it can never change what an existing
+ * one means.
+ *
+ * The LLM does this properly (§1 "multi-step = ordered list", and it reads the
+ * sentence rather than counting conjunctions). This is the offline half, and it
+ * is why "defend <place> and show me the minimap" works with the proxy down.
+ */
+function splitClauses(utterance: string): string[] | null {
+    const parts = utterance
+        .split(/(?:,\s*(?:and\s+|then\s+)?|\s+and\s+then\s+|\s+and\s+|\s*;\s*|\s+then\s+)/i)
+        .map((p) => p.trim())
+        .filter(Boolean);
+    if (parts.length < 2 || parts.length > MAX_ACTIONS) return null;
+    return parts;
+}
+
+/** One clause (or one whole sentence) → one envelope. Never re-splits: the
+ *  split has already happened by the time this is called. */
+function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
     // M3's camera / panel / query patterns, tried BEFORE the slot-filler for the
     // same reason the rename is: none of them is one of the eleven army-moving
     // verbs, and teaching the slot-filler about panels would make every sentence
@@ -294,7 +345,7 @@ export function runLocalUtterance(utterance: string, deps: LocalRunDeps): LocalR
             notes: validation.errors.slice(1, 4),
         };
         deps.ports.console.say(line);
-        return { response, validation, report: { lines: [line], sent: [], refusals: [line.text] } };
+        return { response, validation, report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] } };
     }
 
     const report = executeNLResponse(validation.value, {
@@ -410,7 +461,7 @@ export async function runUtterance(
         return {
             response: fetched.envelope as NLResponse,
             validation,
-            report: { lines: [line], sent: [], refusals: [line.text] },
+            report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] },
             source: 'proxy',
         };
     }
