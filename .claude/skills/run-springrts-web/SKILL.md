@@ -177,10 +177,16 @@ cd client && npx vitest run                        # client unit tests
 - **Zombie `spring-server` on `:9100` blocks auth.** A leftover game server from
   a crashed/killed earlier session holds the port; new rooms route to it and
   login/auth fails or hangs mysteriously (this burned most of the U8 session).
-  Check `list_processes` / `lsof -i :9100` and kill leftovers before launching.
+  `spring-debug` `list_stack` classifies exactly this as `zombie-port` (error);
+  `cleanup_stack` clears it (dry-run first, and it will never kill the `:8011`
+  lobby). Do that before hand-hunting with `pgrep`/`lsof`.
 - **A rebuilt server binary does not affect a live process.** After
   `cmake --build`, kill + relaunch any running game server (and restart the
   lobby proc if lobby code changed) — otherwise you're testing the old binary.
+  `list_stack {probeHashes:true}` proves it either way: it compares each running
+  server's `/api/metrics` → `identity.engineHash` against the on-disk binary
+  (`stale-binary-running`) and flags `binary-drift` when the lobby is forking
+  `build/release/spring-server` while your rebuild went into `build/debug/`.
 - **CMake globs are stale for NEW server `.cpp` files.** Adding a file under
   `rts/Server|Sim|Map|Lua` needs a `cmake build/debug` re-configure before the
   incremental build, else the link fails with undefined symbols.

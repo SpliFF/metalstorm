@@ -21,6 +21,11 @@ import { buildScenarioManifest } from './scenario-manifest.js';
 import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { classifyEndResponse } from './room-end.js';
+import {
+    STACK_PATTERNS, STACK_PORTS, STATUS_STALE_SEC,
+    parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries, classifyStack,
+    planCleanup, summarize, isStackPort, CLEANABLE_KINDS,
+} from './stack-census.js';
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
@@ -210,9 +215,10 @@ async function getGameServerUrl(roomId) {
 // (GameServersDb::DeleteForRoom only runs on the lobby's cleanup path), so a
 // fresh-looking row must never be able to resurrect a dead server.
 
-// 5 missed 2s heartbeats. The heartbeat is published from inside the sim loop
-// (server_main.cpp:2559-2562); if that cadence changes, this must follow.
-const STATUS_STALE_SEC = 10;
+// 5 missed 2s heartbeats — defined once in stack-census.js, because the
+// P8 census applies the same threshold to the same rows and two copies of a
+// staleness rule drift. The heartbeat is published from inside the sim loop
+// (server_main.cpp:2559-2562); if that cadence changes, that constant follows.
 
 const PHASE_ORDER = { dead: -1, spawning: 0, loading: 1, ready: 2, ticking: 3 };
 
@@ -780,6 +786,191 @@ async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 25
     return { exited: !pidAlive(pid), escalatedToKill, waitedMs: Date.now() - t0 };
 }
 
+// --- Stack census (P8) ------------------------------------------------------
+//
+// The IO half of list_stack / cleanup_stack; the classification lives in
+// stack-census.js (pure, tested). Every shell-out goes through execFileAsync
+// (argument arrays, no shell), mirroring the restart_client precedent.
+
+/** pgrep -f for one pattern. Exit 1 (no match) is not an error. */
+async function pgrepPids(pattern) {
+    try {
+        const { stdout } = await execFileAsync('pgrep', ['-f', '--', pattern]);
+        return stdout.split('\n').map(s => Number(s.trim())).filter(Boolean)
+            // pgrep spawns no shell here (execFile), so the known "matches its
+            // own zsh wrapper" trap doesn't apply — but a loosened pattern
+            // could still match this node process. Never report ourselves.
+            .filter(pid => pid !== process.pid);
+    } catch { return []; }
+}
+
+async function psRows(pids) {
+    if (!pids.length) return [];
+    try {
+        const { stdout } = await execFileAsync('ps', ['-o', 'pid=,ppid=,lstart=,args=', '-p', pids.join(',')]);
+        return parsePsOutput(stdout);
+    } catch { return []; }
+}
+
+/** One lsof for every listener on the box; the census filters from there. */
+async function listListeners() {
+    try {
+        const { stdout } = await execFileAsync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fpcn']);
+        return { available: true, listeners: parseLsofF(stdout) };
+    } catch (err) {
+        // lsof exits 1 with empty output when nothing matches — that is an
+        // empty census, not a missing tool. ENOENT is the missing tool.
+        if (err && err.code === 'ENOENT') return { available: false, listeners: [] };
+        return { available: true, listeners: parseLsofF(err?.stdout || '') };
+    }
+}
+
+/**
+ * `spring-server --print-engine-hash` prints 16 hex digits and exits before
+ * logging/SQLite/anything (server_main.cpp:162-176). An older binary without
+ * the flag would BOOT instead — hence the timeout, and the "only under
+ * build/{debug,release}" restriction on what we ever exec.
+ */
+async function probeEngineHash(binPath) {
+    try {
+        const { stdout } = await execFileAsync(binPath, ['--print-engine-hash'], { timeout: 5000 });
+        const hash = stdout.trim();
+        return /^[0-9a-f]{16}$/.test(hash) ? hash : null;
+    } catch { return null; }
+}
+
+async function collectBinaries(probeHashes) {
+    const root = projectRoot();
+    const out = {};
+    for (const flavour of ['release', 'debug']) {
+        const p = resolve(root, `build/${flavour}/spring-server`);
+        try {
+            const st = statSync(p);
+            out[flavour] = {
+                path: p, mtimeMs: st.mtimeMs, mtime: new Date(st.mtimeMs).toISOString(),
+                size: st.size, engineHash: probeHashes ? await probeEngineHash(p) : null,
+            };
+        } catch { /* not built */ }
+    }
+    return classifyBinaries(out);
+}
+
+function readGameStatusRows() {
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        try {
+            const now = Math.floor(Date.now() / 1000);
+            const rows = db.prepare(
+                'SELECT room_id, ready, client_count, pid, port, updated_at FROM game_status',
+            ).all();
+            return {
+                available: true,
+                rows: rows.map(r => ({
+                    ...r,
+                    heartbeatAgeSec: r.updated_at ? now - r.updated_at : null,
+                    stale: r.updated_at ? (now - r.updated_at) > STATUS_STALE_SEC : true,
+                    alive: pidAlive(r.pid),
+                })),
+            };
+        } finally { db.close(); }
+    } catch {
+        return { available: false, rows: [] };
+    }
+}
+
+/** Best-effort `identity` from a running server's /api/metrics. */
+async function fetchIdentity(port) {
+    try {
+        const j = await fetchJson(`http://127.0.0.1:${port}/api/metrics`, 1500);
+        return j?.identity ?? null;
+    } catch { return null; }
+}
+
+/**
+ * Whether the mprocs control server is listening — an lsof LISTEN check ONLY.
+ *
+ * IMPORTANT: never open a socket to it. mprocs deserializes whatever an
+ * accepted connection carries, so a bare connect+close fails it with
+ * `invalid type: … expected internally tagged enum AppEvent` and can take
+ * mprocs down (tools/scripts/spring-services.sh:103-120). A health ping here
+ * would be a regression, not an improvement.
+ */
+function mprocsStatus(listeners) {
+    let yamlText = '';
+    try { yamlText = readFileSync(resolve(projectRoot(), 'mprocs.yaml'), 'utf-8'); } catch { /* none */ }
+    const addr = resolveMprocsAddr({ env: process.env.MPROCS_SERVER || '', yamlText });
+    const ctlPort = Number(addr.split(':').pop());
+    return { ctlPort, reachable: listeners.some(l => l.port === ctlPort) };
+}
+
+/** The whole census, shared verbatim by list_stack and cleanup_stack. */
+async function collectStackFindings({ probeHashes = false } = {}) {
+    const [lobbyPids, serverPids, logserverPids, vitePids] = await Promise.all(
+        [STACK_PATTERNS.lobby, STACK_PATTERNS.server, STACK_PATTERNS.logserver, STACK_PATTERNS.vite]
+            .map(pgrepPids),
+    );
+    const [lobby, server, logserver, vite] = await Promise.all(
+        [lobbyPids, serverPids, logserverPids, vitePids].map(psRows),
+    );
+    const ports = await listListeners();
+    const rows = await getGameServers();
+    // getGameServers() silently folds two sources into one shape; which one
+    // answered changes what "unmanaged" means, so ask separately.
+    let source = 'none';
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/processes`, { signal: AbortSignal.timeout(2000) });
+        if (resp.ok) source = 'lobby';
+    } catch { /* lobby down */ }
+    if (source === 'none' && rows.length) source = 'sqlite';
+
+    const binaries = await collectBinaries(probeHashes);
+    const gameStatus = readGameStatusRows();
+
+    // Identity probes only when we have something to compare against.
+    let identities = [];
+    if (probeHashes) {
+        const targets = [];
+        for (const r of rows) if (r.port && pidAlive(r.pid)) targets.push({ pid: r.pid, port: r.port });
+        for (const p of server) {
+            if (targets.some(t => t.pid === p.pid)) continue;
+            const port = (ports.listeners || []).find(l => l.pid === p.pid)?.port;
+            if (port) targets.push({ pid: p.pid, port });
+        }
+        const settled = await Promise.allSettled(targets.map(t => fetchIdentity(t.port)));
+        identities = targets.map((t, i) => ({
+            ...t, identity: settled[i].status === 'fulfilled' ? settled[i].value : null,
+        }));
+    }
+
+    const census = {
+        processes: { lobby, server, logserver, vite },
+        ports, authority: { source, rows }, gameStatus, binaries, identities,
+    };
+    const findings = classifyStack(census);
+    const lobbyPid = (ports.listeners || []).find(l => l.port === STACK_PORTS.lobby)?.pid ?? null;
+    return { census, findings, lobbyPid };
+}
+
+/**
+ * The kill helper. The :8011 refusal lives HERE rather than only in the
+ * planner, so no future call path can route around it.
+ */
+async function cleanupKill(action, lobbyPid) {
+    if (lobbyPid && action.pid === lobbyPid) {
+        return { ...action, outcome: 'refused', reason: 'pid holds :8011 (the live lobby)' };
+    }
+    if (!pidAlive(action.pid)) return { ...action, outcome: 'exited', signal: null };
+    // SIGTERM first: spring-server turns it into a clean loop exit that drains
+    // the war log and writes the exit checkpoint (server_main.cpp).
+    const r = await endProcess(action.pid, { graceful: true, timeoutMs: 5000, pollMs: 500, escalate: true });
+    return {
+        ...action,
+        signal: r.escalatedToKill ? 'SIGKILL' : 'SIGTERM',
+        outcome: r.exited ? (r.escalatedToKill ? 'killed' : 'exited') : 'error',
+        waitedMs: r.waitedMs,
+    };
+}
+
 // Destructive verbs never guess which game they mean: without an explicit
 // roomId they refuse and enumerate. (Read-oriented tools keep getGameServerUrl's
 // permissive auto-pick — that's a feature there.)
@@ -910,10 +1101,32 @@ const TOOLS = [
     },
     {
         name: 'list_processes',
-        description: 'List all game server processes (from SQLite database).',
+        description: 'List game server processes as JSON: {servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}. Discovery is the lobby /api/processes with a SQLite fallback; `ready`/`clientCount`/heartbeat come from the game_status table and `identity` ({stamp, engineHash, pid}) from each server\'s /api/metrics (null on a server built before P8). For strays, zombie ports and binary drift use list_stack instead.',
         inputSchema: {
             type: 'object',
             properties: {},
+        },
+    },
+    {
+        name: 'list_stack',
+        description: 'Full dev-stack census in one call — replaces ad-hoc pgrep/lsof hunts. Returns {findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}. `findings[]` classifies everything it sees: managed (lobby/logserver/vite/game servers the lobby owns), stray-server (a spring-server the lobby does not know about — e.g. a hand-launched headless run), zombie-port (a listener on 9100-10099 that is not a managed game server; blocks the next room, since room routing is by port), duplicate-lobby, orphan-vite (a vite on a fallback port — a browser pointed at it silently drives the wrong stack), stale-status-row (report-only), binary-drift (the lobby forks build/release/spring-server when it exists, so a debug-only rebuild is invisible) and stale-binary-running. Each finding carries a severity and a suggestedAction. Read-only: it never connects to the mprocs control port (a bare connect can crash mprocs) and never kills anything — that is cleanup_stack.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                probeHashes: { type: 'boolean', description: 'Also run `spring-server --print-engine-hash` on each on-disk binary and read `identity` from every running server, enabling stale-binary-running detection ("the process you are testing is not the binary you just built"). Adds ~1s. Default false.', default: false },
+            },
+        },
+    },
+    {
+        name: 'cleanup_stack',
+        description: 'Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                dryRun: { type: 'boolean', description: 'Report the plan without killing anything. Default TRUE.', default: true },
+                kinds: { type: 'array', items: { type: 'string', enum: CLEANABLE_KINDS }, description: `Restrict to these classifications (default: all of ${CLEANABLE_KINDS.join(', ')}).` },
+                force: { type: 'boolean', description: 'Allow killing a zombie-port pid whose command line is not spring-server (the 9100-10099 range can catch unrelated dev tools). Default false.', default: false },
+            },
         },
     },
     {
@@ -1635,10 +1848,79 @@ async function executeTool(name, args) {
 
         case 'list_processes': {
             const servers = await getGameServers();
+            // Kept as prose: callers (and skill docs) read this exact string as
+            // "nothing is running", and JSON `{count:0}` would break them.
             if (!servers.length) return 'No game server processes found.';
-            return servers.map(s =>
-                `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_id || '?'}, map=${s.map_id || '?'}`
-            ).join('\n');
+
+            const status = readGameStatusRows();
+            const byRoom = new Map(status.rows.map(r => [r.room_id, r]));
+            // allSettled: one hung server must not stall the whole listing.
+            const ids = await Promise.allSettled(
+                servers.map(s => (s.port ? fetchIdentity(s.port) : Promise.resolve(null))),
+            );
+            return JSON.stringify({
+                servers: servers.map((s, i) => {
+                    const st = byRoom.get(s.room_id);
+                    return {
+                        roomId: s.room_id, port: s.port, pid: s.pid, state: s.state,
+                        gameId: s.game_id || null, mapId: s.map_id || null,
+                        ready: st ? !!st.ready : null,
+                        clientCount: st ? st.client_count : null,
+                        heartbeatAgeSec: st ? st.heartbeatAgeSec : null,
+                        heartbeatStale: st ? st.stale : null,
+                        identity: ids[i].status === 'fulfilled' ? ids[i].value : null,
+                    };
+                }),
+                count: servers.length,
+            }, null, 2);
+        }
+
+        case 'list_stack': {
+            const { census, findings } = await collectStackFindings({ probeHashes: !!args.probeHashes });
+            return JSON.stringify({
+                findings,
+                processes: census.processes,
+                ports: census.ports.available
+                    ? census.ports.listeners.filter(l => isStackPort(l.port))
+                    : { available: false },
+                authority: { source: census.authority.source, rows: census.authority.rows },
+                gameStatus: census.gameStatus.available ? census.gameStatus.rows : { available: false },
+                binaries: census.binaries,
+                mprocs: mprocsStatus(census.ports.listeners || []),
+                summary: summarize(findings),
+            }, null, 2);
+        }
+
+        case 'cleanup_stack': {
+            const dryRun = args.dryRun !== false;   // default TRUE
+            const { census, findings, lobbyPid } = await collectStackFindings({ probeHashes: false });
+            const { actions, refusals } = planCleanup(findings, {
+                kinds: args.kinds, force: !!args.force, lobbyPid,
+                authoritySource: census.authority.source,
+            });
+
+            if (!actions.length && !refusals.length) {
+                const managed = findings.filter(f => f.kind === 'managed').length;
+                return JSON.stringify({
+                    dryRun, actions: [], refusals: [],
+                    note: managed
+                        ? `Nothing to clean — all ${managed} processes are managed. To stop a running game use end_game({roomId}), which drains gracefully.`
+                        : 'Nothing to clean — no matching findings.',
+                    summary: summarize(findings),
+                }, null, 2);
+            }
+            if (dryRun) {
+                return JSON.stringify({
+                    dryRun: true, plan: actions, refusals,
+                    note: 'Dry run — nothing was killed. Re-run with dryRun:false to execute this exact plan.',
+                    summary: summarize(findings),
+                }, null, 2);
+            }
+            const results = [];
+            for (const a of actions) results.push(await cleanupKill(a, lobbyPid));
+            return JSON.stringify({
+                dryRun: false, results, refusals, summary: summarize(findings),
+            }, null, 2);
         }
 
         case 'get_lua_source': {

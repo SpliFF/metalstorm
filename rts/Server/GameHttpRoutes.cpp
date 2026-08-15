@@ -3,7 +3,9 @@
 
 #include "NetworkServer.h"
 #include "ContentServer.h"
+#include "CacheControl.h"
 #include "Database.h"
+#include "EngineIdentity.h"
 #include "FactionData.h"
 #include "LuaExecEngine.h"
 #include "ClientEvalBroker.h"
@@ -28,6 +30,7 @@
 #include <iterator>
 #include <set>
 #include <unordered_map>
+#include <unistd.h>   // getpid() for /api/metrics identity
 
 #define LOG_SECTION "server"
 
@@ -241,6 +244,24 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
             simFrame["phases"] = phases;
         }
         j["simFrame"] = simFrame;
+
+        // Binary identity for stale-binary detection (PLAN-test-automation P8):
+        // which build is actually serving this room, comparable against
+        // `spring-server --print-engine-hash` of the on-disk binary. The MCP's
+        // list_stack flags `stale-binary-running` when the two disagree — the
+        // "you rebuilt, but the process you are testing is the old one" trap.
+        //
+        // Prod-safe, deliberately NOT compiled out under SPRING_PROD: `stamp`
+        // is already public via the lobby's /api/version, `engineHash` is a
+        // pure function of it (EngineIdentity.h), and the pid of a localhost
+        // dev server is not sensitive. The stamp comes via CacheControl so the
+        // `#if __has_include("BuildStamp.h")` guard lives in exactly one place.
+        const char* stamp = CacheControl::BuildStamp();
+        j["identity"] = {
+            {"stamp",      stamp},
+            {"engineHash", engineid::HashHex(engineid::StampHash(stamp))},
+            {"pid",        static_cast<int>(getpid())},
+        };
 
         std::string json = j.dump();
         std::vector<uint8_t> body(json.begin(), json.end());

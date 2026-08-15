@@ -600,7 +600,7 @@ The lobby spawns a game server per room. Port is in the `RoomStateUpdate` messag
 |----------|-------------|
 | `GET /api/map/info` | `{mapx, mapy, squareSize, widthElmos, heightElmos}` |
 | `GET /api/map/heightmap` | Binary: u32 width, u32 height, float32[w*h] |
-| `GET /api/metrics` | Performance stats JSON |
+| `GET /api/metrics` | Performance stats JSON. Public, cheap to poll. Besides the PerfMetrics fields and `simFrame` (the sim-phase breakdown, zeroed unless `server sim profile on`), it carries `identity: {stamp, engineHash, pid}` — the build actually serving this room. `engineHash` is the same 16-hex value `spring-server --print-engine-hash` prints for a binary on disk, so a running server can be compared against the one you just built (the MCP's `list_stack` does exactly this and reports `stale-binary-running`). Present under `SPRING_PROD` too: `stamp` is already public via the lobby's `/api/version` and the hash is a pure function of it |
 
 ### Command Execution
 

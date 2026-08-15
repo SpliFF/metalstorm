@@ -6,6 +6,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
 
 - [SQL Query Proxy](#sql-query-proxy)
 - [Process Management](#process-management)
+  - [Stack census (`list_stack` / `cleanup_stack`)](#stack-census-list_stack--cleanup_stack)
 - [Claude / MCP Integration](#claude--mcp-integration)
   - [MCP Server Setup](#mcp-server-setup)
   - [Available Tools](#available-tools)
@@ -93,6 +94,68 @@ lobby> process list
 
 **Restart resilience:** The lobby writes spawned game server info to a `game_servers` SQLite table. On startup, stale entries from a previous run are cleaned up. This table is the foundation for re-adopting orphaned game servers after a lobby restart (not yet fully wired).
 
+### Stack census (`list_stack` / `cleanup_stack`)
+
+`GET /api/processes` only knows about servers the **lobby** launched. Everything
+else — a hand-launched headless run, a leftover listener squatting a game port,
+a second lobby, a Vite that fell back to `:8013` — is invisible to it, and used
+to be hunted by hand with `pgrep`/`lsof`. The two MCP tools answer that in one
+call.
+
+**`list_stack {probeHashes?}`** → `{findings, processes, ports, authority,
+gameStatus, binaries, mprocs, summary}`. Read-only. Each finding is
+`{kind, severity, pid?, port?, roomId?, cmd?, detail, suggestedAction}`:
+
+| kind | meaning | severity |
+|---|---|---|
+| `managed` | the lobby owns it, or it is the `:8011` lobby / `:8010` logserver / `:8012` vite | info |
+| `stray-server` | a `spring-server` pid the lobby does not list — e.g. a hand-launched `--headless-run` | warning |
+| `zombie-port` | a listener on 9100–10099 that is not a managed game server. Room routing is **by port**, so a squatter makes the lobby's next room unreachable | error |
+| `duplicate-lobby` | more than one `spring-lobby`; `SO_REUSEPORT` round-robins accepts, so the extras answer real requests | error |
+| `orphan-vite` | a vite not on `:8012`. The client bakes the lobby port at **build** time, so a browser pointed at the fallback silently drives the wrong stack | warning |
+| `stale-status-row` | a `game_status` row naming a dead pid — **report-only**, never deleted (spring-server owns that row) | warning |
+| `binary-drift` | the lobby forks `build/release/spring-server` when it exists, so a **debug-only rebuild is invisible** in a lobby-driven arm | warning |
+| `stale-binary-running` | a running server's `/api/metrics` → `identity.engineHash` ≠ the on-disk binary's (`probeHashes` only). "The process you are testing is not the binary you just built" | warning / info |
+
+`authority.source` is `lobby` \| `sqlite` \| `none`. **When it is `none`, every
+game server looks unmanaged** — so `stray-server` findings drop to `info` and
+`cleanup_stack` refuses them outright.
+
+`binaries` reports `picked` (release if present, else debug — the rule from
+`lobby_main.cpp`), `drift`, and per-flavour `{mtime, size, engineHash}`.
+`probeHashes:true` fills `engineHash` via `spring-server --print-engine-hash`
+and reads `identity` from every live server (adds ~1 s).
+
+`mprocs` is `{ctlPort, reachable}` from an **lsof LISTEN check only** — never a
+connection. mprocs deserializes whatever an accepted connection carries, so a
+bare connect+close can take it down (see `tools/scripts/spring-services.sh`).
+
+**`cleanup_stack {dryRun=true, kinds?, force?}`** kills only
+`stray-server` / `zombie-port` / `orphan-vite` / `duplicate-lobby`, SIGTERM →
+poll 5 s → SIGKILL (SIGTERM is what gives spring-server its exit checkpoint).
+`dryRun` defaults to **true** and returns the exact plan. Invariants:
+
+- the pid holding `:8011` is **never** killed, whatever its classification;
+- `managed` is never touched — to stop a real game use `end_game({roomId})`,
+  which drains gracefully;
+- `stale-status-row` is report-only (a third writer on that table is a race,
+  and the row deliberately outlives the process for kill-and-resume);
+- a `zombie-port` pid whose command is not `spring-server` needs `force:true`
+  (the 9100–10099 range can catch unrelated dev tools).
+
+```
+list_stack {probeHashes:true}   → "1 stray-server, 1 binary-drift"
+cleanup_stack {}                → plan: pid 14932 stray-server, SIGTERM → poll 5s → SIGKILL
+cleanup_stack {dryRun:false}    → {outcome:"killed", signal:"SIGKILL", waitedMs:5122}
+```
+
+**Engine identity.** The game server's public `GET :port/api/metrics` carries
+`identity: {stamp, engineHash, pid}` — `engineHash` is the same 16-hex value
+`spring-server --print-engine-hash` prints for the binary on disk, so the two
+are directly comparable. It is **not** compiled out under `SPRING_PROD`: the
+stamp is already public via the lobby's `/api/version` and the hash is a pure
+function of it.
+
 ---
 
 ## Claude / MCP Integration
@@ -132,7 +195,9 @@ Configure in `.claude/settings.local.json`:
 | `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope. With `scope:"server"`, a leading `json ` token asks the converted verbs for a JSON object instead of free text — see [structured server verbs](#structured-server-verbs-json-prefix) |
 | `get_game_state` | `roomId` | Sim state as an object: `{frame, paused, speed, teams, units, luaHeapKb}` (`luaHeapKb` is 0 when LuaRules is not loaded). Falls back to the legacy `frame=N teams=N units=N` text on a pre-`json ` game server |
 | `list_units` | `team`, `roomId` | Units as `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}`. `total` counts every match of the team filter (the legacy text reports the *unfiltered* active count); `units` is capped at 100 rows. Falls back to legacy text on a pre-`json ` game server |
-| `list_processes` | | List game server processes (via lobby HTTP) |
+| `list_processes` | | Game servers as JSON: `{servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}`. Discovery is the lobby `/api/processes` with a SQLite fallback; `ready`/`clientCount`/heartbeat are left-joined from `game_status` (`null` when the room has no row — e.g. hibernated) and `identity` is `{stamp, engineHash, pid}` read from each server's `/api/metrics` (`null` on a server built before P8, or one that didn't answer in 1.5 s). Still returns the literal string `No game server processes found.` when there are none |
+| `list_stack` | `probeHashes` (default `false`) | **Full-stack census in one call** — replaces ad-hoc `pgrep`/`lsof` hunts. Returns `{findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}`. See [stack census](#stack-census-list_stack--cleanup_stack) |
+| `cleanup_stack` | `dryRun` (default **`true`**), `kinds`, `force` (default `false`) | Kill what `list_stack` classified as *not* managed. Dry-run first by default; see [stack census](#stack-census-list_stack--cleanup_stack) |
 | `get_lua_source` | `gamePath`, `filePath` | Read a Lua source file from disk |
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
 | `query_db` | `query`, `db` | SQL query against game or debug database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too |
