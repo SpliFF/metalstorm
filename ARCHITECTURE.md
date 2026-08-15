@@ -256,6 +256,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/test-harness.ts` | `window.test` runtime API: spawn/kill/damage/order verbs through `/api/exec`, camera focus on a unit, render-loop pause, screenshot capture, debug-flag toggles. Paired with `.claude/skills/spring-test`. **GW8**: split for the worker — server-bound verbs run on main over HTTP; client-bound (camera/selection/netSim/pause/screenshot) forward to the worker via `workerCall()` (`gp:test`/`gp:testResult`); `selection`/`cameraPose` read the cached `gp:sceneState` feed synchronously. `window.widgets.eval` (Lua) + `window.__gp` (JS into the worker global scope, for `__entityRenderer`/`__fxLightPool`/`__frameProfiler`/`__perfToggles`/… debug hooks) are re-exposed in `main.ts`. **P0**: `perfDump()`/`perfReset()` (per-phase frame-time distribution) + the `__perfToggles` isolation handles (`terrainPlugin`/`decalFade`/`lightPool`/`renderScale`/`luaUi`). **N1**: `uiProfileStart()`/`uiProfileDump()`/`uiProfileStop()` (per-widget LuaUI cost profile — `core/widget-profiler.ts`). **PLAN-fx-offload X5**: `entityFxFenceDump()`/`entityFxFenceReset()` (per-def legacy entity-FX script cost — `core/entity-fx-fence.ts`). The spring-debug MCP browser tools (`browser_test`/`spawn_at_camera`/`evaluate_widget_lua`) all route through these. |
 | `core/net-inspector.ts` | Network message inspector: decodes the envelope byte + FlatBuffer payload type for the debug console, and keeps an always-on per-envelope bandwidth tally (feeds PLAN-performance PC-2). **GW8**: runs **inside the game-processor worker** (the connection lives there) — `recordInbound` at `connection.routeIncoming`, `recordOutbound` at `sendOnControl`; surfaced to main via `window.test.netStats()`. Worker-safe: the per-frame debug-console log goes through a registered sink (`setNetLogSink`, set by debug-console on main) instead of importing the DOM-constructing console singleton. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
+| `lobby/chat.ts` | Chat model (PLAN-lobby.md §3, task 9b's client half): tabs, unread, history/live merge, slash commands, and the `EventSource` recovery policy. Pure — `lobby-ui.ts`'s `renderChat()` is the DOM around it. |
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
 | `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
@@ -1057,10 +1058,42 @@ two: the route answers, `/api/rooms/join` seats, so the fork brakes and the audi
 row are not bypassed — and `opposing_side`, the successful outcome that puts you
 against your friend, **costs a second click** (`friendJoinNeedsConfirm`), because
 seating immediately wrote the warning and replaced it with the room screen in the
-same tick. Classes built from the wire's own words (`friend-<edge>`,
+same tick.
+Classes built from the wire's own words (`friend-<edge>`,
 `friend-presence-<state>`) are enumerated in `lobby-css-coverage.test.ts`: no
 regex over the markup can find them, so a new server state would otherwise ship
 unstyled.
+
+**The chat panel** (`client/src/lobby/chat.ts`, task 9b's client half) reads the six
+`/api/chat/*` routes, and three properties of that service shape it. **A tab is
+keyed by the SERVER'S target and addressed by a different string.** A PM is POSTed
+to `target: "<username>"` and every frame comes back as `Chat::PmTarget`'s
+`"<lo>:<hi>"`, so a tab keyed on what the player typed never matches its own
+replies and the conversation splits in two the moment the other party answers;
+`ChatTab` therefore carries `target` (matches frames) and `sendTarget` (what
+`send`/`history` want back) — verified live, where `history` on the canonical PM
+target answers `no such player`. The three room-shaped scopes have the same split
+in the other direction: all of them POST the bare room id and come back as `<id>`,
+`<id>/ally/<team>` and `<id>/spec`, and the client must never build the ally target
+itself, because the server appends the team it reads off the roster precisely so a
+client cannot name one. **Room tabs are staged by `syncRoomTabs` and die with the
+room** — leaving takes the membership with it, so a tab left behind is a surface
+whose every request is a 403 — and a spectator gets no ally tab, a player no
+spectator tab. **The stream is identified and its credential is a ticket**
+(`SSETickets.h`): the client mints one with the real token and spends it in the
+url, because `EventSource` cannot set a header. `onerror` reports nothing, so a
+401 from a dead ticket and a dropped connection are the same event and want
+opposite responses — the browser's own retry fixes the second and loops forever on
+the first, since it re-fetches the url the dead ticket is in. `streamRecovery` is
+that decision: one free auto-retry while the ticket is plausibly alive, an
+immediate re-mint once its TTL has passed (the TTL slides on redemption, so an
+un-redeemed window means nothing is connected), exponential backoff after that,
+and a stop with a Reconnect button rather than silent retries for the session.
+`/me` has no wire flag and is sent as ordinary text with its marker intact, so it
+renders as an action for every client and survives history. The dock is an empty
+`#chat-dock` div in BOTH lobby templates and everything inside it is written by
+`renderChat()`, which is why `lobby-css-coverage.test.ts` enumerates the chat
+classes explicitly — no markup scan can see a class built from data.
 
 **What the card says about a frozen war** (PLAN-persistence task 4a): the badge is
 `war.state`, not the `live` bit — Live / Resuming / Hibernated / Interrupted /
