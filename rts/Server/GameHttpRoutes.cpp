@@ -7,6 +7,7 @@
 #include "FactionData.h"
 #include "LuaExecEngine.h"
 #include "HttpAuth.h"
+#include "NlProxy.h"
 #include "PathTraversal.h"
 #include "PerfMetrics.h"
 #include "SimFrameProfiler.h"
@@ -261,6 +262,32 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         return reg;
     }();
     HttpAuth::RegisterEndpoints(net, ctx.db, factionRegistry);
+
+    // --- Natural-language command proxy ---
+    // PLAN-metalstorm-command-language.md §3 (M4). POST, not GET: this
+    // codebase's GET handlers never receive headers, so a non-Public GET is
+    // enforced loopback-only (see NetworkServer.h) and could not carry a
+    // player's session token at all. TokenRequired is checked by DispatchPost
+    // before the handler runs; the handler re-resolves the user because the
+    // token bucket is per-user and needs an identity, not just a yes.
+    //
+    // `static` for the same reason factionRegistry above is: the handler
+    // outlives this function. Init is a no-op that leaves it disabled when
+    // SPRING_NL_API_KEY / ANTHROPIC_API_KEY is unset, which is the normal
+    // state of a dev box and of every build that has no business talking to
+    // an external API. NOT compiled out under SPRING_PROD — unlike /api/exec
+    // this is a player-facing feature, and it ships.
+    static NlProxy::Proxy nlProxy;
+    nlProxy.Init(contentRoots.empty() ? std::string{} : contentRoots[0]);
+
+    net.AddHttpPost("/api/nl/command", RouteAuth::TokenRequired,
+                    [&ctx](const std::string&, const std::string& body,
+                           const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
+        if (userId <= 0)
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        return nlProxy.Handle(userId, body);
+    });
 
     // Restart-in-place: re-exec this binary with the same argv.
     // Clients get a GameRestarting message before the connection drops.

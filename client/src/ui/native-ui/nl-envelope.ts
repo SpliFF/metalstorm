@@ -235,12 +235,25 @@ export const NL_GUIDANCE_OPS: readonly NLGuidanceOp[] = [
     'stance', 'paint', 'lock', 'delegate', 'fund', 'roe', 'veto',
 ];
 
-const CAMERA_OPS = ['focus', 'follow', 'fitMap', 'zoom', 'saveView', 'loadView'] as const;
-const UI_OPS = ['open', 'close', 'toggle', 'fullscreen'] as const;
-const QUERY_OPS = ['count', 'locate', 'status', 'resources', 'objectives'] as const;
-const SIDES = ['own', 'enemy', 'ally'] as const;
+/**
+ * Exported since M4: `nl-schema.ts` builds the proxy's JSON schema from these
+ * lists rather than restating them. A closed vocabulary that the validator and
+ * the schema each spell out separately is a vocabulary with two versions, and
+ * the one the model is told about is the one that would silently win.
+ */
+export const CAMERA_OPS = ['focus', 'follow', 'fitMap', 'zoom', 'saveView', 'loadView'] as const;
+export const UI_OPS = ['open', 'close', 'toggle', 'fullscreen'] as const;
+export const QUERY_OPS = ['count', 'locate', 'status', 'resources', 'objectives'] as const;
+export const SIDES = ['own', 'enemy', 'ally'] as const;
+export const GROUP_OPS = ['create', 'rename'] as const;
+export const SUBJECT_TYPES = ['entity-ref', 'class-count', 'idle-filter', 'selection', 'any', 'ai'] as const;
+export const TARGET_TYPES = ['entity-ref', 'point', 'area-around'] as const;
+export const WHEN_TYPES = [
+    'now', 'under-attack', 'region-contested', 'objective-complete', 'strength-below',
+] as const;
+export const NL_SCALES = [1, 2, 3, 4] as const;
 
-const COMMAND_VERBS = Object.keys(TARGET_SHAPES_BY_VERB) as CommandVerb[];
+export const COMMAND_VERBS = Object.keys(TARGET_SHAPES_BY_VERB) as CommandVerb[];
 
 // ───────────────────────────── validation ─────────────────────────────
 

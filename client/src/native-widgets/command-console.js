@@ -38,7 +38,9 @@
 
 import { namedEntityIndex } from '../ui/native-ui/named-entity-index.js';
 import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
-import { runLocalUtterance } from '../ui/native-ui/nl-client.js';
+import { runUtterance } from '../ui/native-ui/nl-client.js';
+import { buildNLContext } from '../ui/native-ui/nl-context.js';
+import { browserTokenStore, getAccessToken } from '../lobby/auth-tokens.js';
 import { NLResolver } from '../ui/native-ui/nl-resolver.js';
 import { matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { cameraPortHolder, createNLCameraPort } from '../ui/native-ui/camera-port.js';
@@ -322,7 +324,7 @@ async function submit() {
     await censusCacheHolder.current?.refresh();
 
     const resolver = buildResolver();
-    runLocalUtterance(utterance, {
+    const result = await runUtterance(utterance, {
         index: namedEntityIndex,
         vocabulary: classVocabulary.current,
         selectionGroupId: selectedGroupId(),
@@ -332,6 +334,11 @@ async function submit() {
             vocabulary: classVocabulary.current,
             resolvePanel: (name) => uiActionRegistry.get(name)?.id ?? null,
         },
+        // Absent ⇒ local-only. That is the honest state when the player has no
+        // session token (a dev harness, a torn-down session): the proxy route
+        // is TokenRequired and would 401 every time, so there is nothing to
+        // gain from trying and a round trip to lose on every sentence.
+        proxy: buildProxyDeps(),
         ports: {
             sendCommand: state.ctx.sendCommand,
             resolver,
@@ -339,6 +346,91 @@ async function submit() {
             ...buildLocalPorts(resolver),
         },
     });
+
+    rememberExchange(utterance, result);
+}
+
+/**
+ * The proxy half of the run, or null when we have no token to send.
+ *
+ * The context payload is rebuilt per utterance rather than cached, because it
+ * IS the board: a payload from thirty seconds ago names groups that have since
+ * died and misses the ones just formed, and the model has no way to tell.
+ */
+function buildProxyDeps() {
+    const token = getAccessToken(browserTokenStore);
+    const endpoint = gameServerOrigin();
+    if (!token || !endpoint || !state.ctx) return undefined;
+
+    const context = buildNLContext({
+        index: namedEntityIndex,
+        census: censusCacheHolder.current ?? { snapshot: () => null },
+        vocabulary: classVocabulary.current,
+        groups: state.ctx.store.getOrgGroups(),
+        directives: state.ctx.store.getDirectives(),
+        panelIds: uiActionRegistry.ids(),
+        selectionCount: state.ctx.store.getSelection().unitIds.length,
+        mapName: state.ctx.mapName ?? '',
+        authority: numericRulesParam(`authority_player_${state.ctx.identity.playerId}`),
+    });
+
+    return {
+        endpoint,
+        token,
+        context,
+        history: state.history,
+    };
+}
+
+/**
+ * The GAME server's origin — where `/api/nl/command` lives.
+ *
+ * Emphatically not `CONFIG.httpUrl`, which is the LOBBY (port 8011 in dev).
+ * The proxy route is registered by `RegisterGameHttpRoutes` on the per-match
+ * `NetworkServer`, deliberately: the lobby's HTTP loop is single-threaded and
+ * global, so a 1–3 s Claude call there would stall login for everyone on the
+ * instance (§3). Posting a player's utterance at the lobby would 404 every
+ * time and, worse, would send the sentence to a process that has no business
+ * seeing it.
+ *
+ * `springrts-game-port` is the handle the lobby writes on room entry and that
+ * `viewport.ts` and `main.ts` already read for exactly this purpose — reusing
+ * it rather than threading a new field through `WidgetContext` keeps one
+ * answer to "which game server am I in".
+ *
+ * Absent ⇒ no game ⇒ no proxy, and `runUtterance` stays local-only.
+ */
+function gameServerOrigin() {
+    let port = '';
+    try {
+        port = localStorage.getItem('springrts-game-port') ?? '';
+    } catch {
+        return '';                       // storage denied — degrade, don't throw
+    }
+    if (!port) return '';
+    const host = globalThis.location?.hostname || 'localhost';
+    return `http://${host}:${port}`;
+}
+
+function numericRulesParam(key) {
+    const raw = state.ctx?.store.teamRulesParam(state.ctx.identity.teamId, key);
+    const n = typeof raw === 'string' ? Number(raw) : raw;
+    return typeof n === 'number' && Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Keep the last exchange so a follow-up ("and the infantry too") has something
+ * to attach to.
+ *
+ * Capped at ONE exchange — two strings — even though the proxy accepts two.
+ * M5 owns the clarification round-trip and will spend the second exchange
+ * deliberately; sending history we have no flow for today would only make
+ * every request bigger and every cached prefix miss more often.
+ */
+function rememberExchange(utterance, result) {
+    const spoken = result?.report?.lines?.find((l) => l.kind !== 'system')?.text;
+    if (!spoken) { state.history = []; return; }
+    state.history = [utterance, spoken];
 }
 
 /**

@@ -66,6 +66,12 @@ const char* StatusText(int code) {
         case 413: return "413 Payload Too Large";
         case 429: return "429 Too Many Requests";
         case 500: return "500 Internal Server Error";
+        // 503 is a first-class answer, not an error: `/api/nl/command` returns
+        // it for "no API key configured" and "upstream down/timed out", and
+        // nl-client.ts branches on it to fall back to the local parser. Without
+        // this case it fell through to 500 below — the body said `nl-disabled`
+        // while the status said the server had crashed.
+        case 503: return "503 Service Unavailable";
         default:  return "500 Internal Server Error";
     }
 }
