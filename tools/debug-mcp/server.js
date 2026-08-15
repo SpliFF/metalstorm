@@ -192,9 +192,128 @@ async function getGameServerUrl(roomId) {
     return { url: `http://127.0.0.1:${server.port}`, ...server };
 }
 
+// --- Readiness probing ---
+//
+// probeGame() composes four independent signals into one honest phase. The
+// ORDER IS LOAD-BEARING: pid liveness is checked *before* the game_status row,
+// because nothing deletes that row when a server dies by SIGKILL
+// (GameServersDb::DeleteForRoom only runs on the lobby's cleanup path), so a
+// fresh-looking row must never be able to resurrect a dead server.
+
+// 5 missed 2s heartbeats. The heartbeat is published from inside the sim loop
+// (server_main.cpp:2559-2562); if that cadence changes, this must follow.
+const STATUS_STALE_SEC = 10;
+
+const PHASE_ORDER = { dead: -1, spawning: 0, loading: 1, ready: 2, ticking: 3 };
+
+function probeResult(phase, fields) {
+    return {
+        phase,
+        roomId: null, pid: null, port: null,
+        ready: null, clientCount: null, statusAgeSec: null,
+        frame: null, simFps: null, detail: '',
+        ...fields,
+    };
+}
+
+async function probeGame(roomId) {
+    const servers = await getGameServers();
+    const row = servers.find(s => s.room_id === roomId);
+    if (!row) {
+        return probeResult('dead', { roomId, detail: `no process row for room ${roomId}` });
+    }
+    if (!pidAlive(row.pid)) {
+        return probeResult('dead', {
+            roomId, pid: row.pid, port: row.port,
+            detail: `pid ${row.pid} not running (row state='${row.state}')`,
+        });
+    }
+
+    // Readonly, opened and closed per probe: a cached handle would hold a WAL
+    // snapshot and read ever-staler heartbeats.
+    let st = null;
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        try {
+            st = db.prepare(
+                'SELECT ready, client_count, pid, port, updated_at FROM game_status WHERE room_id = ?',
+            ).get(roomId) ?? null;
+        } finally { db.close(); }
+    } catch { /* no DB / no table yet → treat as no status row */ }
+
+    const base = { roomId, pid: row.pid, port: st?.port || row.port };
+    if (!st) {
+        return probeResult('spawning', { ...base, detail: 'process up, no game_status row yet' });
+    }
+    if (st.pid !== row.pid) {
+        // A corpse's row describing a *new* incarnation of the same room.
+        return probeResult('spawning', {
+            ...base, port: row.port,
+            detail: `game_status row is stale (previous pid ${st.pid})`,
+        });
+    }
+
+    const statusAgeSec = Math.max(0, Math.floor(Date.now() / 1000) - st.updated_at);
+    const withStatus = { ...base, ready: st.ready, clientCount: st.client_count, statusAgeSec };
+    if (statusAgeSec > STATUS_STALE_SEC) {
+        // The heartbeat only runs inside the sim loop; a live pid deep in
+        // map/defs precache is busy, not dead.
+        return probeResult('loading', {
+            ...withStatus,
+            detail: `status heartbeat stale ${statusAgeSec}s — server busy loading or wedged`,
+        });
+    }
+    if (!st.ready) return probeResult('loading', { ...withStatus, detail: 'ready=0' });
+
+    let m = null, mErr = '';
+    try { m = await fetchMetrics(`http://127.0.0.1:${withStatus.port}`, 1500); }
+    catch (e) { mErr = e.message; }
+    if (!m) {
+        return probeResult('ready', {
+            ...withStatus, detail: `ready=1 but /api/metrics unreachable: ${mErr}`,
+        });
+    }
+    const withMetrics = { ...withStatus, frame: m.frame, simFps: m.simFps };
+    // writeGameStatus(true, 0) fires before the sim loop starts, and a Skirmish
+    // holds GameStart until humans connect — ready=1/frame=0 is a real, stable,
+    // connectable state.
+    if (!(m.frame > 0)) {
+        // frame is -1 before GameStart, 0 on the first tick boundary.
+        return probeResult('ready', { ...withMetrics, detail: `accepting, sim not ticking (frame ${m.frame})` });
+    }
+    return probeResult('ticking', withMetrics);
+}
+
+// Resolve the room a probe/wait targets. An explicit roomId is taken verbatim
+// (probing a room that has already gone is a legitimate post-mortem question);
+// omitting it uses getGameServerUrl's prefer-running pick, ONCE.
+async function resolveWaitRoom(roomId) {
+    if (roomId !== undefined && roomId > 0) return { roomId };
+    const server = await getGameServerUrl(undefined);
+    if (server) return { roomId: server.room_id };
+    const servers = await getGameServers();
+    const list = servers.map(s => `  room ${s.room_id} (state=${s.state}, pid=${s.pid})`).join('\n') || '  (none)';
+    return { error: `Error: no game server to probe. Candidates:\n${list}\nPass an explicit roomId.` };
+}
+
+// Last N formatted room-scoped log lines, for inlining into a failed wait.
+// Never throws and never hangs: a failure to fetch logs must not turn a fast
+// failure into a slow one. Returns {lines, note} — the note names the reason
+// the lines are missing so an empty array is never mistaken for a quiet server.
+async function roomLogTail(roomId, limit = 15) {
+    try {
+        const data = await fetchJson(`${LOG_SERVER_URL}/api/logs/${roomId}?limit=${limit}`, 1500);
+        if (!Array.isArray(data) || !data.length) return { lines: [], note: '' };
+        return { lines: formatLogEntries(data).split('\n'), note: '' };
+    } catch (e) {
+        return { lines: [], note: `log server ${LOG_SERVER_URL} unreachable: ${e.message}` };
+    }
+}
+
 // --- HTTP helpers ---
-async function fetchJson(url) {
-    const resp = await fetch(url);
+async function fetchJson(url, timeoutMs) {
+    const opts = timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {};
+    const resp = await fetch(url, opts);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
     return resp.json();
 }
@@ -204,8 +323,8 @@ async function fetchJson(url) {
 // SPRING_PROD (where /api/exec is compiled out). Base payload is
 // PerfMetrics::ToJSON(): {frame, tickUs, simFps, entities, clients, ais,
 // combatEvents} plus a `simFrame` block.
-async function fetchMetrics(serverUrl) {
-    return fetchJson(`${serverUrl}/api/metrics`);
+async function fetchMetrics(serverUrl, timeoutMs) {
+    return fetchJson(`${serverUrl}/api/metrics`, timeoutMs);
 }
 
 /// Resolve `rel` against `base`, falling back to case-insensitive
@@ -789,6 +908,30 @@ const TOOLS = [
         },
     },
     {
+        name: 'probe_game',
+        description: "One-shot readiness probe for a game server. Composes the lobby process row, pid liveness, the game_status heartbeat and /api/metrics into a single phase: spawning (process up, nothing published yet) | loading (heartbeat present, ready=0 or stale) | ready (accepting connections) | ticking (sim advancing) | dead (no process row, or the pid is gone). Use wait_for_game to poll until a phase is reached.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game.' },
+            },
+        },
+    },
+    {
+        name: 'wait_for_game',
+        description: "Poll a game server (via probe_game) until it reaches a readiness phase (ready = accepting connections, ticking = sim advancing) or a target frame. Fails FAST on server death: returns phase 'dead' immediately with the last room-scoped log lines instead of waiting out the timeout. A timeout returns timedOut:true plus the honest last probe rather than throwing.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game (resolved once, then pinned).' },
+                until: { type: 'string', enum: ['ready', 'ticking', 'frame'], default: 'ready', description: "until='ready' is satisfied by ready OR ticking." },
+                frame: { type: 'number', description: "Target sim frame (required when until='frame')." },
+                timeoutMs: { type: 'number', default: 120000 },
+                pollMs: { type: 'number', default: 500 },
+            },
+        },
+    },
+    {
         name: 'revive_team',
         description: 'Flip a dead team (or all dead teams) back to alive so units can be spawned onto it. Pairs with set_cheats to stop the game-over check re-killing it.',
         inputSchema: {
@@ -829,7 +972,7 @@ const TOOLS = [
     },
     {
         name: 'launch_game',
-        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Returns the new room ID and gameServerPort once the spring-server has spawned.',
+        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Waits (via probe_game) until the server is accepting connections, failing fast if it dies during boot. Returns the new room ID, gameServerPort, the readiness `phase`, and — on failure only — `lastLogs`.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -1348,6 +1491,61 @@ async function executeTool(name, args) {
             }, null, 2);
         }
 
+        case 'probe_game': {
+            const roomId = await resolveWaitRoom(args.roomId);
+            if (roomId.error) return roomId.error;
+            return JSON.stringify(await probeGame(roomId.roomId), null, 2);
+        }
+
+        case 'wait_for_game': {
+            const resolved = await resolveWaitRoom(args.roomId);
+            if (resolved.error) return resolved.error;
+            // Pinned for the whole wait: a died-and-relaunched *different* room
+            // must never satisfy this wait.
+            const roomId = resolved.roomId;
+            const until = args.until || 'ready';
+            if (until === 'frame' && !(args.frame > 0)) {
+                return "Error: until='frame' requires a positive `frame` target.";
+            }
+            const timeoutMs = args.timeoutMs ?? 120000;
+            const pollMs = args.pollMs ?? 500;
+            const t0 = Date.now();
+            const deadline = t0 + timeoutMs;
+            let polls = 0;
+
+            const finish = async (extra) => {
+                const out = { roomId, until, waitedMs: Date.now() - t0, polls, ...extra };
+                if (until === 'frame') out.targetFrame = args.frame;
+                if (out.met === false) {
+                    const tail = await roomLogTail(roomId);
+                    out.lastLogs = tail.lines;
+                    if (tail.note) out.logsNote = tail.note;
+                }
+                return JSON.stringify(out, null, 2);
+            };
+
+            for (;;) {
+                const probe = await probeGame(roomId);
+                polls++;
+                if (probe.phase === 'dead') return finish({ met: false, probe });
+                const met = until === 'frame'
+                    ? (probe.frame != null && probe.frame >= args.frame)
+                    : PHASE_ORDER[probe.phase] >= PHASE_ORDER[until];
+                if (met) {
+                    const out = { met: true, probe };
+                    if (probe.clientCount === 0) {
+                        out.warning = 'target reached with 0 clients — idle self-exit will kill this '
+                            + 'server after the idle window unless a client connects or '
+                            + 'idleStartupGraceSeconds was raised (server_main.cpp:2189-2198; '
+                            + 'workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS)';
+                    }
+                    return finish(out);
+                }
+                if (Date.now() >= deadline) return finish({ met: false, timedOut: true, probe });
+                await new Promise(r => setTimeout(r, pollMs));
+            }
+        }
+
         case 'revive_team': {
             const cmd = args.team !== undefined ? `revive_team ${args.team}` : 'revive_team all';
             const r = await execOnGameServer('server', cmd, args.roomId);
@@ -1459,26 +1657,27 @@ async function executeTool(name, args) {
             const started = await startResp.json();
 
             // Wait for the game server to actually be accepting connections
-            // before returning. The lobby flips the room Loading→Active (state 4)
-            // once spring-server publishes ready=1 (game_status table). Without
-            // this, callers drove the browser into a not-yet-listening QUIC port
-            // and hit the connect-race / 90s defs timeout. ZK cold-start is slow,
-            // so poll up to ~120s.
+            // before returning. Without this, callers drove the browser into a
+            // not-yet-listening QUIC port and hit the connect-race / 90s defs
+            // timeout. ZK cold-start is slow, so poll up to ~120s.
+            //
+            // probeGame rather than the lobby's room list: the room's
+            // Loading→Active flip is *derived from* game_status.ready, so
+            // probing the source drops a lag hop — and the old loop treated a
+            // vanished room (server died on boot) as "keep waiting" for the
+            // full 120s, where probeGame reports 'dead' on the first poll.
             const targetRoomId = started.id || room.id;
-            let ready = false;
-            let finalState = started.state;
+            let probe = await probeGame(targetRoomId);
             const deadline = Date.now() + 120000;
-            while (Date.now() < deadline) {
-                await new Promise((r) => setTimeout(r, 1000));
-                const lr = await fetch(`${LOBBY_URL}/api/rooms`, { headers: authHdr });
-                if (!lr.ok) continue;
-                let list;
-                try { list = await lr.json(); } catch { continue; }
-                const me = (Array.isArray(list) ? list : []).find((r) => r.id === targetRoomId);
-                if (!me) continue;               // room gone (server died on boot)
-                finalState = me.state;
-                if (me.state >= 4) { ready = true; break; }   // 4 = Active = ready
+            while (Date.now() < deadline && probe.phase !== 'dead'
+                   && probe.phase !== 'ready' && probe.phase !== 'ticking') {
+                await new Promise((r) => setTimeout(r, 500));
+                probe = await probeGame(targetRoomId);
             }
+            const ready = probe.phase === 'ready' || probe.phase === 'ticking';
+            // `state` keeps its old meaning for existing callers (4 = Active);
+            // `phase` is the honest value.
+            const finalState = ready ? 4 : started.state;
 
             // Suggested browser URL. Unless the caller is specifically
             // testing the startup commander-chooser, disable it so the view
@@ -1487,18 +1686,27 @@ async function executeTool(name, args) {
                 `?disableWidgets=${encodeURIComponent(STARTUP_SELECTOR_WIDGET)}`;
             const browserUrl = `${CLIENT_URL}/${disable}`;
 
-            return JSON.stringify({
+            const out = {
                 roomId: targetRoomId,
                 gameServerPort: started.gameServerPort,
                 gameId: args.gameId || 'zk',
                 mapId: args.mapId,
                 state: finalState,
                 ready,
+                phase: probe.phase,
                 hint: ready
                     ? 'Game server is accepting connections (room Active). Open browserUrl to view — it disables the ZK commander-selector overlay (pass testStartupSelector=true to keep it).'
-                    : 'WARNING: game server did not report ready within 120s (still warming or failed to boot). Check list_processes / get_logs before connecting a browser.',
+                    : probe.phase === 'dead'
+                        ? `ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`
+                        : `WARNING: game server was still in phase '${probe.phase}' after 120s (${probe.detail}) — still warming or wedged. See lastLogs / probe_game.`,
                 browserUrl,
-            }, null, 2);
+            };
+            if (!ready) {
+                const tail = await roomLogTail(targetRoomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+            return JSON.stringify(out, null, 2);
         }
 
         case 'api_request': {

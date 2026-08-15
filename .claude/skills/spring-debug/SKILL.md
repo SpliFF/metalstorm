@@ -20,6 +20,8 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `end_game` | Gracefully stop a room's spring-server: SIGTERM (clean exit + war-log drain + exit checkpoint) → poll → SIGKILL on timeout. `{roomId, graceful=true, timeoutMs=10000}` → `{exited, escalatedToKill, waitedMs}` | Ending a game you launched — **the default teardown verb** |
 | `kill_game` | **DEPRECATED** alias for `end_game(graceful:false)` (immediate SIGKILL, no checkpoint) | Only when a graceful stop is pointless (server wedged in precache) |
 | `get_frame` | Sim `frame`/`simFps`/`clients` via the public `/api/metrics` — no exec, no auth | Cheap liveness poll; works paused, pre-GameStart, and under `SPRING_PROD` |
+| `probe_game` | One-shot readiness phase for a room: `spawning` → `loading` → `ready` → `ticking`, or `dead`. `{roomId?}` → `{phase, pid, port, ready, clientCount, statusAgeSec, frame, simFps, detail}` | "Is this game up, still booting, or gone?" — the honest answer in one call |
+| `wait_for_game` | Poll `probe_game` until a phase or frame is reached. `{roomId?, until=ready\|ticking\|frame, frame?, timeoutMs=120000, pollMs=500}`. **Returns immediately with `phase:'dead'` + `lastLogs` if the server dies**; a timeout returns `timedOut:true` plus the last probe | Waiting on a launch/restart without burning 120 s on a server that already crashed |
 | `list_processes` | List game server subprocesses managed by the lobby | Checking if a game is running |
 | `list_sessions` | List recent game sessions from the log server | Post-mortem, history |
 | `get_game_state` | Get sim frame, teams, unit count from game server | Checking if sim is ticking |
@@ -133,7 +135,9 @@ Stale rooms are the single biggest time-sink in a test session. `list_processes`
    - A just-launched server self-reaps at frame -1 if no one connects, so abandoned launches don't linger forever — but `leave()`/`end_game` is immediate and keeps `list_processes` readable.
    - Prefer `end_game` over `kill_game`: SIGTERM lets the server drain its war log and write the **exit checkpoint** (the only site where a world becomes resumable); SIGKILL skips it and leaves a stale `game_status` row. Escalation to SIGKILL is automatic after `timeoutMs` (default 10s).
 
-**Canonical browser-test loop:** in-browser as the logged-in user → `createRoom` → `addAI` → `ready(true)` → `startGame` → poll `window.test.deps.connection.authenticated` → drive with `window.test.*`; `leave()` when done. **MCP-only loop (no browser):** `launch_game` → note `roomId` → `get_game_state(roomId)` confirms `frame >= 0` → drive every room-scoped tool with that one `roomId` → `end_game(roomId)` when done.
+7. **Never hand-roll a readiness poll.** `wait_for_game(roomId)` is the one wait: it reads `game_status` (the signal the lobby's room state is *derived* from, so it is a hop earlier) and, crucially, **fails fast** — a room-state poll treats a server that died on boot as "keep waiting" for the full timeout, where `wait_for_game` returns `phase:'dead'` with the last 15 room log lines within a poll period. `probe_game` is the single-shot version for "what is this room doing right now?". Two phases people misread: `ready` means *accepting connections* (`frame` is still -1 pre-GameStart — that is the normal, connectable state a Skirmish sits in until humans join), and `loading` covers both "still precaching" and "wedged" — the `detail` string says which.
+
+**Canonical browser-test loop:** in-browser as the logged-in user → `createRoom` → `addAI` → `ready(true)` → `startGame` → poll `window.test.deps.connection.authenticated` → drive with `window.test.*`; `leave()` when done. **MCP-only loop (no browser):** `launch_game` (already waits, and returns `phase`) → note `roomId` → `wait_for_game(roomId, until:'ticking')` once a client is attached → drive every room-scoped tool with that one `roomId` → `end_game(roomId)` when done.
 
 ## Camera control
 
