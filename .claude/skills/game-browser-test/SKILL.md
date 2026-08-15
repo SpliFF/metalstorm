@@ -94,8 +94,10 @@ only, never DOM overlays.
 4. **Launch, then join immediately — no churn.** `launch_game({...})` →
    grab `roomId` → `lobby.joinRoom(roomId)` right away. A `leave()`/rejoin
    dance after a failed attempt yields `Not in this room's roster`; start
-   clean instead. Poll for `window.widgets && window.test` to confirm the
-   session (and LuaUI worker) came up.
+   clean instead. Confirm the client actually came up with **one** call —
+   `await test.readyState()` reports harness / worker / connection / frame /
+   render together; poll it instead of guessing at `window.widgets`,
+   `deps.connection.authenticated` or a room state.
 5. **Clean up only your rooms.** `end_game(yourRoomId)` when done (graceful
    SIGTERM with automatic SIGKILL escalation; the deprecated `kill_game` is
    just `end_game(graceful:false)`). Never kill or restart a room you didn't
@@ -124,6 +126,10 @@ navigate_page("http://localhost:8012/")
 `launch_game` returns a ready-made `browserUrl` with this applied (pass
 `testStartupSelector: true` to get the plain URL instead). The param
 persists across the in-page login/join, so set it on the initial navigate.
+(It went dead for a while when the legacy widget manager was removed and was
+re-wired in P5 — `main.ts:1903-1922`; it is live again.) The programmatic
+equivalent, once a game is up, is `await test.widgets()` /
+`await test.setWidget(name, false)`.
 
 Worker-side Lua eval is `await window.widgets.eval("...lua...")` (the LuaUI
 widget worker). `window.test.lua(...)` is a **different** context (server
@@ -386,6 +392,10 @@ ZK and BAR were archived 2026-08-02 and are no longer the test vehicle — see
 PLAN.md Code-session contract.)
 
 ## Lobby JS API (`window.lobby`)
+
+> Everything from here down is for testing **the lobby UI itself**. For
+> scenario/game testing, `launch_scenario` + its `?play=` `browserUrl` skips all
+> of it — no login, no room dance (see "Isolated mode + session discipline").
 
 The `LobbyUI` instance is exposed on `window.lobby`. All lobby actions can be called directly from JS (via `evaluate_script` or browser console):
 

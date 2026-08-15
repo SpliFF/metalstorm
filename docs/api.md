@@ -405,12 +405,19 @@ All room endpoints require authentication.
 | `/api/rooms/team` | POST | `{team: 0-N}` | Set team |
 | `/api/rooms/startpos` | POST | `{pos: 0-N, target_player_id?}` | Set start position |
 | `/api/rooms/kick` | POST | `{target_player_id}` | Kick player (host only) |
-| `/api/rooms/close` | POST | | Close room (host only) |
 | `/api/rooms/ai/add` | POST | `{ai_id, name?, team?, profile?}` | Add AI slot |
 | `/api/rooms/ai/remove` | POST | `{slot_index}` | Remove AI slot |
 | `/api/rooms/ai/team` | POST | `{slot_index, team}` | Set AI slot's team (host only) |
 | `/api/rooms/ai/profile` | POST | `{slot_index, profile}` | Set (or, with `profile:""`, clear) an AI slot's personality/difficulty profile — host only. `profile` is opaque, game-specific text (e.g. Metalstorm strategos's `"aggressive"`/`"caretaker"`); see PLAN-metalstorm-ai.md §10 task 6. |
 | `/api/rooms/start` | POST | | Start game (spawns server) |
+
+**Room lifecycle is leave-only.** There is no player-facing end/close endpoint —
+`/api/rooms/end` and `/api/rooms/close` were removed; when the last member leaves,
+the lobby deletes the room and reaps its game server. The admin single-room stop is
+[`POST /api/admin/rooms/end`](#post-apiadminroomsend).
+
+Room `state` values (`ERoomState`, `rts/Server/RoomManager.h`) are listed under
+[Room states](#room-states) below — `docs/javascript.md` cites this table.
 
 **Room object:**
 ```json
@@ -429,7 +436,13 @@ All room endpoints require authentication.
 }
 ```
 
-Room states: 0=Configuring, 1=Filling, 2=ReadyCheck, 3=Loading, 4=Active, 5=Ended.
+#### Room states
+
+`ERoomState` (`rts/Server/RoomManager.h`): 0=Configuring, 1=Filling,
+2=ReadyCheck, 3=Loading, 4=Active, 5=Ended. This is the single source for the
+enum — `docs/javascript.md` cites it rather than repeating it. Note an *in-game*
+client has left the lobby's SSE feed, so its cached `state` never reaches
+`4` — never poll it for "the game is up".
 
 ### Direct start (dev/test only)
 
@@ -510,7 +523,8 @@ SQL mutations (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE) are rejected.
 [{"room_id":1,"port":9101,"pid":12345,"state":"running","map":"content/maps/...","game":"content/games/..."}]
 ```
 
-States: `starting`, `running`, `ended`, `crashed`.
+States: `starting`, `running`, `ended`, `crashed`, `hibernated`
+(`GameServerInstance::State`, emitted at `rts/lobby_main.cpp:1915-1931`).
 
 ### Version
 

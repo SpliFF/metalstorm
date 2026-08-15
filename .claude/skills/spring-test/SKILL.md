@@ -19,7 +19,15 @@ The browser API and the MCP tools call the same server verbs underneath — pick
 
 ### Instant game launch (no lobby UI)
 
-The existing `launch_game` MCP tool already bypasses the lobby UI entirely. It POSTs to `/api/rooms/*` to create a room, add an AI, mark ready, and start — all under one auth token.
+**`launch_scenario` is the primary launch.** One call resolves a scenario, builds the `/api/rooms/direct` manifest in memory (scenario as the **top-level** field), POSTs it, and waits — no lobby UI, no login, no roster dance. It returns `{roomId, port, sessions, browserUrl, phase, frame}`; the `browserUrl` (`?play=…&room=<id>#token=…`) auto-auths and **attaches** to that exact room, and carries `skipBriefing=1` so automation never stalls on the briefing splash (drop it to test the splash itself).
+
+```
+launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
+# wait:"ticking" only when a browser will attach — a human seat holds GameStart
+end_game({ roomId: <id> })          # graceful teardown when done
+```
+
+`launch_direct({manifest})` is the raw-manifest sibling for custom rosters/modoptions. `launch_game` is now for **lobby-flow regression testing only** — it POSTs to `/api/rooms/*` to create a room, add an AI, mark ready, and start — all under one auth token.
 
 ```
 launch_game({ gameId: "papertanks", mapId: "wanderlust2.1", ai: "null" })
@@ -122,23 +130,25 @@ browser_test({ method: "uiProfileStop" })
 ### From scratch: launch a session, spawn a tank, focus on it
 
 ```
-launch_game({ gameId: "papertanks", mapId: "wanderlust2.1", ai: "null" })
-# → wait a beat for spring-server to come up
-spawn_unit({ defName: "papertank", x: 4096, z: 4096, team: 0, count: 1 })
+launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
+# → returns when the server accepts connections; no "wait a beat" guesswork.
+#   Use wait:"ticking" ONLY if a browser will attach: the default roster seats a
+#   human (admin), and the sim holds at frame -1 until that client connects —
+#   navigate to the returned browserUrl, then wait_for_game({roomId, until:"ticking"}).
+spawn_unit({ defName: "ms_scout", x: 4096, z: 4096, team: 0, count: 1 })
 # The browser tab does this itself now — no snippet to paste (P7 relay):
 browser_test({ method: "focus", args: [<id from spawn_unit>] })
 client_screenshot({ maxDim: 640 })      # and look at it
+end_game({ roomId: <id> })              # graceful teardown — always finish here
 ```
 
 ### Verify weapon firing logs
 
 ```
 set_debug_logging({ combat: true, sound: true, weapon: true })
-# stage two units
-api_request({ target: "game", path: "/api/exec", method: "POST",
-              body: { scope: "server", code: "spawn papertank 4000 4000 0 1" } })
-api_request({ target: "game", path: "/api/exec", method: "POST",
-              body: { scope: "server", code: "spawn papertank 4200 4000 1 1" } })
+# stage two units — spawn_unit returns the ids as JSON, no exec string parsing
+spawn_unit({ defName: "ms_scout", x: 4000, z: 4000, team: 0, count: 1 })
+spawn_unit({ defName: "ms_scout", x: 4200, z: 4000, team: 1, count: 1 })
 give_order({ unitId: <atk>, cmdId: 20, params: [<tgt>] })  # CMD.ATTACK = 20
 # Tail the firing logs
 get_logs({ section: "weapon", limit: 20 })

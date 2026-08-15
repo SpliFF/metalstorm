@@ -83,7 +83,18 @@ Returns a JSON array of all game server instances:
 ]
 ```
 
-States: `starting`, `running`, `ended`, `crashed`.
+States: `starting`, `running`, `ended`, `crashed`, `hibernated`
+(`GameServerInstance::State` — `rts/lobby_main.cpp:1915-1931`; same list as
+[api.md](api.md#processes)). `hibernated` is a war frozen to disk, not a failure.
+
+**Two authorities, and they disagree on purpose.** The lobby's process row above
+is *what the lobby spawned*; `game_status` (SQLite, `rts/Server/GameServersDb.cpp`)
+is *what the server itself last reported* — `room_id, ready, client_count, pid,
+port, updated_at` (`GameServersDb.cpp:61-68`), rewritten on a heartbeat; the
+game server is its only writer. A row whose `updated_at` has
+gone stale means the server stopped reporting, whatever the process row says; a
+room with no row at all (hibernated, never-started) reads as `null`, not `0`.
+`probe_game` composes both plus `/api/metrics` — prefer it over reading either.
 
 **Console commands** (scope `lobby`):
 
@@ -198,9 +209,9 @@ Configure in `.claude/settings.local.json`:
 | `list_processes` | | Game servers as JSON: `{servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}`. Discovery is the lobby `/api/processes` with a SQLite fallback; `ready`/`clientCount`/heartbeat are left-joined from `game_status` (`null` when the room has no row — e.g. hibernated) and `identity` is `{stamp, engineHash, pid}` read from each server's `/api/metrics` (`null` on a server built before P8, or one that didn't answer in 1.5 s). Still returns the literal string `No game server processes found.` when there are none |
 | `list_stack` | `probeHashes` (default `false`) | **Full-stack census in one call** — replaces ad-hoc `pgrep`/`lsof` hunts. Returns `{findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}`. See [stack census](#stack-census-list_stack--cleanup_stack) |
 | `cleanup_stack` | `dryRun` (default **`true`**), `kinds`, `force` (default `false`) | Kill what `list_stack` classified as *not* managed. Dry-run first by default; see [stack census](#stack-census-list_stack--cleanup_stack) |
-| `get_lua_source` | `gamePath`, `filePath` | Read a Lua source file from disk |
+| `get_lua_source` | `gameId`, `filePath` | Read a Lua source file from disk (`data/games/<gameId>/<filePath>`) |
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
-| `query_db` | `query`, `db` | SQL query against game or debug database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too |
+| `query_db` | `query` (the only param — the database is fixed by the server's `SPRING_DB`) | SQL query against the lobby database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too |
 | `list_sessions` | | List recent game sessions |
 | `get_frame` | `roomId` | Current sim `frame` + `simFps` + `clients` via the public `GET :port/api/metrics`. No exec, no auth — answers while the sim is paused, pre-`GameStart`, or the exec queue is wedged, and survives `SPRING_PROD` (where `/api/exec` is compiled out) |
 | `end_game` | `roomId` (required), `graceful` (default `true`), `timeoutMs` (default `10000`), `escalate` (default `true`) | Graceful teardown of **one** room. SIGTERM is what gives the server a clean loop exit, war-log drain and **exit checkpoint** (the only site where a world becomes resumable); SIGKILL skips all of it. Prefers the lobby's [`POST /api/admin/rooms/end`](api.md#post-apiadminroomsend), which returns a drain-quality report — the exit checkpoint verified against the snapshot store — as `{source:'/api/admin/rooms/end', roomId, pid, kind, exited, escalated, waitedMs, outcome, frame, label, lossy, resume_eligibility, engine_hash, describe}`. `timeoutMs` is clamped server-side to [100, 30000]. A **route-level 404** (a lobby binary predating that endpoint) falls back to SIGTERM/poll/SIGKILL from the MCP process, reported as `source:'sigterm-fallback'` with no checkpoint verification; a 400/401/403 is reported as an error and **never** downgraded to a local kill, and the route's own `unknown roomId` 404 is reported as-is rather than guessing a pid. **The room does not read "ended" in the response** — the lobby health loop flips it a moment later (poll `/api/rooms` or `probe_game`). To stop a room cleanly *with* a report use this, not a same-name `launch_direct` relaunch (that SIGTERMs, deletes and respawns) |
@@ -240,6 +251,26 @@ snippet rather than erroring, and the fallback line names which gate refused:
 > refuses those harness methods by name and names the server-side tool to use
 > instead (`spawn_unit`, `exec_lua`, `get_game_state`, …); `spawn_at_camera`
 > relays only the camera read and does the spawn server-side.
+
+**Readiness phases, and the one way they lie.** `probe_game` (and therefore
+`wait_for_game`, `launch_game`, `launch_scenario`, `launch_direct`) derives its
+phase from four signals: the lobby's process row, pid liveness, the `game_status`
+heartbeat, and `/api/metrics`. `spawning` means *the process is up but nothing
+has been published yet* — which is also exactly what you get when the MCP is
+reading a **different SQLite file** from the one the lobby was started with. The
+MCP's DB is `SPRING_DB` (`.mcp.json`); the lobby's is its `--db` flag; `mprocs.yaml`
+keeps both on `data/spring-server.db`, but a hand-started lobby on another `--db`
+silently strips every heartbeat-derived field (`ready`/`clientCount`/`statusAgeSec`
+go `null` and the phase sticks at `spawning` for a server that is perfectly ready).
+Verified 2026-08-16: a lobby on `--db data/t9d.db` reported `phase:"spawning"` while
+that file held `game_status` `ready=1` and `/api/metrics` answered normally. Confirm
+with `curl :<port>/api/metrics` — it needs no DB and no auth — before believing a
+stuck `spawning`.
+
+`ready` is *accepting connections*, not *playing*: a roster with a human seat holds
+`GameStart` (and `frame` at `-1`) until that browser attaches, so `wait:'ticking'`
+on a browserless run times out **by design** — wait for `ready`, or open the
+returned `browserUrl`.
 
 The full, current tool list (with input schemas) lives in `tools/debug-mcp/server.js`; the skills in `.claude/skills/` document the recipes and pitfalls for using them. This table is a map, not the source of truth — it can drift from the server as tools are added.
 
@@ -788,7 +819,7 @@ Four things the ruling does deliberately, each of which was a bug first:
 
 `make test-headless-batch` covers the ruling (`lib/growth-fit.mjs` is pure).
 
-### Churn arm — ladder 2 (`soak-churn-run.mjs`)
+### Churn arm, ladder 2 (soak-churn-run.mjs)
 
 The ladder above measures a world with **no clients**, and two of §1's rows are
 unreachable that way (see the `no-signal` note above). This is the arm that
@@ -1454,7 +1485,7 @@ curl -s -X POST http://localhost:8011/api/exec \
 # → {"success":true,"output":"1=1"}
 ```
 
-### Structured server verbs (`json ` prefix)
+### Structured server verbs (json prefix)
 
 A leading `json ` token on a `scope:"server"` exec command switches the
 converted verbs from free text to a serialized JSON object. Nothing else

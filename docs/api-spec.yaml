@@ -291,12 +291,6 @@ paths:
               properties:
                 target_player_id: { type: integer }
 
-  /api/rooms/close:
-    post:
-      summary: Close/delete a room (host only)
-      tags: [Rooms]
-      security: [{ bearerAuth: [] }]
-
   /api/rooms/ai/add:
     post:
       summary: Add an AI slot to the room

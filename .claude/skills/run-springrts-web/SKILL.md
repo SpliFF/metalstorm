@@ -62,12 +62,30 @@ curl -s http://localhost:8011/api/games | python3 -m json.tool | head
 **3. Launch + drive a game in the browser.** The render harness is the
 `chrome-devtools` MCP (navigate / `evaluate_script` / `take_screenshot`) driving
 the client's JS API; admin server actions go through the `spring-debug` MCP
-(`launch_game`, `spawn_unit`, `pause_sim`, `exec_lua`, `get_game_state`,
-`list_units`, `get_logs`). See also the `game-browser-test`, `spring-test`, and
-`spring-debug` skills.
+(`spawn_unit`, `pause_sim`, `exec_lua`, `get_game_state`, `list_units`,
+`get_logs`). See also the `game-browser-test`, `spring-test`, and `spring-debug`
+skills.
 
-The self-contained browser flow that yields a **ticking** sim (verified this
-session — run via `chrome-devtools` `evaluate_script` after navigating to
+**Quick start (the default path — no lobby UI, no login).** One MCP call boots a
+scenario and hands you an auto-auth URL; the browser never sees the login screen:
+
+```jsonc
+launch_scenario {"scenarioId": "border_skirmish", "wait": "ticking"}
+// → {roomId, port, sessions, browserUrl: "http://localhost:8012/?play=…&room=<id>#token=…",
+//    phase: "ticking", frame: 42}
+```
+
+Then navigate `chrome-devtools` to the returned `browserUrl` (it **attaches** to
+the room just launched — it never re-launches it), wait with
+`await test.readyState()`, drive, and tear down with `end_game {"roomId": <id>}`.
+`wait_for_game {"roomId": <id>, "until": "ticking"}` is the standalone waiter if
+you launched with `wait:"none"`; `launch_direct` takes a raw manifest when you
+need a custom roster. Full parameter tables: [docs/debugging-tools.md](../../../docs/debugging-tools.md#available-tools),
+scenario authoring: [docs/scenarios.md](../../../docs/scenarios.md).
+
+**Lobby-flow verification path.** Only when you are testing the lobby UI itself.
+The self-contained browser flow that yields a **ticking** sim (run via
+`chrome-devtools` `evaluate_script` after navigating to
 `http://localhost:8012/?disableWidgets=Startup%20Info%20and%20Selector`):
 
 ```js
@@ -106,6 +124,9 @@ await test.cameraSnapToGround(829, 1298, {height:150, pitchDeg:28, durationMs:0}
 await window.__gp(`(()=>{const er=self.__entityRenderer; return er.scene.meshes.length;})()`);
 ```
 
+When the drive is done, stop the room you started: `end_game {"roomId": <id>}`
+(graceful SIGTERM by default — it lets the server flush its final state).
+
 `window.__gp(expr)` evaluates JS **inside the render worker** (where the Babylon
 scene / `__entityRenderer` / materials live) — the main introspection handle.
 Other worker hooks: `__frameProfiler.dump()`, `__uiTextures.dump()` (enumerates
@@ -136,6 +157,11 @@ cd client && npx vitest run                        # client unit tests
   connects. Joining an MCP-`launch_game` room as a *different* browser user
   (spectator) does **not** satisfy it. To get a ticking sim from the browser,
   **create+start your own room** as the logged-in user (recipe above).
+  For a *browserless* run (exec-driven tests, headless probes) the server also
+  self-exits on its startup idle clock: raise it with `idleGraceSeconds` on
+  `launch_scenario`/`launch_direct` (sugar for the manifest's
+  `idleStartupGraceSeconds`), or start the lobby with
+  `SPRING_IDLE_STARTUP_GRACE_SECONDS=3600` for a no-rebuild blanket workaround.
 - **Vite dev `?worker` serves stale worker code.** Page reloads (even
   cache-bypassing) keep running the *old* worker module after you edit a
   worker-imported file (`entity-renderer.ts`, `game-processor.ts`, …).
@@ -196,11 +222,13 @@ cd client && npx vitest run                        # client unit tests
 | Symptom | Fix |
 |---|---|
 | `smoke.sh` FAIL: lobby `/api/version` not responding | Lobby down — start the `lobby` proc in mprocs (or `smoke.sh --start`). |
-| Game stuck `frame=-1`, `list_units` empty | No connected registered player — create+start your own room as the logged-in browser user (don't just `joinRoom` an MCP room). |
+| Game stuck `frame=-1`, `list_units` empty | `probe_game`/`wait_for_game` names the phase. Usually no connected registered player — create+start your own room as the logged-in browser user (don't just `joinRoom` an MCP room). |
 | `modinfo.lua` edit not reflected in `/api/games` | Restart the `lobby` proc (games list is startup-cached). |
 | Worker code edit not taking after reload | `spring-services.sh restart client` (mprocs control channel); the `?worker` bundle is stale. |
 | `restart` says "control server not reachable" | mprocs was started before the `server:` key existed — restart mprocs once so it opens `:4050` (check with `spring-services.sh status`). |
 | Two lobbies / logservers, port races | `tools/scripts/spring-services.sh stop`, then restart mprocs. |
 | `403 forbidden — admin role required` | Browser user isn't admin — use the `spring-debug` MCP for server actions. |
-| Login/auth hangs or fails after a crashed session | Zombie `spring-server` holding `:9100` — kill it (`lsof -i :9100`), relaunch. |
+| Login/auth hangs or fails after a crashed session | Zombie `spring-server` holding `:9100` — `list_stack` classifies it (`zombie-port`), `cleanup_stack {dryRun:false}` clears it; `lsof -i :9100` is the manual fallback. |
+| Server self-exited before the browser attached | Startup idle clock — relaunch with `idleGraceSeconds`, or `SPRING_IDLE_STARTUP_GRACE_SECONDS` on the lobby. |
+| Testing the wrong binary after `cmake --build` | `list_stack {probeHashes:true}` → `stale-binary-running` / `binary-drift`; restart the server (or lobby). |
 | Undefined-symbol link error after adding a server `.cpp` | Stale CMake glob — re-configure (`cmake build/debug`), then rebuild. |

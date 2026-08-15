@@ -19,8 +19,10 @@ The `LobbyUI` instance. Available after page load completes.
 | `lobby.games` | `array` | Available games: `[{ id, displayName, description, version }]` |
 | `lobby.ais` | `array` | Available AIs for current game: `[{ id, displayName, description, isEngineProvided }]` |
 
-Room state values (`ERoomState`, `rts/Server/RoomManager.h`): `0`=Configuring,
-`1`=Filling, `2`=ReadyCheck, `3`=Loading, `4`=Active, `5`=Ended.
+Room state values (`ERoomState`): `0`=Configuring, `1`=Filling, `2`=ReadyCheck,
+`3`=Loading, `4`=Active, `5`=Ended — the authoritative list lives in
+[api.md § Room states](api.md#room-states) (from `rts/Server/RoomManager.h`);
+this is a courtesy copy.
 
 > **Do not poll `lobby.room.state` for "the game is up".** An in-game client
 > has left the lobby's SSE feed, so its cached room state never advances to
@@ -93,29 +95,27 @@ Set `lobby.selectedGameId` before calling `createRoom` if you want to override t
 // The createRoom() call sends whatever selectedGameId is set to.
 ```
 
-## `window.widgets` — Widget Manager
+## `window.widgets` — LuaUI eval bridge
 
-Available when a game is running with LuaUI widgets loaded. Controls the ZK widget system from JavaScript.
+Installed on the main thread while a game is running (deleted on teardown). The
+LuaUI runtime itself lives **in the game worker**; this object is the bridge to
+it, and it has exactly one method:
 
-| Method / Property | Description |
-|-------------------|-------------|
-| `widgets.ready` | `true` after the LuaUI worker has bootstrapped |
-| `widgets.vfsFileCount` | Number of Lua files in the VFS cache |
-| `widgets.list()` | Toggle the F9 widget list overlay |
-| `widgets.enable(name)` | Enable a widget by name (reloads source from server) |
-| `widgets.disable(name)` | Disable a widget by name |
-| `widgets.toggle(name)` | Toggle a widget (enable forces reload) |
-| `widgets.refresh()` | Request a fresh widget list from the worker |
+| Method | Description |
+|--------|-------------|
+| `widgets.eval(code)` | Evaluate a Lua snippet inside the in-worker LuaUI runtime; resolves with the result's string form, or `'no worker'` / `'busy'` (one call in flight at a time) / `'timeout'` (5 s). Dev-only. |
 
 ```js
-// Examples:
-widgets.toggle('Chili Framework');
-widgets.disable('Map Edge Extension');
-widgets.enable('Chili Framework');  // re-fetches from server
-widgets.list();                     // open/close the F9 overlay
+await widgets.eval('return #widgetHandler.widgets')
 ```
 
-The widget list overlay (F9 or `widgets.list()`) shows checkboxes next to each widget for interactive enable/disable. Enabling a widget re-fetches its source from the lobby server, so toggling off→on serves as a reload action.
+> The old `widgets.ready` / `vfsFileCount` / `list()` / `enable()` / `disable()` /
+> `toggle()` / `refresh()` surface belonged to the legacy `LuaWidgetManager`,
+> which was **deleted** — those names no longer exist. To enumerate or toggle
+> widgets from automation use the harness instead: `await test.widgets()` returns
+> the parsed widget list and `await test.setWidget(name, on)` toggles one
+> ([LuaUI widgets](#luaui-widgets) below). The startup URL param
+> `?disableWidgets=<names>` is the boot-time equivalent.
 
 ## `window.springrts` — Detach / Re-enter (PLAN-quickstart Part B)
 
