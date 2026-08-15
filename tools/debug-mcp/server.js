@@ -19,6 +19,7 @@ import {
 import Database from 'better-sqlite3';
 import { buildScenarioManifest } from './scenario-manifest.js';
 import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
+import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
@@ -316,6 +317,64 @@ async function roomLogTail(roomId, limit = 15) {
     } catch (e) {
         return { lines: [], note: `log server ${LOG_SERVER_URL} unreachable: ${e.message}` };
     }
+}
+
+// --- Direct-start manifests (PLAN-test-automation/P3) ---
+//
+// Loading and merge rules live in direct-manifest.js so they stay unit-testable
+// without starting an MCP stdio server.
+//
+// The single POST/parse choke point for /api/rooms/direct, shared by
+// launch_scenario and launch_direct so the two never drift on error wording.
+// Returns {ok:true, room} or {ok:false, error} with a caller-facing message.
+async function postDirectManifest(manifest) {
+    let resp;
+    try {
+        resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/rooms/direct`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify(manifest),
+        }));
+    } catch (e) {
+        return { ok: false, error: `POST ${LOBBY_URL}/api/rooms/direct failed: ${e.message}` };
+    }
+    if (resp.status === 404) {
+        return {
+            ok: false,
+            error: 'POST /api/rooms/direct answered 404 — the lobby needs --dev-direct-start '
+                 + '(or this lobby binary predates the route). Restart the lobby with the flag '
+                 + '(the mprocs dev stack passes it already), or use launch_game for the lobby-flow path.',
+        };
+    }
+    const bodyText = await resp.text();
+    let room = {};
+    try { room = JSON.parse(bodyText); } catch { /* non-JSON error body */ }
+    if (!resp.ok) {
+        if (resp.status === 403) {
+            return {
+                ok: false,
+                error: `direct start refused (403): ${room.error ?? bodyText}. `
+                     + 'The route is LocalhostOrAdmin — run the MCP on the lobby host, or as an admin account.',
+            };
+        }
+        return { ok: false, error: `direct start failed (${resp.status}): ${room.error ?? (bodyText || '?')}` };
+    }
+    return { ok: true, room };
+}
+
+// Poll probeGame until `want` ('ready' accepts 'ticking' too) or the deadline.
+// A 'dead' phase short-circuits: a server that died during boot never recovers,
+// and waiting the full budget on it turns a fast failure into a slow one.
+async function waitForPhase(roomId, want, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    let probe = await probeGame(roomId);
+    const reached = p => (want === 'ready' ? (p === 'ready' || p === 'ticking') : p === 'ticking');
+    while (probe.phase !== 'dead' && !reached(probe.phase)) {
+        if (Date.now() >= deadline) return { ...probe, timedOut: true };
+        await new Promise(r => setTimeout(r, 500));
+        probe = await probeGame(roomId);
+    }
+    return { ...probe, timedOut: false };
 }
 
 // --- HTTP helpers ---
@@ -1026,11 +1085,27 @@ const TOOLS = [
                 headless: { type: 'boolean', default: false, description: 'No browser will connect: omit browserUrl and warn about the idle-grace self-exit (workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS).' },
                 wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return immediately, when the game server answers /api/metrics, or when the sim frame advances.' },
                 waitTimeoutMs: { type: 'number', default: 120000 },
-                idleGraceSeconds: { type: 'number', description: 'Written to the manifest as idleStartupGraceSeconds — honoured once P3 lands, inert (and noted) before that.' },
+                idleGraceSeconds: { type: 'number', description: 'Written to the manifest as idleStartupGraceSeconds: how long the server waits for its first client before self-exiting (default 120s, which kills a browserless run at frame -1). Silently inert on lobby binaries older than P3 — fallback there is the lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS.' },
                 skipBriefing: { type: 'boolean', default: true, description: 'Append &skipBriefing=1 to browserUrl (S2 splash bypass).' },
                 force: { type: 'boolean', default: false, description: 'Launch even if the scenario is not in the lobby\'s (startup-snapshot) list — the direct path reads the VFS fresh. Requires mapId; sides default to the legacy two-team shape.' },
             },
             required: ['scenarioId'],
+        },
+    },
+    {
+        name: 'launch_direct',
+        description: 'Launch a game from a RAW /api/rooms/direct manifest — the manual sibling of launch_scenario (which builds its manifest in memory from a scenarioId; prefer that for scenario tests, and this one for full control: custom rosters, modoptions, sessionKind, idle timers). Takes a manifest by name from manifests/, inline, or both merged, POSTs it, and waits for the sim to tick. Merge order: file manifest → `manifest` deep-merged on top (objects recurse; arrays and scalars replace) → `overrides` shallow-merged last (top-level keys replaced wholesale). Manifest shape: {name, map (required), game, sessionKind, scenario (TOP-LEVEL — modoptions.scenario alone is overwritten by the map default), modoptions{}, players[] (>=1; players[0] is the host; {username, team, startPos, spectator}), aiSlots[] ({aiId, team, startPos, profile}), autoStart, idleStartupGraceSeconds, idleExitSeconds}. `name` is IDEMPOTENT BY REPLACEMENT: re-POSTing a name SIGTERMs that room\'s server and recreates the room (a clean restart, not an error), and a manifest with no name defaults to "dev:direct", so two unnamed launches silently clobber each other — concurrent lanes must set distinct names. Declared players are force-left from any prior room. Requires the lobby to run with --dev-direct-start. Returns {roomId, port, sessions, players, aiSlots, browserUrl, phase, frame, notes}.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                manifestName: { type: 'string', description: 'File stem under manifests/ (e.g. "crossing_standoff_direct"). A miss lists the available names.' },
+                manifest: { type: 'object', description: 'Inline manifest, deep-merged OVER the file one. Use alone for a fully inline launch.' },
+                overrides: { type: 'object', description: 'Shallow merge applied last — top-level keys replace wholesale. The escape hatch when deep-merge is wrong (e.g. swapping the whole players[] array).' },
+                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return after the POST, when the game server answers /api/metrics, or when the sim frame advances. NOTE: a skirmish holds GameStart until its rostered humans connect — an exec-only test with human players must use "ready" (or an AI-only/spectator roster, or sessionKind:"persistent", neither of which waits).' },
+                timeoutMs: { type: 'number', default: 120000, description: 'Wait budget in ms.' },
+                clearCache: { type: 'boolean', default: false, description: 'Delete the defs cache for the manifest\'s game before launching.' },
+                idleGraceSeconds: { type: 'number', description: 'Sugar for manifest.idleStartupGraceSeconds — how long the server waits for its first client before self-exiting (default 120s, which kills exec-driven tests at frame -1). Ignored without error by lobby binaries older than P3; fallback there is to start the LOBBY with SPRING_IDLE_STARTUP_GRACE_SECONDS in its env (applies to every room it spawns, so pair it with end_game teardown).' },
+            },
         },
     },
     {
@@ -1892,13 +1967,11 @@ async function executeTool(name, args) {
             } catch (e) {
                 return `Error: ${e.message}`;
             }
-            if (typeof args.idleGraceSeconds === 'number') {
-                notes.push('idleStartupGraceSeconds is in the manifest but the game server ignores unknown '
-                         + 'manifest keys until P3 lands — set the lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS instead.');
-            }
             if (args.headless || args.wait === 'none') {
-                notes.push('no browser will attach: the game server can self-exit on its startup idle timer. '
-                         + 'Workaround until P3: run the lobby with SPRING_IDLE_STARTUP_GRACE_SECONDS=3600.');
+                notes.push('no browser will attach: the game server self-exits after its startup idle grace '
+                         + `(default 120s)${typeof args.idleGraceSeconds === 'number' ? '' : ' — pass idleGraceSeconds to extend it'}. `
+                         + 'A lobby binary older than P3 ignores the manifest field silently; there, run the '
+                         + 'lobby with SPRING_IDLE_STARTUP_GRACE_SECONDS=3600 in its env instead.');
             }
             if (LOBBY_URL !== 'http://localhost:8011') {
                 notes.push(`LOBBY_URL is ${LOBBY_URL} but the client at ${CLIENT_URL} bakes its lobby port at BUILD time `
@@ -1909,30 +1982,9 @@ async function executeTool(name, args) {
             //    a loopback caller): it costs nothing, names the caller in the
             //    lobby audit row, and keeps the tool working against a remote
             //    lobby where an admin Bearer token is mandatory.
-            let resp;
-            try {
-                resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/rooms/direct`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify(manifest),
-                }));
-            } catch (e) {
-                return `Error: POST ${LOBBY_URL}/api/rooms/direct failed: ${e.message}`;
-            }
-            if (resp.status === 404) {
-                return 'POST /api/rooms/direct answered 404 — the lobby needs --dev-direct-start '
-                     + '(or this lobby binary predates the route). Restart the lobby with the flag.';
-            }
-            const bodyText = await resp.text();
-            let room = {};
-            try { room = JSON.parse(bodyText); } catch { /* non-JSON error body */ }
-            if (!resp.ok) {
-                if (resp.status === 403) {
-                    return `direct start refused (403): ${room.error ?? bodyText}. `
-                         + 'The route is LocalhostOrAdmin — run the MCP on the lobby host, or as an admin account.';
-                }
-                return `direct start failed (${resp.status}): ${room.error ?? (bodyText || '?')}`;
-            }
+            const posted = await postDirectManifest(manifest);
+            if (!posted.ok) return `Error: ${posted.error}`;
+            const room = posted.room;
 
             // 4. Wait on probeGame (never the room-state loop: state>=4 is
             //    known-unreliable, and a dead server must fail fast).
@@ -1941,15 +1993,8 @@ async function executeTool(name, args) {
             let timedOut = false;
             if (args.wait !== 'none') {
                 const want = args.wait || 'ticking';
-                const deadline = Date.now() + (args.waitTimeoutMs ?? 120000);
-                probe = await probeGame(roomId);
-                while (probe.phase !== 'dead'
-                       && !(want === 'ready' ? (probe.phase === 'ready' || probe.phase === 'ticking')
-                                             : probe.phase === 'ticking')) {
-                    if (Date.now() >= deadline) { timedOut = true; break; }
-                    await new Promise(r => setTimeout(r, 500));
-                    probe = await probeGame(roomId);
-                }
+                probe = await waitForPhase(roomId, want, args.waitTimeoutMs ?? 120000);
+                timedOut = probe.timedOut;
                 if (probe.phase === 'dead') {
                     notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
                 } else if (timedOut) {
@@ -1987,6 +2032,76 @@ async function executeTool(name, args) {
                 notes,
             };
             if (probe.phase === 'dead' || timedOut) {
+                const tail = await roomLogTail(roomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+            return out;
+        }
+
+        case 'launch_direct': {
+            // The raw-manifest sibling of launch_scenario: no scenario
+            // resolution, no manifest synthesis — the caller owns every field.
+            if (!args.manifestName && !args.manifest) {
+                const avail = listManifestNames().join(', ');
+                return 'Error: pass manifestName and/or manifest. Available manifestName values: '
+                     + (avail || '(none — is PROJECT_ROOT set?)');
+            }
+            let fileManifest = null;
+            try {
+                if (args.manifestName) fileManifest = loadManifestByName(args.manifestName);
+            } catch (e) {
+                return `Error: ${e.message}`;
+            }
+            const built = buildDirectManifest({
+                fileManifest,
+                manifest: args.manifest,
+                overrides: args.overrides,
+                idleGraceSeconds: args.idleGraceSeconds,
+            });
+            if (built.error) return `Error: ${built.error}`;
+            const manifest = built.manifest;
+            const notes = [...built.notes];
+            if (args.clearCache) clearDefsCache(manifest.game || 'metalstorm');
+
+            const posted = await postDirectManifest(manifest);
+            if (!posted.ok) return `Error: ${posted.error}`;
+            const room = posted.room;
+            const roomId = room.id;
+
+            let probe = { phase: 'unknown', frame: null, detail: 'wait:none', timedOut: false };
+            const wait = args.wait || 'ticking';
+            if (wait !== 'none') {
+                probe = await waitForPhase(roomId, wait, args.timeoutMs ?? 120000);
+                if (probe.phase === 'dead') {
+                    notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
+                } else if (probe.timedOut) {
+                    notes.push(`WARNING: still in phase '${probe.phase}' after the wait timeout (${probe.detail}).`);
+                    if (wait === 'ticking' && probe.phase === 'ready' && probe.clientCount === 0) {
+                        notes.push('a skirmish holds the sim at frame -1 until its rostered humans connect — '
+                                 + "with no browser attached, wait:'ready' is the reachable target.");
+                    }
+                }
+            }
+
+            const out = {
+                roomId,
+                port: room.game_server_port,
+                roomName: manifest.name || 'dev:direct',
+                sessions: room.sessions,
+                players: room.players,
+                aiSlots: room.ai_slots,
+                // Deliberately NOT the ?direct=<name> form: that boot re-POSTs
+                // the manifest from client/public/ and would tear down the very
+                // room this call just launched. Log in as any `sessions` user.
+                browserUrl: `${CLIENT_URL}/`,
+                browserHint: 'log in as any username in `sessions` (these are live dev session tokens), '
+                           + 'or use launch_scenario for a one-URL ?play= attach.',
+                phase: probe.phase,
+                frame: probe.frame,
+                notes,
+            };
+            if (probe.phase === 'dead' || probe.timedOut) {
                 const tail = await roomLogTail(roomId);
                 out.lastLogs = tail.lines;
                 if (tail.note) out.logsNote = tail.note;

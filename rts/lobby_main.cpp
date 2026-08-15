@@ -558,7 +558,16 @@ static GameServerInstance spawnGameServer(
     // something will respawn on join, and the lobby is the only thing that
     // can. The server binary keeps its own default of 0 so a bare
     // `spring-server` still never exits a world nobody can bring back.
-    int hibernateIdleSeconds = 0) {
+    int hibernateIdleSeconds = 0,
+    // PLAN-test-automation/P3: idle-exit tuning forwarded to the child as
+    // --idle-startup-grace-seconds / --idle-exit-seconds. 0 (the default every
+    // other call site keeps) appends nothing, so the server binary's own
+    // flag > env > default precedence is undisturbed. Only runDirectStart ever
+    // passes these, which is what keeps the knob dev-only: a player-created
+    // room cannot reach it by construction. Without it, an exec-driven test
+    // that never opens a client is killed by the 120s startup-idle timer at
+    // frame -1, because a skirmish holds GameStart for its rostered humans.
+    int idleStartupGraceSeconds = 0, int idleExitSeconds = 0) {
   const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
@@ -663,6 +672,10 @@ static GameServerInstance spawnGameServer(
     std::string portStr = std::to_string(inst.port);
     std::string roomStr = std::to_string(roomId);
     std::string hibernateIdleStr = std::to_string(hibernateIdleSeconds);
+    // Storage must outlive execvp: argv holds c_str() pointers, so a temporary
+    // std::to_string(...).c_str() here would be a use-after-free in the child.
+    std::string idleGraceStr = std::to_string(idleStartupGraceSeconds);
+    std::string idleExitStr = std::to_string(idleExitSeconds);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -732,6 +745,16 @@ static GameServerInstance spawnGameServer(
         argv.push_back("--hibernate-idle-seconds");
         argv.push_back(hibernateIdleStr.c_str());
       }
+      // Idle-exit tuning (P3), dev-direct manifests only. Live-session flags,
+      // so they sit on this side of the replay branch with the rest.
+      if (idleStartupGraceSeconds > 0) {
+        argv.push_back("--idle-startup-grace-seconds");
+        argv.push_back(idleGraceStr.c_str());
+      }
+      if (idleExitSeconds > 0) {
+        argv.push_back("--idle-exit-seconds");
+        argv.push_back(idleExitStr.c_str());
+      }
     }
     if (devBuildAcknowledged)
       argv.push_back(DevBuildGate::kFlag);
@@ -756,13 +779,22 @@ static GameServerInstance spawnGameServer(
       SLOG(SPRING_LOG_NOTICE,
            "spawned REPLAY server pid=%d port=%d for room %u (%s)", pid,
            inst.port, roomId, replayFile.c_str());
-    else
+    else {
+      // A tuned idle grace is worth naming in the log: the failure it prevents
+      // (a server vanishing at frame -1) otherwise looks like a crash.
+      std::string idleNote;
+      if (idleStartupGraceSeconds > 0)
+        idleNote += " (idle-grace " + std::to_string(idleStartupGraceSeconds) + "s)";
+      if (idleExitSeconds > 0)
+        idleNote += " (idle-exit " + std::to_string(idleExitSeconds) + "s)";
       SLOG(SPRING_LOG_NOTICE,
            "spawned game server pid=%d port=%d for room %u "
-           "(%zu players, %zu AI)%s%s",
+           "(%zu players, %zu AI)%s%s%s",
            pid, inst.port, roomId, playerRoster.size(), aiSlots.size(),
            resumeFromSnapshot ? " --resume" : "",
-           hibernateIdleSeconds > 0 ? " (hibernates when idle)" : "");
+           hibernateIdleSeconds > 0 ? " (hibernates when idle)" : "",
+           idleNote.c_str());
+    }
   } else {
     SLOG(SPRING_LOG_ERROR, "fork failed");
     inst.state = GameServerInstance::Crashed;
@@ -3880,6 +3912,27 @@ int main(int argc, char *argv[]) {
       sessionKind = *parsed;
     }
 
+    // Idle-exit tuning (PLAN-test-automation/P3), dev-direct only. Absent or 0
+    // means "leave the server binary's own default alone". Refuse on garbage
+    // for the same reason sessionKind does: a silently-ignored typo here
+    // reproduces the exact frame -1 mystery this field exists to kill.
+    int idleGraceSec = 0, idleExitSec = 0;
+    auto readIdleField = [&](const char *key, int &out) -> bool {
+      if (!manifest.contains(key))
+        return true;
+      const auto &v = manifest[key];
+      if (!v.is_number_integer() || v.get<int>() < 0) {
+        result.error = std::string(key) + " must be a non-negative integer";
+        return false;
+      }
+      out = v.get<int>();
+      return true;
+    };
+    if (!readIdleField("idleStartupGraceSeconds", idleGraceSec))
+      return result;
+    if (!readIdleField("idleExitSeconds", idleExitSec))
+      return result;
+
     if (!manifest.contains("players") || !manifest["players"].is_array() ||
         manifest["players"].empty()) {
       result.error = "players[] must declare at least one player (the host)";
@@ -4071,7 +4124,10 @@ int main(int argc, char *argv[]) {
           spawnGameServer(roomId, gameId, gameVer, mapId, dbPath, room->players,
                           room->aiSlots, room->modOptions, busyPorts,
                           devBuildAcknowledged, wtCertPath, wtKeyPath,
-                          /*replayFile=*/"", room->sessionKind);
+                          /*replayFile=*/"", room->sessionKind,
+                          /*resumeFromSnapshot=*/false,
+                          /*hibernateIdleSeconds=*/0, idleGraceSec,
+                          idleExitSec);
       gameServers[roomId] = inst;
       persistGameServer(inst);
       room->gameServerPort = inst.port;
