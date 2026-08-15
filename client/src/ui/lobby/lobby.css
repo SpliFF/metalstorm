@@ -733,8 +733,66 @@ button.link-button:hover { background: none; color: #7fdcff; }
    own coverage test cannot see. */
 .chat-line-mine { color: #b9c2d0; }
 .chat-line-mine .chat-from { color: #7fd4a8; }
-.chat-line-system { color: #9aa4b5; font-style: italic; }
+/* A server line is the room talking: dimmer, italic, and marked down its left
+   edge so a moderation line ("bob was kicked by admin") cannot be mistaken for
+   somebody in the channel saying it. */
+.chat-line-system {
+    color: #9aa4b5;
+    font-style: italic;
+    border-left: 2px solid #55607a;
+    padding-left: 6px;
+    margin-left: -8px;
+}
 .chat-line-action { color: #c9a0f0; font-style: italic; }
+/* §3.5's mention highlight. Amber like the unread badge and the notice line —
+   the lobby's one "this wants you" colour — and a tinted row rather than a
+   coloured name, because the thing being marked is the whole line. */
+.chat-line-mention {
+    background: #2a2416;
+    border-left: 2px solid #f0a04c;
+    padding-left: 6px;
+    margin-left: -8px;
+    border-radius: 3px;
+}
+.chat-line-mention .chat-text { color: #f3e2c8; }
+/* Links are anchors and nothing else (§3.5: no embeds). */
+.chat-link { color: #4cc9f0; text-decoration: underline; }
+.chat-link:hover { color: #7fdcff; }
+/* A standing mute is not the stream's amber: it is a refusal that will not
+   clear itself on a reconnect, and it sits above every other notice. */
+.chat-notice-mod {
+    color: #ff8f8f;
+    background: #2a1618;
+    border: 1px solid #5a2a2e;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+.chat-sound-btn {
+    background: none;
+    color: #7a8496;
+    font-size: 14px;
+    padding: 2px 6px;
+    margin-left: auto;
+}
+.chat-sound-btn:hover { color: #dfe6f0; }
+/* The operator's mute list: a record, so it reads as a table rather than as
+   chat, and it is dismissible because it is a snapshot. */
+.chat-mutes {
+    background: #131b2e;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+.chat-mutes-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: #9aa4b5;
+    margin-bottom: 4px;
+}
+.chat-mutes-row { color: #dfe6f0; font-variant-numeric: tabular-nums; }
 .chat-compose { display: flex; gap: 8px; margin-top: 8px; }
 .chat-input {
     flex: 1;

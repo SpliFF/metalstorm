@@ -130,8 +130,34 @@ export type ChatCommand =
     | { kind: 'pm'; username: string; text: string }
     | { kind: 'ignore'; username: string; on: boolean }
     | { kind: 'channel'; channel: string; join: boolean }
+    /// `scope`/`target` absent = the account-level mute (`/gmute`), which
+    /// belongs to no conversation; present = this one conversation.
+    | { kind: 'mute'; username: string; scope?: ChatScopeKey; target?: string;
+        seconds: number; reason: string; on: boolean }
+    | { kind: 'kick'; channel: string; username: string; seconds: number; reason: string }
+    | { kind: 'broadcast'; text: string }
+    | { kind: 'mutes' }
     | { kind: 'error'; message: string }
     | { kind: 'none' };
+
+/// `<n>[s|m|h|d]` → seconds; `perm`/`forever` → 0, which the service reads as
+/// *until lifted* (`until = 0`; the ROW is the mute, so its absence is the
+/// only "not muted"). -1 means "that was not a duration", which is how an
+/// optional duration is told apart from the first word of a reason.
+export function parseChatDuration(word: string): number {
+    const w = word.trim().toLowerCase();
+    if (!w) return -1;
+    if (w === 'perm' || w === 'permanent' || w === 'forever') return 0;
+    const m = /^(\d+)([smhd]?)$/.exec(w);
+    if (!m) return -1;
+    const n = Number(m[1]);
+    switch (m[2]) {
+        case 'd': return n * 86400;
+        case 'h': return n * 3600;
+        case 'm': return n * 60;
+        default: return n;   // bare number and `s` are both seconds
+    }
+}
 
 /// Parse what the player typed in the composer.
 ///
@@ -189,6 +215,84 @@ export function parseChatInput(raw: string, active: ChatTab | null): ChatCommand
             }
             return { kind: 'channel', channel: chan, join: word === 'join' };
         }
+        case 'mute':
+        case 'unmute':
+        case 'gmute':
+        case 'gunmute': {
+            const global = word.startsWith('g');
+            const on = !word.includes('un');
+            const [who, ...tail] = rest.split(/\s+/).filter(Boolean);
+            if (!who) {
+                return { kind: 'error', message: on
+                    ? `Usage: /${word} <player> <duration|perm> [reason]`
+                    : `Usage: /${word} <player>` };
+            }
+            // An account-level mute belongs to NO conversation (it is the one
+            // moderation verb that needs no membership), so it is a different
+            // command rather than `/mute` with a flag — and it is the only one
+            // that works from a tab that has no ops at all.
+            if (global) {
+                if (on) {
+                    const secs = parseChatDuration(tail[0] ?? '');
+                    if (secs < 0) {
+                        return { kind: 'error',
+                                 message: 'Usage: /gmute <player> <duration|perm> [reason]' };
+                    }
+                    return { kind: 'mute', username: who, seconds: secs,
+                             reason: tail.slice(1).join(' '), on: true };
+                }
+                return { kind: 'mute', username: who, seconds: 0, reason: '', on: false };
+            }
+            if (!active) return { kind: 'error', message: 'No channel selected.' };
+            // The service answers this with a 400 and it is worth refusing a
+            // round-trip earlier: a moderator who could mute one end of a PM
+            // would be reading it, and the tool for two people is the ignore
+            // list.
+            if (active.scope === 'pm') {
+                return { kind: 'error',
+                         message: `A PM has no moderators — use /ignore ${who}.` };
+            }
+            if (!on) {
+                return { kind: 'mute', username: who, scope: active.scope,
+                         target: active.sendTarget, seconds: 0, reason: '', on: false };
+            }
+            // A duration is REQUIRED here, unlike on the wire, where its
+            // absence means `until lifted`. An indefinite mute is a real
+            // decision and `/mute bob` is what a moderator types when they
+            // mean five minutes; `perm` makes it deliberate.
+            const secs = parseChatDuration(tail[0] ?? '');
+            if (secs < 0) {
+                return { kind: 'error',
+                         message: 'Usage: /mute <player> <duration|perm> [reason] ' +
+                                  '(10s, 5m, 2h, 1d)' };
+            }
+            return { kind: 'mute', username: who, scope: active.scope,
+                     target: active.sendTarget, seconds: secs,
+                     reason: tail.slice(1).join(' '), on: true };
+        }
+        case 'kick': {
+            const [who, ...tail] = rest.split(/\s+/).filter(Boolean);
+            if (!who) return { kind: 'error', message: 'Usage: /kick <player> [duration] [reason]' };
+            // Named channels only, and the channel is the one being read
+            // rather than one that is named: `/api/chat/kick` refuses `#main`
+            // (nobody can leave it) and a room's ejection verb is
+            // `/api/rooms/kick` — a player ejected from a room's channel but
+            // still seated is in a war they cannot talk to.
+            if (!active || active.scope !== 'channel') {
+                return { kind: 'error',
+                         message: 'Kick applies to a named channel — open its tab first.' };
+            }
+            const secs = parseChatDuration(tail[0] ?? '');
+            const reason = (secs < 0 ? tail : tail.slice(1)).join(' ');
+            return { kind: 'kick', channel: active.sendTarget, username: who,
+                     seconds: secs < 0 ? 0 : secs, reason };
+        }
+        case 'broadcast': {
+            if (!rest) return { kind: 'error', message: 'Usage: /broadcast <message>' };
+            return { kind: 'broadcast', text: rest };
+        }
+        case 'mutes':
+            return { kind: 'mutes' };
         default:
             // Refused rather than sent: a mistyped command that goes out as
             // chat publishes it to the channel, which is how `/w bob <secret>`
@@ -205,6 +309,134 @@ export function isActionLine(text: string): boolean {
 /// The body of an action line, without its marker.
 export function actionBody(text: string): string {
     return isActionLine(text) ? text.slice(4) : text;
+}
+
+// ── The moderation surface (task 9d, §3.4's client half) ───────────────────
+
+/// The `moderation` SSE event. The service sends it to ONE account — the
+/// subject of an account-level mute — and to nobody else, because an
+/// account-level mute belongs to no conversation and announcing it in `#main`
+/// would make every moderation action a public event. A *scoped* mute has no
+/// event: it is told to its channel as a system line, which is why the two
+/// halves of this feature render in two different places.
+export interface ChatModerationEvent {
+    muted: boolean;
+    /// Unix seconds, or 0 for *until lifted*.
+    until: number;
+    reason: string;
+    by: string;
+}
+
+/// Is this notice still in force at `nowSec`?
+///
+/// A mute with an expiry stops being true on its own, and a banner that
+/// outlives it tells the player they cannot speak while they can. `until = 0`
+/// is until-lifted, so only an explicit `muted: false` event ends it — which
+/// is why the service emits one on an account-level unmute.
+export function moderationActive(ev: ChatModerationEvent | null, nowSec: number): boolean {
+    if (!ev || !ev.muted) return false;
+    return ev.until === 0 || ev.until > nowSec;
+}
+
+/// The banner line for a standing mute.
+export function moderationNoticeText(ev: ChatModerationEvent): string {
+    const who = ev.by ? ` by ${ev.by}` : '';
+    const when = ev.until > 0 ? ` until ${chatTime(ev.until)}` : ' until lifted';
+    const why = ev.reason ? ` — ${ev.reason}` : '';
+    return `You are muted${who}${when}.${why}`;
+}
+
+/// One row of `/api/chat/mute` read with no `username` — the operator's list.
+export interface ChatMuteRow {
+    account_id: number;
+    username?: string;
+    /// `"account"` for the global one, else `"<scope>:<target>"` (Chat::MuteKey).
+    scope: string;
+    until: number;
+    permanent: boolean;
+    reason: string;
+    by: string;
+}
+
+/// One line of the mute list. The scope is shown as the operator typed it
+/// (`account`, `channel:help`) rather than translated, because it is the
+/// string `/unmute` has to be standing in to lift.
+export function muteRowLine(m: ChatMuteRow, nowSec: number): string {
+    const who = m.username || `#${m.account_id}`;
+    const when = m.permanent || m.until === 0
+        ? 'until lifted'
+        : `${Math.max(0, Math.round((m.until - nowSec) / 60))}m left`;
+    const why = m.reason ? ` — ${m.reason}` : '';
+    return `${who} · ${m.scope} · ${when} · by ${m.by}${why}`;
+}
+
+// ── §3.5 quality of life ───────────────────────────────────────────────────
+
+/// Does this line name me?
+///
+/// Word-bounded and case-insensitive, and it deliberately does NOT match
+/// inside a longer word: a player called `al` would otherwise be mentioned by
+/// every "already". The name is escaped into the pattern because a username
+/// is user content and `.`/`+` are legal in some of them.
+export function hasMention(text: string, username: string): boolean {
+    const name = username.trim();
+    if (!name) return false;
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\w])${esc}([^\\w]|$)`, 'i').test(text);
+}
+
+/// Should this frame make a noise?
+///
+/// Three rules, each of which is a complaint when it is missing: never for my
+/// own line (a client that pings itself is a client nobody leaves open),
+/// never for a system line (the server talks constantly), and never for a
+/// tab that is on screen and being read. What is left is a PM or a mention —
+/// the two things §3.5 asks for.
+export function shouldNotify(
+    f: ChatFrame, myId: number, myName: string, activeKey: string,
+): boolean {
+    if (f.fromId === myId || f.system) return false;
+    const isPm = f.scope === 'pm';
+    const mention = hasMention(f.text, myName);
+    if (!isPm && !mention) return false;
+    // A mention still pings in the tab you are reading — it is addressed to
+    // you and the panel may not have focus — but an ordinary PM in the open
+    // PM tab does not.
+    if (tabKey(f.scope, f.target) === activeKey && !mention) return false;
+    return true;
+}
+
+/// One piece of a rendered line: plain text, or a link.
+export interface ChatSegment { text: string; href?: string; }
+
+/// Split a line into text and links (§3.5: "links auto-detected but rendered
+/// as plain anchors, no embeds").
+///
+/// Returns SEGMENTS rather than HTML on purpose. Building the anchor here
+/// would mean escaping here, and a linkifier that runs over already-escaped
+/// text has to know that `&amp;` is one character — the classic way a chat
+/// panel grows an XSS hole. The renderer escapes each segment itself.
+///
+/// `http`/`https` only: a bare `www.` is ambiguous with ordinary prose, and
+/// any other scheme (`javascript:`, `data:`) is exactly what must not become
+/// an anchor.
+export function linkSegments(text: string): ChatSegment[] {
+    const out: ChatSegment[] = [];
+    const re = /https?:\/\/[^\s<>"']+/g;
+    let at = 0;
+    for (const m of text.matchAll(re)) {
+        const start = m.index ?? 0;
+        if (start > at) out.push({ text: text.slice(at, start) });
+        // Trailing punctuation belongs to the sentence, not the url —
+        // "see http://x/y." links `http://x/y`.
+        let url = m[0];
+        const trail = /[.,;:!?)\]}]+$/.exec(url);
+        if (trail) url = url.slice(0, url.length - trail[0].length);
+        out.push({ text: url, href: url });
+        at = start + url.length;
+    }
+    if (at < text.length) out.push({ text: text.slice(at) });
+    return out.length ? out : [{ text }];
 }
 
 /// Merge lines into a tab: ascending by id, no duplicates.

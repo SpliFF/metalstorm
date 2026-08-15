@@ -5629,9 +5629,24 @@ int main(int argc, char *argv[]) {
           if (!lifted)
             return HttpAuth::JsonResponse(
                 404, R"({"error":"no mute in that scope"})");
-          if (haveScope)
+          if (haveScope) {
             emitChatSystemLine(res.scope, res.target, res.recipients,
                                subject->username + " was unmuted by " + callerName);
+          } else {
+            // The lift is told to the subject for the same reason the mute
+            // is, and the client cannot infer it: an account-level mute with
+            // `until = 0` never expires on a clock, so without this event the
+            // "you are muted" banner would stand for the rest of the session
+            // on an account that is free to speak. Told to nobody else —
+            // announcing a lift is announcing the mute.
+            nlohmann::json ev;
+            ev["scope"] = "notice";
+            ev["muted"] = false;
+            ev["until"] = 0;
+            ev["reason"] = "";
+            ev["by"] = callerName;
+            net.SendSSETo(chatStreamChannel, {subject->id}, ev.dump(), "moderation");
+          }
           nlohmann::json j;
           j["ok"] = true;
           j["username"] = subject->username;

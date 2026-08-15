@@ -29,8 +29,10 @@ import {
 } from './friends';
 import {
     ChatModel, CHAT_STREAM_MAX_ATTEMPTS, CHAT_TICKET_TTL_SEC,
-    actionBody, chatTime, isActionLine, parseChatInput, pmOther, streamRecovery,
-    tabKey,
+    actionBody, chatTime, hasMention, isActionLine, linkSegments, moderationActive,
+    moderationNoticeText, muteRowLine, parseChatInput, pmOther, shouldNotify,
+    streamRecovery, tabKey,
+    type ChatModerationEvent, type ChatMuteRow,
 } from './chat';
 import {
     classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
@@ -1922,6 +1924,18 @@ export class LobbyUI {
     /// which is the only place it looked wrong.
     private chatStreamNotice = '';
     private chatCmdNotice = '';
+    /// The standing account-level mute, from the `moderation` SSE event
+    /// (task 9d). A THIRD notice and not a fourth use of the other two: it
+    /// outranks both — it is why sending fails — and unlike the stream's it
+    /// is about this account rather than this connection, so a reconnect must
+    /// not clear it and a command reply must not overwrite it.
+    private chatMod: ChatModerationEvent | null = null;
+    /// The operator's mute list, shown until dismissed. Null = not asked for.
+    private chatMuteList: ChatMuteRow[] | null = null;
+    /// §3.5's "optional notification sound" — optional, so it is a toggle, and
+    /// remembered, because a player who turns a sound off means it.
+    private chatSoundOn = localStorage.getItem('springrts-chat-sound') !== 'off';
+    private chatAudio: AudioContext | null = null;
 
     /// Bring the chat panel up. Idempotent: both screens call it on render and
     /// the stream survives the screen change.
@@ -1973,13 +1987,37 @@ export class LobbyUI {
             let f: any;
             try { f = JSON.parse(e.data); } catch { return; }
             if (!f || typeof f.id !== 'number') return;
-            const landed = this.chat.applyFrame({
+            const frame = {
                 id: f.id, scope: f.scope, target: String(f.target ?? ''),
                 from: String(f.from ?? ''), fromId: Number(f.fromId ?? 0),
                 text: String(f.text ?? ''), ts: Number(f.ts ?? 0),
                 ...(f.system ? { system: true } : {}),
-            });
-            if (landed) this.renderChat();
+            };
+            // The unread decision is `applyFrame`'s and reads the tab the
+            // frame lands in; the ping is decided on the FRAME, before it is
+            // filed, because a mention pings in the tab you are reading and
+            // that tab never counts an unread.
+            const landed = this.chat.applyFrame(frame);
+            if (landed) {
+                if (shouldNotify(frame, this.myPlayerId, this.myChatName(),
+                                 this.chat.activeKey)) this.chatPing();
+                this.renderChat();
+            }
+        });
+        // The moderation channel (task 9d). It carries exactly one thing —
+        // this account's own account-level mute — because a scoped mute is
+        // told to its channel as a system line instead. Both directions
+        // arrive: the mute, and the lift, without which an
+        // until-lifted banner would stand for the rest of the session.
+        es.addEventListener('moderation', (e: MessageEvent) => {
+            let ev: any;
+            try { ev = JSON.parse(e.data); } catch { return; }
+            if (!ev || typeof ev.muted !== 'boolean') return;
+            this.chatMod = {
+                muted: ev.muted, until: Number(ev.until ?? 0),
+                reason: String(ev.reason ?? ''), by: String(ev.by ?? ''),
+            };
+            this.renderChat();
         });
         es.onerror = () => this.onChatStreamError();
     }
@@ -2030,6 +2068,42 @@ export class LobbyUI {
         this.chatAvailable = null;
         this.chatStreamNotice = '';
         this.chatCmdNotice = '';
+        this.chatMod = null;
+        this.chatMuteList = null;
+    }
+
+    /// The name a mention has to match. Off the stored session rather than the
+    /// roster: chat runs on the browser screen too, where there is no room and
+    /// therefore no roster row to read a name out of.
+    private myChatName(): string {
+        return localStorage.getItem('springrts-username') ?? '';
+    }
+
+    /// §3.5's notification sound. Synthesised rather than fetched: the lobby
+    /// ships no audio assets and a two-tone blip needs none, so this cannot
+    /// 404 or wait on the network. Built lazily because a browser refuses an
+    /// `AudioContext` created before the first gesture.
+    private chatPing(): void {
+        if (!this.chatSoundOn) return;
+        try {
+            const Ctor = window.AudioContext ?? (window as any).webkitAudioContext;
+            if (!Ctor) return;
+            this.chatAudio ??= new Ctor();
+            const ctx = this.chatAudio!;
+            if (ctx.state === 'suspended') void ctx.resume();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.setValueAtTime(1174, ctx.currentTime + 0.07);
+            // Ramped, not switched: a square-edged gain on a sine is a click.
+            gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.2);
+        } catch { /* audio is a courtesy; a chat panel that throws over it is not */ }
     }
 
     /// Room tabs follow the seat, and the seat comes off the roster the room
@@ -2125,7 +2199,94 @@ export class LobbyUI {
                 this.renderChat();
                 return;
             }
+            // ── The moderation verbs (task 9d) ─────────────────────────────
+            //
+            // Every one of them reports its REPLY, refusal or not. A
+            // moderation action whose only evidence is a system line in the
+            // channel looks like it worked to the one person who has to know
+            // whether it did — the moderator is not necessarily reading the
+            // scope they acted in (`/gmute` is told to nobody at all).
+            case 'mute': {
+                const body: Record<string, unknown> = {
+                    username: cmd.username, on: cmd.on,
+                };
+                if (cmd.scope) { body.scope = cmd.scope; body.target = cmd.target; }
+                if (cmd.on) {
+                    body.seconds = cmd.seconds;
+                    if (cmd.reason) body.reason = cmd.reason;
+                }
+                const r = await this.lobbyPost('/api/chat/mute', body);
+                const where = cmd.scope ? 'here' : 'everywhere';
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on
+                        ? `Muted ${cmd.username} ${where}` +
+                          (cmd.seconds > 0 ? ` for ${cmd.seconds}s.` : ' until lifted.')
+                        : `Unmuted ${cmd.username} ${where}.`;
+                // The list is stale the moment a mute changes, and a stale
+                // list of who is muted is worse than none.
+                if (!r?.error && this.chatMuteList) void this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
+            case 'kick': {
+                const body: Record<string, unknown> = {
+                    channel: cmd.channel, username: cmd.username,
+                };
+                if (cmd.seconds > 0) body.seconds = cmd.seconds;
+                if (cmd.reason) body.reason = cmd.reason;
+                const r = await this.lobbyPost('/api/chat/kick', body);
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Kicked ${cmd.username} from #${cmd.channel}.`;
+                this.renderChat();
+                return;
+            }
+            case 'broadcast': {
+                const r = await this.lobbyPost('/api/chat/broadcast', { text: cmd.text });
+                // The line itself arrives down the stream like any other
+                // `#main` line, so the reply's job is only the count.
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Broadcast to ${r?.delivered ?? 0} in #main.`;
+                this.renderChat();
+                return;
+            }
+            case 'mutes': {
+                await this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
         }
+    }
+
+    /// `/api/chat/mute` with no `username` — "who is muted", which the service
+    /// answers to admins only (the list names accounts and reasons, which is
+    /// moderation record rather than chat).
+    private async refreshMuteList(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/mute', {});
+            if (Array.isArray(r)) { this.chatMuteList = r as ChatMuteRow[]; return; }
+            this.chatMuteList = null;
+            this.chatCmdNotice = String(r?.error ?? 'Could not read the mute list.');
+        } catch {
+            this.chatMuteList = null;
+            this.chatCmdNotice = 'Could not read the mute list.';
+        }
+    }
+
+    /// One message body, with §3.5's auto-detected links.
+    ///
+    /// The segmentation runs on the RAW text and each piece is escaped here,
+    /// which is the only order that is safe: a linkifier that runs over
+    /// already-escaped text sees `&amp;` as five characters and is one
+    /// mis-slice away from emitting markup. `rel="noopener noreferrer"` and no
+    /// embed of any kind — §3.5 says plain anchors.
+    private chatBody(text: string): string {
+        return linkSegments(text).map(s => s.href
+            ? `<a class="chat-link" href="${this.escAttr(s.href)}" target="_blank" ` +
+              `rel="noopener noreferrer">${this.esc(s.text)}</a>`
+            : this.esc(s.text)).join('');
     }
 
     private renderChat(): void {
@@ -2143,23 +2304,30 @@ export class LobbyUI {
                    `data-tab="${this.escAttr(t.key)}">${this.esc(t.label)}${unread}${close}</button>`;
         }).join('');
 
+        const myName = this.myChatName();
         const lines = (active?.messages ?? []).map(m => {
             const time = `<span class="chat-time">${chatTime(m.ts)}</span>`;
             if (m.system) {
+                // A server line has no name and no mention highlight: it is
+                // the room talking, and it says everybody's name.
                 return `<div class="chat-line chat-line-system">${time}` +
                        `<span class="chat-text">${this.esc(m.text)}</span></div>`;
             }
+            // §3.5's mention highlight. Never on my own line — I know I said
+            // my name — and computed on the raw text, before linkification
+            // splits it.
+            const mine = m.fromId === this.myPlayerId;
+            const mention = !mine && hasMention(m.text, myName) ? ' chat-line-mention' : '';
             if (isActionLine(m.text)) {
                 // No colon, no name-then-text: an action reads as one
                 // sentence or it is not an action.
-                return `<div class="chat-line chat-line-action">${time}` +
+                return `<div class="chat-line chat-line-action${mention}">${time}` +
                        `<span class="chat-text">${this.esc(m.from)} ` +
-                       `${this.esc(actionBody(m.text))}</span></div>`;
+                       `${this.chatBody(actionBody(m.text))}</span></div>`;
             }
-            const mine = m.fromId === this.myPlayerId ? ' chat-line-mine' : '';
-            return `<div class="chat-line${mine}">${time}` +
+            return `<div class="chat-line${mine ? ' chat-line-mine' : ''}${mention}">${time}` +
                    `<span class="chat-from">${this.esc(m.from)}</span>` +
-                   `<span class="chat-text">${this.esc(m.text)}</span></div>`;
+                   `<span class="chat-text">${this.chatBody(m.text)}</span></div>`;
         }).join('');
 
         const empty = !active || active.messages.length === 0
@@ -2167,18 +2335,45 @@ export class LobbyUI {
               `<code>/w player</code>, <code>/join #channel</code>, <code>/me</code>.</div>`
             : '';
         const stopped = this.chatErrors >= CHAT_STREAM_MAX_ATTEMPTS;
-        // The stream outranks a command reply: "chat is disconnected" is why
-        // the command failed, and showing the reply instead explains nothing.
+        // Three notices, in the order they explain a failure. A standing mute
+        // outranks everything — it is *why* sending fails, and it is true of
+        // the account rather than of this connection — then the stream's state,
+        // then the reply to the last command ("chat is disconnected" explains
+        // a refusal that "unknown command" does not).
+        const muted = moderationActive(this.chatMod, Date.now() / 1000);
+        const modNotice = muted
+            ? `<div class="chat-notice chat-notice-mod">` +
+              `${this.esc(moderationNoticeText(this.chatMod!))}</div>`
+            : '';
         const noticeText = this.chatStreamNotice || this.chatCmdNotice;
         const notice = noticeText
             ? `<div class="chat-notice">${this.esc(noticeText)}` +
               (stopped ? ' <button id="chat-reconnect-btn" class="secondary">Reconnect</button>' : '') +
               `</div>`
             : '';
+        const muteList = this.chatMuteList
+            ? `<div class="chat-mutes"><div class="chat-mutes-head">` +
+              `${this.chatMuteList.length} mute(s) in force` +
+              `<button id="chat-mutes-close" class="chat-tab-close">×</button></div>` +
+              (this.chatMuteList.length
+                  ? this.chatMuteList.map(m =>
+                        `<div class="chat-mutes-row">` +
+                        `${this.esc(muteRowLine(m, Date.now() / 1000))}</div>`).join('')
+                  : `<div class="chat-mutes-row">Nobody is muted.</div>`) +
+              `</div>`
+            : '';
+
+        // The sound toggle rides in the head rather than in a settings screen
+        // the lobby does not have: §3.5 makes the sound optional, and an
+        // option nobody can find is not one.
+        const sound = `<button id="chat-sound-btn" class="chat-sound-btn" ` +
+                      `title="Notification sound for mentions and PMs">` +
+                      `${this.chatSoundOn ? '🔔' : '🔕'}</button>`;
 
         dock.innerHTML =
-            `<div class="chat-head"><h3>Chat</h3><div class="chat-tabs">${tabs}</div></div>` +
-            notice +
+            `<div class="chat-head"><h3>Chat</h3><div class="chat-tabs">${tabs}</div>` +
+            `${sound}</div>` +
+            modNotice + notice + muteList +
             `<div id="chat-log" class="chat-log">${lines}${empty}</div>` +
             `<form id="chat-form" class="chat-compose">` +
             `<input type="text" id="chat-input" class="chat-input" autocomplete="off" ` +
@@ -2215,6 +2410,21 @@ export class LobbyUI {
             this.chatErrors = 0;
             this.chatStreamNotice = '';
             void this.remintAndReopen();
+        };
+        const soundBtn = document.getElementById('chat-sound-btn');
+        if (soundBtn) soundBtn.onclick = () => {
+            this.chatSoundOn = !this.chatSoundOn;
+            localStorage.setItem('springrts-chat-sound', this.chatSoundOn ? 'on' : 'off');
+            // Play the sound the toggle just turned on: a mute button whose
+            // effect is only audible the next time somebody else speaks is a
+            // control nobody can check.
+            if (this.chatSoundOn) this.chatPing();
+            this.renderChat();
+        };
+        const closeMutes = document.getElementById('chat-mutes-close');
+        if (closeMutes) closeMutes.onclick = () => {
+            this.chatMuteList = null;
+            this.renderChat();
         };
     }
 

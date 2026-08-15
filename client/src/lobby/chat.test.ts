@@ -11,8 +11,9 @@ import { describe, it, expect } from 'vitest';
 import {
     ChatModel, CHAT_STREAM_MAX_ATTEMPTS, CHAT_TAB_LIMIT, CHAT_TICKET_TTL_SEC,
     actionBody, chatTime, isActionLine, mergeMessages, normalizeChannel,
-    parseChatInput, pmOther, pmTarget, roomTabSpecs, sortTabs, streamRecovery,
-    tabKey, type ChatFrame, type ChatTab,
+    hasMention, linkSegments, moderationActive, moderationNoticeText, muteRowLine,
+    parseChatDuration, parseChatInput, pmOther, pmTarget, roomTabSpecs, shouldNotify,
+    sortTabs, streamRecovery, tabKey, type ChatFrame, type ChatTab,
 } from './chat.js';
 
 function frame(over: Partial<ChatFrame> = {}): ChatFrame {
@@ -339,5 +340,199 @@ describe('small things the panel renders', () => {
         // Two scopes can carry the same target string (`12` is a room id and
         // could be a channel name), so the key is both.
         expect(tabKey('room', '12')).not.toBe(tabKey('channel', '12'));
+    });
+});
+
+// ── task 9d: the moderation surface and §3.5's quality-of-life list ────────
+
+/// A tab, in the shape `parseChatInput` reads (scope + sendTarget only).
+function tab(over: Partial<ChatTab> = {}): ChatTab {
+    return {
+        key: 'channel:help', scope: 'channel', target: 'help', sendTarget: 'help',
+        label: '#help', closable: true, messages: [], unread: 0, loaded: false,
+        ...over,
+    };
+}
+
+describe('durations', () => {
+    it('reads every unit the composer accepts', () => {
+        expect(parseChatDuration('30')).toBe(30);
+        expect(parseChatDuration('30s')).toBe(30);
+        expect(parseChatDuration('5m')).toBe(300);
+        expect(parseChatDuration('2h')).toBe(7200);
+        expect(parseChatDuration('1d')).toBe(86400);
+    });
+
+    it('reads "until lifted" as the service spells it — 0, not absent', () => {
+        // `until = 0` IS a mute (the row is the mute); the absence of a row is
+        // the only "not muted". A client that sent nothing here would ask for
+        // a mute and get the same thing by accident rather than on purpose.
+        expect(parseChatDuration('perm')).toBe(0);
+        expect(parseChatDuration('forever')).toBe(0);
+    });
+
+    it('says "not a duration" rather than guessing, so a reason can be first', () => {
+        expect(parseChatDuration('spamming')).toBe(-1);
+        expect(parseChatDuration('')).toBe(-1);
+        expect(parseChatDuration('5x')).toBe(-1);
+        expect(parseChatDuration('5 m')).toBe(-1);
+    });
+});
+
+describe('moderation commands', () => {
+    it('scopes /mute to the conversation the moderator is standing in', () => {
+        const c = parseChatInput('/mute bob 5m flooding', tab());
+        expect(c).toEqual({ kind: 'mute', username: 'bob', scope: 'channel',
+                            target: 'help', seconds: 300, reason: 'flooding', on: true });
+    });
+
+    it('sends the room-shaped scope its bare room id, never the derived target', () => {
+        // Same rule as `send`: the ally target is derived by the server off
+        // the roster precisely so a client cannot name a team.
+        const ally = tab({ key: 'ally:12/ally/1', scope: 'ally', target: '12/ally/1',
+                           sendTarget: '12', label: 'Allies' });
+        const c = parseChatInput('/mute bob 60', ally);
+        expect(c).toMatchObject({ kind: 'mute', scope: 'ally', target: '12', seconds: 60 });
+    });
+
+    it('requires a duration for a scoped mute, and refuses rather than defaulting', () => {
+        // The wire's default for an absent `seconds` is 0 = until lifted, so
+        // the lazy client is the dangerous one: `/mute bob` would silence
+        // somebody indefinitely and read like a five-minute timeout.
+        expect(parseChatInput('/mute bob', tab())).toMatchObject({ kind: 'error' });
+        expect(parseChatInput('/mute bob flooding', tab())).toMatchObject({ kind: 'error' });
+        expect(parseChatInput('/mute bob perm rude', tab()))
+            .toMatchObject({ kind: 'mute', seconds: 0, reason: 'rude' });
+    });
+
+    it('refuses a mute in a PM before the round trip, and names the tool that works', () => {
+        const pm = parseChatInput('/mute bob 5m', tab({ scope: 'pm', target: '4:9',
+                                                       sendTarget: 'bob' }));
+        expect(pm).toMatchObject({ kind: 'error' });
+        expect((pm as { message: string }).message).toMatch(/\/ignore bob/);
+    });
+
+    it('makes the account-level mute a different verb, usable from anywhere', () => {
+        // It belongs to no conversation, so it needs no membership — and it
+        // must therefore work from the one tab that has no ops at all.
+        const pmTab = tab({ scope: 'pm', target: '4:9', sendTarget: 'bob' });
+        expect(parseChatInput('/gmute bob 1h spam', pmTab)).toEqual({
+            kind: 'mute', username: 'bob', seconds: 3600, reason: 'spam', on: true });
+        expect(parseChatInput('/gmute bob 1h spam', null)).toMatchObject({ kind: 'mute' });
+        // No scope key at all: `scope`/`target` absent is what the route reads
+        // as the account-level mute.
+        expect('scope' in (parseChatInput('/gmute bob perm', pmTab) as object)).toBe(false);
+    });
+
+    it('unmutes in the scope being read, and globally with the global verb', () => {
+        expect(parseChatInput('/unmute bob', tab())).toEqual({
+            kind: 'mute', username: 'bob', scope: 'channel', target: 'help',
+            seconds: 0, reason: '', on: false });
+        expect(parseChatInput('/gunmute bob', tab())).toEqual({
+            kind: 'mute', username: 'bob', seconds: 0, reason: '', on: false });
+    });
+
+    it('kicks only from the named channel being read', () => {
+        expect(parseChatInput('/kick bob 10m rude', tab())).toEqual({
+            kind: 'kick', channel: 'help', username: 'bob', seconds: 600, reason: 'rude' });
+        // `#main` cannot be left, so there is nothing to eject anybody from,
+        // and a room's ejection verb is `/api/rooms/kick` — a player kicked
+        // from a room channel but still seated is in a war they cannot talk to.
+        for (const scope of ['main', 'room', 'ally', 'spectator', 'pm'] as const) {
+            expect(parseChatInput('/kick bob 10m', tab({ scope })))
+                .toMatchObject({ kind: 'error' });
+        }
+    });
+
+    it('lets a kick take a reason with no duration, and defaults the duration server-side', () => {
+        expect(parseChatInput('/kick bob being rude', tab()))
+            .toMatchObject({ seconds: 0, reason: 'being rude' });
+    });
+
+    it('carries a broadcast and the mute list', () => {
+        expect(parseChatInput('/broadcast server restarting', tab()))
+            .toEqual({ kind: 'broadcast', text: 'server restarting' });
+        expect(parseChatInput('/broadcast', tab())).toMatchObject({ kind: 'error' });
+        expect(parseChatInput('/mutes', tab())).toEqual({ kind: 'mutes' });
+    });
+});
+
+describe('the moderation notice', () => {
+    const ev = { muted: true, until: 0, reason: 'spam', by: 'admin' };
+
+    it('stands until lifted when the mute has no expiry', () => {
+        expect(moderationActive(ev, 1_700_000_000)).toBe(true);
+        expect(moderationActive({ ...ev, muted: false }, 1_700_000_000)).toBe(false);
+        expect(moderationActive(null, 1_700_000_000)).toBe(false);
+    });
+
+    it('ends itself when the mute expires', () => {
+        // Nothing tells the client a timed mute ran out, so a banner that
+        // needs an event to clear says "you cannot speak" to somebody who can.
+        const timed = { ...ev, until: 1_700_000_060 };
+        expect(moderationActive(timed, 1_700_000_000)).toBe(true);
+        expect(moderationActive(timed, 1_700_000_061)).toBe(false);
+    });
+
+    it('names who, until when and why', () => {
+        expect(moderationNoticeText(ev)).toMatch(/muted by admin until lifted/);
+        expect(moderationNoticeText(ev)).toMatch(/spam/);
+        expect(moderationNoticeText({ ...ev, until: 1_700_000_000, reason: '' }))
+            .toMatch(/until \d{2}:\d{2}\.$/);
+    });
+
+    it('formats a mute-list row against the scope /unmute needs', () => {
+        const row = { account_id: 7, username: 'bob', scope: 'channel:help',
+                      until: 1_700_000_600, permanent: false, reason: 'spam', by: 'admin' };
+        const line = muteRowLine(row, 1_700_000_000);
+        expect(line).toMatch(/bob/);
+        expect(line).toMatch(/channel:help/);
+        expect(line).toMatch(/10m left/);
+        expect(muteRowLine({ ...row, permanent: true, until: 0 }, 1_700_000_000))
+            .toMatch(/until lifted/);
+    });
+});
+
+describe('§3.5 quality of life', () => {
+    it('highlights a mention but not a name inside a word', () => {
+        expect(hasMention('nice one al', 'al')).toBe(true);
+        expect(hasMention('al: hello', 'al')).toBe(true);
+        expect(hasMention('AL, look', 'al')).toBe(true);
+        expect(hasMention('already done', 'al')).toBe(false);
+        expect(hasMention('rally', 'al')).toBe(false);
+        expect(hasMention('anything', '')).toBe(false);
+    });
+
+    it('treats a username as text, not as a pattern', () => {
+        // Usernames are user content; `a.c` must not match `abc`.
+        expect(hasMention('abc here', 'a.c')).toBe(false);
+        expect(hasMention('a.c here', 'a.c')).toBe(true);
+    });
+
+    it('pings for a PM or a mention, and never for my own line or the server', () => {
+        const active = tabKey('main', 'main');
+        expect(shouldNotify(frame({ text: 'hey al' }), 1, 'al', active)).toBe(true);
+        expect(shouldNotify(frame({ text: 'hey all' }), 1, 'al', active)).toBe(false);
+        expect(shouldNotify(frame({ fromId: 1, text: 'hey al' }), 1, 'al', active)).toBe(false);
+        expect(shouldNotify(frame({ system: true, text: 'hey al' }), 1, 'al', active)).toBe(false);
+        const pm = frame({ scope: 'pm', target: '1:7', text: 'psst' });
+        expect(shouldNotify(pm, 1, 'al', active)).toBe(true);
+        // …but not the PM you are reading. A mention still pings there: it is
+        // addressed to you and the window may not have focus.
+        expect(shouldNotify(pm, 1, 'al', tabKey('pm', '1:7'))).toBe(false);
+        expect(shouldNotify({ ...pm, text: 'al?' }, 1, 'al', tabKey('pm', '1:7'))).toBe(true);
+    });
+
+    it('links http(s) only, and leaves the sentence out of the url', () => {
+        expect(linkSegments('see http://x.dev/y. ok')).toEqual([
+            { text: 'see ' }, { text: 'http://x.dev/y', href: 'http://x.dev/y' },
+            { text: '. ok' },
+        ]);
+        // Anything else is text: `javascript:` and `data:` are exactly what
+        // must not become an anchor, and a bare `www.` is ambiguous prose.
+        expect(linkSegments('javascript:alert(1)')).toEqual([{ text: 'javascript:alert(1)' }]);
+        expect(linkSegments('www.x.dev')).toEqual([{ text: 'www.x.dev' }]);
+        expect(linkSegments('plain')).toEqual([{ text: 'plain' }]);
+        expect(linkSegments('https://a/b and https://c/d').filter(s => s.href).length).toBe(2);
     });
 });
