@@ -3,6 +3,7 @@
 #include "RoomManager.h"
 #include "Chat.h"
 #include "WarPlayerBindings.h"
+#include "WarSlotReservation.h"
 #include "GameEventsDb.h"
 #include "GameServersDb.h"
 #include "AuthTokens.h"
@@ -167,42 +168,12 @@ static void BindText(sqlite3_stmt* s, int idx, const std::string& v) {
 
 bool RoomManager::WriteTransactionLocked(const char* what,
                                          const std::function<int()>& body) {
-    if (!db) return false;
-    // Already inside somebody else's transaction (PersistRoomLocked calling
-    // one of the Persist*Locked helpers): run inline and let the outermost
-    // call own the commit and the retry.
-    if (!sqlite3_get_autocommit(db)) return body() == SQLITE_OK;
-
-    int rc = SQLITE_OK;
-    for (int attempt = 1; attempt <= kSqliteBusyRetries; ++attempt) {
-        // IMMEDIATE, not deferred: take the write lock up front so the
-        // busy timeout is spent here, once, rather than on whichever
-        // statement inside `body` happens to be the first write.
-        rc = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-        if (rc == SQLITE_OK) {
-            rc = body();
-            if (rc == SQLITE_OK) {
-                rc = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-                if (rc == SQLITE_OK) return true;
-            }
-            // Unconditional: after a failed COMMIT the transaction is still
-            // open, and leaving it open poisons every later writer on this
-            // shared handle.
-            sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
-        }
-        if (!SqliteIsBusy(rc)) break;
-        if (attempt < kSqliteBusyRetries) {
-            SLOG(SPRING_LOG_NOTICE, "%s: database busy, retrying (%d/%d)",
-                what, attempt + 1, kSqliteBusyRetries);
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(SqliteBusyBackoffMs(attempt)));
-        }
-    }
-    // Loud, and at ERROR: this is durable state that did not reach disk, and
-    // the whole point of D35 is that it used to disappear into a WARNING.
-    SLOG(SPRING_LOG_ERROR, "%s: write LOST after %d attempt(s) (%d): %s",
-        what, kSqliteBusyRetries, rc, sqlite3_errmsg(db));
-    return false;
+    // The policy itself now lives in SqliteThreading.h, because RoomManager is
+    // no longer the only writer on this handle: WarDirector and
+    // WarSlotReservations write `mapDb` from the other thread, and a
+    // transaction is a property of the CONNECTION, not of the thread. Keeping
+    // the discipline here made it invisible to them — see the RULE there.
+    return SqliteWriteTransaction(db, what, body);
 }
 
 void RoomManager::PersistRoomLocked(const GameRoom& room) {
@@ -438,6 +409,11 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     // A roster of accounts that never fought here, complete with their pools
     // (PLAN-metalstorm-lobby task 4).
     WarPlayerBindings::DeleteForRoom(db, roomId);
+    // Seats held for joins that will now never land. Inherited, these are
+    // worse than a leak in the specific way this chokepoint is about: the next
+    // war on this id would boot with its sides already partly reserved by
+    // accounts that never asked to fight in it (PLAN-metalstorm-wars §4).
+    WarSlotReservations::DeleteForRoom(db, roomId);
     // A story: the war log the rejoin digest reads back to a player.
     GameEventsDb::DeleteForRoom(db, roomId);
     // A WORLD. `warresume::LatestSnapshot` partitions on (game_id, room_id) and

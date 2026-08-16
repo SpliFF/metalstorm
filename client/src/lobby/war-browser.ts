@@ -53,7 +53,7 @@ export interface WarSide {
 /// reader here falls back to the `live` flag rather than assuming a word.
 export type WarStateKey =
     'not_a_war' | 'live' | 'resuming' | 'hibernated' | 'crashed' | 'fresh' |
-    'unresumable';
+    'finished' | 'unresumable';
 
 /// `warresume::ToString(ResumeEligibility)`, verbatim.
 export type ResumeEligibilityKey =
@@ -100,8 +100,6 @@ export interface WarRow {
     /// True when this account already holds a seat in this war (from the
     /// join preview, which is the only per-account source).
     returning?: boolean;
-    /// True when this account asked to WATCH this war (§3).
-    watching?: boolean;
     /// True when this account is ENLISTED in this war — it holds a binding,
     /// whether or not a join would seat it back on the same team. This, not
     /// `returning`, is what "My wars" means (task 4c). Absent on a lobby
@@ -202,6 +200,10 @@ function myWarRank(row: WarRow): number {
         case 'hibernated':  return 3;
         case 'unresumable': return 4;
         case 'fresh':       return 5;
+        // A war that is OVER needs nothing from its player, so it sorts below
+        // every war that does — but still inside "my wars", because it is
+        // theirs and its result is what they came back to read.
+        case 'finished':    return 6;
         default:            return row.war.live ? 0 : 3;
     }
 }
@@ -359,6 +361,7 @@ export function warStateBadge(war: WarInfo): { label: string; cls: string } {
         case 'crashed':     return { label: 'Interrupted', cls: 'war-badge-crashed' };
         case 'unresumable': return { label: 'Restarting',  cls: 'war-badge-crashed' };
         case 'fresh':       return { label: 'Not started', cls: 'war-badge-idle' };
+        case 'finished':    return { label: 'Ended',       cls: 'war-badge-idle' };
         default:
             // `not_a_war`, or a lobby that publishes no `state` at all. Fall
             // back to the one bit that has always been there.
@@ -402,6 +405,11 @@ export function formatWarStatus(war: WarInfo, nowSec: number): string {
                 : formatResumeRefusal(war);
         case 'fresh':
             return 'never run — a join starts it';
+        case 'finished':
+            // The war ended. Not "the server stopped without saving", which is
+            // what this card said for every correctly-finished war before D4 —
+            // the server stopped because there was nothing left to serve.
+            return 'this war is over — its result is in your war digest';
         default:
             // A lobby with no `state` field, or a room that is not a war.
             return war.live ? '' : 'no server running — a join restarts it';

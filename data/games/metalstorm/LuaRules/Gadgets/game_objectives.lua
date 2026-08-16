@@ -54,6 +54,10 @@ local Extract      = VFS.Include("LuaRules/Gadgets/objectives/extract.lua")
 local Infra        = VFS.Include("LuaRules/Gadgets/objectives/infra.lua")
 local Generator    = VFS.Include("LuaRules/Gadgets/objectives/generator.lua")
 local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
+-- PLAN-metalstorm-wars.md §7 task 4: the per-objective war-end disposition
+-- rule, pure and tested on its own (objectives/tests/warend_spec.lua). The
+-- WALK is here in ExpireAllActive; the RULE is there.
+local WarEnd       = VFS.Include("LuaRules/Gadgets/objectives/warend.lua")
 local Tick         = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 local TYPES = {
@@ -483,7 +487,14 @@ end
 -- ============================================================
 -- Terminal resolution — the single place any objective leaves 'active'.
 -- ============================================================
-function resolveObjective(o, state, completingTeam, ctx)
+--- @param escrowOutcome  optional override for the outcome handed to
+---   `GG.Authority.SettleEscrow`. Defaults to `state`, which is right for every
+---   ordinary resolution. The war-end sweep passes `Escrow.WAR_END` so the
+---   stakes route team-ward (wars §7) while the OBJECTIVE still records the
+---   honest 'expired' — the two are different vocabularies and conflating them
+---   would publish an objective in a state no reader knows and no
+---   `resolvedStates` list contains.
+function resolveObjective(o, state, completingTeam, ctx, escrowOutcome)
     if o.state ~= 'active' then return end
     o.state = state
     o.resolvedFrame = ctx.frame
@@ -500,7 +511,9 @@ function resolveObjective(o, state, completingTeam, ctx)
         awardObjective(o, completingTeam)
         for _, fn in ipairs(completeHooks) do fn(o, completingTeam) end
     else
-        GG.Authority.SettleEscrow(o.id, state)   -- 'failed' | 'expired' -> refund stakers
+        -- 'failed' | 'expired' -> refund stakers; 'war_end' -> refund the
+        -- stakers' TEAM pools (wars §7).
+        GG.Authority.SettleEscrow(o.id, escrowOutcome or state)
     end
 
     -- The while-you-were-away digest (PLAN-persistence task 4b). Emitted HERE
@@ -745,11 +758,54 @@ function GG.Objectives.Fail(id)
 end
 
 --- War-end sweep (PLAN-metalstorm-wars.md §7 `resolving`, called by
---- game_gameover.lua): every still-active objective resolves 'expired', which
---- routes through the one terminal path above and so refunds each staked
---- bounty via SettleEscrow — "no authority is destroyed or awarded to the
---- enemy by war end". Deliberately NOT 'failed': the objectives weren't lost,
---- the war stopped. Returns the number swept.
+--- game_gameover.lua). §7's requirement is that **every unresolved objective
+--- with staked authority disposes deterministically**, and that is two rules,
+--- not one:
+---
+---   * **met-but-unpaid objectives settle normally.** The eval loop runs every
+---     `EVAL_PERIOD` (90 frames / 3 s) and the wind-down grace is 300 frames,
+---     so an objective whose criteria are met inside the last eval window has
+---     been *earned* and never evaluated. Expiring it would refund the bounty
+---     that was just won and pay nobody the reward — a final push that lands in
+---     the last two seconds of the war would be silently unwound. So the sweep
+---     asks each objective's own `check()` ONE more time first, and anything
+---     that answers 'complete' resolves through the ordinary award path
+---     (reward + escrow folded in, participation split, OnComplete hooks).
+---   * **everything else expires with its stakes routed team-ward.** Not
+---     'failed' — the objectives were not lost, the war stopped — and not the
+---     ordinary 'expired' escrow rule either: `Escrow.WAR_END` sends every
+---     stake to the staker's team pool whether or not they are connected,
+---     which is §7's "not to individuals" and the gap §7.2 left open. No
+---     authority is destroyed and none is awarded to the enemy.
+---
+--- `check()` is the same predicate the eval loop calls and is pure with
+--- respect to objective state, so asking it here cannot complete an objective
+--- the ordinary loop would not have completed one tick later. A module that
+--- reports a non-'complete' terminal state (a `protect` whose ward just died)
+--- is honoured too: that is the objective's own answer, and overriding it with
+--- 'expired' would record the wrong ending for it.
+---
+--- Phase-chained parents have no `check()` of their own (their resolution is
+--- driven by the cascade), so they are swept without being asked — the same
+--- asymmetry the eval loop already has.
+---
+--- The escrow outcome comes from `GG.Authority` rather than from a literal
+--- here: authority owns the escrow vocabulary and one spelling of `war_end` is
+--- the point. A missing export is LOUD rather than silent, because the quiet
+--- fallback ('expired') is precisely the behaviour §7 says is wrong, and it
+--- would look identical in the log to a correct sweep.
+local function warEndOutcome()
+    local w = GG.Authority and GG.Authority.ESCROW_WAR_END
+    if w then return w end
+    Spring.Echo('[objectives] WARNING: GG.Authority.ESCROW_WAR_END missing — ' ..
+                'war-end stakes will refund per the ordinary expiry rule ' ..
+                '(to connected stakers), not to team pools. See wars §7.')
+    return 'expired'
+end
+
+--- Returns `completed, expired`. The old single-count return is the sum, and
+--- both numbers are published: "settled 6" told nobody whether the war paid
+--- out or wrote everything off.
 ---
 --- Iterates a snapshot of activeList because resolveObjective mutates it
 --- (removeFromActive swap-pops, and a linked partner / phase parent can
@@ -758,15 +814,31 @@ function GG.Objectives.ExpireAllActive()
     local snapshot = {}
     for i = 1, #activeList do snapshot[i] = activeList[i] end
     local ctx = buildCtx(Spring.GetGameFrame())
-    local n = 0
+    local warEnd = warEndOutcome()
+    local completed, expired = 0, 0
     for _, id in ipairs(snapshot) do
         local o = objectives[id]
         if o and o.state == 'active' then
-            resolveObjective(o, 'expired', nil, ctx)
-            n = n + 1
+            local state, team
+            if WarEnd.shouldAsk(o) then
+                local module = TYPES[o.type]
+                if module and module.check then
+                    -- A content bug in one objective's predicate must not
+                    -- abort the sweep and strand every remaining escrow: the
+                    -- war is ending and this is the last chance to dispose of
+                    -- them. A throw is treated as "no answer" and falls through
+                    -- to the expiry branch.
+                    local ok, s, t = pcall(module.check, o, ctx)
+                    if ok then state, team = s, t end
+                end
+            end
+            local d = WarEnd.dispose(state, warEnd)
+            resolveObjective(o, d.state, d.paid and team or nil, ctx, d.escrowOutcome)
+            if d.paid then completed = completed + 1
+            else            expired = expired + 1 end
         end
     end
-    return n
+    return completed, expired
 end
 
 -- ============================================================

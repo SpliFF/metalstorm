@@ -16,6 +16,22 @@
 // `SessionKindToString`/`SessionKindFromString`: one encoder, one decoder.
 #pragma once
 
+/// One side's territorial standing, as the sim's foothold census reports it
+/// (PLAN-metalstorm-wars.md §7 faction elimination, task 4). Lives here rather
+/// than beside the rule that consumes it because it is a per-side VALUE, and
+/// this header is the one place the three processes already agree on what a
+/// side is — putting it next to the Director would make `WarSummary.h`, which
+/// only reports the census, include the component that decides on it.
+struct WarSideFootholds {
+    std::string factionId;
+    /// Declared start regions this side still holds. A region captured
+    /// ELSEWHERE is not a foothold: §7's condition is "all its start regions
+    /// gone", so a faction pushed off its own ground while sitting on someone
+    /// else's is eliminated — which is the reading that makes the condition
+    /// reachable at all.
+    unsigned held = 0;
+};
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -66,6 +82,34 @@ inline WarSides ParseWarSides(const std::string& spec) {
         if (comma == std::string::npos)
             break;
         pos = comma + 1;
+    }
+    return out;
+}
+
+/// Encode sides back into the `war_sides` modoption form.
+///
+/// The counterpart to `ParseWarSides`, and the ONE place the grammar is
+/// written — `ScenarioDiscovery::EncodeWarSides` builds its list and then
+/// delegates here, and PLAN-metalstorm-wars.md's War Director derives the
+/// modoption from its `war_sides` rows through the same call. Three readers
+/// parse this string in three processes; two independent writers of it is the
+/// shape that lets a faction be seated on team 0 in one and refused in
+/// another.
+///
+/// A faction key carrying ',' or ':' is DROPPED rather than emitted, because
+/// it would silently reshape the list for every downstream parser — the same
+/// rule, and the same reason, as `EncodeWarSideCapacities` below.
+inline std::string EncodeWarSides(const WarSides& sides) {
+    std::string out;
+    for (const auto& [faction, team] : sides) {
+        if (faction.empty() || faction.find(',') != std::string::npos ||
+            faction.find(':') != std::string::npos)
+            continue;
+        if (!out.empty())
+            out += ',';
+        out += faction;
+        out += ':';
+        out += std::to_string(static_cast<unsigned>(team));
     }
     return out;
 }

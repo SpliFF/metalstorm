@@ -237,3 +237,48 @@ TEST_CASE("war resume: LatestSnapshot reads the store the game server wrote") {
 
     sqlite3_close(db);
 }
+
+// ── A war that ENDED is not a war that crashed (wars task 4, D4) ───────────
+
+TEST_CASE("war resume: a finished war is not a crashed war") {
+    const auto kind = SessionKind::PersistentWar;
+    // The shape of a scheduled `--postgame-exit-seconds` exit: no process, no
+    // exit checkpoint (a finished war has nothing to resume, so
+    // DecideExitCheckpoint deliberately declines to take one), and a room
+    // still in the state it was playing in. That is, byte for byte, the test
+    // for `Crashed` — which is how both wars that completed the §7 chain
+    // correctly came to tell their players their war "stopped without saving
+    // its last stretch".
+    auto ended = Down(ERoomState::Active, /*hasSnap=*/false, false);
+    CHECK(warresume::Classify(kind, ended) == warresume::WarState::Crashed);
+    ended.warEnded = true;
+    CHECK(warresume::Classify(kind, ended) == warresume::WarState::Finished);
+
+    // It outranks the other no-process verdicts too: none of their questions
+    // apply to a war nobody is going to resume.
+    auto withSnap = Down(ERoomState::Active, true, false);
+    withSnap.warEnded = true;
+    CHECK(warresume::Classify(kind, withSnap) == warresume::WarState::Finished);
+    auto hibernated = Down(ERoomState::Active, true, true);
+    hibernated.warEnded = true;
+    CHECK(warresume::Classify(kind, hibernated) == warresume::WarState::Finished);
+    auto upgraded = Down(ERoomState::Active, true, true);
+    upgraded.warEnded = true;
+    upgraded.snapshot.engineHash = "aaaaaaaaaaaaaaaa";
+    upgraded.binary.engineHash = "bbbbbbbbbbbbbbbb";
+    CHECK(warresume::Classify(kind, upgraded) == warresume::WarState::Finished);
+
+    // But NOT the live one: a finished war whose server is still serving the
+    // result overlay is live, and the post-game timer is what ends that.
+    auto serving = Live(true);
+    serving.warEnded = true;
+    CHECK(warresume::Classify(kind, serving) == warresume::WarState::Live);
+
+    // And a skirmish is still not a war, however its room ended.
+    CHECK(warresume::Classify(SessionKind::Skirmish, ended) ==
+          warresume::WarState::NotAWar);
+
+    // The new state names itself for the log and the card.
+    CHECK(std::string(warresume::ToString(warresume::WarState::Finished)) ==
+          std::string("finished"));
+}

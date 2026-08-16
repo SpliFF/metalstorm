@@ -32,11 +32,14 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "WarLog.h"
+#include "WarOutcome.h"
 #include "WarPlayerBindings.h"
 #include "WarSummary.h"
+#include "WarTermination.h"
 
 /// Read the per-player war state for `playerNum` on `team` out of the live sim.
 /// Returns zeros for an unknown team or a player with no params yet — a player
@@ -86,6 +89,49 @@ std::vector<WarSummaryRegion> GatherWarSummaryRegions();
 ///
 /// A war with no warlog gadget publishes no head and drains nothing.
 warlog::DrainResult DrainWarLog(int64_t watermark);
+
+/// The per-side foothold census (wars §7 faction elimination, task 4): how
+/// many of its DECLARED start regions each side still holds, as
+/// `game_gameover.lua` publishes it. The sim COUNTS; the Director DECIDES
+/// (`EvaluateWarTermination`).
+///
+/// Returns EMPTY when the census is unusable — no scenario, a scenario that
+/// declares no starting regions, or a war whose gameover gadget is not loaded.
+/// The caller reads that as "cannot tell", never as "everybody is eliminated":
+/// ending a war because a census was unavailable is the one failure mode worth
+/// making unrepresentable.
+std::vector<WarSideFootholds> GatherWarFootholds(const WarSides& sides);
+
+/// §5's "highest-stakes" ranking key: the authority riding on this war's
+/// UNRESOLVED objectives. Summed off `objective_<id>_reward`, which the
+/// objectives gadget already publishes with the staked bounties folded in, so
+/// there is no second adder to drift from it.
+double GatherWarStakes();
+
+/// The war's ENDING, for the durable `war_outcome` row — winner, final frame,
+/// the war-end settlement's two halves, and the final scoreboard with the
+/// players NAMED (only this process holds the playerNum↔name mapping, and
+/// player numbers are recycled).
+///
+/// Returns false while the war is still `active`, when no gameover gadget
+/// publishes `war_state` at all, and — the part that is not obvious — for every
+/// heartbeat of the 300-frame WIND-DOWN grace, during which the war has left
+/// `active` but has settled nothing. `IsPublishableWarOutcome` (WarOutcome.h)
+/// owns that rule; publishing early archives a war with `final_frame=0` and
+/// every stake still in escrow. A scenario-less war has no terminal condition
+/// (§7.1) and must not be recorded as having ended.
+bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out);
+
+/// `war_state` as the sim publishes it right now: "" when no gameover gadget is
+/// loaded, else one of "active" / "winding_down" / "resolving" / "over".
+///
+/// Exists for the hibernation gate (`hibernate::ShouldIdleHibernate`): a war
+/// that has DECLARED its ending is in the middle of a 300-frame settlement it
+/// is the only process that can finish, and an idle timer that fires inside
+/// that window truncates it permanently. Everything else about the war's state
+/// machine is the Director's; this is the one bit the server needs to know
+/// about its own life.
+std::string GatherWarSimState();
 
 /// Restore the participation counters. Lifetime statistics rather than
 /// resources, so they are handed back on every rejoin regardless of how long

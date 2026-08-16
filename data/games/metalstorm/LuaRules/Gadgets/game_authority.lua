@@ -79,6 +79,13 @@ local prevLedger                   = {}
 
 GG.Authority                       = GG.Authority or {}
 
+--- The war-end escrow outcome (PLAN-metalstorm-wars.md §7), re-exported from
+--- the pure ledger module so `game_objectives.lua`'s war-end sweep can name it
+--- without VFS.Including another gadget's private module. Authority owns the
+--- escrow vocabulary; this is the one word of it that another gadget needs to
+--- say, and there is exactly one spelling of it.
+GG.Authority.ESCROW_WAR_END        = Escrow.WAR_END
+
 --- Export ledger counters (PLAN-metalstorm-economy.md §1: for stats-dump
 --- and game_events hooks). Returns { [teamID] = {mint=N, burn=M, move=K, unmapped=U}, ... }
 function GG.Authority.ExportLedger()
@@ -473,12 +480,23 @@ function GG.Authority.EscrowTotal(objectiveID)
     return Escrow.total(escrowState, objectiveID)
 end
 
---- Resolve an objective's escrow. outcome = 'complete' | 'expired' | 'failed'.
+--- Resolve an objective's escrow.
+--- outcome = 'complete' | 'expired' | 'failed' | 'war_end'.
 --- 'complete': caller already awarded EscrowTotal(objectiveID) as part of
 ---   the reward — this just clears the ledger. 'expired'/'failed': returns
 ---   each stake to its staker's player pool, or to their team pool if
 ---   they've since left (§6 "escrow stays on the objective... on
 ---   resolve, the staker's returned share goes to their team pool").
+---
+--- 'war_end' is the war's own terminal sweep (PLAN-metalstorm-wars.md §7
+--- `resolving`, task 4) and it routes EVERY stake team-ward. This closes the
+--- gap §7.2 recorded and deliberately left open: that pass reused 'expired',
+--- whose player-pool branch made the disposition depend on who was still
+--- connected at the final frame — two players who staked the same bounty on
+--- the same dead objective got different answers because one of them had a
+--- browser tab open. §7's rule is not a rounding of the ordinary one, it is a
+--- different rule ("never to individuals"), so it gets its own outcome rather
+--- than a flag on this one.
 function GG.Authority.SettleEscrow(objectiveID, outcome)
     local refunds = Escrow.settle(escrowState, objectiveID, outcome, function(playerID)
         local active = select(2, Spring.GetPlayerInfo(playerID, false))
@@ -781,7 +799,16 @@ function gadget:GameStart()
             setTeamPool(teamID, STARTING_TEAM_AUTHORITY)
         end
     end
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    -- ACTIVE players only (the `true` second argument), and that filter is
+    -- load-bearing twice over. A war is pre-allocated Σ slotCap empty player
+    -- slots at spawn (PLAN-metalstorm-wars.md §8.1) so a dynamic joiner has a
+    -- seat to land on; seeding them here would mint one join grant per EMPTY
+    -- seat, into a pool nobody can spend and a team ledger that would be
+    -- wrong. The same reasoning already applied to a disconnected row: nobody
+    -- is sitting there. Everyone who actually arrives is granted through the
+    -- PlayerAdded hook the server fires on their join (PlayerOnboarding.h),
+    -- which is the same call this loop makes.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
 end

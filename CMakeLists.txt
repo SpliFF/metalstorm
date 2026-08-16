@@ -453,6 +453,22 @@ set(LOBBY_SERVER_SOURCES
     # table (and the faction override deletes from it); the game server writes
     # it. Pure sqlite, no sim — same shape as GameServersDb below.
     rts/Server/WarPlayerBindings.cpp
+    # PLAN-metalstorm-wars.md §9 task 1: the War Director — the `wars` /
+    # `war_sides` tables and the seed→boot-call planner. LOBBY ONLY, and that
+    # is the point: it decides which wars exist and never touches sim state,
+    # so the game server has no reason to link it.
+    rts/Server/WarDirector.cpp
+    # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
+    # the side-sizing / underdog maintenance pass. The reservation table is
+    # read by the GAME server's seating path in spirit but written only here —
+    # the lock it relies on is SQLite's, so linking it into one process is
+    # enough for the race it resolves.
+    rts/Server/WarSlotReservation.cpp
+    rts/Server/WarSideMaintenance.cpp
+    # PLAN-metalstorm-wars.md task 4: the durable record of how a war
+    # ended, and the sweep that drives the §7 meta-state machine.
+    rts/Server/WarOutcome.cpp
+    rts/Server/WarLifecycleSweep.cpp
     # PLAN-metalstorm-lobby.md §8 task 9a: the friends graph. LOBBY ONLY —
     # unlike the bindings above, the game server neither reads nor writes it,
     # so it is deliberately not in the shared set.
@@ -599,6 +615,22 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
+        # PLAN-metalstorm-wars.md task 1: the War Director. Its whole output is
+        # DB rows and one JSON boot call, so test_war_director.cpp drives the
+        # real store against an in-memory db — no lobby, no sim, no server.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarDirector.cpp
+        # task 2: the slot reservation (test_war_slot_reservation.cpp drives
+        # the real transaction from N threads against a real file) and the
+        # side-sizing / incentive maintenance pass.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarSlotReservation.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarSideMaintenance.cpp
+        # task 4: the war meta-state machine's durable halves. The RULE
+        # (WarTermination.h) and the theatre pool (WarTheatrePool.h) are pure
+        # headers; these two are the store and the sweep that applies it, both
+        # plain sqlite with no sim, so test_war_termination.cpp drives them
+        # against an in-memory db.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarOutcome.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarLifecycleSweep.cpp
         # task 9a — test_friends.cpp drives the real store against an
         # in-memory db, and the two policy headers beside it are pure.
         ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp

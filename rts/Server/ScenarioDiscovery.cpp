@@ -417,12 +417,18 @@ std::vector<ScenarioSide> PlayableSides(const ScenarioInfo& info) {
 }
 
 std::string EncodeWarSides(const ScenarioInfo& info) {
-    std::string out;
+    // The grammar itself lives in WarSides.h beside its own parser, and this
+    // function is now only the scenario-shaped half: pick the playable sides,
+    // say out loud which ones cannot be encoded, and hand the rest to the one
+    // encoder. Two writers of a string three processes parse is exactly the
+    // shape task 2 collapsed for the reader side.
+    WarSides sides;
     for (const auto& s : PlayableSides(info)) {
         // The faction key is authored content, but it lands in a modoption
         // that is split on ',' and ':' downstream — a key containing either
         // would silently reshape the list, so skip it rather than emit a
-        // string no parser can recover.
+        // string no parser can recover. The encoder drops it too; the warning
+        // is what a scenario author needs and the encoder cannot give.
         if (s.faction.find(',') != std::string::npos ||
             s.faction.find(':') != std::string::npos) {
             SLOG(SPRING_LOG_WARNING,
@@ -431,13 +437,9 @@ std::string EncodeWarSides(const ScenarioInfo& info) {
                  info.id.c_str(), s.faction.c_str());
             continue;
         }
-        if (!out.empty())
-            out += ',';
-        out += s.faction;
-        out += ':';
-        out += std::to_string(static_cast<unsigned>(s.team));
+        sides.emplace_back(s.faction, s.team);
     }
-    return out;
+    return ::EncodeWarSides(sides);
 }
 
 WarSideCapacities AuthoredSideCapacities(const ScenarioInfo& info) {
