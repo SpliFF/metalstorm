@@ -58,6 +58,9 @@ int CPlayerHandler::Player(const std::string& name) const
 
 int CPlayerHandler::HumanPlayer(const std::string& name) const
 {
+	if (name.empty())
+		return -1;   // a reserved-but-unclaimed slot is nameless; it owns nobody
+
 	for (const CPlayer& player: players) {
 		if (player.isAI)
 			continue;
@@ -66,6 +69,57 @@ int CPlayerHandler::HumanPlayer(const std::string& name) const
 	}
 
 	return -1;
+}
+
+
+void CPlayerHandler::ReserveSlots(int count, const std::vector<int>& teamOfSlot)
+{
+	// PLAN-metalstorm-wars.md §8.1. Grow ONLY — a pre-allocation that shrank
+	// the list would delete rows other state is keyed on, and this runs once
+	// during set-up in any case.
+	const int oldSize = int(players.size());
+
+	if (count <= oldSize)
+		return;
+
+	assert(count <= MAX_PLAYERS);
+	assert(players.capacity() == MAX_PLAYERS);
+
+	for (int i = oldSize; i < count; ++i) {
+		players.emplace_back();
+
+		CPlayer& slot = players.back();
+
+		// Nameless is the marker, and it is load-bearing: `IsUnclaimedSlot`,
+		// the roster broadcast's filter and HumanPlayer() all read it, and
+		// AddPlayer's own gap stubs are named "unknown" precisely so the two
+		// stay distinguishable. A claimed slot gets its account's name.
+		slot.name = "";
+		slot.isFromDemo = false;
+		// Spectator until claimed, so every "who is fighting on this team"
+		// question — Lua's GetPlayerList(teamID), the human-presence checks,
+		// the hibernation gate — reads an empty seat as empty. `active` stays
+		// false for the same reason: nobody is sitting here yet.
+		slot.spectator = true;
+		slot.active = false;
+		// The side the seat is FOR, kept on the row so an operator dumping the
+		// player list can see the shape the war was sized to. Authority over
+		// the layout stays with ReservedPlayerSlots — this is a copy for
+		// legibility, not the source.
+		slot.team = (i < int(teamOfSlot.size()) && teamOfSlot[i] >= 0) ? teamOfSlot[i] : 0;
+		slot.playerNum = i;
+	}
+}
+
+
+bool CPlayerHandler::IsUnclaimedSlot(int id) const
+{
+	if (id < 0 || size_t(id) >= players.size())
+		return false;
+
+	const CPlayer& p = players[id];
+
+	return p.name.empty() && !p.active && !p.isAI;
 }
 
 void CPlayerHandler::PlayerLeft(int id, unsigned char reason)

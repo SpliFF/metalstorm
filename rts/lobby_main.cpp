@@ -16,6 +16,7 @@
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
 #include "Server/ReplayFile.h"
+#include "Server/PlayerSlotReservation.h"
 #include "Server/RoomManager.h"
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
@@ -510,6 +511,25 @@ static std::string gameServerEngineHash() {
   return cachedHash;
 }
 
+/// Σ slotCap for a room — the number of human player slots the game server
+/// this room spawns must pre-allocate (PLAN-metalstorm-wars.md §8.1, task 5).
+///
+/// Read off the ROOM rather than off the Director's `war_sides` table, and
+/// that is the same authority split `ReconcileSeededSides` records: the
+/// scenario owns which team a side sits on and how wide it is at boot, so the
+/// room's own `war_sides`/`war_side_capacities` modoptions are what the
+/// process is actually being launched with. Taking the number from anywhere
+/// else risks sizing the arrays for a war the boot did not produce.
+///
+/// 0 for everything that is not a finite war — a skirmish, a legacy room, a
+/// war with an unlimited side — which the server reads as "grow on demand".
+static unsigned warPlayerSlotCap(const GameRoom &room) {
+  if (room.sessionKind != SessionKind::PersistentWar)
+    return 0;
+  return playerslots::TotalSlotCap(room.SideTeams(), room.SideCapacities(),
+                                   WAR_SIDE_CAPACITY_DEFAULT);
+}
+
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
     const std::string &mapId, const std::string &dbPath,
@@ -552,7 +572,23 @@ static GameServerInstance spawnGameServer(
     // something will respawn on join, and the lobby is the only thing that
     // can. The server binary keeps its own default of 0 so a bare
     // `spring-server` still never exits a world nobody can bring back.
-    int hibernateIdleSeconds = 0) {
+    int hibernateIdleSeconds = 0,
+    // PLAN-metalstorm-wars.md §8.1 task 5: Σ slotCap — how many human player
+    // slots this server must pre-allocate (`--player-slots`). The War Director
+    // knows every side's `slotCap` at seed time, so the process is sized for
+    // the WAR rather than for the roster it boots with, and a dynamic joiner
+    // (§2.1) lands on a slot that already exists.
+    //
+    // Passed rather than left to the server to derive, even though the server
+    // CAN derive it from the same `war_side_capacities` modoption: this is the
+    // number that gets recorded as `wars.spawned_slot_cap`, i.e. what the
+    // running process was sized for, and after task 2's maintenance pass raises
+    // a side the recorded number and the live caps deliberately disagree. The
+    // lobby has to send what it recorded, not what the caps say later.
+    //
+    // 0 (the default) = not sized: a skirmish, a legacy room, or a war with an
+    // unlimited side. The server grows its player list on demand, as before.
+    unsigned playerSlotCap = 0) {
   const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
@@ -657,6 +693,7 @@ static GameServerInstance spawnGameServer(
     std::string portStr = std::to_string(inst.port);
     std::string roomStr = std::to_string(roomId);
     std::string hibernateIdleStr = std::to_string(hibernateIdleSeconds);
+    std::string playerSlotCapStr = std::to_string(playerSlotCap);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -726,6 +763,13 @@ static GameServerInstance spawnGameServer(
         argv.push_back("--hibernate-idle-seconds");
         argv.push_back(hibernateIdleStr.c_str());
       }
+      // §8.1: the war's player-slot sizing. Not on the replay path for the
+      // same reason nothing else describing the world is — a re-execution
+      // rebuilds its block from the header's own modoptions.
+      if (playerSlotCap > 0) {
+        argv.push_back("--player-slots");
+        argv.push_back(playerSlotCapStr.c_str());
+      }
     }
     if (devBuildAcknowledged)
       argv.push_back(DevBuildGate::kFlag);
@@ -753,9 +797,9 @@ static GameServerInstance spawnGameServer(
     else
       SLOG(SPRING_LOG_NOTICE,
            "spawned game server pid=%d port=%d for room %u "
-           "(%zu players, %zu AI)%s%s",
+           "(%zu players, %zu AI, %u pre-allocated player slot(s))%s%s",
            pid, inst.port, roomId, playerRoster.size(), aiSlots.size(),
-           resumeFromSnapshot ? " --resume" : "",
+           playerSlotCap, resumeFromSnapshot ? " --resume" : "",
            hibernateIdleSeconds > 0 ? " (hibernates when idle)" : "");
   } else {
     SLOG(SPRING_LOG_ERROR, "fork failed");
@@ -4029,7 +4073,10 @@ int main(int argc, char *argv[]) {
           spawnGameServer(roomId, gameId, gameVer, mapId, dbPath, room->players,
                           room->aiSlots, room->modOptions, busyPorts,
                           devBuildAcknowledged, wtCertPath, wtKeyPath,
-                          /*replayFile=*/"", room->sessionKind);
+                          /*replayFile=*/"", room->sessionKind,
+                          /*resumeFromSnapshot=*/false,
+                          /*hibernateIdleSeconds=*/0,
+                          warPlayerSlotCap(*room));
       gameServers[roomId] = inst;
       persistGameServer(inst);
       room->gameServerPort = inst.port;
@@ -4579,7 +4626,8 @@ int main(int argc, char *argv[]) {
                                 room.modOptions, busyPorts, devBuildAcknowledged,
                                 wtCertPath, wtKeyPath,
                                 /*replayFile=*/"", room.sessionKind,
-                                resumeFromSnapshot, hibernateIdle);
+                                resumeFromSnapshot, hibernateIdle,
+                                warPlayerSlotCap(room));
     gameServers[room.id] = inst;
     persistGameServer(inst);
     room.gameServerPort = inst.port;
@@ -5004,19 +5052,26 @@ int main(int argc, char *argv[]) {
     // `ReconcileSeededSides` for why the scenario, not the Director, is the
     // authority on which team a side sits on.
     WarSeedPlan booted = plan;
-    if (const GameRoom *room = rooms.GetRoom(result.roomId))
+    unsigned spawnedSlotCap = 0;
+    if (const GameRoom *room = rooms.GetRoom(result.roomId)) {
       booted = ReconcileSeededSides(plan, room->SideTeams(),
                                     room->SideCapacities());
+      // The number the PROCESS was sized with, not the number the plan asked
+      // for (§8.1). Same function `spawnGameServer` was handed a moment ago,
+      // over the same room, so `wars.spawned_slot_cap` and `--player-slots`
+      // cannot drift — and drift is exactly what would make a dynamic joiner
+      // be promised a seat the game server has no player number for.
+      spawnedSlotCap = warPlayerSlotCap(*room);
+    }
     WarDirector::Register(mapDb, result.roomId, booted, now);
     WarDirector::SetState(mapDb, result.roomId, WarState::Open, now);
-    WarDirector::RecordSpawnedSlotCap(mapDb, result.roomId,
-                                      booted.TotalSlotCap());
+    WarDirector::RecordSpawnedSlotCap(mapDb, result.roomId, spawnedSlotCap);
     SLOG(SPRING_LOG_NOTICE,
          "demand-seed: war '%s' (room %u) on '%s' scenario '%s' for faction "
-         "'%s', %zu side(s), Σ slotCap %u",
+         "'%s', %zu side(s), Σ slotCap %u (%u player slot(s) pre-allocated)",
          booted.name.c_str(), result.roomId, booted.theatre.c_str(),
          booted.scenario.c_str(), faction.c_str(), booted.sides.size(),
-         booted.TotalSlotCap());
+         booted.TotalSlotCap(), spawnedSlotCap);
     return true;
   };
 

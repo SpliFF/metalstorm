@@ -781,7 +781,16 @@ function gadget:GameStart()
             setTeamPool(teamID, STARTING_TEAM_AUTHORITY)
         end
     end
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    -- ACTIVE players only (the `true` second argument), and that filter is
+    -- load-bearing twice over. A war is pre-allocated Σ slotCap empty player
+    -- slots at spawn (PLAN-metalstorm-wars.md §8.1) so a dynamic joiner has a
+    -- seat to land on; seeding them here would mint one join grant per EMPTY
+    -- seat, into a pool nobody can spend and a team ledger that would be
+    -- wrong. The same reasoning already applied to a disconnected row: nobody
+    -- is sitting there. Everyone who actually arrives is granted through the
+    -- PlayerAdded hook the server fires on their join (PlayerOnboarding.h),
+    -- which is the same call this loop makes.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
 end

@@ -55,6 +55,7 @@
 #include "Server/AI/AISpawn.h"
 #include "Server/AI/AISpawnService.h"
 #include "Server/PerfMetrics.h"
+#include "Server/PlayerSlotReservation.h"
 #include "Server/RoomManager.h"
 #include "Server/AuthTokens.h"
 #include "Server/GameEventsDb.h"
@@ -236,6 +237,14 @@ int main(int argc, char* argv[])
     // purpose — per-side capacity, war seeding and queue-when-full are task 7;
     // this exists so the join path ships a capacity check that is real.
     unsigned warSideCapacity = WAR_SIDE_CAPACITY_DEFAULT;
+    // PLAN-metalstorm-wars.md §8.1 task 5: Σ slotCap — the number of human
+    // player slots this process is being spawned FOR, decided by the War
+    // Director at seed time and recorded as `wars.spawned_slot_cap`. The slots
+    // are materialised during set-up so a dynamic joiner (§2.1) is seated into
+    // a place that already exists rather than one it has to win from the
+    // spectators. 0 (the default, and what every non-war launcher gets) means
+    // "not sized" — the player list grows on demand exactly as before.
+    unsigned playerSlotCap = 0;
     // PLAN-security-hardening.md task 5 (G3): prod cert for the QUIC/WebTransport
     // endpoint. Both paths must be given together, or neither — see
     // WebTransportServer::Start(). Empty (the default) runs the endpoint in
@@ -427,6 +436,8 @@ int main(int argc, char* argv[])
     // --replay-export PATH / --replay-export-codec none|deflate (repack the
     //   file given by --replay into a shareable .msr and exit),
     // --player username:team:pos (repeatable),
+    // --player-slots N (PLAN-metalstorm-wars.md §8.1: pre-allocate N human
+    //   player slots for a war's Σ slotCap; 0 = size on demand),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -471,6 +482,22 @@ int main(int argc, char* argv[])
                 return 1;
             }
             warSideCapacity = static_cast<unsigned>(std::strtoul(
+                spec.c_str(), nullptr, 10));
+        } else if (arg == "--player-slots" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            // Refused rather than defaulted, exactly like --war-side-capacity
+            // above: a typo here sizes the war's player arrays wrong, and the
+            // symptom (a joiner the lobby already promised a seat being seated
+            // as a spectator instead) surfaces hours later at somebody else's
+            // keyboard. `0` legitimately means "not sized".
+            if (spec.empty() ||
+                spec.find_first_not_of("0123456789") != std::string::npos) {
+                fprintf(stderr, "invalid --player-slots '%s' "
+                        "(expected a non-negative integer; 0 = not sized)\n",
+                        spec.c_str());
+                return 1;
+            }
+            playerSlotCap = static_cast<unsigned>(std::strtoul(
                 spec.c_str(), nullptr, 10));
         } else if (arg == "--wt-cert" && i + 1 < argc) {
             wtCertPath = argv[++i];
@@ -1103,6 +1130,12 @@ int main(int argc, char* argv[])
     // it only ever holds numbers minted from `nextPlayerNum`.
     std::unordered_map<int64_t, int> playerNumByAccount;
 
+    // PLAN-metalstorm-wars.md §8.1: which side each pre-allocated player slot
+    // belongs to. Empty until the `--player-slots` block below fills it (and
+    // permanently empty for every session that was not sized), so "is this a
+    // reserved number" and "reserve nothing" are the same question.
+    playerslots::ReservedPlayerSlots reservedSlots;
+
     // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
     // (sent just before disconnect), consumed once when the disconnect drains.
     std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
@@ -1139,7 +1172,7 @@ int main(int argc, char* argv[])
         clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,
         connectedRosterPlayers,
         rosterPlayersNeeded, waitsForRoster, sessionKind, warSideCapacity,
-        handshakedClients,
+        handshakedClients, reservedSlots,
     };
 
     GameStartCoordinator gameStart(ctx);
@@ -1819,6 +1852,99 @@ int main(int argc, char* argv[])
             }
         }
     };
+
+    // --- Player-slot pre-allocation (PLAN-metalstorm-wars.md §8.1, task 5) ---
+    //
+    // The war was sized by the War Director before this process existed: Σ
+    // slotCap arrived as `--player-slots`, and `wars.spawned_slot_cap` records
+    // the same number so a dynamic joiner can be told what the running server
+    // was sized FOR (task 2's field note: the live per-side caps may be raised
+    // after boot, and a raise past this block is a promise nobody can keep).
+    // Materialising the block here means the arrays are sized for the WAR, not
+    // for the roster this process happened to boot with — the assertion §10's
+    // integration row makes.
+    //
+    // Placed immediately BEFORE the AI virtual players, and that ordering is
+    // the point: every player number minted after this — AI, spectator,
+    // off-side roster player — is numbered ABOVE the block, so the war's own
+    // seats can never be spent by somebody who came to watch.
+    {
+        const auto& opts = CGameSetup::GetModOptions();
+        const auto wsIt = opts.find("war_sides");
+        const WarSides sides =
+            (wsIt != opts.end()) ? ParseWarSides(wsIt->second) : WarSides{};
+        const auto wcIt = opts.find("war_side_capacities");
+        const WarSideCapacities caps =
+            (wcIt != opts.end()) ? ParseWarSideCapacities(wcIt->second)
+                                 : WarSideCapacities{};
+
+        // No `--player-slots`, but the modoptions describe a war with finite
+        // sides: size it from those. The lobby computes the flag from exactly
+        // these two modoptions, so the derived number is the same number — and
+        // deriving it means the sizing survives every launcher that does not
+        // pass the flag. Two of those matter:
+        //   * a REPLAY, which is re-executed with map/game/modoptions/roster
+        //     out of its own header and no world-describing arguments at all
+        //     (see spawnGameServer). Without the block the re-execution would
+        //     allocate a war's first joiner off the top of the list and stop on
+        //     the player-number divergence check, which is to say every war
+        //     recording containing a join would be unplayable.
+        //   * a bare `spring-server --game … --map …` self-test, and any
+        //     direct-start manifest that declares sides.
+        // An explicit flag still wins: it is what the process was SPAWNED with
+        // (`wars.spawned_slot_cap`), and after task 2's maintenance pass raises
+        // a side the two deliberately stop agreeing.
+        if (playerSlotCap == 0) {
+            playerSlotCap =
+                playerslots::TotalSlotCap(sides, caps, warSideCapacity);
+            if (playerSlotCap > 0)
+                SLOG(SPRING_LOG_NOTICE,
+                     "no --player-slots given; sizing from the war's own sides "
+                     "(Σ slotCap %u)", playerSlotCap);
+        }
+
+        // 0 = not sized — a skirmish, a legacy room, or a war with an unlimited
+        // side. The player list grows on demand exactly as it always has, and
+        // `ctx.reservedSlots` stays empty, which every reader treats as
+        // "there is no block; allocate the next free number".
+        if (playerSlotCap > 0) {
+            unsigned slots = playerSlotCap;
+            // MAX_PLAYERS is a hard ceiling on the vector whose own header
+            // forbids reallocating it, so an over-large request is clamped
+            // here — loudly. Refusing to boot instead would strand a war the
+            // lobby has already written rows for; clamping seats as many as
+            // the engine can hold and says exactly how many it could not.
+            if (slots > static_cast<unsigned>(MAX_PLAYERS)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "player-slot cap %u exceeds MAX_PLAYERS (%d) — reserving "
+                     "%d; %u advertised seat(s) have no player number",
+                     slots, MAX_PLAYERS, MAX_PLAYERS,
+                     slots - static_cast<unsigned>(MAX_PLAYERS));
+                slots = static_cast<unsigned>(MAX_PLAYERS);
+            }
+
+            reservedSlots = playerslots::PlanReservedSlots(slots, sides, caps,
+                                                           warSideCapacity);
+            playerHandler.ReserveSlots(static_cast<int>(slots),
+                                       reservedSlots.teamOfSlot);
+            nextPlayerNum = static_cast<int>(slots);
+
+            std::string layout;
+            for (const auto& [faction, team] : sides) {
+                if (!layout.empty()) layout += ", ";
+                layout += faction + "→team " + std::to_string(team) + " ×" +
+                          std::to_string(reservedSlots.CountFor(
+                              static_cast<int>(team)));
+            }
+            if (layout.empty())
+                layout = "no sides declared — every slot unassigned";
+            SLOG(SPRING_LOG_NOTICE,
+                 "pre-allocated %u player slot(s) for this war's Σ slotCap "
+                 "(%s); player numbers from %d up are AI, spectators and "
+                 "off-side seats",
+                 slots, layout.c_str(), nextPlayerNum);
+        }
+    }
 
     // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
     //

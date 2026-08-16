@@ -462,9 +462,49 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // The lookup itself lives on CPlayerHandler, next to the invariant
             // it protects. Here it only has to grow a default: a username with
             // no row yet gets the next free number.
-            auto playerNumForUsername = [&](const std::string& name) -> int {
+            //
+            // ── And the war's pre-allocated block comes first (§8.1, task 5)
+            // A war was spawned sized for Σ slotCap: `--player-slots` reserved
+            // one player number per advertised seat, laid out per side, before
+            // anybody connected. A new arrival taking a *playing* seat is
+            // exactly who that block exists for, so they claim a slot of their
+            // own side rather than minting a number above it. This is what
+            // makes the lobby's advertised seat real: without it the seat is
+            // handed out on a first-come basis against every spectator who
+            // came to watch (see PlayerSlotReservation.h for why that is a
+            // ceiling and not a slope).
+            //
+            // A spectator never claims one — they hold no seat by definition
+            // (§3) — and neither does a seat on a team the war declares no
+            // side for; both fall through to `nextPlayerNum`, which the
+            // pre-allocation already advanced past the block.
+            auto playerNumForUsername = [&](const std::string& name, int team,
+                                            bool spectator) -> int {
                 const int existing = playerHandler.HumanPlayer(name);
-                return (existing >= 0) ? existing : nextPlayerNum;
+                if (existing >= 0)
+                    return existing;
+                if (!spectator && team >= 0 && !ctx.reservedSlots.Empty()) {
+                    const int slot = playerslots::ClaimReservedSlot(
+                        ctx.reservedSlots, team, [&](int n) {
+                            return playerHandler.IsUnclaimedSlot(n);
+                        });
+                    if (slot >= 0) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "'%s' seated on pre-allocated slot %d (reserved "
+                            "for team %d at spawn)",
+                            name.c_str(), slot, ctx.reservedSlots.TeamOf(slot));
+                        return slot;
+                    }
+                    // Not an error: the block can be full while the side is
+                    // not (a war whose caps were raised past what this process
+                    // was sized for — task 2's ceiling note). Falling through
+                    // still seats them; it just costs a number above the block.
+                    SLOG(SPRING_LOG_WARNING,
+                        "'%s' takes team %d with no pre-allocated slot left — "
+                        "this process was sized for %u",
+                        name.c_str(), team, ctx.reservedSlots.Size());
+                }
+                return nextPlayerNum;
             };
 
             // Install (or re-install) the sim-side player row at `pNum` and
@@ -573,7 +613,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         msg.clientId, name.c_str(), specNum);
                     return specNum;
                 }
-                const int pNum = playerNumForUsername(name);
+                const int pNum = playerNumForUsername(name, team, spectator);
                 bindPlayer(name, team, spectator, pNum);
                 return pNum;
             };
@@ -817,7 +857,16 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // RECONNECT re-derives the number it had rather than the next
                 // free one. Deriving it any other way would make every
                 // recording that contains a reconnect stop here.
-                const int derivedNum = playerNumForUsername(rid->username);
+                //
+                // The recorded team and spectator flag are passed for the same
+                // reason (§8.1): a war's seats come out of the pre-allocated
+                // block, so a re-execution that allocated from the top of the
+                // list instead would diverge on the first join. The block is
+                // reconstructed during a replay's set-up from the header's own
+                // `war_sides`/`war_side_capacities` modoptions — the same
+                // inputs the lobby sized the original process from.
+                const int derivedNum = playerNumForUsername(
+                    rid->username, rid->team, rid->spectator);
                 if (derivedNum != rid->playerNum) {
                     SLOG(SPRING_LOG_ERROR,
                         "replay: player-number divergence authenticating '%s' — "
