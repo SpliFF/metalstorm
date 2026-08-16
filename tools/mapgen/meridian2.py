@@ -415,6 +415,10 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     print(f"yard pads: {len(yard_pads)} prepared, "
           f"{len(yard_refusals)} station(s) refused")
     yd.report_pad_relief(h, yard_pads, cell)
+    # ...and the ramp INTO each pad, which the relief report cannot see:
+    # a plateau is flat by construction and can still sit above an
+    # unclimbable verge (roads R4d, yards.pad_ramps).
+    yd.report_pad_ramps(h, yard_pads, cell)
     # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
     # ford is graded where the deck now stands and not where the planner drew
     # it. Published in mapdata/roads.lua; nothing is placed here (terragen/

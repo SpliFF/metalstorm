@@ -104,6 +104,25 @@ class YardParams:
     # footprint it stands (`terrain.footprint_clear`) and is the only layer that
     # can refuse with a building in hand.
     warn_relief_deg: float = 6.0
+    # The grade a DRIVEWAY may deliver — the ramp `level_yard_pads` leaves in the
+    # verge between the pad's road edge and the carriageway. Reported, never a
+    # gate, for `warn_relief_deg`'s reason. 24 degrees is HEAVY's `maxslope`
+    # (data/games/metalstorm/gamedata/moveinfo.tdf CLASS2), the strictest ground
+    # class in the game; VEH is 32 and INFANTRY 45. Nothing else in this pipeline
+    # ever reads this number: `plan_yard_pads` bounds the PRE-flatten relief of
+    # the pad's own ground and `report_pad_relief` measures what is delivered ON
+    # the pad, and a pad can pass both while standing on a plateau nothing can
+    # drive up. Measured on Meridian Basin at 23.4 degrees against this 24 —
+    # i.e. the shipped map clears it by luck, not by construction (roads R4d).
+    warn_ramp_deg: float = 24.0
+
+
+# The scale every ramp reading here declares, in elmos. Spring grades a map
+# square off its corner heights and a square is 8 elmos (`SQUARE_SIZE`), so a
+# slope a movement class is tested against is a slope over 8 elmos. Reading the
+# generator's own grid instead would answer a different question at every
+# resolution — roads R2's finding 5, one file across.
+RAMP_SCALE = 8.0
 
 
 @dataclass(frozen=True)
@@ -512,6 +531,106 @@ def report_pad_relief(height: np.ndarray, pads: list[YardPad], cellsize: float,
               f"{pad.link} at ({pad.x:.0f}, {pad.z:.0f}) — {relief:.1f} elmos "
               f"of relief across {diag:.0f} ({grade:.1f} deg), "
               f"planned at {pad.relief:.1f}")
+    return out
+
+
+def _height_at(height: np.ndarray, x: float, z: float, cellsize: float) -> float:
+    """Bilinear height at world (x, z), clamped to the grid."""
+    H, W = height.shape
+    c = min(max(x / cellsize, 0.0), W - 1.001)
+    r = min(max(z / cellsize, 0.0), H - 1.001)
+    c0, r0 = int(c), int(r)
+    fx, fz = c - c0, r - r0
+    return float(height[r0, c0] * (1 - fx) * (1 - fz)
+                 + height[r0, c0 + 1] * fx * (1 - fz)
+                 + height[r0 + 1, c0] * (1 - fx) * fz
+                 + height[r0 + 1, c0 + 1] * fx * fz)
+
+
+def _ramp_grade(height: np.ndarray, pad: YardPad, cellsize: float,
+                dirx: float, dirz: float, at_u: float, at_v: float,
+                span: float) -> float:
+    """Steepest `RAMP_SCALE`-elmo step walking `span` outward from a pad edge."""
+    ux, uz = pad.along
+    vx, vz = pad.away
+    x = pad.x + ux * at_u + vx * at_v
+    z = pad.z + uz * at_u + vz * at_v
+    prev = _height_at(height, x, z, cellsize)
+    worst = 0.0
+    d = RAMP_SCALE
+    while d <= span + RAMP_SCALE:
+        cur = _height_at(height, x + dirx * d, z + dirz * d, cellsize)
+        worst = max(worst, math.degrees(
+            math.atan2(abs(cur - prev), RAMP_SCALE)))
+        prev = cur
+        d += RAMP_SCALE
+    return worst
+
+
+def pad_ramps(height: np.ndarray, pad: YardPad, cellsize: float,
+              params: YardParams | None = None) -> tuple[float, float]:
+    """(driveway grade, cut-face grade) delivered around one pad, in degrees.
+
+    **THE DRIVEWAY IS THE ONE NUMBER THIS MODULE NEVER MEASURED** (roads R4d).
+    `plan_yard_pads` bounds the relief of the ground a pad is planned on and
+    `report_pad_relief` measures the relief left ON the pad; between them sits
+    the thing a lorry actually has to climb — the smoothstep fade
+    `level_yard_pads` lays across the verge, whose steepness is
+    (pad level - verge ground) / setback and is bounded by neither. A pad
+    plateaued 30 elmos above its verge delivers a 37-degree ramp over a 40-elmo
+    setback while reporting 0.0 elmos of relief and passing every existing rule.
+    Nothing downstream catches it either: `road_frontage` probes the yard's
+    corners and centre, which are all ON the flat, and the passability mask the
+    scenario grades against never looks at the strip between the two.
+
+    The two numbers are reported separately because they mean opposite things.
+    The DRIVEWAY — the road-side face — is the way in, and a yard you cannot
+    drive into from its own carriageway is the R4 defect ("never floating in a
+    field") wearing a different coat. The CUT FACES — back and sides — are
+    allowed to be steep: a yard cut into a hillside has a bank behind it, and
+    that bank being unclimbable is what makes it a yard rather than a slope.
+    """
+    p = params or YardParams()
+    ux, uz = pad.along
+    vx, vz = pad.away
+    # Three rays per face, so a ramp that is only steep at one corner is seen.
+    lanes = (-0.5, 0.0, 0.5)
+    drive = max(_ramp_grade(height, pad, cellsize, -vx, -vz,
+                            k * pad.half_along, -pad.half_away, p.setback)
+                for k in lanes)
+    cut = max(
+        [_ramp_grade(height, pad, cellsize, vx, vz,
+                     k * pad.half_along, pad.half_away, p.setback)
+         for k in lanes]
+        + [_ramp_grade(height, pad, cellsize, s * ux, s * uz,
+                       s * pad.half_along, k * pad.half_away, p.setback)
+           for k in lanes for s in (1.0, -1.0)])
+    return drive, cut
+
+
+def report_pad_ramps(height: np.ndarray, pads: list[YardPad], cellsize: float,
+                     params: YardParams | None = None
+                     ) -> list[tuple[float, float]]:
+    """Print every pad's delivered driveway grade, loudly past `warn_ramp_deg`.
+
+    `report_pad_relief`'s sibling and its complement — that one says the yard is
+    flat, this one says you can get onto it. Both are instruments, not gates, for
+    the reason `warn_relief_deg` gives: the scenario layer is the only one that
+    can refuse with a building in hand. What this buys is that a map whose yards
+    are mesas says so at generation time instead of at the first player who tries
+    to drive into one.
+    """
+    p = params or YardParams()
+    out = []
+    for pad in pads:
+        drive, cut = pad_ramps(height, pad, cellsize, p)
+        out.append((drive, cut))
+        note = ("  yard ramp" if drive <= p.warn_ramp_deg
+                else "  yard ramp UNDRIVABLE")
+        print(f"{note}: {rd.ROAD_CLASS_NAMES.get(pad.road_class, '?')} link "
+              f"{pad.link} at ({pad.x:.0f}, {pad.z:.0f}) — driveway "
+              f"{drive:.1f} deg over {p.setback:.0f} elmos of verge "
+              f"(limit {p.warn_ramp_deg:.0f}), cut faces {cut:.1f} deg")
     return out
 
 
