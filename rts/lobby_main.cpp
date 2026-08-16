@@ -25,6 +25,8 @@
 #include "Server/WarDeploy.h"
 #include "Server/WarDemandSeed.h"
 #include "Server/WarSeeding.h"
+#include "Server/WarLifecycleSweep.h"
+#include "Server/WarOutcome.h"
 #include "Server/WarSideMaintenance.h"
 #include "Server/WarSlotReservation.h"
 #include "Server/WarSummary.h"
@@ -6378,6 +6380,8 @@ int main(int argc, char *argv[]) {
   std::unordered_map<int, std::set<std::string>> knownRoomAlarms;
   // PLAN-metalstorm-wars.md §4, task 2: the side-sizing / underdog sweep.
   int warSideMaintenanceTick = 0;
+  // §7, task 4: the meta-state machine's driver.
+  int warLifecycleTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -6411,6 +6415,68 @@ int main(int argc, char *argv[]) {
           SLOG(SPRING_LOG_NOTICE,
                "war %u: %u side cap(s) raised, %u incentive flag(s) changed",
                war.roomId, r.capsRaised, r.flagsChanged);
+      }
+    }
+
+    // Advance every live war's meta-state (~every 5 s at 10 Hz) —
+    // PLAN-metalstorm-wars.md §7, task 4. This is the half §7.2 explicitly
+    // left to the Director: "the lobby still lists a finished room as In
+    // Progress ... that is the Director's half (task 1/4)". The game server
+    // now records its ending in `war_outcome` and exits; nothing was reading
+    // that.
+    //
+    // 5 s, not the 30 s the side sweep uses, because the chain is walked one
+    // link per pass (`NextWarState`) and there are three of them between a
+    // declared win and an archived war. At 30 s a finished war would keep
+    // advertising itself for a minute and a half; at 5 s the browser catches
+    // up inside the sim's own 10 s wind-down beat. The cost of a pass over an
+    // idle population is one indexed read per war and no transaction —
+    // `AdvanceWarLifecycle` returns early when nothing moved.
+    if (++warLifecycleTick >= 50) {
+      warLifecycleTick = 0;
+      const int64_t now = static_cast<int64_t>(std::time(nullptr));
+      for (const auto &war : WarDirector::ListLive(mapDb)) {
+        WarTerminationFacts facts;
+        // The sim's declaration. The DURABLE row is the signal, not the
+        // perishable summary: the game server exits a few minutes after
+        // declaring the result (§7.2's --postgame-exit-seconds) and its
+        // summary is dropped as stale half a minute later, so a lobby that
+        // was down for a maintenance restart would otherwise miss the ending
+        // entirely and leave the war live forever.
+        if (WarOutcomeDb::HasOutcome(mapDb, war.roomId))
+          facts.simWarState = "over";
+
+        // The foothold census and the live-human count both come off the
+        // summary, and both are absent for a hibernated war — which is
+        // exactly right. A frozen war ends for no reason at all: the census
+        // is unusable (so elimination is inert) and `hasLiveHumans` is false
+        // (so nothing is promoted). teams §4.5 as corrected by review §A8.
+        bool hasLiveHumans = false;
+        WarSummary live;
+        if (warSummaryFor(war.roomId, live)) {
+          facts.footholdsKnown = live.footholdsKnown;
+          for (const auto &side : live.sides) {
+            if (side.humans > 0) hasLiveHumans = true;
+            if (live.footholdsKnown)
+              facts.footholds.push_back({side.faction, side.footholds});
+          }
+        }
+        facts.warSeasonId = war.seasonId;
+        // NOT WIRED YET, and deliberately visible as such rather than
+        // silently absent: `operatorRetire` needs a live-ops verb (a GmVerbs
+        // entry) and `currentSeasonId` needs a season the lobby is
+        // configured with. Neither exists, so both stay empty/false — which
+        // the rule reads as "no seasons configured, nobody pressed retire",
+        // the correct answer for this deployment rather than a default
+        // standing in for a missing one.
+
+        const auto step =
+            AdvanceWarLifecycle(mapDb, war.roomId, facts, hasLiveHumans, now);
+        if (!step) continue;
+        SLOG(SPRING_LOG_NOTICE, "war %u: %s -> %s (%s)%s", war.roomId,
+             WarStateToString(step->from), WarStateToString(step->to),
+             WarTerminalReasonToString(step->reason),
+             step->archived ? " — archived, digest emitted" : "");
       }
     }
 

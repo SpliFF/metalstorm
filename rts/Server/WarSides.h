@@ -16,6 +16,22 @@
 // `SessionKindToString`/`SessionKindFromString`: one encoder, one decoder.
 #pragma once
 
+/// One side's territorial standing, as the sim's foothold census reports it
+/// (PLAN-metalstorm-wars.md §7 faction elimination, task 4). Lives here rather
+/// than beside the rule that consumes it because it is a per-side VALUE, and
+/// this header is the one place the three processes already agree on what a
+/// side is — putting it next to the Director would make `WarSummary.h`, which
+/// only reports the census, include the component that decides on it.
+struct WarSideFootholds {
+    std::string factionId;
+    /// Declared start regions this side still holds. A region captured
+    /// ELSEWHERE is not a foothold: §7's condition is "all its start regions
+    /// gone", so a faction pushed off its own ground while sitting on someone
+    /// else's is eliminated — which is the reading that makes the condition
+    /// reachable at all.
+    unsigned held = 0;
+};
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>

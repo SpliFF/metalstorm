@@ -23,7 +23,8 @@ std::string ColText(sqlite3_stmt* s, int idx) {
 
 const char* kWarColumns =
     "room_id, name, theatre, scenario, state, origin, season_id, "
-    "created_at, retired_at, last_active_frame, spawned_slot_cap";
+    "created_at, retired_at, last_active_frame, spawned_slot_cap, "
+    "terminal_reason";
 
 WarRecord ReadWarRow(sqlite3_stmt* s) {
     WarRecord w;
@@ -42,6 +43,7 @@ WarRecord ReadWarRow(sqlite3_stmt* s) {
     w.retiredAt       = sqlite3_column_int64(s, 8);
     w.lastActiveFrame = sqlite3_column_int64(s, 9);
     w.spawnedSlotCap  = static_cast<unsigned>(sqlite3_column_int64(s, 10));
+    w.terminalReason  = ColText(s, 11);
     return w;
 }
 
@@ -234,8 +236,18 @@ void WarDirector::EnsureTables(sqlite3* db) {
         "  created_at INTEGER NOT NULL DEFAULT 0,"
         "  retired_at INTEGER NOT NULL DEFAULT 0,"
         "  last_active_frame INTEGER NOT NULL DEFAULT 0,"
-        "  spawned_slot_cap INTEGER NOT NULL DEFAULT 0"
+        "  spawned_slot_cap INTEGER NOT NULL DEFAULT 0,"
+        "  terminal_reason TEXT NOT NULL DEFAULT ''"
         ")", nullptr, nullptr, nullptr);
+    // The additive migration the header promises, exercised for the first time
+    // by task 4: every war created before this build has a `wars` row with no
+    // `terminal_reason`, and dropping the table to add it would erase the
+    // population of live wars on an upgrade. A failure here is expected and
+    // ignored — it means the column is already present, which is the ordinary
+    // case on every start after the first.
+    sqlite3_exec(db,
+        "ALTER TABLE wars ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''",
+        nullptr, nullptr, nullptr);
     sqlite3_exec(db,
         "CREATE TABLE IF NOT EXISTS war_sides ("
         "  room_id INTEGER NOT NULL,"
@@ -378,6 +390,31 @@ bool WarDirector::Retire(sqlite3* db, uint32_t roomId, int64_t now) {
         "  retired_at=CASE WHEN retired_at=0 THEN ? ELSE retired_at END "
         "WHERE room_id=?";
     return UpdateWar(db, kSql, roomId, {now});
+}
+
+bool WarDirector::SetTerminalReason(sqlite3* db, uint32_t roomId,
+                                    const std::string& reason) {
+    if (!db || reason.empty())
+        return false;
+    // First writer wins, exactly like `retired_at` above and for the same
+    // reason: a war ends once. The sweep re-evaluates every few seconds and a
+    // war sits in `winding_down` → `resolving` for several of them, so without
+    // the guard a war won on its objective could be re-labelled
+    // `season_end` on the way to the archive — the ending would change after
+    // the players had already been told what it was.
+    static const char* kSql =
+        "UPDATE wars SET terminal_reason=? WHERE room_id=? AND terminal_reason=''";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    BindText(stmt, 1, reason);
+    sqlite3_bind_int64(stmt, 2, static_cast<int64_t>(roomId));
+    const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    const bool wrote = ok && sqlite3_changes(db) > 0;
+    sqlite3_finalize(stmt);
+    return wrote;
 }
 
 bool WarDirector::RecordSpawnedSlotCap(sqlite3* db, uint32_t roomId,
@@ -532,6 +569,24 @@ bool WarDirector::Forget(sqlite3* db, uint32_t roomId) {
                 ok = ok && sqlite3_step(stmt) == SQLITE_DONE;
             } else {
                 ok = false;
+            }
+            sqlite3_finalize(stmt);
+        }
+        // The war's ENDING goes with it, and only here. `Forget` is the
+        // id-reuse path — the room was deleted outright — so leaving the
+        // outcome behind would hand the next war on this id the previous
+        // war's winner and scoreboard. An ARCHIVED war is not forgotten (that
+        // is `Retire`) and keeps its ending, which is the whole point of the
+        // table. Raw SQL rather than `WarOutcomeDb::Forget` so this file keeps
+        // no dependency on it, and a missing table is tolerated the way
+        // `GameServersDb::DeleteForRoom` tolerates one: a row that cannot
+        // exist cannot be inherited.
+        {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, "DELETE FROM war_outcome WHERE room_id=?",
+                                   -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                ok = ok && sqlite3_step(stmt) == SQLITE_DONE;
             }
             sqlite3_finalize(stmt);
         }

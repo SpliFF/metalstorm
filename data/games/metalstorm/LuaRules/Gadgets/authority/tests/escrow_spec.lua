@@ -81,4 +81,84 @@ describe("escrow ledger", function()
         assert.are.equal(200, refunds[2].team)
         assert.are.equal(15, refunds[2].amount)
     end)
+    -- ── War-end disposition (PLAN-metalstorm-wars.md §7, task 4) ──────────
+    --
+    -- The rule §7 states and §7.2 recorded as unimplemented: at war end a
+    -- staked bounty on an UNMET objective returns to the staker's TEAM pool,
+    -- "never to individuals, never to the enemy". The ordinary 'expired' rule
+    -- is not a rounding of it — it routes to the player when they are still
+    -- connected, which makes the disposition depend on who had a browser tab
+    -- open at the final frame.
+
+    it("war_end refunds an ACTIVE staker to their team pool, not to them", function()
+        local state = Escrow.newState()
+        Escrow.add(state, 1, 10, 100, 25)
+        local refunds = Escrow.settle(state, 1, Escrow.WAR_END, function() return true end)
+        assert.are.equal(1, #refunds)
+        assert.are.equal(100, refunds[1].team)
+        assert.is_nil(refunds[1].player)
+        assert.are.equal(25, refunds[1].amount)
+    end)
+
+    it("war_end ignores isPlayerActive entirely", function()
+        local state = Escrow.newState()
+        Escrow.add(state, 1, 10, 100, 25)
+        local asked = false
+        Escrow.settle(state, 1, Escrow.WAR_END, function()
+            asked = true
+            return true
+        end)
+        assert.is_false(asked)
+    end)
+
+    it("war_end sends every staker of a mixed set team-ward", function()
+        local state = Escrow.newState()
+        Escrow.add(state, 1, 10, 100, 25)   -- active, team 100
+        Escrow.add(state, 1, 11, 200, 15)   -- gone,   team 200
+        local refunds = Escrow.settle(state, 1, Escrow.WAR_END, function(pid) return pid == 10 end)
+        assert.are.equal(2, #refunds)
+        for _, r in ipairs(refunds) do
+            assert.is_nil(r.player)
+            assert.is_truthy(r.team)
+        end
+    end)
+
+    it("war_end still pays nothing on 'complete' (the reward already folded it in)", function()
+        local state = Escrow.newState()
+        Escrow.add(state, 1, 10, 100, 25)
+        assert.are.same({}, Escrow.settle(state, 1, 'complete', function() return true end))
+    end)
+
+    it("refundsTeamward is true only for war_end", function()
+        assert.is_true(Escrow.refundsTeamward(Escrow.WAR_END))
+        assert.is_false(Escrow.refundsTeamward('expired'))
+        assert.is_false(Escrow.refundsTeamward('failed'))
+        assert.is_false(Escrow.refundsTeamward('complete'))
+    end)
+
+    -- Synced code adds each refund into a pool one at a time, and
+    -- floating-point addition is not associative — a `pairs`-ordered refund
+    -- list makes the resulting pool depend on hash layout. The visible half is
+    -- the refund event order the client renders.
+    it("returns refunds in ascending playerID order, whatever pairs does", function()
+        local state = Escrow.newState()
+        for _, pid in ipairs({ 41, 7, 19, 3, 28 }) do
+            Escrow.add(state, 1, pid, 100 + pid, pid)
+        end
+        local refunds = Escrow.settle(state, 1, 'expired', function() return true end)
+        local got = {}
+        for i, r in ipairs(refunds) do got[i] = r.player end
+        assert.are.same({ 3, 7, 19, 28, 41 }, got)
+    end)
+
+    it("orders war_end refunds the same way (team rows carry no player id)", function()
+        local state = Escrow.newState()
+        for _, pid in ipairs({ 41, 7, 19 }) do
+            Escrow.add(state, 1, pid, 500 + pid, pid)
+        end
+        local refunds = Escrow.settle(state, 1, Escrow.WAR_END, nil)
+        local got = {}
+        for i, r in ipairs(refunds) do got[i] = r.team end
+        assert.are.same({ 507, 519, 541 }, got)
+    end)
 end)

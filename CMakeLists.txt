@@ -454,6 +454,10 @@ set(LOBBY_SERVER_SOURCES
     # enough for the race it resolves.
     rts/Server/WarSlotReservation.cpp
     rts/Server/WarSideMaintenance.cpp
+    # PLAN-metalstorm-wars.md task 4: the durable record of how a war
+    # ended, and the sweep that drives the §7 meta-state machine.
+    rts/Server/WarOutcome.cpp
+    rts/Server/WarLifecycleSweep.cpp
     # PLAN-metalstorm-lobby.md §8 task 9a: the friends graph. LOBBY ONLY —
     # unlike the bindings above, the game server neither reads nor writes it,
     # so it is deliberately not in the shared set.
@@ -604,6 +608,13 @@ if(TEST_SOURCES)
         # side-sizing / incentive maintenance pass.
         ${CMAKE_SOURCE_DIR}/rts/Server/WarSlotReservation.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarSideMaintenance.cpp
+        # task 4: the war meta-state machine's durable halves. The RULE
+        # (WarTermination.h) and the theatre pool (WarTheatrePool.h) are pure
+        # headers; these two are the store and the sweep that applies it, both
+        # plain sqlite with no sim, so test_war_termination.cpp drives them
+        # against an in-memory db.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarOutcome.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarLifecycleSweep.cpp
         # task 9a — test_friends.cpp drives the real store against an
         # in-memory db, and the two policy headers beside it are pure.
         ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp

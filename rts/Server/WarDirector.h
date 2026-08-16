@@ -366,6 +366,14 @@ struct WarRecord {
     /// boot, and the number that matters for a dynamic join is the one the
     /// RUNNING process was spawned with.
     unsigned    spawnedSlotCap = 0;
+    /// Why this war ended (`WarTerminalReasonToString`), empty while it is
+    /// live. The Director's own half of the ending: `war_outcome` carries the
+    /// facts only the sim can see, and a war can end for a reason the sim
+    /// never sees at all (an operator retire, a season boundary, a faction
+    /// driven out of the theatre), so this is the field that always exists.
+    /// TEXT for the same reason `state` is — these rows are read at a sqlite
+    /// prompt far more often than by C++.
+    std::string terminalReason;
 
     bool IsLive() const {
         return state != WarState::Archived;
@@ -414,6 +422,14 @@ public:
     /// Terminal: `Archived` plus `retired_at`. Legal from every state, so an
     /// operator-retire and a seeding failure are the same call.
     static bool Retire(sqlite3* db, uint32_t roomId, int64_t now);
+
+    /// Record WHY the war ended (`WarTerminalReasonToString`, §7). First
+    /// writer wins — a war ends once, and the sweep re-evaluates every few
+    /// seconds while a war sits in `winding_down`/`resolving`, so without that
+    /// guard the recorded ending could change after the players had been told
+    /// what it was. Returns true only when this call is the one that wrote it.
+    static bool SetTerminalReason(sqlite3* db, uint32_t roomId,
+                                  const std::string& reason);
 
     /// Record the Σ slotCap the game server was actually spawned with (§8.1).
     /// Separate from `Register` because the plan is written before the boot

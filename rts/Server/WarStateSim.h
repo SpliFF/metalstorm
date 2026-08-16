@@ -35,8 +35,10 @@
 #include <vector>
 
 #include "WarLog.h"
+#include "WarOutcome.h"
 #include "WarPlayerBindings.h"
 #include "WarSummary.h"
+#include "WarTermination.h"
 
 /// Read the per-player war state for `playerNum` on `team` out of the live sim.
 /// Returns zeros for an unknown team or a player with no params yet — a player
@@ -86,6 +88,28 @@ std::vector<WarSummaryRegion> GatherWarSummaryRegions();
 ///
 /// A war with no warlog gadget publishes no head and drains nothing.
 warlog::DrainResult DrainWarLog(int64_t watermark);
+
+/// The per-side foothold census (wars §7 faction elimination, task 4): how
+/// many of its DECLARED start regions each side still holds, as
+/// `game_gameover.lua` publishes it. The sim COUNTS; the Director DECIDES
+/// (`EvaluateWarTermination`).
+///
+/// Returns EMPTY when the census is unusable — no scenario, a scenario that
+/// declares no starting regions, or a war whose gameover gadget is not loaded.
+/// The caller reads that as "cannot tell", never as "everybody is eliminated":
+/// ending a war because a census was unavailable is the one failure mode worth
+/// making unrepresentable.
+std::vector<WarSideFootholds> GatherWarFootholds(const WarSides& sides);
+
+/// The war's ENDING, for the durable `war_outcome` row — winner, final frame,
+/// the war-end settlement's two halves, and the final scoreboard with the
+/// players NAMED (only this process holds the playerNum↔name mapping, and
+/// player numbers are recycled).
+///
+/// Returns false while the war is still `active`, or when no gameover gadget
+/// publishes `war_state` at all. A scenario-less war has no terminal condition
+/// (§7.1) and must not be recorded as having ended.
+bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out);
 
 /// Restore the participation counters. Lifetime statistics rather than
 /// resources, so they are handed back on every rejoin regardless of how long

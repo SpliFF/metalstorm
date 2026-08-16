@@ -62,6 +62,12 @@ struct WarSideSummary {
     unsigned ais = 0;
     /// Regions this team controls right now.
     unsigned regions = 0;
+    /// How many of this side's DECLARED start regions it still holds — wars
+    /// §7's foothold census, which is what `faction elimination` is measured
+    /// on (and it is NOT "regions", above: a faction sitting on captured
+    /// ground with none of its own is eliminated). Meaningful only when
+    /// `footholdsKnown`.
+    unsigned footholds = 0;
 };
 
 /// The region-control snapshot §4 calls "current front/control summary".
@@ -85,6 +91,10 @@ struct WarSummary {
     /// the same way every other surface does.
     std::vector<WarSideSummary> sides;
     WarControlSummary control;
+    /// Whether the foothold census above is usable at all. False for a war
+    /// with no scenario or one declaring no start regions, and read by the
+    /// Director as "cannot tell" rather than "everybody is eliminated".
+    bool footholdsKnown = false;
 };
 
 /// One player row as the sim holds it. A struct rather than the engine's
@@ -113,7 +123,9 @@ struct WarSummaryRegion {
 inline WarSummary BuildWarSummary(const WarSides& sides,
                                   const std::vector<WarSummaryPlayer>& players,
                                   const std::vector<WarSummaryRegion>& regions,
-                                  int frame, int64_t uptimeSec) {
+                                  int frame, int64_t uptimeSec,
+                                  const std::vector<WarSideFootholds>& footholds =
+                                      {}) {
     WarSummary s;
     s.frame = frame;
     s.uptimeSec = uptimeSec;
@@ -142,6 +154,14 @@ inline WarSummary BuildWarSummary(const WarSides& sides,
             else        side->humans++;
         }
     }
+    // The census is matched by FACTION, not by position: `war_sides` and the
+    // census are both built from the same declaration order today, but a
+    // positional join would silently mis-attribute the moment either grew a
+    // side the other did not.
+    s.footholdsKnown = !footholds.empty();
+    for (const auto& f : footholds)
+        for (auto& side : s.sides)
+            if (side.faction == f.factionId) side.footholds = f.held;
     for (const auto& r : regions) {
         s.control.total++;
         if (r.contested) s.control.contested++;
@@ -166,8 +186,10 @@ inline std::string EncodeWarSummary(const WarSummary& s) {
         sj["humans"] = side.humans;
         sj["ais"] = side.ais;
         sj["regions"] = side.regions;
+        sj["footholds"] = side.footholds;
         j["sides"].push_back(std::move(sj));
     }
+    j["footholds_known"] = s.footholdsKnown;
     j["control"] = {{"total", s.control.total},
                     {"contested", s.control.contested},
                     {"neutral", s.control.neutral}};
@@ -199,8 +221,16 @@ inline bool DecodeWarSummary(const std::string& text, WarSummary& out) {
         side.humans = sj.value("humans", 0u);
         side.ais = sj.value("ais", 0u);
         side.regions = sj.value("regions", 0u);
+        // Additive field, so a summary written by an older game server simply
+        // reports 0 and `footholds_known` false. Deliberately NOT a version
+        // bump: bumping would make a new lobby drop every summary an
+        // un-upgraded server writes, blacking out the whole browser until
+        // every war restarted, to add a field whose absence is already
+        // expressible.
+        side.footholds = sj.value("footholds", 0u);
         s.sides.push_back(std::move(side));
     }
+    s.footholdsKnown = j.value("footholds_known", false);
     if (j.contains("control") && j["control"].is_object()) {
         s.control.total = j["control"].value("total", 0u);
         s.control.contested = j["control"].value("contested", 0u);

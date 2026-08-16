@@ -156,6 +156,87 @@ std::vector<WarSummaryRegion> GatherWarSummaryRegions() {
     return out;
 }
 
+std::vector<WarSideFootholds> GatherWarFootholds(const WarSides& sides) {
+    // `war_footholds_<team>` + `war_footholds_known`, published by
+    // game_gameover.lua (wars §7, task 4). Keyed by TEAM there because a team
+    // is what the scenario's regions block names; the faction mapping is
+    // `war_sides`, which the caller already holds, so folding it in on the Lua
+    // side would be a second copy of it.
+    const LuaRulesParams::Params& game = CSplitLuaHandle::GetGameParams();
+    std::vector<WarSideFootholds> out;
+    if (ParamNumber(game, "war_footholds_known") == 0.0)
+        return out;   // the caller reads an empty census as "cannot tell"
+    for (const auto& [faction, team] : sides) {
+        WarSideFootholds f;
+        f.factionId = faction;
+        f.held = static_cast<unsigned>(std::max(
+            0.0, ParamNumber(game, PlayerKey("war_footholds_", team))));
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out) {
+    const LuaRulesParams::Params& game = CSplitLuaHandle::GetGameParams();
+    // The war has an ENDING only once game_gameover.lua has left 'active'. A
+    // war with no gameover gadget publishes nothing and is never recorded as
+    // over — which is right: a scenario-less war has no terminal condition
+    // (§7.1) and the Director must not invent one for it.
+    const std::string state = ParamString(game, "war_state");
+    if (state.empty() || state == "active")
+        return false;
+
+    out.winnerTeam = static_cast<int>(ParamNumber(game, "war_winner_team")) - 0;
+    // `war_winner_team` is absent, not zero, before a winner is declared, and
+    // team 0 is a real team — so the presence of the key is the test, never
+    // its value.
+    if (game.find("war_winner_team") == game.end())
+        out.winnerTeam = -1;
+
+    // Every faction on the winning SIDE. game_gameover publishes the winning
+    // ALLYTEAMS, which is the engine's vocabulary; the archive wants the
+    // player's, and `war_sides` is the one mapping between them.
+    out.winnerFactions.clear();
+    if (out.winnerTeam >= 0) {
+        for (const auto& [faction, team] : sides) {
+            if (static_cast<int>(team) != out.winnerTeam) continue;
+            if (!out.winnerFactions.empty()) out.winnerFactions += ",";
+            out.winnerFactions += faction;
+        }
+    }
+
+    // The frame the sim STAMPED at `resolving`, not the frame this scrape
+    // happens on: the sim freezes after the declaration, and the scoreboard is
+    // republished on a 30 s cadence, so "now" would archive whatever the last
+    // tick left behind.
+    out.finalFrame = static_cast<int32_t>(ParamNumber(game, "war_final_frame"));
+    out.settledComplete =
+        static_cast<unsigned>(std::max(0.0, ParamNumber(game, "war_settled_complete")));
+    out.settledExpired =
+        static_cast<unsigned>(std::max(0.0, ParamNumber(game, "war_settled_expired")));
+
+    // The final scoreboard (teams §6). Read off the live player list rather
+    // than by scanning the param map for `score_*` keys, because the archive
+    // has to be able to NAME the participants and only the roster holds the
+    // playerNum↔name mapping — player numbers are recycled, so a scoreboard
+    // browsed a month later would otherwise be anonymous.
+    out.scoreboard.clear();
+    for (int i = 0; i < playerHandler.ActivePlayers(); ++i) {
+        const CPlayer* p = playerHandler.Player(i);
+        if (p == nullptr || p->isAI || p->spectator) continue;
+        WarScoreRow row;
+        row.playerNum  = i;
+        row.name       = p->name;
+        row.team       = p->team;
+        row.earned     = ParamNumber(game, PlayerKey("score_", i, "_earned"));
+        row.spent      = ParamNumber(game, PlayerKey("score_", i, "_spent"));
+        row.objectives = static_cast<unsigned>(
+            std::max(0.0, ParamNumber(game, PlayerKey("score_", i, "_objectives"))));
+        out.scoreboard.push_back(std::move(row));
+    }
+    return true;
+}
+
 warlog::DrainResult DrainWarLog(int64_t watermark) {
     const LuaRulesParams::Params& params = CSplitLuaHandle::GetGameParams();
     const int64_t head = static_cast<int64_t>(ParamNumber(params, "warlog_seq"));

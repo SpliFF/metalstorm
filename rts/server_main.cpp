@@ -1037,6 +1037,11 @@ int main(int argc, char* argv[])
     // both-processes rule as the bindings table above, and the same durability
     // rule — it is the only copy of what happened in a war.
     GameEventsDb::EnsureTable(db.Handle());
+    // war_outcome — the durable record of how this war ended (wars §7, task
+    // 4). Created here beside game_events for the same reason: both are
+    // written by THIS process and read by the lobby, and both must exist
+    // before the first write rather than on the lobby's schedule.
+    WarOutcomeDb::EnsureTable(db.Handle());
     // room_runtime_ai — the AI seats this war takes on WHILE running (task
     // 4(b)'s open thread, RuntimeAIRoster.h). Written and read here; the lobby
     // only deletes it with the room. Created unconditionally for the same
@@ -2395,7 +2400,25 @@ int main(int argc, char* argv[])
             std::chrono::steady_clock::now() - serverStartTime).count();
         const std::string json = EncodeWarSummary(BuildWarSummary(
             sides, GatherWarSummaryPlayers(), GatherWarSummaryRegions(),
-            sim.GetFrameNum(), upSec));
+            sim.GetFrameNum(), upSec, GatherWarFootholds(sides)));
+
+        // The war's ENDING (PLAN-metalstorm-wars.md §7, task 4) — a separate,
+        // DURABLE row, not a field on this one. `war_summary` is deliberately
+        // perishable (the lobby drops it after kWarSummaryStaleSec so a killed
+        // server stops claiming players are online), and this process EXITS a
+        // few minutes after declaring the result by design (§7.2's
+        // --postgame-exit-seconds). Carried here, the fact that the war was
+        // won would evaporate half a minute later.
+        //
+        // Written on every heartbeat while the war is over rather than once at
+        // the declaration: `Record` replaces on room_id, and a one-shot would
+        // be lost by any failure between the declaration and the commit — of
+        // which the process's own scheduled exit is one.
+        if (WarOutcomeRecord outcome; GatherWarOutcome(sides, outcome)) {
+            outcome.roomId = roomId;
+            outcome.recordedAt = static_cast<int64_t>(std::time(nullptr));
+            WarOutcomeDb::Record(db.Handle(), outcome);
+        }
         sqlite3_stmt* st = nullptr;
         if (sqlite3_prepare_v2(statusDb,
                 "INSERT OR REPLACE INTO war_summary"
