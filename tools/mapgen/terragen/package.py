@@ -372,7 +372,8 @@ def filter_defs_lua(text: str, names) -> str:
 # ---------------------------------------------------------------------------
 
 def emit_roads_lua(net, cellsize: float, params=None, decimate: float = 64.0,
-                   crossings=None, yards=None) -> str:
+                   crossings=None, yards=None, refusals=None,
+                   p_cross=None) -> str:
     """The planned road network as map data, for consumers downstream of the bake.
 
     **Why this file exists, and what it does not solve.** R2's brief asks for a
@@ -401,6 +402,13 @@ def emit_roads_lua(net, cellsize: float, params=None, decimate: float = 64.0,
     the road, the scenario stager is the only thing that can lay a level span
     over it (see terragen/bridges.py), and a map that publishes its roads but
     not its fords makes that stager guess.
+
+    `refusals` is the other half of the same call and rides here as the `fords`
+    block (roads R3d): a wet run that carries no chain is still a wet run, and
+    a map that publishes only the bridgeable ones tells a consumer that the
+    rest of its water is not on a road. `p_cross` is the `CrossingParams` the
+    survey used, so the wade depth every ford row is graded against is the one
+    that graded it rather than a default re-guessed here.
 
     `yards` (roads R4b, `terragen.yards.plan_yard_pads`) is the third of the
     same shape and the one that closes the seam this docstring opens: a pad is
@@ -450,13 +458,26 @@ def emit_roads_lua(net, cellsize: float, params=None, decimate: float = 64.0,
     # Water crossings (R3b). Always emitted, even empty: a map with no crossings
     # and a map generated before this key existed must not read the same to a
     # consumer deciding whether to look for bridges elsewhere.
-    lines.append("    -- Fords: stretches of deck under water, sized for a chain of")
-    lines.append("    -- bridge spans. `heading` is the road's own tangent in Spring")
-    lines.append("    -- heading units; the chain is CENTRED on (x, z). The span is")
-    lines.append("    -- non-blocking decoration and the ford under it is what units")
-    lines.append("    -- cross — see tools/mapgen/terragen/bridges.py.")
+    lines.append("    -- Bridge crossings: stretches of deck under water that are")
+    lines.append("    -- narrow enough for a chain of spans. `heading` is the road's")
+    lines.append("    -- own tangent in Spring heading units; the chain is CENTRED on")
+    lines.append("    -- (x, z). The span is non-blocking decoration and the ford")
+    lines.append("    -- under it is what units cross — terragen/bridges.py.")
     lines.append("    crossings = {")
     lines.extend(br.emit_crossings_lua(crossings or []))
+    lines.append("    },")
+    # Fords (R3d). The SUPERSET of `crossings` and the one a unit cares about:
+    # where the deck goes through water at all, bridged or not. Emitted last so
+    # `read_road_crossings` can keep bounding itself at the next block's name.
+    lines.append("    -- Fords: every stretch of deck a ground unit has to wade,")
+    lines.append("    -- including the ones under a bridge (spans > 0) and the ones")
+    lines.append("    -- too wide for any legal chain (spans = 0). `depth` is the")
+    lines.append("    -- deepest point and `wade` the depth it was graded against —")
+    lines.append("    -- a run deeper than the wade is a BROKEN ROUTE and is not")
+    lines.append("    -- here at all. See tools/mapgen/terragen/bridges.py.")
+    lines.append("    fords = {")
+    lines.extend(br.emit_fords_lua(crossings or [], refusals or [],
+                                   wade_depth=(p_cross or br.CrossingParams()).wade_depth))
     lines.append("    },")
     lines.append("}")
     return "\n".join(lines) + "\n"

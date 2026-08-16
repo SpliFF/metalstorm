@@ -131,13 +131,30 @@ class Crossing:
 
 @dataclass(frozen=True)
 class Refusal:
-    """A wet stretch of road that gets no bridge, and why."""
+    """A wet stretch of road that gets no bridge, and why.
+
+    ⚠ **"No bridge" is two completely different facts and this type carries
+    which one** (roads R3d). A run that is too wide for a legal chain, or too
+    narrow to be worth one, is a **ford**: the road goes through the water and
+    the map's own vehicles drive through it after it, exactly as they do under
+    a span. A run deeper than the wade is a **broken route**: the deck leads
+    into water its own traffic cannot follow, and no decoration fixes that.
+    `fordable` is the difference, and until R3d both left the generator as the
+    same disappointed print line — so a map published where its bridges went
+    and never published where its roads waded, which is the larger set and the
+    one a unit actually has to survive.
+    """
     link: int
     reason: str
     length: float
     max_depth: float
     x: float
     z: float
+    # Defaulted because they were added by R3d and a caller building a Refusal
+    # by hand (the tests do) should not have to describe a chain it refused.
+    fordable: bool = True
+    road_class: int = 0
+    heading: int = 0
 
     def describe(self) -> str:
         return (f"link {self.link} at ({self.x:.0f}, {self.z:.0f}): "
@@ -229,12 +246,14 @@ def find_crossings(net, height: np.ndarray, cellsize: float,
                     -1.0, 1.0)
                 bend = float(np.degrees(np.arccos(cosang)).max())
 
-            def refuse(reason):
-                refusals.append(Refusal(idx, reason, length, depth, cx, cz))
+            def refuse(reason, fordable=True):
+                refusals.append(Refusal(idx, reason, length, depth, cx, cz,
+                                        fordable, ln.road_class, heading))
 
             if not crossing_is_fordable(depth, p.wade_depth):
                 refuse(f"deeper than VEH wades ({p.wade_depth:.0f}) — the "
-                       f"ROUTE is broken here, not the decoration")
+                       f"ROUTE is broken here, not the decoration",
+                       fordable=False)
                 continue
             # Sized by FLOOR over the water, never ceil, and measured on the
             # chord the chain actually lays along rather than on the wandering
@@ -263,6 +282,42 @@ def find_crossings(net, height: np.ndarray, cellsize: float,
                 continue
             crossings.append(cand)
     return crossings, refusals
+
+
+def emit_fords_lua(crossings: list[Crossing], refusals: list[Refusal],
+                   wade_depth: float = VEH_WADE_DEPTH,
+                   indent: str = "        ") -> list[str]:
+    """`fords = { ... }` rows for mapdata/roads.lua — EVERY crossable wet run.
+
+    The superset of `crossings`, and the honest one (roads R3d). `crossings`
+    answers "where does the stager build a chain of spans", which is a question
+    about decoration; this answers **"where does this road go through water,
+    and how deep"**, which is the question a unit, an AI convoy planner or a
+    scenario author actually has. The two differ in both directions on real
+    maps: a 300-elmo run 3 elmos deep carries a chain and is also a ford, while
+    Meridian Basin's authored passes are 1700 elmos of 6-deep wading that no
+    24-span chain can legally cover and that every vehicle on the map crosses
+    without noticing.
+
+    `spans = 0` is exactly that case: a ford with no bridge over it. It is not
+    a lesser row — the deck is the same deck, and the span was never what units
+    drove on (see the module header).
+
+    ⛔ **A run deeper than `wade_depth` is NOT emitted.** It is a broken route,
+    it stays a refusal, and publishing it here as a ford would be the precise
+    lie this table exists to stop: a consumer reading `fords` is entitled to
+    assume every row is one its ground units can follow. `wade` rides on every
+    row so a consumer with a different move class can check rather than trust.
+    """
+    rows = [(c.link, c.road_class, c.x, c.z, c.heading, c.spans,
+             c.length, c.max_depth) for c in crossings]
+    rows += [(r.link, r.road_class, r.x, r.z, r.heading, 0,
+              r.length, r.max_depth) for r in refusals if r.fordable]
+    rows.sort(key=lambda r: (r[0], r[2], r[3]))
+    return [f"{indent}{{ link = {lk}, class = {cls}, x = {x:.0f}, z = {z:.0f}, "
+            f"heading = {hd}, spans = {sp}, length = {ln:.0f}, "
+            f"depth = {dp:.1f}, wade = {wade_depth:.0f} }},"
+            for lk, cls, x, z, hd, sp, ln, dp in rows]
 
 
 def emit_crossings_lua(crossings: list[Crossing], defname: str = "ms_road_bridge",

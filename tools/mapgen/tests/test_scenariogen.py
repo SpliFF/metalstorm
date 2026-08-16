@@ -41,9 +41,16 @@ def find_maps_dir():
     Map data is gitignored, so a taskherd clone has none of its own while the
     checkout it was cloned from does — the same situation regions_from_map.py's
     "anchor on the MAP dir" comment describes.
+
+    ⚠ `MS_MAPS_DIR` is checked FIRST, and the order is the whole point. A lane
+    clone that has generated even one map has a `data/maps` of its own — it
+    just holds the terragen maps and not the external ones this matrix targets
+    — so a local-first order made the override unreachable in exactly the case
+    it exists for, and the matrix failed with "scorched_crossing_v2.4 is
+    missing" however the variable was set.
     """
-    for cand in (os.path.join(REPO, "data", "maps"),
-                 os.environ.get("MS_MAPS_DIR", "")):
+    for cand in (os.environ.get("MS_MAPS_DIR", ""),
+                 os.path.join(REPO, "data", "maps")):
         if cand and os.path.isdir(cand):
             return cand
     try:
