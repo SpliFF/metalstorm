@@ -204,14 +204,22 @@ double GatherWarStakes() {
     return total;
 }
 
+std::string GatherWarSimState() {
+    return ParamString(CSplitLuaHandle::GetGameParams(), "war_state");
+}
+
 bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out) {
     const LuaRulesParams::Params& game = CSplitLuaHandle::GetGameParams();
-    // The war has an ENDING only once game_gameover.lua has left 'active'. A
-    // war with no gameover gadget publishes nothing and is never recorded as
-    // over — which is right: a scenario-less war has no terminal condition
-    // (§7.1) and the Director must not invent one for it.
+    // The war has an ENDING only once game_gameover.lua has left 'active' AND
+    // stamped the frame it resolved on. Leaving 'active' happens 300 frames
+    // earlier, at the top of the wind-down grace, when nothing has been settled
+    // and every field below scrapes as 0 — see `IsPublishableWarOutcome`, which
+    // owns this rule for both ends of the rendezvous.
+    //
+    // Read the frame FIRST, because it is half the question.
     const std::string state = ParamString(game, "war_state");
-    if (state.empty() || state == "active")
+    out.finalFrame = static_cast<int32_t>(ParamNumber(game, "war_final_frame"));
+    if (!IsPublishableWarOutcome(state, out.finalFrame))
         return false;
 
     out.winnerTeam = static_cast<int>(ParamNumber(game, "war_winner_team")) - 0;
@@ -233,11 +241,11 @@ bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out) {
         }
     }
 
-    // The frame the sim STAMPED at `resolving`, not the frame this scrape
-    // happens on: the sim freezes after the declaration, and the scoreboard is
-    // republished on a 30 s cadence, so "now" would archive whatever the last
-    // tick left behind.
-    out.finalFrame = static_cast<int32_t>(ParamNumber(game, "war_final_frame"));
+    // `out.finalFrame` was read above: it is the frame the sim STAMPED at
+    // `resolving`, not the frame this scrape happens on (the sim freezes after
+    // the declaration, and the scoreboard is republished on a 30 s cadence, so
+    // "now" would archive whatever the last tick left behind) — and it is also
+    // the gate that got us here.
     out.settledComplete =
         static_cast<unsigned>(std::max(0.0, ParamNumber(game, "war_settled_complete")));
     out.settledExpired =

@@ -136,6 +136,7 @@ const char* ToString(WarState s) {
         case WarState::Hibernated: return "hibernated";
         case WarState::Crashed:    return "crashed";
         case WarState::Fresh:      return "fresh";
+        case WarState::Finished:   return "finished";
         case WarState::Unresumable: return "unresumable";
     }
     return "unknown";
@@ -146,8 +147,14 @@ WarState Classify(SessionKind kind, const WarFacts& f) {
         return WarState::NotAWar;
     if (f.serverProcessAlive)
         return f.serverReady ? WarState::Live : WarState::Resuming;
-    // E1 first among the no-process cases (task 3c) — see the header for why it
-    // outranks Crashed.
+    // The war ended and its process has gone. This outranks every question
+    // below because none of them apply to a war that is over — and it has to be
+    // asked BEFORE `Crashed`, whose test a clean post-game exit passes in full
+    // (D4: a war that finished correctly told its players it had been lost).
+    if (f.warEnded)
+        return WarState::Finished;
+    // E1 first among the remaining no-process cases (task 3c) — see the header
+    // for why it outranks Crashed.
     if (RefusesResume(DecideResumeEligibility(f.snapshot, f.binary).eligibility))
         return WarState::Unresumable;
     // In flight when the process vanished, with no exit checkpoint to show for

@@ -123,6 +123,65 @@ struct CheckpointDecision {
 /// reported as a data-loss event just because the walk was also incomplete.
 CheckpointDecision DecideExitCheckpoint(const ExitContext& c);
 
+// ──────────────────── when may an idle war hibernate? ────────────────────
+//
+// The idle timer and the war's own ENDING used to know nothing about each
+// other, and the collision is a permanent data loss (wars task 4, second live
+// verification, D1). `game_gameover.lua` declares a victory and then runs a
+// 300-frame wind-down grace before `resolve()` settles every unresolved
+// objective, disposes the escrow and stamps the final frame. Nobody else can
+// run that settlement: it is synced Lua inside this process.
+//
+// Observed live: victory at frame 9000, `no connected clients for 301s` at
+// frame 9031, checkpoint-and-exit 269 frames before the resolve at 9300.
+// `ExpireAllActive` never ran — nothing settled, NO escrow disposed, and the
+// war's durable row stayed `final_frame=0, settled 0/0, scoreboard=[]` forever.
+// The wars in question had nobody connected precisely BECAUSE they had been won
+// and everyone had left, so this is the ordinary case, not a corner.
+//
+// The rule is therefore: a war that has declared its ending finishes its own
+// grace, however empty the room is. It is bounded (300 frames, 10 s at 1x, 50 s
+// at the 0.2x the verification ran at), so the wait cannot be long — and once
+// the sim reaches `over`, the POST-GAME timer is the exit path that applies,
+// which is the one that knows the war is finished rather than merely quiet.
+struct IdleHibernateContext {
+    /// Is this a persistent-war room at all? Skirmishes use the separate
+    /// idle-EXIT path and never hibernate.
+    bool persistentRoom = false;
+    /// `--no-hibernate` / SPRING_HIBERNATE, and the operator's window.
+    bool hibernationEnabled = true;
+    int  idleSeconds = 0;         ///< 0 = the window is switched off
+    /// A harness run's stop conditions own its exit; a replay is not a war.
+    bool headlessRun = false;
+    bool replaying = false;
+    int64_t sinceStartSec = 0;    ///< uptime, against the startup grace
+    int64_t startupGraceSec = 0;
+    int64_t idleForSec = 0;       ///< since the last connected client left
+    /// `war_state` as the sim publishes it (WarStateSim.h `GatherWarSimState`):
+    /// "" when no gameover gadget is loaded, else "active" / "winding_down" /
+    /// "resolving" / "over". Anything that is not "" and not "active" means the
+    /// war is mid-ending and this process is the only one that can finish it.
+    std::string warSimState = "active";
+};
+
+struct IdleHibernateDecision {
+    bool hibernate = false;
+    /// Always populated. When `hibernate` is false and the refusal is the
+    /// wind-down one, this is what the server logs — an idle war that visibly
+    /// declines to sleep is otherwise indistinguishable from a stuck timer.
+    std::string reason;
+    /// True only for the wind-down refusal, so the caller can log it once
+    /// rather than on every 5 s pass through an ending war.
+    bool deferredForWarEnding = false;
+};
+
+/// Pure. Order: not eligible at all → the timers → the war's own ending.
+///
+/// The ending check is LAST on purpose: a room that was never going to
+/// hibernate must not report "deferred for a war that is ending", which would
+/// put that sentence in the log of every replay and every skirmish.
+IdleHibernateDecision DecideIdleHibernate(const IdleHibernateContext& c);
+
 // ────────────────────────────── resume ──────────────────────────────
 
 /// The store, narrowed to what a resume needs. GameStateStore satisfies this;

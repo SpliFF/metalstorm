@@ -199,6 +199,17 @@ describe('warStateBadge', () => {
         expect(warStateBadge(war({ state: 'live' })).label).toBe('Live');
         expect(warStateBadge(war({ state: 'fresh' })).label).toBe('Not started');
     });
+    it('a war that ENDED is not a war that was interrupted', () => {
+        // wars task 4, D4: a scheduled post-game exit looks exactly like a
+        // crash from the lobby's side, so every correctly-finished war wore
+        // the "Interrupted" badge and told its players it had lost its tail.
+        expect(warStateBadge(war({ live: false, state: 'finished' })).label).toBe('Ended');
+        expect(warStateBadge(war({ live: false, state: 'finished' })).cls)
+            .not.toBe(warStateBadge(war({ state: 'crashed' })).cls);
+        const ended = formatWarStatus(war({ live: false, state: 'finished' }), 1000);
+        expect(ended).toContain('over');
+        expect(ended).not.toContain('without saving');
+    });
     it('falls back to the live bit on a lobby that publishes no state', () => {
         expect(warStateBadge(war()).label).toBe('Live');
         expect(warStateBadge(war({ live: false })).label).toBe('Idle');

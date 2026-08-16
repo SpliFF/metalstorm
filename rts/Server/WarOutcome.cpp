@@ -18,6 +18,18 @@ const char* kColumns =
 
 }  // namespace
 
+bool IsPublishableWarOutcome(const std::string& simWarState, int32_t finalFrame) {
+    // No gadget, or a war still being fought: there is no ending to publish.
+    // A scenario-less war has no terminal condition at all (§7.1) and the
+    // Director must not be handed one.
+    if (simWarState.empty() || simWarState == "active")
+        return false;
+    // Left `active`, but `resolve()` has not stamped its frame — this is a
+    // heartbeat inside the 300-frame wind-down grace, where every field that
+    // matters still reads 0. Not an ending yet.
+    return finalFrame > 0;
+}
+
 std::string EncodeWarScoreboard(const std::vector<WarScoreRow>& rows) {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& r : rows) {
@@ -137,8 +149,12 @@ std::optional<WarOutcomeRecord> WarOutcomeDb::Load(sqlite3* db, uint32_t roomId)
 bool WarOutcomeDb::HasOutcome(sqlite3* db, uint32_t roomId) {
     if (!db) return false;
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM war_outcome WHERE room_id=?", -1,
-                           &stmt, nullptr) != SQLITE_OK) {
+    // `final_frame > 0` is the completeness half — see the header. A row whose
+    // frame is unstamped is a war still winding down, not a war that ended.
+    if (sqlite3_prepare_v2(db,
+                           "SELECT 1 FROM war_outcome"
+                           " WHERE room_id=? AND final_frame>0",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
         // The table can legitimately be absent on a lobby that has never seen
         // a war end. Not an error, and emphatically not "the war is over".
         sqlite3_finalize(stmt);

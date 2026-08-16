@@ -201,6 +201,19 @@ enum class WarState : uint8_t {
     Crashed,
     /// A war that has never run: no process, no history, never in flight.
     Fresh,
+    /// The war ENDED and its server has since exited. No process, no exit
+    /// checkpoint — a finished war has nothing to resume, so `Hibernation.h`
+    /// deliberately declines to take one — and the room keeps the state it was
+    /// in when the match ran. Every one of those is also true of a crash, which
+    /// is why this state has to be told apart by a fact neither the room nor
+    /// the store holds: the war's own durable OUTCOME (wars task 4, D4).
+    ///
+    /// Live evidence for why it matters: both wars that completed the §7 chain
+    /// correctly, digest and all, were then announced to their players as
+    /// "Your war stopped without saving its last stretch — some of it is gone."
+    /// The scheduled `--postgame-exit-seconds` exit is indistinguishable from a
+    /// crash by shape alone.
+    Finished,
     /// No process, a frozen world in the store, and this binary may not load
     /// it (E1 — see `ResumeEligibility`). The war is joinable and will come
     /// back at frame 0; the frame it froze at is still published, because
@@ -221,6 +234,13 @@ struct WarFacts {
     /// when the process vanished?), never about the process.
     ERoomState roomState = ERoomState::Filling;
     SnapshotFacts snapshot;
+    /// This war has a COMPLETE durable outcome — `WarOutcomeDb::HasOutcome`,
+    /// i.e. the sim declared an ending and stamped the frame it resolved on.
+    /// The only fact that tells a scheduled post-game exit apart from a crash,
+    /// because by shape they are identical (no process, no exit checkpoint, a
+    /// room still in its in-flight state). Left false by callers with no
+    /// database to ask, which is exactly the pre-D4 behaviour.
+    bool warEnded = false;
     /// What the spawn would run (task 3c). Left empty by callers that have not
     /// probed the server binary — the E1 pre-flight then abstains rather than
     /// guessing, and behaviour is exactly what it was before 3c.
@@ -230,11 +250,18 @@ struct WarFacts {
 /// Pure. Order of evaluation is the specification:
 ///   1. not a war                                → NotAWar
 ///   2. a live process                           → Live / Resuming
-///   3. history this binary may not load (E1)    → Unresumable
-///   4. was in flight and left no exit checkpoint→ Crashed
-///   5. any snapshot history                     → Hibernated
-///   6. otherwise                                → Fresh
-/// 4 sits ABOVE 5 on purpose: a war that crashed with an old GM checkpoint on
+///   3. the war ENDED and the process is gone    → Finished
+///   4. history this binary may not load (E1)    → Unresumable
+///   5. was in flight and left no exit checkpoint→ Crashed
+///   6. any snapshot history                     → Hibernated
+///   7. otherwise                                → Fresh
+/// 3 sits above 4-6 because a finished war is not waiting on any of the
+/// questions they ask: it will not be resumed, so whether this binary could
+/// load its world is moot, and the frames "lost" after the last checkpoint are
+/// frames the war does not need. It sits BELOW 2 because a finished war whose
+/// server is still serving the result overlay is genuinely live, and the
+/// post-game timer — not this — is what ends that.
+/// 5 sits ABOVE 6 on purpose: a war that crashed with an old GM checkpoint on
 /// disk is resumable *and* lost frames, and only one of those two facts is
 /// worth putting on a card unprompted.
 /// 3 sits above BOTH (task 3c): a war that crashed *and* was then upgraded past

@@ -431,3 +431,105 @@ TEST_CASE("task 4: forgetting a room drops its ending, archiving does not") {
     REQUIRE(WarDirector::Forget(t.db, id));
     CHECK_FALSE(WarOutcomeDb::Load(t.db, id).has_value());
 }
+
+// ── The rendezvous's completeness rule (second live verification, D2/D3) ────
+//
+// The defect these cover was structurally invisible to this suite: the sweep
+// takes `WarTerminationFacts` as a struct, so every test above simply SET
+// `simWarState = "winding_down"` and the question of where that fact comes
+// from — a `war_outcome` row the game server publishes on a heartbeat — was
+// never asked. Live, at 0.2x sim speed, the war was archived and its digest
+// emitted 23 s BEFORE the sim settled a single objective.
+
+TEST_CASE("task 4 D2: an outcome scraped mid-wind-down is not publishable") {
+    // `war_state` leaves 'active' at the FIRST frame of the 300-frame grace,
+    // when `resolve()` has not run and every field the archive wants still
+    // reads 0. This is the exact scrape the game server takes on that
+    // heartbeat, and publishing it archives a war that ended at frame 0 with
+    // its whole escrow undisposed.
+    CHECK_FALSE(IsPublishableWarOutcome("winding_down", 0));
+    CHECK_FALSE(IsPublishableWarOutcome("resolving", 0));
+    CHECK_FALSE(IsPublishableWarOutcome("over", 0));
+
+    // Still fought, and the two shapes that mean "there is no ending here at
+    // all" — a war with no gameover gadget must never be recorded as over
+    // (§7.1: a scenario-less war has no terminal condition).
+    CHECK_FALSE(IsPublishableWarOutcome("active", 0));
+    CHECK_FALSE(IsPublishableWarOutcome("active", 9300));
+    CHECK_FALSE(IsPublishableWarOutcome("", 0));
+    CHECK_FALSE(IsPublishableWarOutcome("", 9300));
+
+    // `resolve()` ran: it settled every unresolved objective, disposed the
+    // escrow and stamped the frame. NOW there is an ending.
+    CHECK(IsPublishableWarOutcome("resolving", 9300));
+    CHECK(IsPublishableWarOutcome("over", 9300));
+}
+
+TEST_CASE("task 4 D2: the lobby's signal is a COMPLETE row, not any row") {
+    LifecycleDb t;
+    // A hollow row is what D1's truncated wind-down leaves behind: the server
+    // hibernated inside the grace, so nothing was ever settled. The writer's
+    // gate should stop it existing; if one exists anyway (an older binary, a
+    // recycled id), the reader must not archive a war on it.
+    WarOutcomeRecord hollow;
+    hollow.roomId = 11;
+    hollow.finalFrame = 0;
+    REQUIRE(WarOutcomeDb::Record(t.db, hollow));
+    CHECK_FALSE(WarOutcomeDb::HasOutcome(t.db, 11));
+    // The row itself is still readable — this is a completeness gate on the
+    // SIGNAL, not a refusal to store what the server sent.
+    CHECK(WarOutcomeDb::Load(t.db, 11).has_value());
+
+    // The next heartbeat, after the resolve, repairs it. `Record` replaces on
+    // room_id, which is what makes the written-every-heartbeat property safe.
+    hollow.finalFrame = 9300;
+    hollow.settledComplete = 1;
+    REQUIRE(WarOutcomeDb::Record(t.db, hollow));
+    CHECK(WarOutcomeDb::HasOutcome(t.db, 11));
+
+    // And a war nobody has published anything for is not over either.
+    CHECK_FALSE(WarOutcomeDb::HasOutcome(t.db, 12));
+}
+
+TEST_CASE("task 4 D3: the war-over digest is stamped with the frame it ended on") {
+    LifecycleDb t;
+    const uint32_t id = t.SeedWar(WarState::Resolving);
+    WarOutcomeRecord o;
+    o.roomId = id;
+    o.finalFrame = 9300;
+    o.winnerFactions = "union";
+    REQUIRE(WarOutcomeDb::Record(t.db, o));
+
+    // `wars.last_active_frame` is deliberately left at its seeded 0 here: that
+    // is what every live war's column actually held, because nothing called
+    // `TouchActivity` in production at all. The digest must not inherit it.
+    const auto war = WarDirector::Load(t.db, id);
+    REQUIRE(war->lastActiveFrame == 0);
+
+    auto f = LiveFacts();
+    f.simWarState = "over";
+    REQUIRE(AdvanceWarLifecycle(t.db, id, f, false, 4000)->archived);
+
+    int total = 0;
+    const auto events = GameEventsDb::Since(t.db, id, 0, 10, &total);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].frame == 9300);
+}
+
+TEST_CASE("task 4 D3: an ending the sim never saw falls back to the war's frame") {
+    // An operator retire has no `war_outcome` row at all (§7: there was no
+    // in-sim ending to record), so the heartbeat column is the only frame
+    // there is — and it now has a writer, so it is no longer always 0.
+    LifecycleDb t;
+    const uint32_t id = t.SeedWar(WarState::Active);
+    REQUIRE(WarDirector::TouchActivity(t.db, id, 5400, 4100));
+
+    auto f = LiveFacts();
+    f.operatorRetire = true;
+    REQUIRE(AdvanceWarLifecycle(t.db, id, f, true, 4100)->archived);
+
+    int total = 0;
+    const auto events = GameEventsDb::Since(t.db, id, 0, 10, &total);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].frame == 5400);
+}

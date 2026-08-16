@@ -196,3 +196,38 @@ TEST_CASE("war events: the watcher remembers, seeds and forgets") {
         CHECK(w.Size() == 0);
     }
 }
+
+// ── The toast a correctly-finished war used to get (wars task 4, D4) ───────
+
+TEST_CASE("war events: a war that ENDED is never announced as lost") {
+    using warresume::WarState;
+    // Live evidence: after `archived, digest emitted`, both completed wars
+    // logged `lost (state=crashed) — Your war stopped without saving its last
+    // stretch — some of it is gone.` The player had already been told, by the
+    // digest, that their war ended and who won.
+    CHECK(warevents::Detect(WarState::Live, WarState::Finished) ==
+          warevents::Kind::None);
+    CHECK(warevents::Detect(WarState::Resuming, WarState::Finished) ==
+          warevents::Kind::None);
+    CHECK(warevents::Detect(WarState::Hibernated, WarState::Finished) ==
+          warevents::Kind::None);
+
+    // The crash sentence still fires for an actual crash — this is a fix to
+    // the classification, not the removal of a notification.
+    CHECK(warevents::Detect(WarState::Live, WarState::Crashed) ==
+          warevents::Kind::Lost);
+
+    // A finished war is not "up", so a later checkpoint row is bookkeeping and
+    // not news; and if one somehow came back, that IS news.
+    CHECK(warevents::Detect(WarState::Finished, WarState::Hibernated) ==
+          warevents::Kind::None);
+    CHECK(warevents::Detect(WarState::Finished, WarState::Live) ==
+          warevents::Kind::Back);
+
+    // A finished war observed twice says nothing at all — the sweep re-observes
+    // it on every 5 s pass for as long as the room exists.
+    warevents::Watcher w;
+    CHECK(w.Observe(4, WarState::Live) == warevents::Kind::None);  // seeds
+    CHECK(w.Observe(4, WarState::Finished) == warevents::Kind::None);
+    CHECK(w.Observe(4, WarState::Finished) == warevents::Kind::None);
+}

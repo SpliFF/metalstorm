@@ -93,6 +93,17 @@ Kind Detect(WarState prev, WarState next) {
         case WarState::Fresh:
             return Kind::None;
 
+        // The war ENDED. Nothing to interrupt anybody with: §7's archive
+        // already emitted the war-over digest, which is the surface that tells
+        // a player how their war finished and who won — a toast here would be a
+        // second, poorer announcement of the same thing, and one that arrives
+        // whenever the server's post-game timer happens to fire rather than
+        // when the war ended. What matters is that this is NOT `Lost`: before
+        // D4 a finished war arrived at `Crashed` and every enlisted player was
+        // told their war "stopped without saving its last stretch".
+        case WarState::Finished:
+            return Kind::None;
+
         case WarState::NotAWar:
             return Kind::None;
     }

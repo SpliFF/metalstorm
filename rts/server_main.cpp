@@ -2626,6 +2626,10 @@ int main(int argc, char* argv[])
     // atomic), so Signal is the default and the residue. The exit-checkpoint
     // decision below is a pure function of this plus the world's state.
     hibernate::ExitReason exitReason = hibernate::ExitReason::Signal;
+    /// One-shot latch for the "idle, but the war is still settling" line
+    /// (wars task 4, D1). The condition holds for every pass of the wind-down,
+    /// and the log is where an operator looks for the resolve it precedes.
+    bool hibernateDeferLogged = false;
 
     while (keepRunning.load()) {
         // --- Pacing ---
@@ -2769,19 +2773,47 @@ int main(int argc, char* argv[])
             // than lost — but only when the operator has switched the window
             // on, because a room that exits is unjoinable until the lobby
             // learns to respawn it with --resume (task 3b). Default 0 = off.
-            if (roomPersistent && hibernationEnabled && hibernateIdleSeconds > 0 &&
-                !headlessCfg.enabled && !replay::IsReplaying()) {
-                const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
+            //
+            // The decision itself is `hibernate::DecideIdleHibernate` — pure,
+            // and it carries one input this loop cannot see from its own
+            // timers: the WAR's state. A declared war spends 300 frames
+            // settling, and only this process can run that settlement, so an
+            // idle deadline that lands inside the grace truncates it
+            // permanently (D1 — observed live: exit 269 frames before the
+            // resolve, nothing settled, no escrow disposed).
+            {
+                hibernate::IdleHibernateContext hc;
+                hc.persistentRoom = roomPersistent;
+                hc.hibernationEnabled = hibernationEnabled;
+                hc.idleSeconds = hibernateIdleSeconds;
+                hc.headlessRun = headlessCfg.enabled;
+                hc.replaying = replay::IsReplaying();
+                hc.sinceStartSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - serverStartTime).count();
-                const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
+                hc.startupGraceSec = kStartupGraceSec;
+                hc.idleForSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - lastClientTime).count();
-                if (sinceStart > kStartupGraceSec && idleFor > hibernateIdleSeconds) {
+                hc.warSimState = GatherWarSimState();
+                const hibernate::IdleHibernateDecision hd =
+                    hibernate::DecideIdleHibernate(hc);
+                if (hd.hibernate) {
                     SLOG(SPRING_LOG_NOTICE,
                         "no connected clients for %llds — hibernating persistent "
                         "room %u at frame %d",
-                        static_cast<long long>(idleFor), roomId, sim.GetFrameNum());
+                        static_cast<long long>(hc.idleForSec), roomId,
+                        sim.GetFrameNum());
                     exitReason = hibernate::ExitReason::Idle;
                     keepRunning.store(false);
+                } else if (hd.deferredForWarEnding && !hibernateDeferLogged) {
+                    // Once per process. A war that is ending is idle on every
+                    // subsequent pass too, and a line per 5 s would bury the
+                    // resolve it is waiting for.
+                    hibernateDeferLogged = true;
+                    SLOG(SPRING_LOG_NOTICE,
+                         "no connected clients for %llds, but room %u is NOT "
+                         "hibernating at frame %d: %s",
+                         static_cast<long long>(hc.idleForSec), roomId,
+                         sim.GetFrameNum(), hd.reason.c_str());
                 }
             }
             // Post-game exit: a finished war has nothing left to serve, so the

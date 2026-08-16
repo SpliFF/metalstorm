@@ -85,6 +85,38 @@ struct WarOutcomeRecord {
     int64_t  recordedAt = 0;
 };
 
+/// ── The completeness rule, owned by the rendezvous rather than by either end ─
+///
+/// `war_state` leaves `active` at the FIRST frame of the wind-down grace, 300
+/// frames before `resolve()` runs. Everything that makes an outcome an outcome
+/// — `war_final_frame`, `war_settled_complete/expired`, the frozen scoreboard —
+/// is stamped by `resolve()` and by nothing before it. So a scrape taken on a
+/// `winding_down` heartbeat reads every one of those as ZERO, and publishing it
+/// hands the Director a row that says the war ended at frame 0 having settled
+/// nothing.
+///
+/// Live evidence (2026-08-17): at 0.2x the war was archived and its digest
+/// emitted 23 s BEFORE the sim settled a single objective; the row was only
+/// repaired because the server happened to outlive the archive. When it does
+/// not — a hibernation inside the grace, which is exactly D1 — the zeros are
+/// permanent and a won war is over on paper with every stake still in escrow.
+///
+/// `war_final_frame` is the stamp that says `resolve()` ran, so it is the gate.
+/// This is a gate on COMPLETENESS, not a one-shot: the writer still publishes
+/// on every heartbeat once the row is publishable (see `Record`), because a
+/// single write would be lost by any failure between the declaration and the
+/// commit — of which the process's own scheduled exit is one.
+///
+/// Kept here, beside the table, rather than in the scraper: the reader
+/// (`HasOutcome`) applies the identical rule to rows already on disk, and two
+/// spellings of "is this ending real yet" is how the writer and the reader come
+/// to disagree.
+///
+/// @param simWarState  `war_state` as the sim publishes it: "" (no gameover
+///   gadget at all), "active", "winding_down", "resolving" or "over".
+/// @param finalFrame   `war_final_frame`, 0 when unstamped.
+bool IsPublishableWarOutcome(const std::string& simWarState, int32_t finalFrame);
+
 /// Encode / decode the scoreboard for the row's JSON column. One writer, one
 /// reader, both here — the same discipline `WarSummary`'s codec pair uses
 /// across the same process boundary.
@@ -114,11 +146,20 @@ public:
     /// one-integer SELECT rather than `Load`, which would decode a whole
     /// scoreboard to answer a yes/no.
     ///
-    /// The presence of the row IS the signal. The alternative considered was
-    /// carrying `war_state` on the perishable `war_summary`, which fails for
+    /// The presence of a COMPLETE row is the signal. The alternative considered
+    /// was carrying `war_state` on the perishable `war_summary`, which fails for
     /// precisely the case that matters: the game server exits a few minutes
     /// after declaring the result, and the summary is dropped as stale half a
     /// minute later — so the lobby would lose the ending it was waiting for.
+    ///
+    /// "Complete" means `final_frame > 0`, i.e. the sim stamped the frame it
+    /// resolved on — the same rule `IsPublishableWarOutcome` gates the WRITER
+    /// with, applied to what is already on disk. The writer's gate is what
+    /// should keep a hollow row from ever existing; this one is what keeps a
+    /// hollow row written by an older binary (or by a future second writer)
+    /// from archiving a war that has not finished settling. A war whose row is
+    /// not yet complete simply stays live and finishes — including on resume,
+    /// which is what makes D1's truncated wind-down fail safe.
     static bool HasOutcome(sqlite3* db, uint32_t roomId);
 
     /// Drop a room's outcome. For the id-reuse path (a room deleted outright),

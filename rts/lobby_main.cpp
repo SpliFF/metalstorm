@@ -1373,6 +1373,14 @@ int main(int argc, char *argv[]) {
     }
     if (room.sessionKind == SessionKind::PersistentWar) {
       f.snapshot = warresume::LatestSnapshot(mapDb, room.gameId, room.id);
+      // Did this war END? (wars task 4, D4.) A scheduled post-game exit and a
+      // crash look identical from the room and the store — no process, no exit
+      // checkpoint (a finished war has nothing to resume, so Hibernation.h
+      // declines to take one), and a room still in the state it was playing
+      // in. The durable outcome is the one fact that separates them, and
+      // without it every war that ended correctly announced itself to its
+      // players as lost.
+      f.warEnded = WarOutcomeDb::HasOutcome(mapDb, room.id);
       // The E1 pre-flight's other half (PLAN-persistence task 3c): what the
       // spawn would run. `mapHash` is the room's map id, which is what
       // server_main stamps into StoreConfig.mapHash, so a room re-pointed at
@@ -6571,6 +6579,13 @@ int main(int argc, char *argv[]) {
         bool hasLiveHumans = false;
         WarSummary live;
         if (warSummaryFor(war.roomId, live)) {
+          // `wars.last_active_frame` had a store and a test and no production
+          // writer at all, so it read 0 for every war ever seeded (D3). The
+          // summary heartbeat is where the frame arrives, and this sweep is
+          // already reading it. Monotonic in the store, so a resumed war whose
+          // sim restarts at 0 cannot make the column go backwards.
+          if (live.frame > 0)
+            WarDirector::TouchActivity(mapDb, war.roomId, live.frame, now);
           facts.footholdsKnown = live.footholdsKnown;
           for (const auto &side : live.sides) {
             if (side.humans > 0) hasLiveHumans = true;

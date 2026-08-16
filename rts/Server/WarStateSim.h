@@ -32,6 +32,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "WarLog.h"
@@ -112,10 +113,25 @@ double GatherWarStakes();
 /// players NAMED (only this process holds the playerNum↔name mapping, and
 /// player numbers are recycled).
 ///
-/// Returns false while the war is still `active`, or when no gameover gadget
-/// publishes `war_state` at all. A scenario-less war has no terminal condition
+/// Returns false while the war is still `active`, when no gameover gadget
+/// publishes `war_state` at all, and — the part that is not obvious — for every
+/// heartbeat of the 300-frame WIND-DOWN grace, during which the war has left
+/// `active` but has settled nothing. `IsPublishableWarOutcome` (WarOutcome.h)
+/// owns that rule; publishing early archives a war with `final_frame=0` and
+/// every stake still in escrow. A scenario-less war has no terminal condition
 /// (§7.1) and must not be recorded as having ended.
 bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out);
+
+/// `war_state` as the sim publishes it right now: "" when no gameover gadget is
+/// loaded, else one of "active" / "winding_down" / "resolving" / "over".
+///
+/// Exists for the hibernation gate (`hibernate::ShouldIdleHibernate`): a war
+/// that has DECLARED its ending is in the middle of a 300-frame settlement it
+/// is the only process that can finish, and an idle timer that fires inside
+/// that window truncates it permanently. Everything else about the war's state
+/// machine is the Director's; this is the one bit the server needs to know
+/// about its own life.
+std::string GatherWarSimState();
 
 /// Restore the participation counters. Lifetime statistics rather than
 /// resources, so they are handed back on every rejoin regardless of how long

@@ -279,3 +279,94 @@ TEST_CASE("resume: every status formats to a distinct, non-empty line") {
     // design and are separated by their error text.
     CHECK(lines[0] != lines[1]);
 }
+
+// ── The idle timer and the war's own ending (wars task 4, D1) ──────────────
+
+namespace {
+
+/// An idle persistent war, eligible on every count except whatever the test
+/// changes. `warSimState` defaults to a war still being fought.
+hibernate::IdleHibernateContext IdleWar() {
+    hibernate::IdleHibernateContext c;
+    c.persistentRoom = true;
+    c.hibernationEnabled = true;
+    c.idleSeconds = 300;
+    c.sinceStartSec = 400;
+    c.startupGraceSec = 60;
+    c.idleForSec = 301;
+    c.warSimState = "active";
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("hibernate D1: a war that has declared its ending does not sleep") {
+    // Live, run 1: victory at frame 9000, `no connected clients for 301s` at
+    // 9031, checkpoint-and-exit 269 frames before the resolve at 9300.
+    // `ExpireAllActive` never ran — nothing settled, NO escrow disposed, and
+    // the durable row stayed `final_frame=0, settled 0/0` forever. The room
+    // was empty precisely BECAUSE the war had been won.
+    for (const char* state : {"winding_down", "resolving", "over"}) {
+        auto c = IdleWar();
+        c.warSimState = state;
+        const auto d = hibernate::DecideIdleHibernate(c);
+        CHECK_FALSE(d.hibernate);
+        CHECK(d.deferredForWarEnding);
+        CHECK(d.reason.find(state) != std::string::npos);
+    }
+
+    // A war still being fought sleeps exactly as it did before, and so does a
+    // room whose sim publishes no war state at all (no gameover gadget — there
+    // is no ending it could be in the middle of).
+    CHECK(hibernate::DecideIdleHibernate(IdleWar()).hibernate);
+    auto noGadget = IdleWar();
+    noGadget.warSimState = "";
+    CHECK(hibernate::DecideIdleHibernate(noGadget).hibernate);
+}
+
+TEST_CASE("hibernate D1: the timers still decide everything else") {
+    {   // Not a war: the separate idle-EXIT path owns this room.
+        auto c = IdleWar();
+        c.persistentRoom = false;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+    }
+    {   // The window is off — the shipped default.
+        auto c = IdleWar();
+        c.idleSeconds = 0;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+        c = IdleWar();
+        c.hibernationEnabled = false;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+    }
+    {   // A harness run and a replay own their own exits.
+        auto c = IdleWar();
+        c.headlessRun = true;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+        c = IdleWar();
+        c.replaying = true;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+    }
+    {   // Inside the startup grace, and inside the idle window. Boundaries are
+        // exclusive both ways: the shipped condition was `>`, not `>=`.
+        auto c = IdleWar();
+        c.sinceStartSec = 60;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+        c = IdleWar();
+        c.idleForSec = 300;
+        CHECK_FALSE(hibernate::DecideIdleHibernate(c).hibernate);
+    }
+}
+
+TEST_CASE("hibernate D1: an ineligible room never blames the war's ending") {
+    // The wind-down refusal is logged, once, as the reason an idle war is
+    // visibly declining to sleep. A replay or a skirmish that was never going
+    // to hibernate must not emit that sentence — it would appear in the log of
+    // every non-war process on the box.
+    auto c = IdleWar();
+    c.warSimState = "resolving";
+    c.replaying = true;
+    const auto d = hibernate::DecideIdleHibernate(c);
+    CHECK_FALSE(d.hibernate);
+    CHECK_FALSE(d.deferredForWarEnding);
+    CHECK(!d.reason.empty());
+}

@@ -60,8 +60,18 @@ std::optional<WarLifecycleStep> AdvanceWarLifecycle(
     // has no `war_outcome` row at all — that is not a gap, there was no in-sim
     // ending to record — and the digest simply carries no victor.
     std::string winners;
-    if (const auto outcome = WarOutcomeDb::Load(db, roomId))
+    // The frame the digest is stamped with. `wars.last_active_frame` is the
+    // fallback and NOT the first choice: it is a heartbeat column, so it is
+    // behind by up to a sweep even when it is maintained, and for a war ended
+    // by the sim there is an exact answer — the frame `resolve()` stamped.
+    // Every war-over digest carried `frame=0` before this (D3), including one
+    // whose war demonstrably ended at frame 9300.
+    int32_t digestFrame = static_cast<int32_t>(war->lastActiveFrame);
+    if (const auto outcome = WarOutcomeDb::Load(db, roomId)) {
         winners = outcome->winnerFactions;
+        if (outcome->finalFrame > 0)
+            digestFrame = outcome->finalFrame;
+    }
 
     // Seq continues the war's own stream rather than starting a new one: the
     // digest is served as "everything after my cursor", so a line numbered
@@ -76,7 +86,7 @@ std::optional<WarLifecycleStep> AdvanceWarLifecycle(
     e.subject = war->name.empty() ? std::string("The war") : war->name;
     e.detail = WarOverDigestDetail(step, winners);
     e.team = -1;
-    e.frame = static_cast<int32_t>(war->lastActiveFrame);
+    e.frame = digestFrame;
     GameEventsDb::Append(db, roomId, {e}, now);
 
     return step;
