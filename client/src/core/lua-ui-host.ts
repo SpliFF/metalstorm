@@ -1220,10 +1220,10 @@ export async function init(
             });
         },
         addMinimapMarker: (x, z) => {
-            // Spring.MarkerAddPoint / MarkerAddLine path. The host
-            // (lua-widget-manager) translates these into
-            // minimap.pushMarkerPing so the cyan event-layer ring pulses
-            // at the drop site. Coordinates are world-space elmos.
+            // Spring.MarkerAddPoint / MarkerAddLine path. The main thread
+            // (minimap.pushMarkerPing) translates this postToMain message
+            // so the cyan event-layer ring pulses at the drop site.
+            // Coordinates are world-space elmos.
             postToMain({ type: 'minimapMarker', x, z });
         },
         requestPath: (requestId, sx, sy, sz, ex, ey, ez, moveType, goalRadius) => {

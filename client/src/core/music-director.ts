@@ -64,10 +64,10 @@ export class MusicDirector {
     }
 
     /// Extract `music_<state>_<n>` SoundItems and build per-state
-    /// playlists. Called by lua-widget-manager after it receives the
-    /// `soundItems` worker message and hands the map to
-    /// AudioManager.ingestSoundItems. Items are looked up by name
-    /// against the same map AudioManager already holds.
+    /// playlists. Called from main.ts's `soundItems` case after the
+    /// game-processor worker (lua-ui-host.ts) posts the message and
+    /// main hands the map to AudioManager.ingestSoundItems. Items are
+    /// looked up by name against the same map AudioManager already holds.
     ingestPlaylistsFromSoundItems(items: Map<string, SoundItem>): void {
         this.playlists.clear();
         // Pattern: name lowercases to `music_<state>_<n>` where
