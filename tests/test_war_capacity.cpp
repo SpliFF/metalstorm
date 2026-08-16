@@ -248,12 +248,42 @@ TEST_CASE("deploy: a war I already hold a seat in wins outright") {
     CHECK(d.roomId == 1);
 }
 
-TEST_CASE("deploy: my own war wins even when its side is full") {
-    // The seat is already held, so capacity has nothing to say — this is the
-    // same hold DecideRejoin's bypassCapacity grants at the game server.
+TEST_CASE("wars task 3: a bound war with no seat FALLS THROUGH (wars §5)") {
+    // CORRECTED 2026-08-16 (wars §9 task 3). This case used to assert the
+    // opposite — "my own war wins even when its side is full" — on the
+    // reasoning that DecideRejoin's `bypassCapacity` holds the seat anyway.
+    // PLAN-metalstorm-wars.md §5 says otherwise, in as many words: "if that
+    // side is now full, fall through to `findWar` for another war of the same
+    // faction."
+    //
+    // The old reading confused two different fulls. `bypassCapacity` stops the
+    // veteran's OWN held seat from counting against the cap when they join;
+    // it does not conjure a seat when the side is full of other people. So the
+    // old behaviour sent a returning player at a war with nowhere to sit and
+    // the join failed downstream — a preference for a seat that does not exist
+    // is a refusal, not a preference.
+    //
+    // The binding is not lost by falling through: it stays in the table and
+    // the veteran returns to it as soon as somebody leaves.
     std::vector<DeployCandidate> wars = {War(1, 8, 8, 8, 0, /*bound=*/true)};
-    CHECK(DecideDeploy("compact", wars).outcome ==
-          DeployOutcome::ReturnToMyWar);
+    CHECK(DecideDeploy("compact", wars).outcome == DeployOutcome::SeedNewWar);
+    CHECK(DecideDeploy("compact", wars).rejoinFellThrough);
+
+    // …and it falls through to another war of the SAME faction when there is
+    // one, rather than seeding a redundant world.
+    wars.push_back(War(2, 0, 8, 0));
+    const DeployDecision d = DecideDeploy("compact", wars);
+    CHECK(d.outcome == DeployOutcome::JoinWar);
+    CHECK(d.roomId == 2);
+    CHECK(d.rejoinFellThrough);
+}
+
+TEST_CASE("wars task 3: falling through is reported, and only when it happened") {
+    // An account with no binding anywhere that gets `seed` is the ordinary
+    // first-time case and must not be labelled as having been displaced.
+    CHECK_FALSE(DecideDeploy("compact", {War(1, 8, 8, 8)}).rejoinFellThrough);
+    CHECK_FALSE(DecideDeploy("compact", {War(1, 0, 8, 0, 0, /*bound=*/true)})
+                    .rejoinFellThrough);
 }
 
 TEST_CASE("deploy: a war that does not field my faction is not a candidate") {
@@ -272,21 +302,71 @@ TEST_CASE("deploy: a factionless account is told so, not sent somewhere") {
     CHECK(d.roomId == 0);
 }
 
-TEST_CASE("deploy: ties break on live population, then on room id") {
-    // Equal deficits — the war with people in it is the better game.
-    const std::vector<DeployCandidate> livelier = {
-        War(1, 2, 8, 4, /*live=*/0),
-        War(2, 2, 8, 4, /*live=*/5),
-    };
-    CHECK(DecideDeploy("compact", livelier).roomId == 2);
+TEST_CASE("wars task 3: §5's ranking is friends > needed > stakes > freshest") {
+    // Each block moves exactly ONE key and holds every key above it equal, so
+    // a failure names the key that broke rather than "the ranking changed".
 
-    // Equal in both — the lowest id, so the same lobby state always deploys
-    // the same way and two clients cannot be told different things.
-    const std::vector<DeployCandidate> identical = {
-        War(7, 2, 8, 4, /*live=*/3),
-        War(3, 2, 8, 4, /*live=*/3),
-    };
-    CHECK(DecideDeploy("compact", identical).roomId == 3);
+    SUBCASE("friends outrank a bigger deficit") {
+        // §8: "people play where their friends are". You can always be needed
+        // tomorrow.
+        auto withFriend = War(1, 2, 8, 2);
+        withFriend.friendsPresent = 1;
+        const auto needier = War(2, 0, 8, 8);
+        CHECK(DecideDeploy("compact", {withFriend, needier}).roomId == 1);
+    }
+
+    SUBCASE("with friends equal, the most outnumbered side wins") {
+        const std::vector<DeployCandidate> wars = {War(1, 2, 8, 3),
+                                                  War(2, 2, 8, 7)};
+        CHECK(DecideDeploy("compact", wars).roomId == 2);
+    }
+
+    SUBCASE("with need equal, the higher stakes win") {
+        auto low = War(1, 2, 8, 4);
+        low.stakes = 10.0;
+        auto high = War(2, 2, 8, 4);
+        high.stakes = 250.0;
+        CHECK(DecideDeploy("compact", {low, high}).roomId == 2);
+    }
+
+    SUBCASE("with stakes equal, the FRESHEST war wins") {
+        // Freshest, not longest-running: §4's demand seeding creates wars to
+        // absorb exactly this traffic, and ranking the incumbent above them
+        // would leave every seeded war empty.
+        auto older = War(1, 2, 8, 4);
+        older.createdAt = 1000;
+        auto newer = War(2, 2, 8, 4);
+        newer.createdAt = 9000;
+        CHECK(DecideDeploy("compact", {older, newer}).roomId == 2);
+    }
+
+    SUBCASE("equal in every key — the lowest id, always") {
+        // So the same lobby state always deploys the same way and two clients
+        // cannot be told different things.
+        const std::vector<DeployCandidate> identical = {War(7, 2, 8, 4),
+                                                        War(3, 2, 8, 4)};
+        CHECK(DecideDeploy("compact", identical).roomId == 3);
+    }
+
+    SUBCASE("live population is NOT a key") {
+        // It ranked above nothing §5 names and it fought "freshest": a war
+        // with people in it is by construction not the fresh one, so a
+        // live-population key made demand-seeded wars unreachable.
+        auto fresh = War(1, 2, 8, 4, /*live=*/0);
+        fresh.createdAt = 9000;
+        auto busy = War(2, 2, 8, 4, /*live=*/12);
+        busy.createdAt = 1000;
+        CHECK(DecideDeploy("compact", {fresh, busy}).roomId == 1);
+    }
+
+    SUBCASE("a full side never wins any key") {
+        auto perfect = War(1, 8, 8, 8);
+        perfect.friendsPresent = 5;
+        perfect.stakes = 9999.0;
+        perfect.createdAt = 9000;
+        const auto plain = War(2, 0, 8, 0);
+        CHECK(DecideDeploy("compact", {perfect, plain}).roomId == 2);
+    }
 }
 
 TEST_CASE("deploy: every outcome names itself for the operator log") {

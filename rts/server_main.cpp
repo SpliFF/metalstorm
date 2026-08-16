@@ -2400,7 +2400,8 @@ int main(int argc, char* argv[])
             std::chrono::steady_clock::now() - serverStartTime).count();
         const std::string json = EncodeWarSummary(BuildWarSummary(
             sides, GatherWarSummaryPlayers(), GatherWarSummaryRegions(),
-            sim.GetFrameNum(), upSec, GatherWarFootholds(sides)));
+            sim.GetFrameNum(), upSec, GatherWarFootholds(sides),
+            GatherWarStakes()));
 
         // The war's ENDING (PLAN-metalstorm-wars.md §7, task 4) — a separate,
         // DURABLE row, not a field on this one. `war_summary` is deliberately

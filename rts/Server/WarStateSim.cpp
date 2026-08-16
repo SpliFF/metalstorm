@@ -176,6 +176,34 @@ std::vector<WarSideFootholds> GatherWarFootholds(const WarSides& sides) {
     return out;
 }
 
+double GatherWarStakes() {
+    // §5's "highest-stakes" key. Summed off `objective_<id>_reward`, which
+    // game_objectives.lua already publishes as `reward + EscrowTotal(id)` —
+    // so the staked bounties are in it and there is no second place that adds
+    // them up. Only ACTIVE objectives count: a resolved one has been paid and
+    // is riding on nothing.
+    //
+    // Scanned by key shape, the same way GatherWarSummaryRegions() is, because
+    // the objective id space is the gadget's and asking it for the list would
+    // mean calling into synced Lua from a wall-clock heartbeat.
+    static const std::string kPrefix = "objective_";
+    static const std::string kSuffix = "_reward";
+
+    const LuaRulesParams::Params& params = CSplitLuaHandle::GetGameParams();
+    double total = 0.0;
+    for (const auto& [key, param] : params) {
+        if (key.size() <= kPrefix.size() + kSuffix.size()) continue;
+        if (key.compare(0, kPrefix.size(), kPrefix) != 0) continue;
+        if (key.compare(key.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+            continue;
+        const std::string base = key.substr(0, key.size() - kSuffix.size());
+        if (ParamString(params, base + "_state") != "active") continue;
+        if (const float* f = std::get_if<float>(&param.value))
+            total += *f;
+    }
+    return total;
+}
+
 bool GatherWarOutcome(const WarSides& sides, WarOutcomeRecord& out) {
     const LuaRulesParams::Params& game = CSplitLuaHandle::GetGameParams();
     // The war has an ENDING only once game_gameover.lua has left 'active'. A

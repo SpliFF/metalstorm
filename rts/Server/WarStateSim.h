@@ -101,6 +101,12 @@ warlog::DrainResult DrainWarLog(int64_t watermark);
 /// making unrepresentable.
 std::vector<WarSideFootholds> GatherWarFootholds(const WarSides& sides);
 
+/// §5's "highest-stakes" ranking key: the authority riding on this war's
+/// UNRESOLVED objectives. Summed off `objective_<id>_reward`, which the
+/// objectives gadget already publishes with the staked bounties folded in, so
+/// there is no second adder to drift from it.
+double GatherWarStakes();
+
 /// The war's ENDING, for the durable `war_outcome` row — winner, final frame,
 /// the war-end settlement's two halves, and the final scoreboard with the
 /// players NAMED (only this process holds the playerNum↔name mapping, and

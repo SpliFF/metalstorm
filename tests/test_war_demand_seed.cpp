@@ -11,6 +11,7 @@
 #include "Server/WarDemandSeed.h"
 #include "Server/WarDeploy.h"
 #include "Server/WarDirector.h"
+#include "Server/WarTheatrePool.h"
 
 namespace {
 
@@ -216,4 +217,135 @@ TEST_CASE("task 2: a demand-seeded war is registered as demand-origin") {
     CHECK(WarDirector::WarsFielding(db, "union") == 1);
 
     sqlite3_close(db);
+}
+
+// ── §3's pool rotation (task 7) ───────────────────────────────────────────
+//
+// The key that was MISSING, and whose absence was invisible because the
+// ordering looked like a choice: with variety unrepresented, a box with two
+// idle theatres seeded the alphabetically-first one every time, forever.
+
+TEST_CASE("wars task 7: the pool rotates — least-recently-used wins a tie") {
+    std::vector<TheatreOption> options = {
+        Theatre("alpha_ridge", "alpha_war", {"compact", "union"}),
+        Theatre("zeta_basin", "zeta_war", {"compact", "union"}),
+    };
+    // Equal on every prior key, so map id used to decide and `alpha_ridge`
+    // won forever. Now the one used longest ago does.
+    options[0].use.lastSeededAt = 9000;
+    options[1].use.lastSeededAt = 1000;
+    const auto* pick = ChooseDemandSeedTheatre(options, "compact", {"union"});
+    REQUIRE(pick != nullptr);
+    CHECK(pick->mapId == "zeta_basin");
+}
+
+TEST_CASE("wars task 7: a NEVER-seeded theatre goes first") {
+    // What makes newly shipped content get its turn instead of waiting for
+    // every incumbent to age past it. `0` is a distinct case, not a very old
+    // timestamp.
+    std::vector<TheatreOption> options = {
+        Theatre("alpha_ridge", "alpha_war", {"compact", "union"}),
+        Theatre("zeta_basin", "zeta_war", {"compact", "union"}),
+    };
+    options[0].use.lastSeededAt = 1;      // used once, long ago
+    options[1].use.lastSeededAt = 0;      // never
+    const auto* pick = ChooseDemandSeedTheatre(options, "compact", {"union"});
+    REQUIRE(pick != nullptr);
+    CHECK(pick->mapId == "zeta_basin");
+}
+
+TEST_CASE("wars task 7: rotation ranks BELOW spreading across empty maps") {
+    // Spreading wars onto a map nobody is fighting on is a stronger claim on
+    // variety than rotating onto one that is already busy.
+    std::vector<TheatreOption> options = {
+        Theatre("busy", "busy_war", {"compact", "union"}, 4, /*liveWars=*/2),
+        Theatre("quiet", "quiet_war", {"compact", "union"}, 4, /*liveWars=*/0),
+    };
+    options[0].use.lastSeededAt = 0;       // never used, but busy
+    options[1].use.lastSeededAt = 9000;    // used a moment ago, but empty
+    const auto* pick = ChooseDemandSeedTheatre(options, "compact", {"union"});
+    REQUIRE(pick != nullptr);
+    CHECK(pick->mapId == "quiet");
+}
+
+TEST_CASE("wars task 7: rotation never outranks fielding the right opponent") {
+    // A war seeded against a faction with nobody waiting is a war with one
+    // side in it. Variety is a tie-break, not a reason to build that.
+    std::vector<TheatreOption> options = {
+        Theatre("stale", "stale_war", {"compact", "raiders"}),
+        Theatre("fresh", "fresh_war", {"compact", "union"}),
+    };
+    options[0].use.lastSeededAt = 0;       // never used
+    options[1].use.lastSeededAt = 9999;    // used seconds ago
+    const auto* pick =
+        ChooseDemandSeedTheatre(options, "compact", {"union", "raiders"});
+    REQUIRE(pick != nullptr);
+    CHECK(pick->mapId == "fresh");
+}
+
+TEST_CASE("wars task 7: identical recency still deploys deterministically") {
+    std::vector<TheatreOption> options = {
+        Theatre("zeta", "zeta_war", {"compact", "union"}),
+        Theatre("alpha", "alpha_war", {"compact", "union"}),
+    };
+    options[0].use.lastSeededAt = 500;
+    options[1].use.lastSeededAt = 500;
+    CHECK(ChooseDemandSeedTheatre(options, "compact", {"union"})->mapId ==
+          "alpha");
+}
+
+TEST_CASE("wars task 7: LessRecentlyUsed is a rule about variety, not an order") {
+    CHECK(LessRecentlyUsed({0}, {5}));
+    CHECK_FALSE(LessRecentlyUsed({5}, {0}));
+    CHECK(LessRecentlyUsed({3}, {5}));
+    CHECK_FALSE(LessRecentlyUsed({5}, {5}));
+    // Two never-used theatres are equally fresh; the caller's next key
+    // decides, which is what keeps this from pretending to be a total order.
+    CHECK(SameRecency({0}, {0}));
+    CHECK(SameRecency({7}, {7}));
+    CHECK_FALSE(SameRecency({0}, {7}));
+}
+
+// ── §3's operator pick: adopting a war that already exists ────────────────
+
+TEST_CASE("wars task 7: a room's own sides become the Director's row") {
+    const WarSides sides = {{"compact", 0}, {"union", 4}};
+    const WarSideCapacities caps = {{"compact", 6}, {"union", 3}};
+    const WarSeedPlan plan =
+        PlanWarFromRoom("Raven Basin", "scorched_crossing_v2.4", "metalstorm",
+                        "crossing_standoff", sides, caps, WarOrigin::Operator);
+    REQUIRE(plan.ok);
+    CHECK(plan.theatre == "scorched_crossing_v2.4");
+    CHECK(plan.scenario == "crossing_standoff");
+    CHECK(plan.origin == WarOrigin::Operator);
+    REQUIRE(plan.sides.size() == 2);
+    // The SCENARIO's team numbers survive — not re-derived as 0/1. Handing
+    // this war {0,1} would put the union's whole army on a team nobody is
+    // seated on, which is §7.4's defect from the other end.
+    CHECK(plan.sides[0].team == 0);
+    CHECK(plan.sides[1].team == 4);
+    // …and the scenario's authored side widths, which a second sizing pass
+    // would silently discard.
+    CHECK(plan.sides[0].slotCap == 6);
+    CHECK(plan.sides[1].slotCap == 3);
+    CHECK(plan.TotalSlotCap() == 9);
+}
+
+TEST_CASE("wars task 7: a one-sided room is a skirmish, not a war to adopt") {
+    const WarSeedPlan plan =
+        PlanWarFromRoom("Solo", "map", "metalstorm", "", {{"compact", 0}}, {},
+                        WarOrigin::Operator);
+    CHECK_FALSE(plan.ok);
+    CHECK_FALSE(plan.error.empty());
+}
+
+TEST_CASE("wars task 7: an adopted side has no capacity opinion of its own") {
+    // A room that declared no capacities gets the default, not zero — zero is
+    // UNLIMITED everywhere else in this system, and adopting a war into
+    // unlimited sides would make its ` slotCap` sum unknowable (task 5).
+    const WarSeedPlan plan =
+        PlanWarFromRoom("W", "map", "metalstorm", "", {{"a", 0}, {"b", 1}}, {},
+                        WarOrigin::Operator);
+    REQUIRE(plan.ok);
+    CHECK(plan.sides[0].slotCap == WAR_SIDE_CAPACITY_DEFAULT);
 }

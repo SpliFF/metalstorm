@@ -39,6 +39,7 @@
 
 #include "WarDirector.h"
 #include "WarSides.h"
+#include "WarTheatrePool.h"
 
 /// What one faction's supply looks like right now, from the seeding side.
 struct FactionDemand {
@@ -109,6 +110,10 @@ struct TheatreOption {
     /// Live wars already being fought here. A tie-break toward variety: two
     /// wars on one map is a smaller world than two maps with one each.
     unsigned    liveWars = 0;
+    /// §3's pool rotation (task 7): when a war was last seeded here, or 0 for
+    /// never. Derived from `wars.theatre`/`created_at`, so it needs no cursor
+    /// and cannot go stale against a pool that grew a map.
+    TheatreUse  use;
 
     bool Fields(const std::string& faction) const {
         return std::find(factions.begin(), factions.end(), faction) !=
@@ -126,12 +131,35 @@ struct TheatreOption {
 /// answer to "nowhere to put this player" is to say so and leave `seed` a
 /// recommendation, exactly as it was before.
 ///
-/// Ordering among theatres that DO fit: the best-ranked opponent it can field
-/// first (so the war seeds against the faction with the longest queue), then
-/// fewest live wars, then most start boxes, then map id.
+/// Ordering among theatres that DO fit, in strict precedence:
+///
+///   1. the best-ranked opponent it can field — so the war seeds against the
+///      faction with the longest queue;
+///   2. fewest live wars — two wars on one map is a smaller world than two
+///      maps with one each;
+///   3. **least recently used** (§3's pool rotation, task 7), never-seeded
+///      first. This is the key that was missing, and its absence was invisible
+///      because the ordering LOOKED like a choice: with variety unrepresented,
+///      a box with two idle theatres seeded the alphabetically-first one every
+///      time, forever. Ranked below live-war count on purpose — spreading wars
+///      across maps that are currently empty is a stronger claim on variety
+///      than rotating onto a map that is already busy;
+///   4. most start boxes, then map id, so the same lobby state always seeds
+///      the same war and a seeded war is reproducible from its row.
+///
+/// Written as an explicit "is a better than b" rather than a chain of ||s on a
+/// running best, because that chain is what let a candidate's third key be
+/// compared against the incumbent's second.
 inline const TheatreOption* ChooseDemandSeedTheatre(
     const std::vector<TheatreOption>& options, const std::string& factionId,
     const std::vector<std::string>& rankedOpponents) {
+    auto opponentRank = [&](const TheatreOption& t) {
+        for (size_t i = 0; i < rankedOpponents.size(); ++i)
+            if (t.Fields(rankedOpponents[i]))
+                return i;
+        return rankedOpponents.size();
+    };
+
     const TheatreOption* best = nullptr;
     size_t bestRank = rankedOpponents.size();
     for (const auto& t : options) {
@@ -141,22 +169,25 @@ inline const TheatreOption* ChooseDemandSeedTheatre(
         // refuses the seed after we have already chosen it.
         if (t.startBoxCount > 0 && t.factions.size() > t.startBoxCount)
             continue;
-        size_t rank = rankedOpponents.size();
-        for (size_t i = 0; i < rankedOpponents.size(); ++i) {
-            if (t.Fields(rankedOpponents[i])) {
-                rank = i;
-                break;
-            }
-        }
+        const size_t rank = opponentRank(t);
         if (rank == rankedOpponents.size())
             continue;  // fields nobody worth fighting
-        if (best == nullptr || rank < bestRank ||
-            (rank == bestRank &&
-             (t.liveWars < best->liveWars ||
-              (t.liveWars == best->liveWars &&
-               (t.startBoxCount > best->startBoxCount ||
-                (t.startBoxCount == best->startBoxCount &&
-                 t.mapId < best->mapId)))))) {
+
+        bool better;
+        if (best == nullptr) {
+            better = true;
+        } else if (rank != bestRank) {
+            better = rank < bestRank;
+        } else if (t.liveWars != best->liveWars) {
+            better = t.liveWars < best->liveWars;
+        } else if (!SameRecency(t.use, best->use)) {
+            better = LessRecentlyUsed(t.use, best->use);
+        } else if (t.startBoxCount != best->startBoxCount) {
+            better = t.startBoxCount > best->startBoxCount;
+        } else {
+            better = t.mapId < best->mapId;
+        }
+        if (better) {
             best = &t;
             bestRank = rank;
         }

@@ -26,6 +26,7 @@
 #include "Server/WarDemandSeed.h"
 #include "Server/WarSeeding.h"
 #include "Server/WarLifecycleSweep.h"
+#include "Server/WarTheatrePool.h"
 #include "Server/WarOutcome.h"
 #include "Server/WarSideMaintenance.h"
 #include "Server/WarSlotReservation.h"
@@ -530,6 +531,15 @@ static unsigned warPlayerSlotCap(const GameRoom &room) {
     return 0;
   return playerslots::TotalSlotCap(room.SideTeams(), room.SideCapacities(),
                                    WAR_SIDE_CAPACITY_DEFAULT);
+}
+
+/// The scenario a room was created with, or empty. RoomManager is
+/// deliberately scenario-agnostic (see its header) — the scenario travels as
+/// an ordinary modoption, written once by `applyRoomScenario` (§7.3), so this
+/// is a lookup rather than a field.
+static std::string scenarioOf(const GameRoom &room) {
+  const auto it = room.modOptions.find("scenario");
+  return it == room.modOptions.end() ? std::string() : it->second;
 }
 
 static GameServerInstance spawnGameServer(
@@ -4634,6 +4644,54 @@ int main(int argc, char *argv[]) {
     persistGameServer(inst);
     room.gameServerPort = inst.port;
     rooms.PersistRoomGameSession(room.id);
+
+    // ── Adopt the war (PLAN-metalstorm-wars.md §3, task 7) ────────────────
+    //
+    // §3's "operator pick": a war created the way a player or an operator
+    // creates one. It has always worked as a war and has never had a `wars`
+    // row — `Register` was called from exactly one place, the demand seeder.
+    // Every consequence of that only appears once something reads the
+    // Director's table as the population of live wars, and then they arrive
+    // together: the §7 lifecycle sweep iterates `ListLive`, so such a war
+    // could never wind down or archive however decisively its victory
+    // objective resolved; `WarsFielding` counted none of them, so the brake
+    // that makes demand seeding self-limiting was reading a fraction of the
+    // truth; and §5's "freshest" tie-break had no creation stamp.
+    //
+    // Registered from the room's OWN sides rather than by re-running
+    // `PlanWarSeed`, for the reason `ReconcileSeededSides` records: the
+    // scenario is the authority on which team a side sits on, and a second
+    // sizing pass here would disagree with the process just launched.
+    //
+    // Idempotent — `Register` upserts — so a war that hibernates and respawns
+    // re-asserts its row rather than duplicating it. A war the Director
+    // already knows keeps the STATE it has: `SetState(Open)` is refused from
+    // `winding_down` by `IsLegalWarTransition`, so a respawn cannot reopen a
+    // war that was ending.
+    if (room.sessionKind == SessionKind::PersistentWar) {
+      const auto plan = PlanWarFromRoom(
+          room.name, room.mapId, room.gameId, scenarioOf(room),
+          room.SideTeams(), room.SideCapacities(), WarOrigin::Operator);
+      if (!plan.ok) {
+        SLOG(SPRING_LOG_NOTICE,
+             "war room %u not adopted by the Director: %s", room.id,
+             plan.error.c_str());
+      } else {
+        const bool fresh = !WarDirector::Load(mapDb, room.id).has_value();
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (fresh)
+          WarDirector::Register(mapDb, room.id, plan, now);
+        WarDirector::SetState(mapDb, room.id, WarState::Open, now);
+        WarDirector::RecordSpawnedSlotCap(mapDb, room.id,
+                                          warPlayerSlotCap(room));
+        if (fresh)
+          SLOG(SPRING_LOG_NOTICE,
+               "war room %u adopted by the Director: theatre '%s' scenario "
+               "'%s', %zu side(s)",
+               room.id, plan.theatre.c_str(), plan.scenario.c_str(),
+               plan.sides.size());
+      }
+    }
     // Audit the process spawn (G10 / §3): who started which game/map on what
     // port. Append-only admin_audit row.
     auto starter = db.FindUserById(userId);
@@ -4931,6 +4989,24 @@ int main(int argc, char *argv[]) {
     // that is the whole point of holding one.
     const auto registered = db.CountAccountsByFaction();
     std::unordered_map<std::string, unsigned> openSlots;
+    // §3's LRU input, over EVERY war this box ever seeded — archived ones
+    // included, deliberately. A theatre that hosted a war which ended an hour
+    // ago has been used more recently than one that has never been touched,
+    // and counting only live wars would rotate straight back onto the map the
+    // players just left.
+    std::unordered_map<std::string, int64_t> theatreLastUsed;
+    {
+      sqlite3_stmt *st = nullptr;
+      if (sqlite3_prepare_v2(
+              mapDb, "SELECT theatre, MAX(created_at) FROM wars GROUP BY theatre",
+              -1, &st, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW)
+          if (const unsigned char *m = sqlite3_column_text(st, 0))
+            theatreLastUsed[reinterpret_cast<const char *>(m)] =
+                sqlite3_column_int64(st, 1);
+      }
+      sqlite3_finalize(st);
+    }
     std::unordered_map<std::string, unsigned> liveWarsOnMap;
     for (const auto *room : rooms.GetAllRooms()) {
       if (!room || room->sessionKind != SessionKind::PersistentWar)
@@ -4998,6 +5074,12 @@ int main(int argc, char *argv[]) {
           static_cast<unsigned>(mdb.GetMap(mapDb, info.mapId).startPositions.size());
       const auto it = liveWarsOnMap.find(info.mapId);
       t.liveWars = it == liveWarsOnMap.end() ? 0u : it->second;
+      // §3's pool rotation (task 7). No cursor: `wars` already records every
+      // war ever seeded and which theatre it was on, so "when was this map
+      // last used" is a read of the world rather than something to remember
+      // — and a pool that grows a map cannot disagree with it.
+      const auto lu = theatreLastUsed.find(info.mapId);
+      t.use.lastSeededAt = lu == theatreLastUsed.end() ? 0 : lu->second;
       theatres.push_back(std::move(t));
     }
     const TheatreOption *pick =
@@ -5101,9 +5183,27 @@ int main(int argc, char *argv[]) {
           return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
         const std::string faction = user->factionId.value_or("");
 
+        // §5's first ranking key. Read ONCE for the whole ranking rather than
+        // per war: the graph is per-account and does not change while we rank,
+        // and `MutualIds` is a join the loop below would otherwise re-run for
+        // every live war on the box.
+        std::set<int64_t> myFriends;
+        for (const int64_t fid : Friends::MutualIds(db.Handle(), userId))
+          myFriends.insert(fid);
+
         std::vector<DeployCandidate> candidates;
         for (const auto *room : rooms.GetAllRooms()) {
           if (!room || room->sessionKind != SessionKind::PersistentWar)
+            continue;
+          // The Director's row, read once for two things. An archived war is
+          // history, not a destination (§7) — without that check the ranking
+          // would happily send a volunteer at a war that ended last Tuesday,
+          // whose side looks pleasantly empty precisely because its bindings
+          // are still in the table. A room with no `wars` row at all is a
+          // persistent room the Director never registered; it still ranks,
+          // it just has no creation stamp to be "freshest" on.
+          const auto directorRow = WarDirector::Load(mapDb, room->id);
+          if (directorRow && !directorRow->IsLive())
             continue;
           const auto sides = room->SideTeams();
           const auto team = TeamForFactionIn(sides, faction);
@@ -5122,6 +5222,9 @@ int main(int argc, char *argv[]) {
             boundPerTeam[b.team]++;
             if (b.accountId == static_cast<int64_t>(userId))
               c.iAmBound = true;
+            // On ANY side, deliberately — see DeployCandidate::friendsPresent.
+            else if (myFriends.count(b.accountId))
+              c.friendsPresent++;
           }
           if (team) {
             const int t = static_cast<int>(*team);
@@ -5143,7 +5246,15 @@ int main(int argc, char *argv[]) {
           if (warSummaryFor(room->id, live)) {
             for (const auto &ls : live.sides)
               c.liveHumans += ls.humans;
+            // §5's "highest-stakes". Absent for a war whose server is down,
+            // which costs it a tie-break and nothing more.
+            c.stakes = live.stakes;
           }
+          // §5's "freshest", off the war object rather than the room: the
+          // `wars` row is the only thing that records when the WAR began, and
+          // it is stamped once at Register.
+          if (directorRow)
+            c.createdAt = directorRow->createdAt;
           candidates.push_back(c);
         }
 
@@ -5199,6 +5310,12 @@ int main(int argc, char *argv[]) {
         j["outcome"] = DeployOutcomeToString(d.outcome);
         j["faction"] = faction;
         j["underdog_by"] = d.underdogBy;
+        // §5's rejoin fall-through, surfaced rather than inferred: "you were
+        // sent somewhere other than your own front, and here is why" is the
+        // one sentence that keeps this from reading as a bug to the veteran it
+        // happens to.
+        if (d.rejoinFellThrough)
+          j["rejoin_fell_through"] = true;
         if (d.roomId != 0) {
           j["room_id"] = d.roomId;
           if (const auto *room = rooms.GetRoom(d.roomId))

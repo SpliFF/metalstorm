@@ -91,6 +91,12 @@ struct WarSummary {
     /// the same way every other surface does.
     std::vector<WarSideSummary> sides;
     WarControlSummary control;
+    /// §5's "highest-stakes" ranking key: the total authority riding on this
+    /// war's UNRESOLVED objectives — each one's published reward, which
+    /// `game_objectives.lua` already folds its staked bounties into. A measure
+    /// of how much is at issue right now, and one nobody tunes: it is
+    /// authority players have committed plus the board's own rewards.
+    double stakes = 0.0;
     /// Whether the foothold census above is usable at all. False for a war
     /// with no scenario or one declaring no start regions, and read by the
     /// Director as "cannot tell" rather than "everybody is eliminated".
@@ -124,8 +130,8 @@ inline WarSummary BuildWarSummary(const WarSides& sides,
                                   const std::vector<WarSummaryPlayer>& players,
                                   const std::vector<WarSummaryRegion>& regions,
                                   int frame, int64_t uptimeSec,
-                                  const std::vector<WarSideFootholds>& footholds =
-                                      {}) {
+                                  const std::vector<WarSideFootholds>& footholds = {},
+                                  double stakes = 0.0) {
     WarSummary s;
     s.frame = frame;
     s.uptimeSec = uptimeSec;
@@ -158,6 +164,7 @@ inline WarSummary BuildWarSummary(const WarSides& sides,
     // census are both built from the same declaration order today, but a
     // positional join would silently mis-attribute the moment either grew a
     // side the other did not.
+    s.stakes = stakes;
     s.footholdsKnown = !footholds.empty();
     for (const auto& f : footholds)
         for (auto& side : s.sides)
@@ -190,6 +197,7 @@ inline std::string EncodeWarSummary(const WarSummary& s) {
         j["sides"].push_back(std::move(sj));
     }
     j["footholds_known"] = s.footholdsKnown;
+    j["stakes"] = s.stakes;
     j["control"] = {{"total", s.control.total},
                     {"contested", s.control.contested},
                     {"neutral", s.control.neutral}};
@@ -231,6 +239,7 @@ inline bool DecodeWarSummary(const std::string& text, WarSummary& out) {
         s.sides.push_back(std::move(side));
     }
     s.footholdsKnown = j.value("footholds_known", false);
+    s.stakes = j.value("stakes", 0.0);
     if (j.contains("control") && j["control"].is_object()) {
         s.control.total = j["control"].value("total", 0u);
         s.control.contested = j["control"].value("contested", 0u);
