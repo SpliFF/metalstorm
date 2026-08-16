@@ -1006,6 +1006,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
               f"{len(network.junctions)} junctions; length by class: {_mix})")
         print(f"yard pads: {len(yard_pads)} prepared, "
               f"{len(yard_refusals)} station(s) refused")
+        yd.report_pad_refusals(yard_refusals)
         yd.report_pad_relief(h, yard_pads, cell)
         # ...and the ramp INTO each pad, which the relief report cannot see:
         # a plateau is flat by construction and can still sit above an

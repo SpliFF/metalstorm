@@ -186,6 +186,29 @@ class PlannedPads(unittest.TestCase):
                                            road_params=RP)
         self.assertEqual((pads, refusals), ([], []))
 
+    def test_a_map_with_no_pads_says_why(self):
+        """`report_pad_refusals` is the only instrument a padless map has.
+
+        `report_pad_relief` and `report_pad_ramps` both print one line per PAD,
+        so a map where every station was refused (Skerry Reach: 58 refused, 0
+        prepared) prints exactly what a map nobody surveyed prints. The
+        histogram is what tells those apart, and the measured reason is folded
+        so the count is a count rather than 58 distinct relief figures.
+        """
+        h, net, raster = flat_net()
+        zz = np.arange(h.shape[0])[:, None]
+        h = h + (zz % 2) * 400.0                 # saw-tooth: every station a cliff
+        _pads, refusals = yd.plan_yard_pads(net, h, raster, CELL, 0.0,
+                                            road_params=RP)
+        tally = yd.report_pad_refusals(refusals)
+        self.assertEqual(sum(n for _r, n in tally), len(refusals))
+        self.assertTrue(any("relief" in reason for reason, _n in tally), tally)
+        # the fold: one row for a reason that carries a different number each time
+        relief_rows = [r for r in tally if "relief" in r[0]]
+        self.assertEqual(len(relief_rows), 1, tally)
+        self.assertGreater(relief_rows[0][1], 1, "the measurement was not folded")
+        self.assertEqual(yd.report_pad_refusals([]), [])
+
     def test_the_frontage_class_filter_excludes_a_class(self):
         p = yd.YardParams(classes=(rd.ROAD_HIGHWAY,))
         pads, _r = yd.plan_yard_pads(self.net, self.h, self.raster, CELL, 0.0,
