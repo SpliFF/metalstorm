@@ -227,10 +227,21 @@ describe('applyAtFrame stub (§7, no-op until PLAN-latency L1) — soa', () => {
   });
 });
 
-describe('OO engine is untouched by default (§10a)', () => {
-  it('a plain SquadManager (no engine override) still builds real Squad instances', () => {
+describe('SoA is the default engine (§14 S7); OO is still selectable', () => {
+  it('a plain SquadManager (no engine override) now builds store-backed SquadRec instances', () => {
     const backend = new RecordingBackend();
     const mgr = new SquadManager(backend);
+    expect(mgr.engine).toBe('soa');
+    expect(mgr.store).not.toBeNull();
+    mgr.syncSquad(1, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef({ squadSize: 3 }));
+    const sq = mgr.squads.get(1);
+    expect(Array.isArray(sq.members)).toBe(false);
+    expect(countSlots(mgr, sq, (store, i) => isAlive(store, i))).toBe(3);
+  });
+
+  it('engine: "oo" still builds real Squad instances (escape hatch, §10a)', () => {
+    const backend = new RecordingBackend();
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     expect(mgr.engine).toBe('oo');
     expect(mgr.store).toBeNull();
     mgr.syncSquad(1, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef({ squadSize: 3 }));

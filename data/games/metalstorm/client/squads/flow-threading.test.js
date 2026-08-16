@@ -60,7 +60,7 @@ const STEPS = Math.ceil((END_X - START_X) / CROSS_SPEED / DT) + 30; // a little 
  */
 function runCrossingScene(moveClass, crossZ = 0) {
   const backend = new FlatGroundBackend();
-  const manager = new SquadManager(backend);
+  const manager = new SquadManager(backend, { engine: 'oo' });
   const def = { ...SQUAD_DEF, moveClass };
 
   manager.registerBigUnit(100, QUAD_WALKER_L);

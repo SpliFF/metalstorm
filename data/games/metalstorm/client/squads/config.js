@@ -297,11 +297,12 @@ export const DEFAULT_CONFIG = {
   governorRelaxFrames: 240,
 
   // --- SoA engine (PLAN-metalstorm-squad-performance.md §10) ---------------
-  // 'oo' (default) keeps every squad on the Squad/Member classes above;
-  // 'soa' routes construction/sync/casualty/LOD through soa-squad.js's
-  // store-backed SquadRec instead (S3 — no stepping kernel yet, S4 adds it;
-  // the default flips at S7). Same SquadManager public API either way.
-  engine: 'oo',
+  // 'soa' (default since S7 — PLAN-metalstorm-squad-performance.md §14 S7)
+  // routes construction/sync/casualty/LOD through soa-squad.js's store-backed
+  // SquadRec + soa-kernel.js's array kernel. 'oo' (Squad/Member classes above)
+  // is retained as the S6 parity oracle and as an escape hatch
+  // (`config.engine: 'oo'`). Same SquadManager public API either way.
+  engine: 'soa',
   // Initial member-array pool capacity (soa-store.js); doubles on overflow.
   soaInitialMembers: 4096,
 
