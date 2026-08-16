@@ -13,8 +13,9 @@
  *
  * NOTE: this module is the source of truth the GW4-c1…c6 cut builds against; it
  * is intentionally landed first (spec-first) and has no runtime behaviour. The
- * worker (lua-widget-worker.ts, evolving into the game-processor worker) and the
- * manager (lua-widget-manager.ts) import these as they take on each role.
+ * worker (lua-widget-worker.ts, evolving into the game-processor worker) imports
+ * these as it takes on each role; the main-thread lua-widget-manager.ts it
+ * replaced was retired post-GW4.
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
@@ -687,8 +688,9 @@ export type GpMessageToMain =
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
      *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect
-     *  on main. Both the game-processor worker and legacy LuaWidgetManager paths
-     *  post this shape; main.ts and lua-widget-manager.ts handle it identically. */
+     *  on main. The game-processor worker posts this shape; the legacy
+     *  LuaWidgetManager path that used to post it identically was retired
+     *  post-GW4. */
     | { type: 'storage:set'; key: string; value: string }
     /**
      * Drag-select rectangle for the main-thread overlay div (GW4-c5b-2). The

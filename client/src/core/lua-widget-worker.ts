@@ -8,9 +8,9 @@
  *   - gp-context.ts      — shared mutable seam refs (connection, renderers…)
  *   - worker-vfs.ts      — VFS lookup, prefetch, Lua source constants
  *
- * The entry file must remain `core/lua-widget-worker.ts` — main.ts and
- * lua-widget-manager.ts both bundle it by that path (anchor:
- * `import GameWorker from './core/lua-widget-worker.ts?worker'`).
+ * The entry file must remain `core/lua-widget-worker.ts` — main.ts bundles
+ * it by that path (`import GameWorker from './core/lua-widget-worker.ts?worker'`).
+ * The retired lua-widget-manager.ts used to bundle it identically.
  *
  * Extracted as part of PLAN-refactor-p3.md WP2c.
  */

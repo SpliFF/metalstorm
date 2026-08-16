@@ -1049,8 +1049,9 @@ function domButtonToSpring(b: number): number {
 
 /** KeyboardEvent.code → Spring/SDL keysym. Named keys are mapped; letters,
  *  digits and numpad digits fall back to the ASCII code of the character they
- *  produce (matching the lua-widget-manager springKeyCode table on main, which
- *  worked off `.key` — here we derive the same numbers from `.code`). */
+ *  produce (matching the springKeyCode table the retired lua-widget-manager
+ *  used to carry, which worked off `.key` — here we derive the same numbers
+ *  from `.code`). */
 function codeToSpringKeysym(code: string): number {
     const m: Record<string, number> = {
         Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, Escape: 27, Space: 32,

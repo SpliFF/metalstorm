@@ -646,8 +646,9 @@ export class Minimap {
 
     /**
      * Set the on-screen rect for the minimap canvas in DOM-space pixels
-     * (top-left origin). Called by lua-widget-manager after translating
-     * the widget's Spring-space ConfigMiniMap call into DOM-space.
+     * (top-left origin). Called from main.ts's `minimapGeometry` handler
+     * after the worker (lua-ui-host.ts) translates the widget's
+     * Spring-space ConfigMiniMap call into DOM-space and posts it over.
      * Triggers a Babylon engine resize (debounced via rAF) only when the
      * pixel dimensions actually change — repositioning alone is free.
      */
@@ -714,10 +715,11 @@ export class Minimap {
             && clientY >= g.y && clientY < g.y + g.h;
     }
 
-    /** Called by lua-widget-manager whenever a widget invokes
-     *  `gl.DrawMiniMapEvents`. The events layer is suppressed in
-     *  widget-owned mode unless this was set within `eventsRequestTtlMs`
-     *  — letting a widget mute pings without owning the data itself. */
+    /** Called by main.ts whenever a widget invokes `gl.DrawMiniMapEvents`
+     *  (lua-gl-bridge.ts in the worker forwards the call over). The events
+     *  layer is suppressed in widget-owned mode unless this was set within
+     *  `eventsRequestTtlMs` — letting a widget mute pings without owning
+     *  the data itself. */
     markEventsRequested(): void {
         this.eventsRequestedAt = performance.now();
     }
@@ -730,10 +732,10 @@ export class Minimap {
     }
 
     /** Push a player-marker ping into the events layer. Fired when the
-     *  widget worker invokes `Spring.MarkerAddPoint`/`MarkerAddLine`;
-     *  the worker posts a message back to the main thread (via
-     *  `lua-widget-manager`) which calls this. Line markers push one
-     *  ping per endpoint so the cyan dots bracket the line. */
+     *  game-processor worker invokes `Spring.MarkerAddPoint`/`MarkerAddLine`
+     *  (lua-ui-host.ts); the worker posts a `minimapMarker` message back
+     *  to the main thread, whose handler calls this. Line markers push
+     *  one ping per endpoint so the cyan dots bracket the line. */
     pushMarkerPing(p: { x: number; z: number }): void {
         this.pushPing(p.x, p.z, 'marker');
     }
