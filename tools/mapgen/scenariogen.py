@@ -52,11 +52,52 @@ a variation, and the generator refuses to write the file rather than shipping it
   4. Determinism. Same seed + same map + same generator version ⇒ byte-identical
      output. Every rule that makes that true is listed at RULES OF DETERMINISM
      below; each one is a real failure mode, not advice.
-  5. The war is winnable ON THAT MAP: both sides' spawns and the victory
-     region are mutually reachable on the passability mask, for EVERY movement
-     class the emitted roster contains — not just the default VEH. A roster
-     carrying HEAVY units graded only on VEH reproduces the Meridian failure
-     one class down.
+  5. The war is winnable ON THAT MAP — but "winnable" is not one claim, and
+     only part of it is universal. Everything here is graded on the passability
+     mask for EVERY movement class the emitted roster contains, never just the
+     default VEH: a roster carrying HEAVY units graded only on VEH reproduces
+     the Meridian failure one class down.
+
+     ALWAYS, on every path, no exceptions:
+       * nothing the scenario labels — a landing zone, the victory objective —
+         stands on impassable ground (`component -1`). That is not a map shape
+         a boat gets around, it is a position on terrain the class cannot
+         occupy;
+       * no side's home region is without ground its own roster can move on. A
+         side that cannot move the instant it lands is not an army;
+       * blocking decoration takes nothing away. A wreck field may not bury a
+         labelled point, and may not sever two points that shared a component
+         of the bare map. Decoration may not decide the war.
+
+     CONDITIONALLY, and this is conditional on what the scenario is FOR rather
+     than on what the map looks like — `generate(..., test_scenario=...)`:
+       * mutual ground reachability between both landing zones and the victory
+         objective. Enforced for a TEST scenario (the DEFAULT: the automated
+         suites, CI, any headless war), because a machine-run match between two
+         armies that can never meet does not fail, it stalemates forever with
+         nobody watching. The refusal is visible; the stalemate is not.
+       * dropped for a PLAYER scenario (`--player` / `test_scenario=False`).
+         A map whose landing zones lie in different components of the mask —
+         islands, a river, a strait — is a LEGITIMATE map, and the crossing is
+         a transport problem rather than a defect. Refusing those refuses a map
+         genre. `want_comp` goes with the gate: with no shared component to
+         name, the victory objective is chosen on value alone and
+         `region_anchor` is called without a component constraint, because a
+         component invented for a split map would silently exclude every
+         objective on every other island.
+
+     WHAT THE PLAYER PATH DOES NOT PROMISE. It does not make a split map
+     fightable — it only stops calling it broken. The one transport in the
+     content is `ms_landing_ship` (SHIP, capacity 4,
+     data/games/metalstorm/units/transports.lua:20); there is no air transport,
+     and no AI behaviour that loads, ferries or lands a squad. A human can
+     solve the crossing by hand; the NPC brain currently cannot, so an NPC
+     cluster on the far side of water is scenery. Making that work is a content
+     and AI job, not a gate.
+
+     Which mode a run used is stated in the summary, in the generation metadata
+     (`test_scenario`) and in a header comment in the emitted file. It is never
+     inferable only from what is missing.
 
   ...plus the placement rule that has already cost one debugging session:
      nothing spawns inside a building's blocked yardmap. A unit on a
@@ -728,7 +769,7 @@ def _rank_regions(regions: list[dict], barred: set[str], occupied: set[str],
 
 
 def place_sites(rnd, terrain: Terrain, facts, regions: list[dict],
-                want_comp: dict[str, int], count: int, barred: set[str],
+                want_comp: dict[str, int] | None, count: int, barred: set[str],
                 occupied: set[str], placed: list[Building],
                 placed_units: list[tuple[int, int, object]],
                 names: set[str]) -> list[dict]:
@@ -833,7 +874,7 @@ def _water_within(terrain: Terrain, x: float, z: float, reach: float) -> bool:
 
 
 def place_relics(rnd, terrain: Terrain, facts, fdefs, regions: list[dict],
-                 want_comp: dict[str, int], count: int, barred: set[str],
+                 want_comp: dict[str, int] | None, count: int, barred: set[str],
                  occupied: set[str], placed: list[Building],
                  placed_units: list[tuple[int, int, object]],
                  names: set[str], guardian_team) -> list[dict]:
@@ -1155,8 +1196,9 @@ def find_crossing(terrain: Terrain, region: dict, pitch: float
 # ==========================================================================
 
 def gate_reachability(terrain: Terrain, points: list[tuple[str, int, int]],
-                      map_id: str) -> dict[str, int]:
-    """Every labelled point mutually reachable, on the MASK, for EVERY class.
+                      map_id: str, *,
+                      mutual: bool = True) -> dict[str, int] | None:
+    """Every labelled point on real ground, and — if `mutual` — mutually reachable.
 
     Checked against the passability mask, never against the region graph. That
     distinction is the entire lesson of Meridian Basin: regions are coarse
@@ -1165,21 +1207,53 @@ def gate_reachability(terrain: Terrain, points: list[tuple[str, int, int]],
     each only touch a different pocket of — it reported Meridian as fine, the
     exact map whose start positions provably cannot meet.
 
-    Returns the component id per class, for callers that must place further
-    things in the same component.
+    TWO DIFFERENT CLAIMS, and only one of them is universal.
+
+    `component -1` — a labelled point with no passable sample anywhere near it —
+    is refused in BOTH modes. That is not a map shape, it is a placement on
+    ground nothing can stand on, and no amount of transport fixes it.
+
+    Mutual reachability is refused only when `mutual` is set, which is what a
+    TEST scenario is: a war run by machines, where two armies in different
+    components make a headless match that never resolves. A map whose landing
+    zones lie on separate islands is a legitimate PLAYER map — the crossing is
+    a transport problem, not a defect — so the player path passes
+    `mutual = False` and this gate stops judging the map's shape.
+
+    Defaults to `mutual = True` deliberately: the automated suites and any
+    headless war keep the gate without opting in, and only a caller that has
+    said out loud "this is for a human" loses it.
+
+    Returns the component id per class when `mutual` — for callers that must
+    place further things in the same component — and `None` when not. `None` is
+    not "no constraint I could be bothered to compute": on a split map there is
+    no shared component, and inventing one would silently exclude every
+    objective outside one arbitrary island.
     """
     want: dict[str, int] = {}
     for mclass in terrain.classes:
+        groups: dict[int, list[str]] = {}
+        for label, x, z in points:
+            groups.setdefault(terrain.component_at(x, z, mclass), []).append(label)
+
+        # Universal, both modes: a point on ground that is not ground.
+        if -1 in groups:
+            raise Rejected(
+                f"{map_id}: for the {mclass} movement class these positions "
+                f"are not on passable ground at all: "
+                f"{', '.join(sorted(groups[-1]))}. This is not a map that "
+                f"needs a boat, it is a placement on terrain nothing of that "
+                f"class can stand on.")
+
+        if not mutual:
+            continue
+
         # regions_from_map's own verify_starts stays the arbiter of pass/fail;
-        # the labelled grouping below exists only to make the message name
+        # the labelled grouping above exists only to make the message name
         # WHICH of our points is stranded, which bare indices cannot.
         ok, _msg, _ids = verify_starts(
             terrain.masks[mclass], terrain.comps[mclass], terrain.W, terrain.H,
             [(x, z) for _l, x, z in points])
-
-        groups: dict[int, list[str]] = {}
-        for label, x, z in points:
-            groups.setdefault(terrain.component_at(x, z, mclass), []).append(label)
 
         if not ok:
             detail = "; ".join(
@@ -1192,14 +1266,18 @@ def gate_reachability(terrain: Terrain, points: list[tuple[str, int, int]],
                 f"{len(groups)} disconnected components of the passability "
                 f"mask. {detail}. This war could not be fought: those armies "
                 f"can never meet. (This is the exact defect that made "
-                f"meridian_basin unplayable.)")
+                f"meridian_basin unplayable.) This refusal is specific to a "
+                f"TEST scenario, which is run by machines and would otherwise "
+                f"stalemate forever unwatched; the same map generates for a "
+                f"human player, who can see the water.")
         want[mclass] = next(iter(groups))
-    return want
+    return want if mutual else None
 
 
 def gate_blocking_features_leave_the_war_fightable(
         terrain: Terrain, rects: list[tuple[float, float, float, float]],
-        points: list[tuple[str, int, int]], map_id: str) -> None:
+        points: list[tuple[str, int, int]], map_id: str, *,
+        mutual: bool = True) -> None:
     """Invariant 5, re-checked with the wreck field ON the map.
 
     `features/wrecks.lua` sets `blocking = true` — that is what makes a wreck
@@ -1213,20 +1291,64 @@ def gate_blocking_features_leave_the_war_fightable(
     ground the map's chokepoints are on. A field that severs the only route
     between two armies is the Meridian defect re-created out of decoration.
 
+    THE POINT OF THIS GATE SURVIVES BOTH MODES — decoration may not decide the
+    war — but on the player path the question it asks is narrower, because
+    "these points are in different components" is no longer a defect there.
+    What it checks instead is that the wreck field TOOK NOTHING AWAY:
+
+      * no labelled point may be buried (component -1) by a wreck dropped on it;
+      * any two points that shared a component BEFORE the field must still
+        share one after it.
+
+    A field that severs a component the armies were already going to cross by
+    sea is not the Meridian defect and is allowed through. A field that strands
+    a side inside its own landing zone — cutting it off from ground it could
+    drive to a moment ago — still is, and is refused on both paths.
+
+    In `mutual` mode the two formulations coincide: every point started in one
+    component, so "no pair may be split" is exactly "all still in one".
+
     Cheaper than it looks, and deliberately not optimised into a patch: removing
     samples can SPLIT a component, so the components are recomputed from the
     stamped mask rather than edited.
     """
     if not rects:
         return
-    try:
-        gate_reachability(terrain.blocked_copy(rects), points, map_id)
-    except Rejected as e:
-        raise Rejected(
-            f"the wreck field makes this war unfightable — {e}\n"
-            f"  {len(rects)} blocking feature(s) were placed on contested "
-            f"ground and at least one of them walls off the route between the "
-            f"armies. Wrecks are decoration; they may not decide the war.")
+    if mutual:
+        try:
+            gate_reachability(terrain.blocked_copy(rects), points, map_id)
+        except Rejected as e:
+            raise Rejected(
+                f"the wreck field makes this war unfightable — {e}\n"
+                f"  {len(rects)} blocking feature(s) were placed on contested "
+                f"ground and at least one of them walls off the route between "
+                f"the armies. Wrecks are decoration; they may not decide the "
+                f"war.")
+        return
+
+    after = terrain.blocked_copy(rects)
+    for mclass in terrain.classes:
+        before_ids = [terrain.component_at(x, z, mclass) for _l, x, z in points]
+        after_ids = [after.component_at(x, z, mclass) for _l, x, z in points]
+        for i, (label, _x, _z) in enumerate(points):
+            if after_ids[i] < 0:
+                raise Rejected(
+                    f"{map_id}: the wreck field makes this war unfightable — a "
+                    f"blocking feature was dropped onto '{label}' itself: for "
+                    f"{mclass} there is no passable ground left under it. "
+                    f"Wrecks are decoration; they may not decide the war.")
+            for j in range(i + 1, len(points)):
+                if before_ids[i] != before_ids[j]:
+                    continue        # already a crossing — the field did not do that
+                if after_ids[i] != after_ids[j]:
+                    raise Rejected(
+                        f"{map_id}: the wreck field makes this war unfightable "
+                        f"— for {mclass}, '{label}' and '{points[j][0]}' shared "
+                        f"a component of the bare map and the "
+                        f"{len(rects)} blocking feature(s) placed on contested "
+                        f"ground severed it. That is not the sea between two "
+                        f"islands, it is a side stranded by scenery: wrecks are "
+                        f"decoration, they may not decide the war.")
 
 
 def gate_no_unit_in_a_footprint(unit_points: list[tuple[str, float, float]],
@@ -1384,8 +1506,34 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
              sites: int = 3, relics: int = 1, wrecks: int = 5,
              bridges: int = 1,
              hostility: str = "mixed", roster: str = "standard",
-             version: int = GENERATOR_VERSION, game_dir: str | None = None):
-    """Build one scenario. Returns `(lua_source, meta)`. Raises `Rejected`."""
+             version: int = GENERATOR_VERSION, game_dir: str | None = None,
+             test_scenario: bool = True):
+    """Build one scenario. Returns `(lua_source, meta)`. Raises `Rejected`.
+
+    `test_scenario` is what invariant 5 is conditional on — see the module
+    docstring. It says who this scenario is FOR, not what the map looks like:
+
+      True  (the default) — a scenario a MACHINE will run: the automated
+            suites, a headless war, CI. Both landing zones and the victory
+            objective must be mutually reachable on the passability mask for
+            every staged movement class, or generation refuses. Two armies that
+            cannot meet make a headless match that never resolves, and nobody
+            is watching to notice.
+
+      False — a scenario a HUMAN will play. Islands, rivers and straits are
+            legitimate maps; the crossing is a transport problem, and refusing
+            to generate for them is refusing to ship a map genre. The mutual-
+            reachability gate is dropped and `want_comp` goes with it.
+
+    Defaulting to True is the load-bearing half of that: a test scenario that
+    quietly generated WITHOUT the gate is worse than one that refuses, because
+    the refusal is visible and the stalemate is not. Nothing has to opt in to
+    be safe; only the player path opts out.
+
+    Two refusals survive in BOTH modes, because no transport fixes them: a
+    labelled point on impassable ground, and a home region containing no ground
+    passable for its own roster.
+    """
     import random
     rnd = random.Random(seed)
 
@@ -1466,6 +1614,10 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # judges them. Filtering them by component first would be a rubber stamp:
     # the gate could then never fail, and the failure it exists to catch would
     # resurface as the far vaguer "this region has no usable ground".
+    #
+    # This refusal is UNCONDITIONAL — a home region with no ground its own
+    # roster can drive on is not a map a boat rescues, it is a side that cannot
+    # move at the moment it lands.
     side_anchors = []
     for r in side_regions:
         a = region_anchor(terrain, r)
@@ -1476,15 +1628,27 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                 f"armies staged there could not move at all.")
         side_anchors.append(a)
 
+    # `want_comp` is a dict in test mode and None on the player path, where
+    # there may be no shared component to name. Every consumer below is a
+    # `region_anchor(..., want_comp)` call, and None there means exactly what it
+    # says: no component requirement, choose on value alone.
     want_comp = gate_reachability(
         terrain,
         [(f"side {i} landing zone ({r['key']})", a[0], a[1])
          for i, (r, a) in enumerate(zip(side_regions, side_anchors))],
-        map_id)
+        map_id, mutual=test_scenario)
 
     # --- victory region -----------------------------------------------------
     # Highest value, not a home, reachable in the graph from every side, and
     # preferring a chokepoint (`value` already lifts central and choke ground).
+    #
+    # `want_comp` is threaded through as-is and is None on the player path,
+    # which is `region_anchor`'s own default — the third argument is DROPPED,
+    # not replaced. That is deliberate and it is the whole of the ruling on
+    # this call: a component invented for a split map (say, whichever island
+    # side 0 happened to land on) would silently exclude every objective on
+    # every other island, and the picker would report "no winnable objective"
+    # about a map full of them. Chosen on value alone instead.
     reach = [hop_distances(regions, r["key"]) for r in side_regions]
     victory = None
     for r in sorted(regions, key=lambda r: (-r["value"], r["key"])):
@@ -1508,17 +1672,19 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     victory_anchor = region_anchor(terrain, victory, want_comp)
     vx, vz = region_centre(victory)
 
-    # Re-run the gate over the full set. The victory region was filtered to
-    # `want_comp` above, so this cannot fail — which is exactly why it is here:
-    # it states the invariant over the actual shipped positions rather than
-    # trusting that the filter above stayed correct.
+    # Re-run the gate over the full set. In test mode the victory region was
+    # filtered to `want_comp` above, so this cannot fail — which is exactly why
+    # it is here: it states the invariant over the actual shipped positions
+    # rather than trusting that the filter above stayed correct. On the player
+    # path there was no filter, and this pass is what still catches the one
+    # thing no boat fixes: an anchor on impassable ground.
     gate_reachability(
         terrain,
         [(f"side {i} landing zone ({r['key']})", a[0], a[1])
          for i, (r, a) in enumerate(zip(side_regions, side_anchors))] +
         [(f"victory objective ({victory['key']})",
           victory_anchor[0], victory_anchor[1])],
-        map_id)
+        map_id, mutual=test_scenario)
 
     # --- clusters -----------------------------------------------------------
     # Every `home` region, not merely the two this scenario seats sides on.
@@ -1727,7 +1893,7 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
          for i, (r, a) in enumerate(zip(side_regions, side_anchors))] +
         [(f"victory objective ({victory['key']})",
           victory_anchor[0], victory_anchor[1])],
-        map_id)
+        map_id, mutual=test_scenario)
 
     # Bridges. Searched over the victory region first (a crossing IS a
     # chokepoint, which is why the victory picker prefers one) and then over
@@ -1808,6 +1974,13 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "seed": seed,
         "version": version,
         "sides": sides,
+        # Which invariant-5 mode this run used. Recorded rather than inferred:
+        # a reader of the metadata (or of the lobby's stored scenario record)
+        # must be able to tell a war proved mutually reachable from one merely
+        # not proved unreachable, and the two files are otherwise identical in
+        # shape.
+        "test_scenario": test_scenario,
+        "mutually_reachable": test_scenario,
         "victory_region": victory["key"],
         "hostile_team": hostile_team,
         "clusters": [(c["kind"], c["region"]["key"], c["owner"])
@@ -1858,8 +2031,13 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
         f"generator-version={meta['version']}")
     add("--")
     add("-- Do not hand-edit: regenerate with")
+    # `--player` belongs in the reproduce line whenever it was used: without it
+    # this command does not regenerate the file, it prints a refusal, and the
+    # reader concludes the generator is broken rather than that the mode is
+    # missing.
     add(f"--   tools/mapgen/scenariogen.py data/maps/{meta['map_id']} "
-        f"--seed {meta['seed']}")
+        f"--seed {meta['seed']}"
+        f"{'' if meta.get('test_scenario', True) else ' --player'}")
     add("-- Generation is deterministic, so the same map and seed reproduce")
     add("-- this file byte for byte.")
     add("--")
@@ -1869,11 +2047,21 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     add("-- file scope does not fail loudly, it makes the scenario silently")
     add("-- vanish from the lobby's list (ScenarioDiscovery.h:33-37).")
     add("--")
-    add(f"-- Verified at generation time against {meta['map_id']}'s own")
-    add("-- heightmap: both landing zones and the victory region are mutually")
-    add(f"-- reachable on the passability mask for "
-        f"{', '.join(meta['classes'])} — every movement class this roster")
-    add("-- stages, not just the default VEH.")
+    if meta.get("test_scenario", True):
+        add(f"-- Verified at generation time against {meta['map_id']}'s own")
+        add("-- heightmap: both landing zones and the victory region are mutually")
+        add(f"-- reachable on the passability mask for "
+            f"{', '.join(meta['classes'])} — every movement class this roster")
+        add("-- stages, not just the default VEH.")
+    else:
+        add(f"-- PLAYER SCENARIO. Verified against {meta['map_id']}'s own")
+        add(f"-- heightmap only so far as every landing zone and the victory")
+        add(f"-- objective stand on ground {', '.join(meta['classes'])} can")
+        add("-- actually occupy. Mutual ground reachability was NOT required and")
+        add("-- is NOT claimed: if this map is islands, a river or a strait, the")
+        add("-- crossing is a transport problem for the player to solve, not a")
+        add("-- defect. Do not run this file as an automated or headless war —")
+        add("-- regenerate it without --player and let the gate judge the map.")
     add("")
     add("return {")
     add(f"    version   = {SCHEMA_VERSION},")
@@ -2198,6 +2386,14 @@ def main(argv=None):
     ap.add_argument("--hostility", default="mixed",
                     choices=["neutral", "hostile", "mixed"])
     ap.add_argument("--roster", default="standard", choices=sorted(ARMY_ROSTERS))
+    ap.add_argument("--player", action="store_true",
+                    help="generate for a HUMAN: drop the mutual-ground-"
+                         "reachability gate, so islands, rivers and straits "
+                         "produce a scenario instead of a refusal. Without it "
+                         "this is a TEST scenario and the gate applies — the "
+                         "safe direction, since a machine-run war between two "
+                         "armies that cannot meet never resolves and nobody "
+                         "is watching.")
     ap.add_argument("--game-dir", default=None,
                     help="data/games/metalstorm (default: derived from map-dir)")
     ap.add_argument("--out", default=None,
@@ -2221,7 +2417,7 @@ def main(argv=None):
             sites=args.sites, relics=args.relics, wrecks=args.wrecks,
             bridges=args.bridges,
             hostility=args.hostility, roster=args.roster,
-            game_dir=args.game_dir)
+            game_dir=args.game_dir, test_scenario=not args.player)
     except Rejected as e:
         print(f"REJECTED — {e}", file=sys.stderr)
         return 2
@@ -2239,6 +2435,21 @@ def main(argv=None):
     say(f"  map {meta['map_id']}, seed {meta['seed']}, "
         f"{meta['sides']} playable side(s), classes verified: "
         f"{', '.join(meta['classes'])}")
+    # Which invariant-5 mode ran, always, in both directions. A run that
+    # dropped the gate must never be distinguishable from one that passed it
+    # only by what is absent from the report.
+    if meta["test_scenario"]:
+        say("  mode TEST scenario (default) — invariant 5 ENFORCED: the "
+            "landing zones and the victory objective are mutually reachable "
+            "on the passability mask for every class above. Pass --player to "
+            "generate for a human instead.")
+    else:
+        say("  mode PLAYER scenario (--player) — invariant 5 RELAXED: mutual "
+            "ground reachability was not required and is not claimed. If this "
+            "map is islands, a river or a strait the crossing is the player's "
+            "transport problem. Still enforced: nothing is placed on "
+            "impassable ground, and no home region lacks ground its own "
+            "roster can move on. DO NOT run this scenario headless.")
     say(f"  victory: control {meta['victory_region']} at "
         f"notBefore {meta['not_before']} + hold {meta['hold_frames']} "
         f"(worst approach {meta['worst_frames']:.0f} frames)")
@@ -2290,6 +2501,11 @@ def main(argv=None):
             "mines": args.mines, "sites": args.sites, "relics": args.relics,
             "wrecks": args.wrecks, "bridges": args.bridges,
             "hostility": args.hostility, "roster": args.roster,
+            # The mode is a generation input, so it is echoed with the rest of
+            # the knobs — a stored scenario that cannot say whether its gate ran
+            # cannot be reproduced, and cannot be safely handed to a headless
+            # launch either.
+            "player": args.player,
         }
         with open(args.meta_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, sort_keys=True, indent=2)
