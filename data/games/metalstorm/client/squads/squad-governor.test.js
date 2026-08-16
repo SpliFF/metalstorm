@@ -176,7 +176,7 @@ function makeDef(overrides = {}) {
 }
 
 function managerWithSquads(n, backend = new NullRenderBackend(), overrides = {}) {
-  const mgr = new SquadManager(backend, overrides);
+  const mgr = new SquadManager(backend, { engine: 'oo', ...overrides });
   for (let i = 0; i < n; i++) {
     mgr.syncSquad(i, { x: i * 200, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
   }
@@ -327,7 +327,7 @@ describe('SquadManager degrade ladder (§12c table)', () => {
   /** Two squads 6 elmos apart — well inside separationRadius (14), so every
    *  member of one is a live foreign neighbour of the other. */
   function overlappingPair(overrides = {}) {
-    const mgr = new SquadManager(new NullRenderBackend(), overrides);
+    const mgr = new SquadManager(new NullRenderBackend(), { engine: 'oo', ...overrides });
     mgr.syncSquad(0, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
     mgr.syncSquad(1, { x: 6, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
     return mgr;
@@ -417,7 +417,7 @@ describe('SquadManager degrade ladder (§12c table)', () => {
   it('L6 demotes the farthest third of full squads to a centroid step without touching lod', () => {
     // Needs a camera: the ranking is the member budget's own `_lodD2`, so with
     // no view fed in there is deliberately nothing to rank.
-    const mgr = new SquadManager(new NullRenderBackend(), { lodFullMemberBudget: 10000 });
+    const mgr = new SquadManager(new NullRenderBackend(), { engine: 'oo', lodFullMemberBudget: 10000 });
     for (let i = 0; i < 6; i++) {
       mgr.syncSquad(i, { x: i * 1000, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
     }
@@ -442,7 +442,7 @@ describe('SquadManager degrade ladder (§12c table)', () => {
 
   it('no rung of the ladder ever writes sq.lod', () => {
     for (let level = 0; level <= 6; level++) {
-      const mgr = new SquadManager(new NullRenderBackend(), { lodFullMemberBudget: 10000 });
+      const mgr = new SquadManager(new NullRenderBackend(), { engine: 'oo', lodFullMemberBudget: 10000 });
       for (let i = 0; i < 6; i++) {
         mgr.syncSquad(i, { x: i * 1000, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
       }

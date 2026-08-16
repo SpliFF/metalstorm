@@ -1289,6 +1289,11 @@ export class RTSCamera {
         return this.camera.position.clone();
     }
 
+    /** Configured zoom-out ceiling (elmos), for normalising camera height into [0,1]. */
+    get zoomMaxHeight(): number {
+        return this.maxHeight;
+    }
+
     // ─── Transition internals ───
 
     private startTransition(endPos: Vector3, endLookAt: Vector3, durationMs: number): void {

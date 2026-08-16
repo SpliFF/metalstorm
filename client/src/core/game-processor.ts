@@ -1014,18 +1014,21 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
     // the centre to [half, mapDim-half] exactly like an RTS camera clamps at a
     // map edge. On maps larger than VP_SIZE the box still tracks the camera
     // (a tighter frustum-derived box + zoom LOD is the later optimisation noted
-    // at GW4-c5b). Rotation 0 / zoom 1 remain placeholders until the LOD path lands.
+    // at GW4-c5b). Rotation stays 0 (unused by the server); zoom is now the live
+    // camera height normalised to [0,1] against RTSCamera.zoomMaxHeight, for the
+    // server-side zoom-LOD work at GW4-c5b (server ignores it today).
     const clampCenter = (c: number, mapDim: number): number =>
         VP_SIZE >= mapDim ? mapDim / 2 : Math.min(Math.max(c, VP_HALF), mapDim - VP_HALF);
 
     const send = () => {
         const cam = gpViewCameras.get(0);
         const t = cam?.target;
+        const zoom = cam ? Math.min(1, Math.max(0, cam.position.y / cam.zoomMaxHeight)) : 1;
         gpCtx.connection?.sendViewportUpdate(
             0,
             clampCenter(t ? t.x : centerX, mapW),
             clampCenter(t ? t.z : centerZ, mapH),
-            VP_SIZE, VP_SIZE, 0, 1);
+            VP_SIZE, VP_SIZE, 0, zoom);
     };
     send();
     if (gpViewportTimer) clearInterval(gpViewportTimer);

@@ -21,7 +21,7 @@ import { NullRenderBackend } from './render-backend.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 
 function makeCfg(overrides = {}) {
-  return { ...DEFAULT_CONFIG, countCurve: linearCount, ...overrides };
+  return { ...DEFAULT_CONFIG, countCurve: linearCount, engine: 'oo', ...overrides };
 }
 
 function makeDef(overrides = {}) {
@@ -172,7 +172,7 @@ describe('centroid tier — holds the formation, does not collapse it', () => {
 /** N squads in a line receding from the origin, one per 100 elmos. */
 function makeManager(count, cfgOverrides = {}) {
   const { backend } = makeBackend();
-  const mgr = new SquadManager(backend, cfgOverrides);
+  const mgr = new SquadManager(backend, { engine: 'oo', ...cfgOverrides });
   for (let i = 0; i < count; i++) {
     mgr.syncSquad(i + 1, { x: 0, y: 0, z: 100 * (i + 1), heading: 0, health: 65535, maxHealth: 65535 },
       makeDef());
