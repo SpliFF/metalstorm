@@ -190,6 +190,21 @@ DeployCandidate War(uint32_t id, unsigned mine, unsigned capacity,
     c.iAmBound = bound;
     return c;
 }
+
+/// A war this account is bound to, built the way the PRODUCER builds it.
+///
+/// `lobby_main.cpp`'s Deploy route counts `boundPerTeam[b.team]++` for EVERY
+/// binding on the side including the deploying account's, so a bound
+/// candidate's `myBound` always includes them. `War(..., bound=true)` lets a
+/// fixture set the two fields independently and so cannot pin that; this one
+/// takes the number of OTHER bound players and derives `myBound` from it, which
+/// is the only way a test here can be wrong in the same direction production is.
+DeployCandidate MyWar(uint32_t id, unsigned others, unsigned capacity,
+                      unsigned opposing) {
+    DeployCandidate c = War(id, others + 1, capacity, opposing, 0,
+                            /*bound=*/true);
+    return c;
+}
 }  // namespace
 
 TEST_CASE("deploy: the war where my side is most outnumbered wins") {
@@ -265,7 +280,13 @@ TEST_CASE("wars task 3: a bound war with no seat FALLS THROUGH (wars §5)") {
     //
     // The binding is not lost by falling through: it stays in the table and
     // the veteran returns to it as soon as somebody leaves.
-    std::vector<DeployCandidate> wars = {War(1, 8, 8, 8, 0, /*bound=*/true)};
+    //
+    // CORRECTED AGAIN 2026-08-17 (step-9 review finding 1): the fixture used to
+    // be `War(1, /*mine=*/8, /*cap=*/8, …, bound=true)`, which is a side of
+    // 7 others + ME and therefore has a seat — the case this test is about is
+    // `cap` OTHERS, which only `MyWar` can express. See `MyWar` above.
+    std::vector<DeployCandidate> wars = {MyWar(1, /*others=*/8, /*cap=*/8,
+                                               /*opposing=*/8)};
     CHECK(DecideDeploy("compact", wars).outcome == DeployOutcome::SeedNewWar);
     CHECK(DecideDeploy("compact", wars).rejoinFellThrough);
 
@@ -276,6 +297,43 @@ TEST_CASE("wars task 3: a bound war with no seat FALLS THROUGH (wars §5)") {
     CHECK(d.outcome == DeployOutcome::JoinWar);
     CHECK(d.roomId == 2);
     CHECK(d.rejoinFellThrough);
+}
+
+TEST_CASE("wars task 3: the fall-through does not count the veteran's own seat") {
+    // The two halves of "if that side is now full" (wars §5), built the way the
+    // producer builds them — `myBound` INCLUDES the deploying account.
+    //
+    // Half one: the ordinary state of a popular war. Cap 8, seven other
+    // veterans, and me — I am sitting in the eighth seat. Deploy must send me
+    // home, not judge me seatless on a count that is only at cap because I am
+    // in it. `WarSlotReservation` agrees: a bound account short-circuits to
+    // `AlreadySeated` before capacity is ever counted, so the join Deploy would
+    // have diverted me from was going to succeed.
+    {
+        const std::vector<DeployCandidate> wars = {
+            MyWar(1, /*others=*/7, /*cap=*/8, /*opposing=*/8),
+            War(2, /*mine=*/0, /*cap=*/8, /*opposing=*/8),  // needs me more
+        };
+        const DeployDecision d = DecideDeploy("compact", wars);
+        CHECK(d.outcome == DeployOutcome::ReturnToMyWar);
+        CHECK(d.roomId == 1);
+        CHECK_FALSE(d.rejoinFellThrough);
+    }
+
+    // Half two: the case the fall-through is FOR, and it is reachable rather
+    // than dead — `WarSideMaintenance` can lower a cap below the population
+    // already seated under the old one. Cap 4 with five other bound players
+    // leaves nowhere for me, so §5 fires.
+    {
+        const std::vector<DeployCandidate> wars = {
+            MyWar(1, /*others=*/5, /*cap=*/4, /*opposing=*/8),
+            War(2, /*mine=*/0, /*cap=*/8, /*opposing=*/0),
+        };
+        const DeployDecision d = DecideDeploy("compact", wars);
+        CHECK(d.outcome == DeployOutcome::JoinWar);
+        CHECK(d.roomId == 2);
+        CHECK(d.rejoinFellThrough);
+    }
 }
 
 TEST_CASE("wars task 3: falling through is reported, and only when it happened") {

@@ -170,6 +170,18 @@ inline std::string EliminatedFaction(const WarTerminationFacts& f) {
 inline WarTerminalReason EvaluateWarTermination(const WarTerminationFacts& f) {
     if (f.operatorRetire)
         return WarTerminalReason::OperatorRetire;
+    // KNOWN LIMIT — the sim publishes THAT it ended, never WHY. `war_state` is
+    // a lifecycle, not a cause, so every sim ending is recorded (and headlined
+    // to every enlisted player) as "won on its objective". That is exact today
+    // and only today: `game_gameover.lua` has exactly ONE entry into
+    // `winding_down` — `beginWindDown`, called from the `o.victory` branch of
+    // its objective handler — so a non-active `war_state` cannot presently mean
+    // anything else. The moment a SECOND in-sim ending exists (a surrender, a
+    // scenario-scripted stop, a draw), this line starts naming the wrong
+    // reason, and the fix is a cause channel rather than a cleverer guess here:
+    // `game_gameover.lua` publishes `war_end_cause` alongside `war_state`,
+    // `WarTerminationFacts` carries it, and this maps it. Tracked as an open
+    // thread on the wars lane.
     if (!f.simWarState.empty() && f.simWarState != "active")
         return WarTerminalReason::VictoryObjective;
     if (!EliminatedFaction(f).empty())

@@ -57,11 +57,22 @@
 // veteran returns to it the moment somebody leaves. What falls through is only
 // where Deploy sends them *right now*.
 //
-// Note the asymmetry that makes this safe: `bypassCapacity` (WarRejoinPolicy)
-// means a returning veteran is not counted against the cap when they actually
-// JOIN. So this fall-through fires only when the side is full of OTHER bound
-// players — i.e. when the war genuinely has no room — and not merely because
-// the veteran's own seat is one of the ones counted.
+// What makes this safe is that the seat test DISCOUNTS the veteran's own seat
+// when it is applied to the veteran's own war. `myBound` is a count of every
+// binding on the side including theirs (lobby_main.cpp builds it that way, and
+// the browser card needs it that way), so testing it raw would judge a side of
+// "7 others + me, cap 8" as full and route the veteran away from a front they
+// are already sitting on — the exact hostility the design call above exists to
+// prevent, and a disagreement with the rest of the stack besides:
+// `WarSlotReservation` short-circuits a bound account to `AlreadySeated`
+// BEFORE it counts capacity, so the join they were diverted from would have
+// succeeded.
+//
+// With the discount the fall-through fires only when the side holds `cap`
+// OTHER bound players, i.e. when the war genuinely has no room for them. That
+// is still reachable rather than dead: `WarSideMaintenance` can lower a cap
+// below the side's already-seated population, and a veteran who was outside
+// the new cap's first `cap` seats then has nowhere to sit.
 //
 // Pure function of values (the discipline of DynamicJoin.h / JoinPreview.h), so
 // the whole policy is testable without a lobby, a database or a war.
@@ -162,13 +173,24 @@ struct DeployDecision {
 };
 
 /// True when `c` has room for one more human on my faction's side.
-inline bool DeployHasSeat(const DeployCandidate& c) {
+///
+/// `discountMyOwnSeat` is for the one caller that asks the question about a war
+/// the account is ALREADY bound to: there, `myBound` includes the asker, and
+/// the question being asked is "is there room for me" — which they already
+/// have. Without it a full-but-mine side reads as seatless. See the design call
+/// at the top of this file; the parameter is not defaulted precisely so that
+/// every caller has to say which of the two questions it is asking.
+inline bool DeployHasSeat(const DeployCandidate& c, bool discountMyOwnSeat) {
     if (!c.fieldsMyFaction)
         return false;
     // Capacity 0 is unlimited (WAR_SIDE_CAPACITY_UNLIMITED) — the same
     // permissive reading DecideDynamicJoin uses, and for the same reason: a war
     // that never sized its sides must not lock everyone out.
-    return c.myCapacity == 0 || c.myBound < c.myCapacity;
+    if (c.myCapacity == 0)
+        return true;
+    const unsigned others =
+        (discountMyOwnSeat && c.myBound > 0) ? c.myBound - 1 : c.myBound;
+    return others < c.myCapacity;
 }
 
 /// Rank and choose.
@@ -178,8 +200,9 @@ inline bool DeployHasSeat(const DeployCandidate& c) {
 ///   0. **A war I am already bound to, IF it still has a seat.** Not part of
 ///      §5's rank list because it is not a ranking — it is an identity. See
 ///      the design call above, and its one exception: a bound war whose side
-///      is full falls through to the ranking below rather than sending the
-///      player at a seat that does not exist.
+///      is full of OTHER players (my own seat discounted) falls through to the
+///      ranking below rather than sending the player at a seat that does not
+///      exist.
 ///   1. **friends-present** — §8's "people play where their friends are", and
 ///      the first key because discovery in a persistent world is social before
 ///      it is tactical. A war with a friend in it beats a war that needs you
@@ -220,7 +243,9 @@ inline DeployDecision DecideDeploy(const std::string& factionId,
         if (!c.iAmBound)
             continue;
         boundAnywhere = true;
-        if (!DeployHasSeat(c))
+        // My own seat is one of the `myBound` — discount it, or a side of
+        // "7 others + me" at cap 8 reads as full and sends me away from it.
+        if (!DeployHasSeat(c, /*discountMyOwnSeat=*/true))
             continue;
         // Lowest room id, so an account that somehow holds two bindings gets
         // a deterministic answer rather than a hash-order one.
@@ -257,7 +282,7 @@ inline DeployDecision DecideDeploy(const std::string& factionId,
 
     const DeployCandidate* best = nullptr;
     for (const auto& c : wars) {
-        if (!DeployHasSeat(c))
+        if (!DeployHasSeat(c, /*discountMyOwnSeat=*/false))
             continue;
         if (best == nullptr || better(c, *best))
             best = &c;
