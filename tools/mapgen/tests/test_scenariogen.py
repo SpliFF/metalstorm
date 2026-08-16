@@ -345,6 +345,10 @@ class TestGeneratorOnSyntheticMaps(unittest.TestCase):
         The region graph in this fixture still declares the two halves adjacent,
         so a generator that verified connectivity on the graph would sail
         through. Only the passability mask sees the wall.
+
+        Note the bare call: no mode is passed, and it still refuses. That is the
+        default under test as much as the gate is — see
+        `test_the_gate_is_kept_by_default_not_by_opting_in`.
         """
         with SyntheticMap(walled_map, "synth_walled") as d:
             with self.assertRaises(sg.Rejected) as cm:
@@ -611,6 +615,163 @@ class TestPlannedTowns(unittest.TestCase):
         b, mb = self.wide()
         self.assertEqual(a, b)
         self.assertEqual(ma["towns"], mb["towns"])
+
+class TestInvariant5IsConditionalOnAudience(unittest.TestCase):
+    """Invariant 5's mutual-reachability half applies to TEST scenarios only.
+
+    The ruling this encodes: a map whose landing zones lie in different
+    components of the passability mask is a LEGITIMATE map — islands, a river,
+    a strait — and the crossing is a transport problem. It is a defect only for
+    a scenario generated to be run by MACHINES, where two armies that cannot
+    meet make a headless war that never resolves and nobody is watching.
+
+    Two things this suite is careful about, because both are how the gate could
+    rot into a rubber stamp from the other direction:
+
+      * the DEFAULT must be the strict mode, so an automated caller keeps the
+        gate without knowing it exists;
+      * the refusals that no transport fixes must survive BOTH modes.
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_the_gate_is_kept_by_default_not_by_opting_in(self):
+        """The signature default, asserted directly.
+
+        `test_a_map_split_by_a_cliff_is_REJECTED` proves the bare call refuses;
+        this proves WHY, so a future edit that flips the default is caught here
+        with a message about the default rather than there with a message about
+        a cliff.
+        """
+        import inspect
+        sig = inspect.signature(sg.generate)
+        self.assertIs(sig.parameters["test_scenario"].default, True,
+                      "a test scenario that generates WITHOUT the gate is worse "
+                      "than one that refuses: the refusal is visible, the "
+                      "stalemate is not")
+        self.assertIs(
+            inspect.signature(sg.gate_reachability).parameters["mutual"].default,
+            True)
+        self.assertIs(
+            inspect.signature(
+                sg.gate_blocking_features_leave_the_war_fightable
+            ).parameters["mutual"].default, True)
+
+    def test_the_same_split_map_generates_for_a_player(self):
+        """The whole point. Same fixture, same seed, opposite outcome."""
+        with SyntheticMap(walled_map, "synth_walled") as d:
+            with self.assertRaises(sg.Rejected):
+                sg.generate(d, seed=11, game_dir=GAME_DIR)
+            lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+        self.assertEqual(count_victory_flags(lua), 1)
+        self.assertIs(meta["test_scenario"], False)
+        self.assertIs(meta["mutually_reachable"], False)
+
+    def test_the_player_file_does_not_claim_a_reachability_it_never_checked(self):
+        """The emitted header is the first thing a reader trusts."""
+        with SyntheticMap(walled_map, "synth_walled") as d:
+            player, _ = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            test, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
+        self.assertIn("mutually", test)
+        self.assertIn("PLAYER SCENARIO", player)
+        self.assertNotIn("are mutually\n-- reachable", player)
+        self.assertIn("--player", player,
+                      "the reproduce line must carry the mode, or following it "
+                      "prints a refusal instead of this file")
+
+    def test_a_connected_map_generates_identically_in_both_modes(self):
+        """`want_comp` is dropped, not weakened.
+
+        On a map with one component the constraint it imposed was vacuous, so
+        the player path must not perturb a single placement. If this ever
+        fails, the player path has started making different choices rather than
+        merely refusing less — and every existing golden fixture is downstream
+        of that.
+        """
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            strict, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
+            relaxed, _ = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                     test_scenario=False)
+        # Only the header prose may differ.
+        self.assertEqual(strict[strict.index("return {"):],
+                         relaxed[relaxed.index("return {"):])
+
+    def test_a_point_on_impassable_ground_is_refused_in_BOTH_modes(self):
+        """No transport fixes a position nothing can stand on.
+
+        `component_at` snaps to the nearest passable sample within 64 samples
+        (regions_from_map._nearest_passable_component), because a start pad may
+        legitimately sit one sample off a cliff edge. So `component -1` means
+        no passable ground within 512 elmos in any direction — that is what has
+        to be built here, not merely a point on a ridge.
+        """
+        with SyntheticMap(flat_map, "synth_buried") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        buried = (3 * span) // 4
+        smothered = terrain.blocked_copy(
+            [(buried - 900, mid - 900, buried + 900, mid + 900)])
+        points = [("west", 200, mid), ("buried east", buried, mid)]
+        # The bare map is fine in both modes — it is the stamp that buries it.
+        sg.gate_reachability(terrain, points, "synth", mutual=True)
+        for mutual in (True, False):
+            with self.subTest(mutual=mutual):
+                with self.assertRaises(sg.Rejected) as cm:
+                    sg.gate_reachability(smothered, points, "synth",
+                                         mutual=mutual)
+                self.assertIn("not on passable ground", str(cm.exception))
+                self.assertIn("buried east", str(cm.exception))
+
+    def test_the_wreck_gate_still_refuses_a_side_stranded_by_scenery(self):
+        """Decoration may not decide the war — on the player path too.
+
+        The two points here share a component of the BARE map, so a wreck field
+        that separates them took something away. That is the Meridian defect
+        made of scenery, and it is refused in both modes.
+        """
+        with SyntheticMap(flat_map, "wreckgate_player") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        wall = [(mid - 40, z, mid + 40, z + 200) for z in range(0, span, 200)]
+        points = [("west", 200, mid), ("east", span - 200, mid)]
+        sg.gate_reachability(terrain, points, "synth", mutual=False)   # passes bare
+        with self.assertRaises(sg.Rejected) as cm:
+            sg.gate_blocking_features_leave_the_war_fightable(
+                terrain, wall, points, "synth", mutual=False)
+        self.assertIn("unfightable", str(cm.exception))
+
+    def test_the_wreck_gate_does_not_blame_scenery_for_the_sea(self):
+        """The other half of the player-path ruling, and the reason it is not
+        just the strict gate again.
+
+        On a map already split, a wreck field on one side has not severed
+        anything: the two points were in different components before it was
+        placed. Refusing here would be the generator blaming decoration for the
+        map — which is what a naive re-run of the strict gate does, so this is
+        also the test that the two modes are genuinely different code paths.
+        """
+        with SyntheticMap(walled_map, "wreckgate_split") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        points = [("west landing", 400, mid), ("east landing", span - 400, mid)]
+        # A few wrecks well clear of either point, on the western half.
+        wrecks = [(1200, mid - 300 + 200 * i, 1400, mid - 100 + 200 * i)
+                  for i in range(3)]
+        # Strict mode refuses this map at all — that is the map, not the wrecks.
+        with self.assertRaises(sg.Rejected):
+            sg.gate_blocking_features_leave_the_war_fightable(
+                terrain, wrecks, points, "synth", mutual=True)
+        # Player mode lets it through: nothing was taken away.
+        sg.gate_blocking_features_leave_the_war_fightable(
+            terrain, wrecks, points, "synth", mutual=False)
 
 
 class TestGoldenFixture(unittest.TestCase):

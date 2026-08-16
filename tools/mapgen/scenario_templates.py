@@ -255,7 +255,11 @@ ANCIENT_GUARDIANS = [
 # wreck cover rather than scenery), so the generator stamps every placed wreck
 # into the passability mask and RE-RUNS the reachability gate afterwards. A
 # wreck field that walls off the crossing it decorates is the same class of bug
-# as a bridge that does — see scenariogen.gate_reachability.
+# as a bridge that does — see scenariogen.gate_reachability. On a PLAYER
+# scenario (scenariogen's `test_scenario=False`) the re-run asks the narrower
+# question, because a map already split by water is not a defect there: a field
+# may not BURY a labelled point, and may not sever two points that shared a
+# component before it was placed. Decoration still may not decide the war.
 WRECK_FIELD = [
     ("ms_tank_wreck",     6),
     ("ms_train_wreck",    2),
