@@ -13,22 +13,23 @@ browser.
 
 ```
 .claude/skills/run-springrts-web/smoke.sh --start        # stack up + verified
-launch_scenario {"scenarioId": "crossing_standoff", "wait": "ready"}
-# → {roomId, port, sessions, browserUrl: "http://localhost:8012/?play=…&room=<id>#token=…",
-#    phase: "ready", frame: -1}
-# navigate a browser to browserUrl (it ATTACHES to that room — no login, no lobby UI),
-# then:
-wait_for_game {"roomId": <id>, "until": "ticking"}
+launch_scenario {"scenarioId": "crossing_standoff", "wait": "ticking", "openBrowser": true}
+# → {roomId, port, sessions, browserUrl, phase: "ticking", frame: 7,
+#    browser: {pid, connected: true, clientId, readyState}}
 # drive (spawn_unit / client_screenshot / …), then ALWAYS:
-end_game {"roomId": <id>}
+end_game {"roomId": <id>}          # stops the server AND closes that browser
 ```
 
-- `wait:"ready"` is the reachable target at launch — the default roster seats a
-  human, so the sim holds at frame −1 until the browser attaches; `"ticking"`
-  completes only after that. For a **browserless** run (exec-driven tests,
-  headless probes) the server also self-exits on its startup idle clock: raise
-  it with `idleGraceSeconds` on `launch_scenario`/`launch_direct` (sugar for the
-  manifest's `idleStartupGraceSeconds`), or start the lobby with
+- **`openBrowser: true` is what makes `"ticking"` reachable** (~3 s end to end).
+  The default roster seats a *human*, so with no client the sim holds at frame
+  −1 and every relay tool answers "no connected admin client". The browser is
+  headless (renders identically, opens no window — `browserHeadless: false` to
+  watch), is tracked by the MCP, and is closed by `end_game`. `open_client` /
+  `close_client` / `list_clients` manage one independently.
+- Without a browser, `wait: "ready"` is the reachable target, and the server
+  self-exits on its startup idle clock: raise it with `idleGraceSeconds` on
+  `launch_scenario`/`launch_direct` (sugar for the manifest's
+  `idleStartupGraceSeconds`), or start the lobby with
   `SPRING_IDLE_STARTUP_GRACE_SECONDS=3600` for a no-rebuild blanket workaround
   (it applies to every room the lobby spawns, so pair it with `end_game`).
 - `launch_direct` takes a raw manifest when you need a custom roster;
@@ -40,7 +41,9 @@ end_game {"roomId": <id>}
   session: `client_ready` (readiness), `client_screenshot` (a viewable image of
   the rendered frame), `client_eval` / `browser_test` (any `window.test`
   method). chrome-devtools MCP is the fallback for DOM/network/clicks — see the
-  `game-browser-test`, `spring-test`, and `spring-debug` skills.
+  `game-browser-test`, `spring-test`, and `spring-debug` skills. Don't reach for
+  chrome-devtools merely to *have* a connected page: `openBrowser`/`open_client`
+  is that, without a second browser stack.
 
 Paths are relative to the repo root. Environment here is a **macOS dev machine**
 (darwin) with the toolchain installed via Homebrew + CMake `FetchContent`; this

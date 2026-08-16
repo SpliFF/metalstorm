@@ -9,7 +9,15 @@ user-invocable: false
 
 ## The canonical entry: `launch_scenario` → `browserUrl`
 
-**Getting a browser into a game is one navigate.**
+**If all you need is a connected client, you do not need this skill's browser at
+all**: `launch_scenario({scenarioId:'crossing_standoff', wait:'ticking', openBrowser:true})`
+launches the game *and* a headless client and returns once it is connected
+(~3 s), and `end_game` closes it. `open_client` / `close_client` / `list_clients`
+manage one on their own. Use chrome-devtools below when you need what only CDP
+has — DOM snapshots, clicks, network inspection, console logs — or when you are
+testing the **lobby UI**, which the attach path deliberately skips.
+
+**Getting a browser into a game by hand is one navigate.**
 `launch_scenario({scenarioId:'crossing_standoff', wait:'ready'})` returns a `browserUrl` of
 the form `http://localhost:8012/?play=<id>&room=<id>&user=<host>&skipBriefing=1#token=…`.
 Navigate a fresh isolated profile straight to it: the page **attaches** to that

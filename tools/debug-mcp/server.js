@@ -22,6 +22,9 @@ import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { classifyEndResponse } from './room-end.js';
 import {
+    BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
+} from './browser.js';
+import {
     classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
     probeSqliteAnnotations, dbDivergenceWarning,
 } from './sqlite-health.js';
@@ -530,6 +533,86 @@ async function execJsonVerb(verb, roomId) {
     }
     try { return { json: JSON.parse(output) }; }
     catch { return { legacy: output }; }
+}
+
+// --- Browser lifecycle ----------------------------------------------------
+//
+// The relay above can only answer when a browser is CONNECTED, and nothing in
+// this server could produce one — so the documented loop ended at "navigate a
+// browser to browserUrl" and left the caller to do it by hand. This registry
+// closes that gap: we launch clients, we track them, and we take them down with
+// the same "read the report" discipline end_game uses. Policy and the process-
+// group reasoning live in browser.js.
+const browsers = new BrowserRegistry();
+
+// roomId → the attach-form browserUrl its launch minted. The URL carries the
+// host's session token in its hash, and that token is only ever handed out in
+// the /api/rooms/direct response — so it cannot be reconstructed later, only
+// remembered. This is why open_client({roomId}) works for a room THIS server
+// launched, and needs an explicit `url` for any other.
+const roomBrowserUrls = new Map();
+
+/**
+ * Open a client at `url` and (optionally) wait until the relay can actually
+ * reach it. "The process started" is a much weaker claim than "a client is
+ * connected and answering", and only the second one is useful to a caller.
+ */
+async function openClient({ url, roomId, headless, width, height, waitReadyMs }) {
+    const launched = launchBrowser({ url, roomId, headless, width, height });
+    if (launched.error) return { error: launched.error };
+    const entry = browsers.add(launched.entry);
+
+    const out = {
+        pid: entry.pid, roomId: entry.roomId, url: entry.url,
+        headless: entry.headless, profileDir: entry.profileDir,
+        browserPath: entry.browserPath,
+    };
+    if (!(waitReadyMs > 0)) return { result: { ...out, connected: null } };
+
+    const deadline = Date.now() + waitReadyMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        if (!defaultIsAlive(entry.pid)) {
+            browsers.remove(entry.pid);
+            return { result: { ...out, connected: false, detail: 'the browser exited during startup — see profileDir, or re-run with headless:false to watch it' } };
+        }
+        const relayed = await clientEval('test', 'readyState()', roomId, undefined, 5000);
+        if (!relayed.fallback && relayed.success) {
+            return { result: { ...out, connected: true, clientId: relayed.clientId,
+                               readyState: clientEvalValue(relayed.output) } };
+        }
+        last = relayed.fallback ?? relayed.output;
+        await new Promise(r => setTimeout(r, 500));
+    }
+    return { result: { ...out, connected: false, detail: `still not answering the relay after ${waitReadyMs} ms (last: ${String(last).slice(0, 160)})` } };
+}
+
+// If THIS process goes away, every browser it launched is orphaned — nothing
+// else knows those pids, and an abandoned renderer holds the GPU. So take them
+// down on the way out. Synchronous by necessity: 'exit' handlers cannot await,
+// and a detached group signalled with SIGKILL is the only thing guaranteed to
+// land. SIGTERM first for the ordinary paths (Ctrl-C, a supervisor restart).
+function killAllBrowsersSync(signal = 'SIGKILL') {
+    for (const entry of browsers.list()) {
+        if (!entry.alive) continue;
+        try { process.kill(-entry.pid, signal); } catch { /* already gone */ }
+    }
+}
+process.on('exit', () => killAllBrowsersSync('SIGKILL'));
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { killAllBrowsersSync('SIGTERM'); process.exit(0); });
+}
+
+/** Close every browser this server opened for `roomId`. */
+async function closeRoomBrowsers(roomId, timeoutMs = 5000) {
+    const entries = browsers.forRoom(roomId);
+    const reports = [];
+    for (const e of entries) {
+        const r = await closeBrowser(e, { timeoutMs });
+        browsers.remove(e.pid);
+        reports.push({ ...r, describe: describeClose(r) });
+    }
+    return reports;
 }
 
 /// PLAN-test-automation P7: run code inside a CONNECTED browser client and get
@@ -1438,6 +1521,8 @@ const TOOLS = [
             properties: {
                 scenarioId: { type: 'string', description: 'Scenario id — the file stem of data/games/<gameId>/scenarios/<id>.lua (e.g. "crossing_standoff").' },
                 gameId: { type: 'string', default: 'metalstorm', description: 'Game the scenario belongs to.' },
+                openBrowser: { type: 'boolean', default: false, description: 'Open a browser client on browserUrl and wait for it to connect, then re-probe. The default roster seats a HUMAN, so without this the sim holds at frame -1 and every relay tool answers "no connected admin client" — with it, wait:"ticking" is reachable in one call. The browser is tracked and end_game closes it. Returns its report under `browser`.' },
+                browserHeadless: { type: 'boolean', default: true, description: 'Headless browser for openBrowser (renders identically; opens no window). false to watch the run.' },
                 mapId: { type: 'string', description: 'Map override. Default: the scenario\'s declared world.map.' },
                 ai: { type: 'string', default: 'null', description: 'AI id seated on every non-host playable side ("null", "strategos"). "" = no AI slots (the lobby\'s solo-team safety net may still add a Null AI).' },
                 players: {
@@ -1751,6 +1836,45 @@ const TOOLS = [
                 clientId: { type: 'number', description: 'Address a specific admin client id.' },
             },
         },
+    },
+
+    // --- Browser lifecycle ---------------------------------------------
+    // The relay tools above need a CONNECTED admin client. These three make
+    // one, without a human at a keyboard and without chrome-devtools MCP
+    // (a second browser stack, launched for a CDP session we do not want).
+    {
+        name: 'open_client',
+        description: 'Open a browser client and connect it to a room — the missing half of the relay tools, which all need a CONNECTED admin client and could not previously make one. Pass `roomId` to attach to a room this server launched (its browserUrl, including the host session token, is remembered from launch_scenario/launch_direct), or pass an explicit `url` for anything else. HEADLESS BY DEFAULT: verified to render this Babylon client identically (same mesh counts, working client_screenshot) while opening no window on the user\'s machine — pass headless:false to watch a run live. With `waitReady` (the default) it returns only once the relay actually answers, reporting {connected:true, clientId, readyState}; "the process started" is a much weaker claim than "a client is connected". The browser is tracked, so end_game closes it and list_clients can see it. Chrome is found automatically (override with SPRING_BROWSER).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId:   { type: 'number', description: 'Attach to this room using the browserUrl remembered from its launch. Required unless `url` is given.' },
+                url:      { type: 'string', description: 'Explicit URL. Overrides the remembered browserUrl; use for a room this server did not launch, or a non-game page.' },
+                headless: { type: 'boolean', default: true, description: 'false opens a visible window (useful to watch a run, or to debug a client that will not connect).' },
+                width:    { type: 'number', default: 1280 },
+                height:   { type: 'number', default: 800 },
+                waitReady:   { type: 'boolean', default: true, description: 'Wait until the relay reaches the new client before returning.' },
+                waitReadyMs: { type: 'number', default: 60000, description: 'How long to wait for that first relay answer.' },
+            },
+        },
+    },
+    {
+        name: 'close_client',
+        description: 'Close a browser this server opened. `{pid}` closes one, `{roomId}` closes every client attached to that room, `{all:true}` closes all of them. SIGTERM to the process GROUP → poll → SIGKILL, because Chrome is a process tree and signalling the bare parent leaves GPU-holding renderers behind (an abandoned renderer has corrupted whole perf sessions here). Returns a per-browser report — read the `outcome`, not just the count: `exited` is clean, `killed_after_timeout` means SIGTERM was ignored, `kill_failed` needs a human. Refuses to signal a pid this server did not launch.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                pid:       { type: 'number', description: 'A pid returned by open_client.' },
+                roomId:    { type: 'number', description: 'Close every client attached to this room.' },
+                all:       { type: 'boolean', description: 'Close every tracked client.' },
+                timeoutMs: { type: 'number', default: 5000, description: 'Grace before SIGKILL.' },
+            },
+        },
+    },
+    {
+        name: 'list_clients',
+        description: 'The browsers this server launched: {pid, roomId, url, headless, profileDir, startedAt, alive}. Liveness is re-probed on every call, never cached, so a browser that died or was killed by hand shows alive:false instead of a stale yes. Only ever lists this server\'s own browsers — a browser you opened yourself is invisible here (and is never signalled by close_client).',
+        inputSchema: { type: 'object', properties: {} },
     },
 
     // --- Scenario authoring (S3) ---------------------------------------
@@ -2210,13 +2334,22 @@ async function executeTool(name, args) {
                 return { result: { roomId: target.room_id, pid: target.pid, ...r } };
             };
 
+            // A browser we opened for this room outlives the server otherwise,
+            // and an abandoned renderer holds the GPU. Closed on every exit
+            // path below, including the SIGKILL alias.
+            const withBrowsers = async (roomId, payload) => {
+                const reports = roomId > 0 ? await closeRoomBrowsers(roomId) : [];
+                if (reports.length) payload.browsers = reports;
+                return JSON.stringify(payload, null, 2);
+            };
+
             if (args.graceful === false) {
                 const { error, result } = await bySignal(false);
                 if (error) return error;
-                return JSON.stringify({
+                return withBrowsers(result.roomId, {
                     source: 'sigkill', ...result,
                     note: 'Lobby marks the room ended on its next health check.',
-                }, null, 2);
+                });
             }
 
             if (!(args.roomId > 0)) {
@@ -2233,20 +2366,20 @@ async function executeTool(name, args) {
             const decision = classifyEndResponse(resp.status, await resp.text());
             if (decision.action === 'error') return `Error: ${decision.error}`;
             if (decision.action === 'report') {
-                return JSON.stringify({
+                return withBrowsers(args.roomId, {
                     source: '/api/admin/rooms/end', ...decision.report,
                     note: 'The room flips to "ended" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game to observe it.',
-                }, null, 2);
+                });
             }
             // Route-level 404 ⇒ a lobby binary older than P4 (this route has no
             // feature latch, unlike /api/rooms/direct).
             const { error, result } = await bySignal(true);
             if (error) return error;
-            return JSON.stringify({
+            return withBrowsers(result.roomId, {
                 source: 'sigterm-fallback',
                 note: 'This lobby predates POST /api/admin/rooms/end — signalled locally, so no checkpoint verification or resume eligibility is available. The room flips to "ended" on the lobby\'s next health check.',
                 ...result,
-            }, null, 2);
+            });
         }
 
         case 'get_frame': {
@@ -2563,7 +2696,16 @@ async function executeTool(name, args) {
             let timedOut = false;
             if (args.wait !== 'none') {
                 const want = args.wait || 'ticking';
-                probe = await waitForPhase(roomId, want, args.waitTimeoutMs ?? 120000);
+                // With openBrowser, 'ticking' is not reachable YET: the sim
+                // holds at frame -1 until a client connects, and the client is
+                // ours to launch a few lines below. Waiting for it here would
+                // burn the whole timeout and then report a scary (and by then
+                // false) "no browser attached" warning on a run that succeeds.
+                // So stop at 'ready' now, and wait for the caller's real target
+                // after the browser is in.
+                const deferToBrowser = args.openBrowser && want === 'ticking';
+                probe = await waitForPhase(roomId, deferToBrowser ? 'ready' : want,
+                                           args.waitTimeoutMs ?? 120000);
                 timedOut = probe.timedOut;
                 if (probe.phase === 'dead') {
                     notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
@@ -2608,6 +2750,45 @@ async function executeTool(name, args) {
                 const tail = await roomLogTail(roomId);
                 out.lastLogs = tail.lines;
                 if (tail.note) out.logsNote = tail.note;
+            }
+
+            // Remember the attach URL even when we are not opening a browser
+            // now — open_client({roomId}) later has no other way to get the
+            // host session token.
+            if (browserUrl) roomBrowserUrls.set(roomId, browserUrl);
+
+            // openBrowser closes the loop this tool used to leave open: the
+            // default roster seats a human, so without a client the sim holds
+            // at frame -1 forever and every relay tool answers "no connected
+            // admin client".
+            if (args.openBrowser && browserUrl && probe.phase !== 'dead') {
+                const opened = await openClient({
+                    url: browserUrl, roomId,
+                    headless: args.browserHeadless !== false,
+                    waitReadyMs: args.wait === 'none' ? 0 : 60000,
+                });
+                if (opened.error) {
+                    out.browser = { error: opened.error };
+                    notes.push(`openBrowser failed: ${opened.error}`);
+                } else {
+                    out.browser = opened.result;
+                    // The sim only starts once the client is in, so the phase
+                    // captured before the browser existed is already stale.
+                    if (opened.result.connected && args.wait && args.wait !== 'none') {
+                        const after = await waitForPhase(roomId, args.wait, 60000);
+                        out.phase = after.phase;
+                        out.frame = after.frame;
+                        if (after.timedOut) {
+                            notes.push(`WARNING: the client connected but the game is still '${after.phase}' `
+                                     + `after waiting for '${args.wait}' (${after.detail}).`);
+                        }
+                    } else if (!opened.result.connected) {
+                        notes.push(`WARNING: the browser was launched but never reached the relay (${opened.result.detail || 'no detail'}) `
+                                 + '— the sim will hold at frame -1. Re-run with browserHeadless:false to watch it.');
+                    }
+                }
+            } else if (args.openBrowser && !browserUrl) {
+                notes.push('openBrowser ignored: headless:true means no browserUrl was minted.');
             }
             return out;
         }
@@ -2682,6 +2863,9 @@ async function executeTool(name, args) {
                 out.lastLogs = tail.lines;
                 if (tail.note) out.logsNote = tail.note;
             }
+            // Same reason as launch_scenario: the token in this URL is issued
+            // once and cannot be rebuilt, so open_client({roomId}) needs it kept.
+            if (out.browserUrl) roomBrowserUrls.set(roomId, out.browserUrl);
             return out;
         }
 
@@ -2979,6 +3163,69 @@ async function executeTool(name, args) {
                 return `Relay unavailable: ${r.fallback}. For SERVER-side readiness use \`wait_for_game\` instead.`;
             if (!r.success) return `Error (client ${r.clientId}): ${r.output}`;
             return { clientId: r.clientId, ...(clientEvalValue(r.output) ?? {}) };
+        }
+
+        case 'open_client': {
+            let url = args.url;
+            if (!url && args.roomId > 0) url = roomBrowserUrls.get(args.roomId);
+            if (!url) {
+                const known = [...roomBrowserUrls.keys()];
+                return args.roomId > 0
+                    ? `Error: no remembered browserUrl for room ${args.roomId}. `
+                      + `This server only remembers rooms IT launched${known.length ? ` (${known.join(', ')})` : ' (none this session)'}; `
+                      + 'the attach URL carries a session token that only /api/rooms/direct issues. '
+                      + 'Pass an explicit `url`, or launch the room with launch_scenario.'
+                    : 'Error: pass `roomId` (a room this server launched) or an explicit `url`.';
+            }
+            const waitReadyMs = args.waitReady === false ? 0 : (args.waitReadyMs ?? 60000);
+            const { error, result } = await openClient({
+                url, roomId: args.roomId ?? null,
+                headless: args.headless !== false,
+                width: args.width, height: args.height,
+                waitReadyMs,
+            });
+            if (error) return `Error: ${error}`;
+            return JSON.stringify(result, null, 2);
+        }
+
+        case 'close_client': {
+            const timeoutMs = args.timeoutMs ?? 5000;
+            let targets;
+            if (args.pid > 0) {
+                const e = browsers.get(args.pid);
+                if (!e) {
+                    const live = browsers.list().map(x => x.pid);
+                    return `Error: pid ${args.pid} was not launched by this server, so it is not ours to signal. `
+                         + (live.length ? `Tracked pids: ${live.join(', ')}.` : 'No browsers are tracked.');
+                }
+                targets = [e];
+            } else if (args.roomId > 0) {
+                targets = browsers.forRoom(args.roomId);
+            } else if (args.all) {
+                targets = browsers.list().map(e => browsers.get(e.pid)).filter(Boolean);
+            } else {
+                return 'Error: pass `pid`, `roomId`, or `all:true`.';
+            }
+            if (!targets.length) return JSON.stringify({ closed: 0, browsers: [], note: 'nothing tracked matched' }, null, 2);
+
+            const reports = [];
+            for (const e of targets) {
+                const r = await closeBrowser(e, { timeoutMs });
+                browsers.remove(e.pid);
+                reports.push({ ...r, roomId: e.roomId, describe: describeClose(r) });
+            }
+            return JSON.stringify({ closed: reports.length, browsers: reports }, null, 2);
+        }
+
+        case 'list_clients': {
+            const list = browsers.list();
+            return JSON.stringify({
+                count: list.length,
+                clients: list,
+                note: list.length
+                    ? 'Only browsers this server launched. alive:false means it died or was killed outside close_client.'
+                    : 'No tracked browsers. open_client makes one; a browser you opened by hand is never listed here.',
+            }, null, 2);
         }
 
         case 'client_screenshot': {
