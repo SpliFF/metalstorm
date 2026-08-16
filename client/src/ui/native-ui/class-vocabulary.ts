@@ -126,6 +126,15 @@ export class ClassVocabulary {
      * Build from parsed JSON. Malformed entries are skipped with a warning
      * rather than throwing — a bad vocabulary must cost the player keyword
      * coverage, never their HUD.
+     *
+     * Audited M5 (§7 "no silent drops"): every `console.warn` below is a
+     * load-time complaint about the SHIPPED DATA, raised once at startup with
+     * no utterance in flight, so there is no exchange for it to be a line of.
+     * The player-facing half is covered where it lands: a class the vocabulary
+     * dropped is a class `describeClasses()` does not list (the console's
+     * `help` says so out loud), and an order naming it refuses through the
+     * validator's "is not a known unit class or role". The warnings are for
+     * whoever edits `class-vocabulary.json`.
      */
     static fromData(data: ClassVocabularyData): ClassVocabulary {
         const phrases: PhraseEntry[] = [];

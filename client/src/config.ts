@@ -11,7 +11,12 @@ const gamePort = typeof __GAME_SERVER_PORT__ !== 'undefined'
 // `globalThis.location` resolves to Window.location on the main thread and
 // WorkerLocation in a worker (both expose `.hostname`) — GW4 imports the
 // def/render modules that pull in CONFIG into the game-processor worker.
-const host = globalThis.location.hostname || 'localhost';
+// Optional-chained because this runs at MODULE SCOPE: any importer that
+// transitively reaches config.ts in a context without a `location` — a node
+// test process, an SSR pass — would otherwise die on import rather than on
+// use, taking the whole module graph with it for a value it may never read.
+// The 'localhost' fallback is already the right answer in every such context.
+const host = globalThis.location?.hostname || 'localhost';
 
 export const CONFIG = {
     gameServerPort: gamePort,

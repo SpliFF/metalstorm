@@ -108,6 +108,18 @@ describe('every fixture dispatches exactly as declared', () => {
             if (expected.clarifies) {
                 expect(report.clarification, 'expected a question').toBeDefined();
                 expect(report.lines.some((l) => l.kind === 'ask')).toBe(true);
+                if (expected.asks?.options) {
+                    expect(report.clarification?.options).toEqual(expected.asks.options);
+                }
+                if (expected.asks?.pick !== undefined) {
+                    expect(report.clarification?.pick ?? 1).toBe(expected.asks.pick);
+                }
+                if (expected.asks?.patchable !== undefined) {
+                    // A question the resolver raised carries a context; one the
+                    // model raised does not, and is never patchable.
+                    expect(report.clarifyContext?.patchable ?? false)
+                        .toBe(expected.asks.patchable);
+                }
             } else {
                 expect(report.clarification, 'did not expect a question').toBeUndefined();
             }
@@ -115,6 +127,9 @@ describe('every fixture dispatches exactly as declared', () => {
             if (expected.refusals !== undefined) {
                 expect(report.refusals).toHaveLength(expected.refusals);
             }
+
+            if (expected.ran) expect(report.ran).toEqual(expected.ran);
+            if (expected.notRun) expect(report.notRun).toEqual(expected.notRun);
 
             if (expected.camera) expect(h.cameraCalls).toEqual(expected.camera);
             if (expected.ui) expect(h.uiCalls).toEqual(expected.ui);
@@ -271,7 +286,7 @@ describe('clarifications', () => {
         expect(report.clarification).toBeDefined();
     });
 
-    it('a refusal does NOT stop the plan', () => {
+    it('a refusal stops the plan too, and says what was skipped (M5)', () => {
         const h = harness('basin');
         const report = executeNLResponse({
             actions: [
@@ -283,9 +298,75 @@ describe('clarifications', () => {
             ],
         }, h.ports);
         expect(report.refusals).toHaveLength(1);
-        expect(sendShapes(h.sent)).toEqual([
-            { type: 'LuaRulesMsg', wire: 'cmd=guidance.stance&value=aggressive' },
-        ]);
+        // Nothing after the refusal ran — the stance change never reached the wire.
+        expect(sendShapes(h.sent)).toEqual([]);
+        expect(report.stoppedAt).toBe(0);
+        expect(report.ran).toEqual([]);
+        expect(report.notRun).toEqual(['stance aggressive']);
+        expect(report.lines.map((l) => l.kind)).toEqual(['refused', 'system']);
+        expect(report.lines[1].text).toContain('not run: stance aggressive');
+    });
+
+    it('the steps that DID run are named in the stop line', () => {
+        const h = harness('basin');
+        const report = executeNLResponse({
+            actions: [
+                {
+                    kind: 'command',
+                    intent: {
+                        verb: 'defend', subject: { type: 'any' },
+                        target: { type: 'entity-ref', name: 'Grain Silo' },
+                    },
+                },
+                {
+                    kind: 'command',
+                    intent: {
+                        verb: 'attack', subject: { type: 'any' },
+                        target: { type: 'entity-ref', name: 'the ridge' },
+                    },
+                },
+                { kind: 'ui', ui: { op: 'open', panelId: 'minimap' } },
+            ],
+        }, h.ports);
+        // The plan's own example: "defended the silo; couldn't find 'the ridge'".
+        expect(report.ran).toEqual(['defend Grain Silo']);
+        expect(report.stoppedAt).toBe(1);
+        expect(report.notRun).toEqual(['open minimap']);
+        expect(report.refusals[0]).toContain('the ridge');
+        expect(report.lines.at(-1)?.text)
+            .toBe('did: defend Grain Silo — stopped there; not run: open minimap');
+    });
+
+    it('a question mid-plan reports the skipped steps the same way', () => {
+        const h = harness('ambiguous-forces');
+        const report = executeNLResponse({
+            actions: [
+                { kind: 'guidance', guidance: { op: 'stance', value: 'defensive' } },
+                {
+                    kind: 'command',
+                    intent: {
+                        verb: 'secure', subject: { type: 'entity-ref', name: 'Chimera' },
+                        target: { type: 'entity-ref', name: 'Northgate' },
+                    },
+                },
+                { kind: 'guidance', guidance: { op: 'roe', value: 'free' } },
+            ],
+        }, h.ports);
+        expect(report.ran).toEqual(['stance defensive']);
+        expect(report.notRun).toEqual(['roe free']);
+        expect(report.clarifyContext).toEqual({ actionIndex: 1, slot: 'subject', patchable: true });
+    });
+
+    it('a single action that refuses says nothing extra', () => {
+        // The summary exists to stop a half-done plan reading as a finished one.
+        // With nothing skipped there is no such risk, and the extra line would
+        // just be noise under every refusal in the game.
+        const h = harness('basin');
+        const report = executeNLResponse({
+            actions: [{ kind: 'group', group: { op: 'create', name: 'Hammerfall' } }],
+        }, h.ports);
+        expect(report.lines.map((l) => l.kind)).toEqual(['refused']);
+        expect(report.notRun).toEqual([]);
     });
 });
 
@@ -504,7 +585,28 @@ describe('the say line', () => {
         expect(report.lines.map((l) => l.kind)).toEqual(['refused']);
     });
 
-    it('IS printed when a later action succeeds after an earlier refusal', () => {
+    it('IS printed once an earlier action has succeeded', () => {
+        const h = harness('basin');
+        const report = executeNLResponse({
+            say: 'Two things.',
+            actions: [
+                { kind: 'guidance', guidance: { op: 'stance', value: 'aggressive' } },
+                {
+                    kind: 'command',
+                    intent: { verb: 'patrol', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Northgate' } },
+                },
+            ],
+        }, h.ports);
+        // No stop summary: the refusal was the LAST action, so nothing was
+        // skipped and there is no half-done plan to warn about.
+        expect(report.lines.map((l) => l.kind)).toEqual(['system', 'ok', 'refused']);
+        expect(report.lines[0].text).toBe('Two things.');
+    });
+
+    it('is NOT printed when the FIRST action refuses and stops the plan', () => {
+        // `say` is written before resolution runs, so an envelope that never
+        // achieves anything must acknowledge nothing — including when the reason
+        // it achieved nothing is that step 1 ended it.
         const h = harness('basin');
         const report = executeNLResponse({
             say: 'Two things.',
@@ -516,6 +618,6 @@ describe('the say line', () => {
                 { kind: 'guidance', guidance: { op: 'stance', value: 'aggressive' } },
             ],
         }, h.ports);
-        expect(report.lines.map((l) => l.kind)).toEqual(['refused', 'system', 'ok']);
+        expect(report.lines.some((l) => l.text === 'Two things.')).toBe(false);
     });
 });

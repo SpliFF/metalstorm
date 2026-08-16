@@ -78,6 +78,65 @@
     font-size: 10px;
 }
 
+/* ── Clarification chips (M5) ───────────────────────────────────────── */
+
+/* Tappable answers to a question. Aligned with the note gutter so a question,
+   its options and its answer read as one block. */
+.cc-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 3px 0 5px 40px;
+}
+
+.cc-chip {
+    padding: 2px 9px;
+    border: 1px solid var(--nui-accent);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--nui-accent);
+    font: var(--nui-font);
+    font-size: 11px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.cc-chip:hover:not(:disabled) {
+    background: var(--nui-accent);
+    color: var(--nui-bg-head);
+}
+
+/* Ticked, while a multi-pick question is still collecting. */
+.cc-chip--on {
+    background: var(--nui-accent);
+    color: var(--nui-bg-head);
+}
+
+/* The confirm button of a multi-pick question. Disabled until the right number
+   of chips is ticked — a "send 1/2" that fired would answer a different
+   question from the one that was asked. */
+.cc-chip--go {
+    border-style: dashed;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Answered or superseded. The question stays in the transcript — a record of
+   what was asked and what was picked — but it can no longer be acted on, since
+   the board has moved since. */
+.cc-chip--dead {
+    border-color: var(--nui-border);
+    color: var(--nui-text-faint);
+    cursor: default;
+    opacity: 0.65;
+}
+
+.cc-chip--dead.cc-chip--on {
+    background: transparent;
+    border-color: var(--nui-text-faint);
+    color: var(--nui-text-dim);
+    text-decoration: underline;
+}
+
 /* ── Input row ──────────────────────────────────────────────────────── */
 
 .cc-input-row {
@@ -88,3 +147,96 @@
 }
 
 .cc-input { flex: 1; min-width: 0; }
+
+/* ── Push-to-talk mic (M6) ──────────────────────────────────────────────
+ *
+ * The button exists only when the browser has a speech API (the widget appends
+ * it in `setupVoice`), so there is no disabled/greyed state to style — an
+ * affordance the browser cannot honour is absent, not decorated.
+ *
+ * Two states, and the visual distance between them is deliberate (§4 "mic state
+ * must be unambiguous"): cold is a dim outline, hot is a filled red button with
+ * a pulsing dot and a glow. Nobody should have to squint to know whether the
+ * microphone is open.
+ */
+
+.cc-mic {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    padding: 3px 9px;
+    border: 1px solid var(--nui-border);
+    border-radius: var(--nui-radius);
+    background: var(--nui-bg-sunken);
+    color: var(--nui-text-dim);
+    font: var(--nui-font);
+    line-height: 1.4;
+    cursor: pointer;
+    /* Holding the button must not select the label text under the cursor. */
+    user-select: none;
+    touch-action: none;
+}
+
+.cc-mic:hover { border-color: var(--nui-accent); color: var(--nui-text); }
+
+/* The state lamp. Hollow and grey when cold — a mic that is not listening says
+   so without the player reading anything. */
+.cc-mic__dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid var(--nui-text-faint);
+}
+
+.cc-mic__glyph { font-size: 12px; opacity: 0.75; }
+
+/* HOT — the mic is open, right now. */
+.cc-mic--hot {
+    border-color: var(--nui-bad);
+    background: var(--nui-bad);
+    color: var(--nui-bg-head);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--nui-bad) 35%, transparent);
+}
+
+.cc-mic--hot .cc-mic__dot {
+    background: var(--nui-bg-head);
+    border-color: var(--nui-bg-head);
+    animation: cc-mic-pulse 1s ease-in-out infinite;
+}
+
+.cc-mic--hot .cc-mic__glyph { opacity: 1; }
+
+/* SETTLING — the key is released and the port is already stopped, so the mic is
+   CLOSED; this only says "still writing down what you said". Deliberately not
+   the hot colour: the one thing this styling must never do is show a live mic
+   when the mic is shut. */
+.cc-mic--settling {
+    border-color: var(--nui-accent);
+    color: var(--nui-accent);
+}
+
+.cc-mic--settling .cc-mic__dot {
+    background: var(--nui-accent);
+    border-color: var(--nui-accent);
+}
+
+@keyframes cc-mic-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.45; transform: scale(0.7); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cc-mic--hot .cc-mic__dot { animation: none; }
+}
+
+/* While listening, the whole panel picks up a hairline so the state is legible
+   from the play area — the player is watching the battlefield, not the mic. */
+.command-console--listening .cc-log {
+    border-color: color-mix(in srgb, var(--nui-bad) 55%, var(--nui-border-sunken));
+}
+
+.command-console--listening .cc-input {
+    border-color: color-mix(in srgb, var(--nui-bad) 55%, var(--nui-border));
+}

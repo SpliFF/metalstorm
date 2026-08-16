@@ -135,8 +135,16 @@ export interface FixtureExpect {
     ui?: string[];
     /** The executor must ask rather than act. */
     clarifies?: boolean;
+    /** The question's own shape: the chips offered, how many the answer takes,
+     *  and whether the console can answer it without the model (M5). */
+    asks?: { options?: string[]; pick?: number; patchable?: boolean };
     /** How many refusal lines the run produced. */
     refusals?: number;
+    /** Short labels of the actions that completed, in order (M5). */
+    ran?: string[];
+    /** Short labels of the actions the stop skipped (M5). An empty array
+     *  asserts the plan ran to the end. */
+    notRun?: string[];
     /** Substrings that must appear somewhere in the printed lines. */
     saysLike?: string[];
 }
@@ -148,6 +156,17 @@ export interface NLFixture {
     context: string;
     expected: NLResponse;
     expect?: FixtureExpect;
+    /**
+     * Prior exchanges, oldest first, alternating you/game — the `history` the
+     * proxy accepts (§3, ≤2). Present on the second half of a clarification
+     * round-trip, where the question the game asked is what makes the follow-up
+     * sentence mean anything.
+     *
+     * The TS suites ignore it (they execute `expected`, which is already the
+     * answer); `tools/nl-eval` sends it, because whether the MODEL can carry a
+     * round-trip is exactly what the eval measures.
+     */
+    history?: string[];
     /**
      * Run this fixture with the M3 camera / registry / query ports injected.
      *

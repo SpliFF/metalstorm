@@ -31,6 +31,7 @@ import { planUtterance, type ExchangeDeps, type ExchangeOutcome } from './consol
 import type { AcceleratorResult } from './free-text-accelerator.js';
 import { matchLocalPattern, type LocalPatternDeps } from './nl-local-patterns.js';
 import {
+    MAX_ACTIONS,
     validateNLResponse,
     type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
     type NLWhen, type ValidationResult,
@@ -128,6 +129,56 @@ function cleanName(raw: string): string {
  * depending on whether the proxy happened to be up.
  */
 export function acceleratorToEnvelope(utterance: string, deps: AdapterDeps): LocalParse {
+    const clauses = splitClauses(utterance);
+    if (clauses) {
+        const parts = clauses.map((clause) => parseOne(clause, deps));
+        // All or nothing: one clause the local path can't execute means the
+        // conjunction was part of a name, not a list of orders. See
+        // `splitClauses`.
+        const executable = parts.every((p) =>
+            p.response.actions.length > 0 && p.response.actions.every((a) => a.kind !== 'refuse'));
+        if (executable && parts.reduce((n, p) => n + p.response.actions.length, 0) <= MAX_ACTIONS) {
+            const says = parts.map((p) => p.response.say).filter((s): s is string => !!s);
+            return {
+                notes: parts.flatMap((p) => p.notes),
+                response: {
+                    ...(says.length ? { say: clampText(says.join('; ')) } : {}),
+                    actions: parts.flatMap((p) => p.response.actions),
+                },
+            };
+        }
+    }
+    return parseOne(utterance, deps);
+}
+
+/**
+ * "defend Northgate and show me the minimap" → two clauses, or null.
+ *
+ * Null means "treat the whole thing as one sentence", and it is the answer
+ * whenever ANY clause fails to parse on its own. That all-or-nothing rule is
+ * what keeps the split safe: "defend the grain silo and osprey fen" splits into
+ * a clause and a fragment, the fragment produces no action, and the sentence
+ * goes to the slot-filler whole — where "and osprey fen" ends up in the
+ * unmatched-words note, exactly as before this existed. So this can only ever
+ * ADD sentences the local path executes; it can never change what an existing
+ * one means.
+ *
+ * The LLM does this properly (§1 "multi-step = ordered list", and it reads the
+ * sentence rather than counting conjunctions). This is the offline half, and it
+ * is why "defend <place> and show me the minimap" works with the proxy down.
+ */
+function splitClauses(utterance: string): string[] | null {
+    const parts = utterance
+        .split(/(?:,\s*(?:and\s+|then\s+)?|\s+and\s+then\s+|\s+and\s+|\s*;\s*|\s+then\s+)/i)
+        .map((p) => p.trim())
+        .filter(Boolean);
+    if (parts.length < 2 || parts.length > MAX_ACTIONS) return null;
+    return parts;
+}
+
+/** One clause (or one whole sentence) → one envelope. Never re-splits: the
+ *  split has already happened by the time this is called. */
+function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
     // M3's camera / panel / query patterns, tried BEFORE the slot-filler for the
     // same reason the rename is: none of them is one of the eleven army-moving
     // verbs, and teaching the slot-filler about panels would make every sentence
@@ -294,7 +345,7 @@ export function runLocalUtterance(utterance: string, deps: LocalRunDeps): LocalR
             notes: validation.errors.slice(1, 4),
         };
         deps.ports.console.say(line);
-        return { response, validation, report: { lines: [line], sent: [], refusals: [line.text] } };
+        return { response, validation, report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] } };
     }
 
     const report = executeNLResponse(validation.value, {
@@ -302,6 +353,168 @@ export function runLocalUtterance(utterance: string, deps: LocalRunDeps): LocalR
         console: withNotes(deps.ports.console, notes),
     });
     return { response, validation, report };
+}
+
+// ─────────────────────────── the proxy run (M4) ───────────────────────────
+
+/**
+ * Where the envelope that just executed came from.
+ *
+ * Surfaced rather than inferred because the player is owed it: the offline
+ * parser understands a much narrower set of sentences, and a player whose
+ * "get a couple of tank squads over to Randtown" silently became "I didn't
+ * understand that" deserves to know the difference between a sentence the game
+ * rejects and a proxy that is down.
+ */
+export type NLRunSource = 'proxy' | 'offline-parser';
+
+/** Printed under the first line whenever the local path ran instead. */
+export const OFFLINE_TAG = '(offline parser)';
+
+export interface ProxyDeps {
+    /** Game-server origin — `CONFIG.httpUrl`. */
+    endpoint: string;
+    /** The player's session token, sent as a Bearer header. The proxy route is
+     *  `RouteAuth::TokenRequired`, and the token is also what the per-user
+     *  token bucket is keyed on. */
+    token: string;
+    /** The §2 payload (`nl-context.ts`). */
+    context: unknown;
+    /** ≤2 prior exchanges, oldest first, alternating you/game. */
+    history?: readonly string[];
+    /** Injected in tests. */
+    fetchImpl?: typeof fetch;
+    /**
+     * Client-side abort. Deliberately LONGER than the server's own 6 s cap so
+     * that a slow-but-alive upstream comes back as the server's clean 503
+     * rather than as a client timeout — the two look the same to the player but
+     * only one of them leaves a usable line in the server log.
+     */
+    timeoutMs?: number;
+}
+
+export const PROXY_TIMEOUT_MS = 8000;
+
+export interface RemoteRunDeps extends LocalRunDeps {
+    /** Absent ⇒ local-only, exactly the M0–M3 behaviour. */
+    proxy?: ProxyDeps;
+}
+
+export interface RunResult extends LocalRunResult {
+    source: NLRunSource;
+    /** Why the proxy path was not used, when it wasn't. Logged, not shown. */
+    fallbackReason?: string;
+}
+
+/**
+ * One utterance, proxy-first, falling back to the local slot-filler.
+ *
+ * The fallback triggers on 429 / 503 / timeout / transport error — i.e. every
+ * way the proxy can be unavailable — and NOT on a 200 whose envelope fails
+ * validation. That asymmetry is the point: an unavailable proxy is an
+ * operational state the player should barely notice, while a proxy returning
+ * an envelope the contract rejects is a bug, and quietly re-running the
+ * sentence through a different parser would hide it. The second case prints the
+ * validator's own complaint, the same way a bad local envelope does.
+ *
+ * The proxy's output is validated HERE even though the proxy asked for
+ * structured output against the same schema (§3). That is not redundancy: the
+ * server is a different trust domain from this executor, structured outputs
+ * constrain shape but not the closed vocabularies the schema cannot express
+ * (name charsets, count ranges, clarify-excludes-actions), and the executor's
+ * safety argument has to hold for an envelope that arrived over the network.
+ */
+export async function runUtterance(
+    utterance: string, deps: RemoteRunDeps,
+): Promise<RunResult> {
+    if (!deps.proxy) {
+        return { ...runLocalUtterance(utterance, deps), source: 'offline-parser' };
+    }
+
+    let fetched: ProxyOutcome;
+    try {
+        fetched = await callProxy(utterance, deps.proxy);
+    } catch (err) {
+        fetched = { kind: 'unavailable', reason: describeError(err) };
+    }
+
+    if (fetched.kind === 'unavailable') {
+        const local = runLocalUtterance(utterance, {
+            ...deps,
+            ports: { ...deps.ports, console: withNotes(deps.ports.console, [OFFLINE_TAG]) },
+        });
+        return { ...local, source: 'offline-parser', fallbackReason: fetched.reason };
+    }
+
+    const validation = validateNLResponse(fetched.envelope, {
+        vocabulary: deps.vocabulary,
+        ...(deps.panelIds ? { panelIds: deps.panelIds } : {}),
+    });
+
+    if (!validation.ok) {
+        const line: NLConsoleLine = {
+            kind: 'refused',
+            text: `I understood that, but couldn't put it in a form the game accepts: ${validation.errors[0]}.`,
+            notes: validation.errors.slice(1, 4),
+        };
+        deps.ports.console.say(line);
+        return {
+            response: fetched.envelope as NLResponse,
+            validation,
+            report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] },
+            source: 'proxy',
+        };
+    }
+
+    const report = executeNLResponse(validation.value, deps.ports);
+    return { response: validation.value, validation, report, source: 'proxy' };
+}
+
+type ProxyOutcome =
+    | { kind: 'ok'; envelope: unknown }
+    | { kind: 'unavailable'; reason: string };
+
+async function callProxy(utterance: string, proxy: ProxyDeps): Promise<ProxyOutcome> {
+    const doFetch = proxy.fetchImpl ?? globalThis.fetch;
+    if (typeof doFetch !== 'function') {
+        return { kind: 'unavailable', reason: 'no fetch available' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), proxy.timeoutMs ?? PROXY_TIMEOUT_MS);
+    try {
+        const resp = await doFetch(`${proxy.endpoint}/api/nl/command`, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                authorization: `Bearer ${proxy.token}`,
+            },
+            body: JSON.stringify({
+                utterance,
+                context: proxy.context,
+                ...(proxy.history?.length ? { history: [...proxy.history] } : {}),
+            }),
+            signal: controller.signal,
+        });
+
+        if (!resp.ok) {
+            // Every non-2xx is a fallback. A 400 from the size gate means this
+            // client built something malformed, which is a bug — but refusing
+            // the player's sentence over it would punish them for our mistake,
+            // and the local parser can still handle the simple half.
+            return { kind: 'unavailable', reason: `HTTP ${resp.status}` };
+        }
+
+        return { kind: 'ok', envelope: await resp.json() };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function describeError(err: unknown): string {
+    if (err instanceof DOMException && err.name === 'AbortError') return 'timeout';
+    if (err instanceof Error) return err.message;
+    return 'transport error';
 }
 
 /** Decorate the first line with the transparency notes, then get out of the way. */

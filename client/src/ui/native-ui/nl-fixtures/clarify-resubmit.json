@@ -1,0 +1,247 @@
+{
+  "_comment": "Golden fixtures: the clarification ROUND-TRIP (PLAN-metalstorm-command-language.md §4/§5, milestone M5). Each pair is one question and the sentence that answers it. The answering fixture carries `history` — the ≤2 prior exchanges the proxy accepts — because without the question in front of it, 'the second one' is not an order. The TS suites execute `expected` (already the answer); `tools/nl-eval` replays the history and measures whether the model can carry a round-trip at all.",
+
+  "fixtures": [
+    {
+      "name": "three idle tank squads, two asked for → which two?",
+      "utterance": "move 2 tank squads to Randtown",
+      "context": "three-idle-tanks",
+      "note": "THE M5 acceptance case. The ranking could pick a pair — Chimera is nearest Randtown — but nothing in the sentence says which two of the player's armies should drive across the map, and a distance tie-break is not evidence about that (§5, never guess between armies). `pick: 2` is what tells the console to render the chips as toggles instead of asking twice.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [],
+        "clarifies": true,
+        "asks": {
+          "options": ["Chimera Squad", "Basilisk Squad", "Warhound Squad", "cancel"],
+          "pick": 2,
+          "patchable": true
+        },
+        "saysLike": ["which two"]
+      }
+    },
+
+    {
+      "name": "…and the two chips picked execute exactly those two",
+      "utterance": "move 2 tank squads to Randtown. Chimera Squad and Warhound Squad",
+      "context": "three-idle-tanks",
+      "history": [
+        "move 2 tank squads to Randtown",
+        "You have 3 tank squads and asked for 2 — which two?"
+      ],
+      "note": "The other half of acceptance 1. Two named forces, so ONE COMMAND EACH (prompt rule 6) — a single action naming 'Chimera Squad and Warhound Squad' would name a group that does not exist. Basilisk is not sent, which is the whole point of having asked. The console reaches this envelope without the model at all, by patching the class-count subject it already holds (nl-clarify.ts).",
+      "expected": {
+        "say": "Moving Chimera Squad and Warhound Squad to Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Randtown" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Warhound Squad" },
+              "target": { "type": "entity-ref", "name": "Randtown" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 3 }
+        ],
+        "ran": ["secure Randtown", "secure Randtown"],
+        "notRun": []
+      }
+    },
+
+    {
+      "name": "two places tie → the question, with the names as chips",
+      "utterance": "attack Rand",
+      "context": "ambiguous-places",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Rand" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [],
+        "clarifies": true,
+        "asks": { "options": ["Randtown", "Randtown East"], "pick": 1, "patchable": true }
+      }
+    },
+
+    {
+      "name": "…answered by tapping the second chip",
+      "utterance": "attack Rand. Randtown East",
+      "context": "ambiguous-places",
+      "history": ["attack Rand", "Which place did you mean — Randtown or Randtown East?"],
+      "note": "One pick, so the chip fires immediately — a confirm step on a single choice is a click that says nothing. The console patches the TARGET slot of the envelope it already holds and re-runs; nothing goes back to the model.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Randtown East" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 0 }] }
+    },
+
+    {
+      "name": "a free-typed follow-up resolves against the question",
+      "utterance": "the second one",
+      "context": "ambiguous-places",
+      "history": ["attack Rand", "Which place did you mean — Randtown or Randtown East?"],
+      "note": "Why the console carries `history` on typed sentences too, not only on chip taps: 'the second one' is not an order in isolation, and the only thing that can turn it into one is the question sitting above it. Nothing local can parse this — the offline slot-filler refuses it — so it is a fixture the eval measures and the local path honestly cannot serve.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Randtown East" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 0 }] }
+    },
+
+    {
+      "name": "a follow-up that adds to the order just given",
+      "utterance": "and the infantry too",
+      "context": "basin",
+      "history": [
+        "Chimera Squad hold Osprey Fen",
+        "standing order set · normal priority"
+      ],
+      "note": "The other kind of follow-up: not an answer to a question, just a sentence that only means something after the last one. Same verb, same place, the group the player named this time.",
+      "expected": {
+        "say": "Ironback Platoon is holding Osprey Fen too.",
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "hold",
+            "subject": { "type": "entity-ref", "name": "Ironback Platoon" },
+            "target": { "type": "entity-ref", "name": "Osprey Fen" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 5 }] }
+    },
+
+    {
+      "name": "the model asks which two, with pick on the wire",
+      "utterance": "send a couple of squads to Fallow Gate",
+      "context": "basin",
+      "note": "The model's own multi-pick question, as opposed to the resolver's. `clarify ⇒ actions === []` still holds, and there is no envelope behind it to patch — so the console resubmits this one instead of answering it locally, which is the branch nl-clarify.ts returns null for.",
+      "expected": {
+        "clarify": {
+          "question": "Which two — Chimera, Warhound or Kestrel Flight?",
+          "options": ["Chimera Squad", "Warhound Squad", "Kestrel Flight"],
+          "pick": 2
+        },
+        "actions": []
+      },
+      "expect": {
+        "sends": [],
+        "clarifies": true,
+        "asks": { "pick": 2, "patchable": false }
+      }
+    },
+
+    {
+      "name": "two places share one name, so the answer cannot BE that name",
+      "utterance": "defend West Scarp",
+      "context": "same-name-places",
+      "note": "The one question the console must NOT answer locally. Both regions are literally called 'West Scarp', so the options differ only by the type suffix the question adds for display — substituting either back into the envelope would ask the identical question forever. The resolver leaves `patchable` off, and the console resubmits to the model instead of looping.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "West Scarp" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [],
+        "clarifies": true,
+        "asks": {
+          "options": ["West Scarp (region)", "West Scarp (district)"],
+          "pick": 1,
+          "patchable": false
+        }
+      }
+    },
+
+    {
+      "name": "a pool the sentence exactly consumes does not ask",
+      "utterance": "move 3 tank squads to Randtown",
+      "context": "three-idle-tanks",
+      "note": "Three tank squads, three asked for: the pool is exactly consumed, so there is nothing to choose and no question. Guards the excess rule against firing whenever the count is above one.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 3 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 2 },
+          { "type": "GroupDirective", "groupId": 3 }
+        ]
+      }
+    },
+
+    {
+      "name": "cancelling is an option on every squad question",
+      "utterance": "move 2 tank squads to Northgate",
+      "context": "three-idle-tanks",
+      "note": "`cancel` rides in `options` so a player who changed their mind can leave without answering. The console recognises it by name and sends nothing — it is never one of the `pick` names, and it is never substituted into an envelope.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [],
+        "clarifies": true,
+        "asks": { "pick": 2 },
+        "saysLike": ["which two"]
+      }
+    }
+  ]
+}

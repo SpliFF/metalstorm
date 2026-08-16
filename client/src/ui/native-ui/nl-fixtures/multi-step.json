@@ -117,10 +117,10 @@
     },
 
     {
-      "name": "a refusal part-way does NOT stop the plan",
+      "name": "a refusal part-way stops the plan and names what was skipped",
       "utterance": "prioritise Northgate, patrol Slag Forge, and hold Osprey Fen",
       "context": "basin",
-      "note": "The mirror of the fixture above. One impossible step (patrol needs a route) shouldn't cancel the two that were fine — a refusal is a per-action fact, an ambiguity is doubt about intent.",
+      "note": "M5 changed this from M1's 'a refusal does not stop the plan'. A multi-step envelope is one sentence split up, and its steps lean on each other — running step 3 on the assumption that step 2 happened is how a plan half-executes into a position nobody asked for. Skipping is recoverable; an order sent on a false premise costs authority and moves an army. The stop line names the step that ran and the one that didn't.",
       "expected": {
         "actions": [
           { "kind": "guidance", "guidance": { "op": "paint", "value": "priority", "regionRef": "Northgate" } },
@@ -144,10 +144,160 @@
       },
       "expect": {
         "sends": [
-          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=north_gate_ridge&value=priority" },
-          { "type": "GroupDirective", "groupId": 1 }
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=north_gate_ridge&value=priority" }
         ],
-        "refusals": 1
+        "refusals": 1,
+        "ran": ["paint Northgate"],
+        "notRun": ["hold Osprey Fen"],
+        "saysLike": ["not run: hold Osprey Fen"]
+      }
+    },
+
+    {
+      "name": "an order and a panel, in the order they were said",
+      "utterance": "defend Northgate and show me the minimap",
+      "context": "basin",
+      "ports": true,
+      "note": "M5 acceptance 2. Two kinds in one sentence, and the ORDER is the assertion: the directive commits before the panel opens, because that is the order the player said them in and because a panel that opened first would be the visible half of a sentence whose other half then refused.",
+      "expected": {
+        "say": "Defending Northgate, and opening the minimap.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          },
+          { "kind": "ui", "ui": { "op": "open", "panelId": "minimap" } }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "StandingOrder" }],
+        "ui": ["open:minimap"],
+        "ran": ["defend Northgate", "open minimap"],
+        "notRun": []
+      }
+    },
+
+    {
+      "name": "several named forces become several actions, not one merged name",
+      "utterance": "send Chimera and Basilisk to Fallow Gate",
+      "context": "basin",
+      "note": "Prompt rule 6, and the resolver-ambiguity item M5 scoped: `NLCommandIntent.subject` holds ONE subject, so a multi-subject sentence is expressed as multi-step. The alternative — a subject naming 'Chimera and Basilisk' — would be a group that does not exist and could only ever refuse. Note Basilisk is tasked and goes anyway: the player named it, so there is nothing to choose and nothing to ask.",
+      "expected": {
+        "say": "Sending Chimera Squad and Basilisk Squad to Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Basilisk Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 2 }
+        ]
+      }
+    },
+
+    {
+      "name": "more named forces than an envelope can hold is a refusal",
+      "utterance": "send Chimera, Basilisk, Warhound, Kestrel and Ironback to Fallow Gate",
+      "context": "basin",
+      "note": "Five subjects, four actions. Refused rather than silently truncated to four — a sentence that moved four of the five armies you named, without saying which one it left behind, is the worst possible outcome of the multi-subject rule.",
+      "expected": {
+        "actions": [{
+          "kind": "refuse",
+          "reason": "That's five squads in one order — I can take four at a time. Say it in two."
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "notRun": [] }
+    },
+
+    {
+      "name": "the step that fails is named, and the rest is not run",
+      "utterance": "defend the grain silo, then push on to the ridge, then show me the minimap",
+      "context": "basin",
+      "ports": true,
+      "note": "The plan's own example of the M5 report: 'defended the silo; couldn't find the ridge'. 'The ridge' is in no index, so step 2 refuses by name and step 3 never happens — the minimap does NOT open, because a panel opening at the end of a plan that failed in the middle reads as success.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Grain Silo" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "the ridge" }
+            }
+          },
+          { "kind": "ui", "ui": { "op": "open", "panelId": "minimap" } }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "StandingOrder" }],
+        "ui": [],
+        "refusals": 1,
+        "ran": ["defend Grain Silo"],
+        "notRun": ["open minimap"],
+        "saysLike": ["don't know a place called \"the ridge\"", "not run: open minimap"]
+      }
+    },
+
+    {
+      "name": "a first step that fails takes the whole plan with it",
+      "utterance": "take Wolfden, then hold Northgate",
+      "context": "basin",
+      "note": "The boundary case of the same rule: nothing ran, so the summary says so rather than listing an empty 'did:'. And `say` is never printed — an envelope that achieved nothing acknowledges nothing.",
+      "expected": {
+        "say": "Taking Wolfden, then holding Northgate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Wolfden" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "ran": [],
+        "notRun": ["hold Northgate"],
+        "saysLike": ["nothing ran — stopped there; not run: hold Northgate"]
       }
     },
 

@@ -67,6 +67,29 @@
     ]
   },
 
+  "three-idle-tanks": {
+    "_note": "M5 acceptance board: THREE idle tank squads and a sentence asking for two. The ranking could pick a pair (Chimera is nearest Randtown), but nothing in the sentence says which two armies the player meant, so the resolver asks and offers the callsigns as chips. Positions are deliberately distinct — a board where the tie-break WOULD fire is the only one that proves the tie-break is not allowed to.",
+    "places": [
+      { "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 },
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 }
+    ],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Basilisk Squad", "id": 2, "cls": "tanks", "scale": 3, "size": 6, "x": 1400, "z": 1400 },
+      { "n": "Warhound Squad", "id": 3, "cls": "tanks", "scale": 2, "size": 5, "x": 2800, "z": 2800 },
+      { "n": "Kestrel Flight", "id": 4, "cls": "fighters", "scale": 2, "size": 4, "x": 1500, "z": 1500 }
+    ]
+  },
+
+  "same-name-places": {
+    "_note": "Two places that genuinely carry the SAME display name — a grid sector and an authored district can collide, and a scenario author can do it on purpose. Nothing can be scored between them, and no answer expressed as a name can pick one, which is the case the console must not try to answer locally (M5).",
+    "places": [
+      { "n": "West Scarp", "t": "region", "k": "grid_c4", "x": 700, "z": 700 },
+      { "n": "West Scarp", "t": "district", "k": "west_scarp_district", "x": 2200, "z": 2400 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }]
+  },
+
   "no-tanks": {
     "_note": "No candidates at all. Forming a group costs authority and touches AI locks, so this refuses rather than offering to auto-form (§5).",
     "places": [{ "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 }],

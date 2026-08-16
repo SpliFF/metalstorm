@@ -91,6 +91,13 @@ export class UiActionRegistry {
                 // Two panels claiming one phrase means every sentence using it
                 // is a coin flip. Loud, and first-registration wins so the
                 // behaviour is at least deterministic.
+                //
+                // Audited M5 (§7 "no silent drops"): a `console.warn` and NOT a
+                // transcript line, deliberately. This fires at widget-load time,
+                // before any player has said anything — there is no exchange to
+                // attach it to, and the audience is whoever wrote the manifest,
+                // not whoever is playing. The player-visible half is that the
+                // phrase still resolves, to the first claimant, every time.
                 console.warn(
                     `[ui-action-registry] "${name}" is claimed by both ${existing} and ${entry.id}; ` +
                     `keeping ${existing}`);

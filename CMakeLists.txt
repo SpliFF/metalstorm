@@ -417,7 +417,18 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
+# libcurl — the ONLY outbound HTTP client in this tree (rts/Server/NlProxy.cpp,
+# PLAN-metalstorm-command-language.md M4). Resolved from the macOS SDK with no
+# install step (`libcurl.tbd`, 8.7.1), which is what made it the cheaper half of
+# the M4 transport decision: the alternative was a Node sidecar to manage, and
+# macOS is the only platform that can configure this project today (the
+# docker-build-v2 images are upstream RecoilEngine tooling whose apt list has
+# none of the QUIC stack spring-server hard-requires, and .github/workflows/
+# security-prod-gate.yml runs on macos-14 for exactly that reason). On Linux
+# this is `libcurl4-openssl-dev`, a one-line apt addition whenever that build
+# becomes real. Not gated on SPRING_PROD: the NL route ships.
+find_package(CURL REQUIRED)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon CURL::libcurl)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -612,6 +623,9 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
+        # M4 NL proxy: the token bucket, the request gate and the prompt
+        # assembly are all reachable without a network or a key (test_nl_proxy.cpp).
+        ${CMAKE_SOURCE_DIR}/rts/Server/NlProxy.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/FactionData.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
@@ -684,7 +698,7 @@ if(TEST_SOURCES)
     # how the synced-input classifier is proved exhaustive against the real wire
     # schema instead of against a copy of it (PLAN-replay task 1).
     add_dependencies(spring-tests check_protocol_schema generate_build_stamp)
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers CURL::libcurl)
     # Absolute path to the source tree so tests can open checked-in fixtures
     # (e.g. the strategos AI plugin) regardless of the ctest working dir.
     target_compile_definitions(spring-tests PRIVATE SPRING_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
