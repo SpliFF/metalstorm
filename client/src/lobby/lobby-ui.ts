@@ -2064,7 +2064,6 @@ export class LobbyUI {
                     id: r.id, name: r.name, mapId: r.mapId, state: r.state,
                     war: r.war!,
                     returning: p?.returning ?? false,
-                    watching: p?.watching ?? false,
                     // The durable half of "is this war mine" (task 4c). Left
                     // undefined when the lobby does not publish it, so
                     // `filterWars` falls back to `returning` rather than

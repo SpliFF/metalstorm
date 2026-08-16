@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "Server/RoomManager.h"
+#include "Server/RoomWatchIntent.h"
 
 #include <sqlite3.h>
 
@@ -174,4 +175,60 @@ TEST_CASE("EnsureTables catches a room_members table that predates spectate_only
     CHECK(reloaded.GetRoom(warId)->FindPlayer(10)->spectateOnly);
 
     sqlite3_close(db);
+}
+
+// ── AccountWantsToWatch — the READER half ──────────────────────────────
+//
+// The writer half above is exercised via RoomManager::JoinRoom; these cases
+// exercise the reader (RoomWatchIntent.h) against a db that writer actually
+// wrote, so the writer's key (room_id, player_id bound from accountId) and
+// the reader's key (roomId, accountId) are proved to be the SAME key — a
+// hand-INSERTed row would only prove the test's own idea of the schema.
+
+TEST_CASE("AccountWantsToWatch reads true for a recorded watch intent") {
+    TwoRooms t;
+    REQUIRE(t.rooms.JoinRoom(t.warId, 10, 0, "watcher", "",
+                             /*asSpectator=*/true, "union"));
+    CHECK(AccountWantsToWatch(t.db, t.warId, 10));
+}
+
+TEST_CASE("AccountWantsToWatch reads false for a fighter") {
+    TwoRooms t;
+    REQUIRE(t.rooms.JoinRoom(t.warId, 11, 0, "fighter", "",
+                             /*asSpectator=*/false, "union"));
+    CHECK_FALSE(AccountWantsToWatch(t.db, t.warId, 11));
+}
+
+TEST_CASE("AccountWantsToWatch reads false for a skirmish member") {
+    // A skirmish never records the intent (RoomManager sets spectate_only
+    // only on a PersistentWar), so even a member who joined as a spectator
+    // reads false here — the game server never checks this on a skirmish
+    // anyway, but the reader itself must not invent a true.
+    TwoRooms t;
+    REQUIRE(t.rooms.JoinRoom(t.skirmishId, 10, 0, "watcher", "",
+                             /*asSpectator=*/true, "union"));
+    CHECK_FALSE(AccountWantsToWatch(t.db, t.skirmishId, 10));
+}
+
+TEST_CASE("AccountWantsToWatch reads false when the account never joined") {
+    TwoRooms t;
+    REQUIRE(t.rooms.JoinRoom(t.warId, 10, 0, "watcher", "",
+                             /*asSpectator=*/true, "union"));
+    CHECK_FALSE(AccountWantsToWatch(t.db, t.warId, /*accountId=*/999));
+}
+
+TEST_CASE("AccountWantsToWatch reads false when room_members does not exist") {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(":memory:", &db) == SQLITE_OK);
+    CHECK_FALSE(AccountWantsToWatch(db, /*roomId=*/1, /*accountId=*/10));
+    sqlite3_close(db);
+}
+
+TEST_CASE("AccountWantsToWatch reads false for a null db or a non-positive accountId") {
+    TwoRooms t;
+    REQUIRE(t.rooms.JoinRoom(t.warId, 10, 0, "watcher", "",
+                             /*asSpectator=*/true, "union"));
+    CHECK_FALSE(AccountWantsToWatch(nullptr, t.warId, 10));
+    CHECK_FALSE(AccountWantsToWatch(t.db, t.warId, 0));
+    CHECK_FALSE(AccountWantsToWatch(t.db, t.warId, -1));
 }

@@ -100,8 +100,6 @@ export interface WarRow {
     /// True when this account already holds a seat in this war (from the
     /// join preview, which is the only per-account source).
     returning?: boolean;
-    /// True when this account asked to WATCH this war (§3).
-    watching?: boolean;
     /// True when this account is ENLISTED in this war — it holds a binding,
     /// whether or not a join would seat it back on the same team. This, not
     /// `returning`, is what "My wars" means (task 4c). Absent on a lobby
