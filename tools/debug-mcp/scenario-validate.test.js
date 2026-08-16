@@ -294,6 +294,34 @@ test('world-map: a map this machine does not have', () => {
     assert.ok(has(f, 'warning', 'world-map'));
 });
 
+test('world-map: NO world.map at all is reported, not silently passed', () => {
+    // The regression: deleting the map line from the shipped showcase war gave
+    // ok:true with zero findings AND zero `skipped` — indistinguishable from a
+    // fully checked clean file, while every map-dependent pass had been quietly
+    // skipped. A warning (not an error): ScenarioDiscovery reads a missing map
+    // as an empty mapId rather than rejecting the war.
+    const f = findings(BASE.replace("world = { map = 'green_flat_x34_v3' },", ''));
+    assert.ok(has(f, 'warning', 'world-map'), JSON.stringify(f));
+    assert.ok(!has(f, 'error', 'world-map'), 'a war with no map still loads — warning, not error');
+    const wm = f.find((x) => x.rule === 'world-map');
+    assert.match(wm.message, /SKIPPED, not passed/);
+});
+
+test('world-map: a non-string map is still an error', () => {
+    const f = findings(BASE.replace("map = 'green_flat_x34_v3'", 'map = 42'));
+    assert.ok(has(f, 'error', 'world-map'), JSON.stringify(f));
+});
+
+test('region-graph-missing: says WHY when there is no map to graph', () => {
+    const f = findings(
+        BASE.replace("world = { map = 'green_flat_x34_v3' },",
+                     "ai = { { team = 0, slate = { home = 'r1' } } },"),
+        { regionKeys: null });
+    const skipped = f.find((x) => x.rule === 'region-graph-missing');
+    assert.ok(skipped, JSON.stringify(f));
+    assert.match(skipped.message, /declares no world\.map/);
+});
+
 test('defs-cache-missing: an empty universe SKIPS the def rules, never fails them', () => {
     const f = findings(BASE.replace("def = 'ms_soldiers_s1', team = 1", "def = 'utterly_bogus', team = 1"),
         { unitDefs: null, featureDefs: null });

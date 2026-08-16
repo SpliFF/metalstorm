@@ -70,6 +70,33 @@ export function parsePsOutput(text) {
 }
 
 /**
+ * The `--db <path>` a running lobby was started with.
+ *
+ * The MCP reads `game_status` and `game_servers` straight from SQLite, so it
+ * must open the SAME file the lobby writes. A hardcoded default cannot know
+ * that: this repo's lobby is routinely launched on a scratch db
+ * (`--db data/t9d.db`), and when the two diverge every probe reports `spawning`
+ * forever against a game that is demonstrably running. Detecting it from the
+ * lobby's own command line is the only source that cannot go stale, and it
+ * beats pinning a scratch filename into .mcp.json where it would rot the
+ * moment the next scratch db is used.
+ *
+ * Quoted paths are not handled because the flag is written by
+ * tools/scripts/spring-services.sh and mprocs.yaml, neither of which quotes.
+ *
+ * @returns {string|null} the path, or null when no lobby is running / no flag
+ */
+export function parseLobbyDbFlag(psText, patterns = STACK_PATTERNS) {
+    const lobbyRe = new RegExp(patterns.lobby);
+    for (const row of parsePsOutput(psText)) {
+        if (!lobbyRe.test(row.cmd)) continue;
+        const m = /--db[= ]+(\S+)/.exec(row.cmd);
+        if (m) return m[1];
+    }
+    return null;
+}
+
+/**
  * Parse `lsof -nP -iTCP -sTCP:LISTEN -Fpcn` machine output. Records are
  * one-per-line, tagged by their first character; `p`/`c` set the current
  * process context and every following `n` belongs to it.

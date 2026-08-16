@@ -21,6 +21,7 @@ import { buildScenarioManifest } from './scenario-manifest.js';
 import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { classifyEndResponse } from './room-end.js';
+import { validateToolArgs } from './tool-args.js';
 import {
     BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
 } from './browser.js';
@@ -31,14 +32,14 @@ import {
 import {
     STACK_PATTERNS, STACK_PORTS, STATUS_STALE_SEC,
     parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries, classifyStack,
-    planCleanup, summarize, isStackPort, CLEANABLE_KINDS,
+    planCleanup, summarize, isStackPort, CLEANABLE_KINDS, parseLobbyDbFlag,
 } from './stack-census.js';
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
     rmdirSync, statSync,
 } from 'fs';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -54,7 +55,36 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
 // switch named widgets off once the worker is ready. launch_game suggests a
 // browser URL with this widget disabled unless `testStartupSelector` is set.
 const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
-const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+// --- Which SQLite file? ----------------------------------------------------
+//
+// This must be the file the RUNNING lobby writes, not a default. The committed
+// .mcp.json said `data/spring-server.db` while the lobby ran `--db data/t9d.db`
+// (scratch dbs are routine here), and the whole probe surface then reported
+// `spawning` forever against a game that was demonstrably up — the SPRING_DB
+// divergence warning exists precisely because this kept happening.
+//
+// Order: an explicit SPRING_DB always wins (it is how you point at a db by
+// hand); otherwise ask the running lobby what it opened; otherwise the default.
+const DB_DEFAULT = resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+function detectLobbyDb() {
+    try {
+        const ps = execFileSync('ps', ['-eo', 'pid,ppid,lstart,args='], {
+            encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5000,
+        });
+        const flag = parseLobbyDbFlag(ps);
+        return flag ? resolve(process.env.PROJECT_ROOT || '.', flag) : null;
+    } catch { return null; }
+}
+const DB_EXPLICIT = !!process.env.SPRING_DB;
+const DB_DETECTED = DB_EXPLICIT ? null : detectLobbyDb();
+const DB_PATH = process.env.SPRING_DB
+    ? resolve(process.env.PROJECT_ROOT || '.', process.env.SPRING_DB)
+    : (DB_DETECTED || DB_DEFAULT);
+if (DB_DETECTED && DB_DETECTED !== DB_DEFAULT) {
+    // stdout is the MCP protocol channel — diagnostics go to stderr only.
+    console.error(`SPRING_DB: following the running lobby's --db (${DB_DETECTED}); `
+                + `set SPRING_DB to override.`);
+}
 
 // --- SQLite boot self-check (FU2) ---
 //
@@ -306,7 +336,7 @@ async function probeGame(roomId) {
     // the SPRING_DB-divergence `warning`. Neither changes the phase.
     const health = probeSqliteAnnotations({
         processSource: source, bindingReason: sqliteUnavailable,
-        sqliteOpened, statusRow: st, port: row.port,
+        sqliteOpened, statusRow: st, port: row.port, pid: row.pid,
     });
 
     const base = { roomId, pid: row.pid, port: st?.port || row.port, ...health };
@@ -2156,8 +2186,43 @@ async function executeTool(name, args) {
         }
 
         case 'list_gadgets': {
-            const result = await execOnGameServer('LuaRules', 'return table.concat(Spring.GetGadgetList(), "\\n")', args.roomId);
-            return result.output || '(no gadgets or game not running)';
+            // `Spring.GetGadgetList` does not exist — not in this engine, not
+            // in Recoil, not anywhere in this tree. This tool could therefore
+            // never have worked: every call died with "attempt to call a nil
+            // value (field 'GetGadgetList')". The real registry is the gadget
+            // handler's own `gadgets` array, each entry carrying a read-only
+            // `ghInfo` proxy {name, basename, filename, layer, desc, author} —
+            // the same source the handler's own listing command walks
+            // (cont/base/springcontent/LuaGadgets/gadgets.lua).
+            //
+            // Tab-separated rather than JSON-from-Lua: the exec channel hands
+            // back a plain string, and building JSON in Lua would need an
+            // encoder this scope has no guarantee of.
+            const lua = `
+                if not gadgetHandler or not gadgetHandler.gadgets then
+                    return 'ERR: no gadgetHandler in this LuaRules state'
+                end
+                local out = {}
+                for i, g in ipairs(gadgetHandler.gadgets) do
+                    local gi = g.ghInfo or {}
+                    out[#out+1] = table.concat({
+                        tostring(gi.layer or 0),
+                        tostring(gi.name or '?'),
+                        tostring(gi.basename or ''),
+                        tostring(gi.author or ''),
+                    }, '\\t')
+                end
+                return table.concat(out, '\\n')`;
+            const result = await execOnGameServer('LuaRules', lua, args.roomId);
+            const text = (result.output || '').trim();
+            if (!text) return JSON.stringify({ count: 0, gadgets: [], note: 'the gadget handler reports no loaded gadgets' }, null, 2);
+            if (text.startsWith('ERR: ')) return `Error: ${text.slice(5)}`;
+            if (/attempt to (call|index)/.test(text)) return `Error from LuaRules: ${text}`;
+            const gadgets = text.split('\n').map(line => {
+                const [layer, name, basename, author] = line.split('\t');
+                return { name, basename, layer: Number(layer), ...(author ? { author } : {}) };
+            });
+            return JSON.stringify({ count: gadgets.length, gadgets }, null, 2);
         }
 
         case 'query_db': {
@@ -3479,6 +3544,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
+        // Enforce the inputSchema before dispatch. Until this existed, a
+        // missing REQUIRED field reached the handler as undefined and surfaced
+        // as whatever the downstream layer said about it (a better-sqlite3
+        // type error, a game-server usage line), and a typo'd optional field
+        // was silently indistinguishable from omitting it. See tool-args.js.
+        const argError = validateToolArgs(TOOLS.find(t => t.name === name), args || {});
+        if (argError) return { content: [{ type: 'text', text: `Error: ${argError}` }], isError: true };
+
         const result = await executeTool(name, args || {});
         // A tool that builds its own MCP content blocks (image + text —
         // `client_screenshot`, P7) hands them back whole; everything else is

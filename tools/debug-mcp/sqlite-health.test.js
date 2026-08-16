@@ -93,6 +93,24 @@ test('lobby says running + SQLite readable + no game_status row → the SPRING_D
     assert.match(a.warning, /curl :9100\/api\/metrics/);
 });
 
+test('a HIBERNATED room (pid 0) never triggers the divergence warning', () => {
+    // A hibernated room is a lobby row with pid 0 / port 0 and legitimately no
+    // game_status row — nothing is running to publish one. This used to report
+    // a db mismatch that did not exist, and advise `curl :0/api/metrics`.
+    assert.deepEqual(probeSqliteAnnotations({
+        processSource: 'lobby', bindingReason: null,
+        sqliteOpened: true, statusRow: null, port: 0, pid: 0,
+    }), {});
+});
+
+test('a live server (pid > 0) with no row still warns', () => {
+    const a = probeSqliteAnnotations({
+        processSource: 'lobby', bindingReason: null,
+        sqliteOpened: true, statusRow: null, port: 9100, pid: 47752,
+    });
+    assert.deepEqual(a, { warning: dbDivergenceWarning(9100) });
+});
+
 test('no warning when the status row exists, when SQLite did not open, or when the process row came from the SQLite fallback', () => {
     const base = { bindingReason: null, sqliteOpened: true, port: 9100 };
     assert.deepEqual(probeSqliteAnnotations({

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries,
     classifyStack, planCleanup, summarize, isStackPort, STACK_PATTERNS,
+    parseLobbyDbFlag,
 } from './stack-census.js';
 
 // --- parsers ----------------------------------------------------------------
@@ -22,6 +23,32 @@ test('parsePsOutput keeps a command line containing spaces intact', () => {
 
 test('parsePsOutput skips blank and short lines', () => {
     assert.deepEqual(parsePsOutput('\n  \nnot a ps row\n'), []);
+});
+
+// --- the lobby's own --db ---------------------------------------------------
+
+const PS_SCRATCH_LOBBY =
+    ' 13254 1 Sat Aug 15 23:11:13 2026 ./build/debug/spring-lobby --port 8011 --db data/t9d.db --dev-direct-start\n'
+    + ' 52185 1 Sat Aug 15 22:38:47 2026 ./build/debug/spring-logserver --port 8010 --db data/debug.db\n';
+
+test('parseLobbyDbFlag reads the db the LOBBY opened, not the logserver\'s', () => {
+    // The logserver also carries a --db, and it is a different file. Matching
+    // the wrong one would point every probe at a db with no game_status rows —
+    // the exact failure this detection exists to prevent.
+    assert.equal(parseLobbyDbFlag(PS_SCRATCH_LOBBY), 'data/t9d.db');
+});
+
+test('parseLobbyDbFlag accepts --db=path as well as --db path', () => {
+    assert.equal(parseLobbyDbFlag(
+        ' 99 1 Fri Aug 15 09:00:01 2026 build/release/spring-lobby --db=data/other.db\n'), 'data/other.db');
+});
+
+test('parseLobbyDbFlag returns null with no lobby, or a lobby with no --db', () => {
+    assert.equal(parseLobbyDbFlag(''), null);
+    assert.equal(parseLobbyDbFlag(
+        ' 52185 1 Sat Aug 15 22:38:47 2026 ./build/debug/spring-logserver --port 8010 --db data/debug.db\n'), null);
+    assert.equal(parseLobbyDbFlag(
+        ' 99 1 Fri Aug 15 09:00:01 2026 build/release/spring-lobby --port 8011\n'), null);
 });
 
 test('parseLsofF attributes every n record to the preceding p/c pair', () => {

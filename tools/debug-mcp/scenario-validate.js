@@ -504,9 +504,25 @@ function checkMcpLayer(scn, add, opts) {
             + 'file with this name is deleted on the next resync. write_scenario refuses it');
 
     const map = tbl(scn.world).map;
-    if (map !== undefined && !isStr(map))
+    // A scenario with NO world.map used to pass silently with zero findings —
+    // no error, no warning, and not even a `skipped` marker for the map-
+    // dependent passes that could not run. That is the one thing this tool
+    // promises never to do: `skipped` means "not checked", and a clean result
+    // has to mean "checked and fine". Deleting one line from the shipped
+    // showcase war reproduced it (ok:true, findings:[], skipped:0).
+    //
+    // It is a WARNING, not an error: ScenarioDiscovery reads a missing map as
+    // an empty mapId rather than rejecting the file, so the war still loads —
+    // it just has no map affinity and must be launched with an explicit mapId.
+    if (map === undefined)
+        add('warning', 'world-map', 'world.map',
+            'no "world.map" — the lobby stores this war with an EMPTY map affinity, so '
+            + 'DefaultForMap never auto-selects it and a direct or headless launch must pass '
+            + 'an explicit mapId. Every map-dependent pass (region keys, passability) was '
+            + 'SKIPPED, not passed');
+    else if (!isStr(map))
         add('error', 'world-map', 'world.map', `"map" must be a string, got ${JSON.stringify(map)}`);
-    else if (isStr(map) && opts.mapDirExists === false)
+    else if (opts.mapDirExists === false)
         add('warning', 'world-map', 'world.map',
             `no data/maps/${map}/ on this machine — a direct or headless launch of this scenario `
             + 'will fail here, and the region-key and passability passes cannot run');
@@ -521,7 +537,10 @@ function checkMcpLayer(scn, add, opts) {
             + 'SKIPPED, not passed. Run a game once to bake it');
     if (!opts.regionKeys && seq(scn.ai).some((a) => a && a.slate))
         add('skipped', 'region-graph-missing', 'ai',
-            opts.mapDirExists === false
+            map === undefined
+                ? 'this scenario declares no world.map, so there is no region graph to check '
+                  + 'slate region keys against'
+                : opts.mapDirExists === false
                 ? `no data/maps/${map}/ on this machine, so slate region keys were not checked`
                 : 'this map ships no mapdata/regions.lua, so it uses the 2048-elmo GRID provider '
                   + '(where any "col:row" string is a valid key) and slate region keys were not checked');

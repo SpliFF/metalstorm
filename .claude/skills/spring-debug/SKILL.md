@@ -44,7 +44,7 @@ Five habits this surface replaces — do not fall back to the old folklore:
 | `get_frame` | Sim `frame`/`simFps`/`clients` via the public `/api/metrics` — no exec, no auth | Cheap liveness poll; works paused, pre-GameStart, and under `SPRING_PROD` |
 | `get_game_state` | Sim state as an **object**: `{frame, paused, speed, teams, units, luaHeapKb}` | Checking if sim is ticking; reading paused/speed without a second call |
 | `list_units` | Units as an **object**: `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}` — `total` counts every match of the team filter, `units` caps at 100 rows | Debugging combat, spawning; positions without a Lua round-trip |
-| `list_gadgets` | List loaded Lua gadgets | Checking which gadgets are active |
+| `list_gadgets` | Loaded synced gadgets as an **object**: `{count, gadgets:[{name, basename, layer, author?}]}`, read from the gadget handler's own registry in call order | Checking which gadgets are active, and their layer order |
 | `get_lua_source` | Read a Lua file straight off disk — `{gameId, filePath}` → `data/games/<gameId>/<filePath>` (case-insensitive resolve). No HTTP, no running lobby needed | Reading gadget source when debugging errors |
 | `list_sessions` | List recent game sessions from the log server | Post-mortem, history |
 | `validate_scenario` | **Offline** — replicates BOTH scenario parsers (lobby bare-`lua_State` discovery + `game_scenario.lua`'s GameStart `validate()`) with no stack running. `{scenarioId \| luaSource, gameId='metalstorm', passability?}` → `{ok, findings[{severity, rule, path, message}], counts, defsSource}` | Before writing or launching any scenario. `skipped` findings mean **not checked**, never "fine" |
@@ -64,9 +64,20 @@ This server also exposes the browser relay tools (`client_eval`, `client_ready`,
 Two formerly-silent degradations now announce themselves — believe the message, don't debug around it:
 
 - **`sqliteUnavailable`**: the better-sqlite3 native binding was built for a different node (NODE_MODULE_VERSION mismatch — the MCP must run under **node v22**, the `.mcp.json` default). The server prints one `SQLITE DISABLED:` stderr line at boot with the exact rebuild command, and the flag rides every affected result: `query_db` errors with it, `probe_game` reports `game_status unreadable`, `list_processes`/`list_stack`/`launch_*` carry it top-level.
-- **SPRING_DB divergence `warning`**: the lobby vouches for a server but `game_status` has no row → the MCP's `SPRING_DB` points at a different database than the lobby's `--db`. `probe_game` stays `spawning` forever but carries a `warning` field naming the mismatch (the launch tools push it into `notes`). Diagnose with `curl :<port>/api/metrics`; fix by running the MCP with `SPRING_DB=<the lobby's --db>`.
+- **SPRING_DB divergence `warning`**: the lobby vouches for a *running* server (pid > 0) but `game_status` has no row → the MCP is reading a different database than the lobby's `--db`. `probe_game` stays `spawning` forever but carries a `warning` naming the mismatch (the launch tools push it into `notes`). **This should now be rare**: with no `SPRING_DB` set, the MCP reads the running lobby's own `--db` off its command line and follows it (one `SPRING_DB: following …` line on stderr at boot), which is why `.mcp.json` no longer pins one — scratch dbs are routine here and a pinned path rots. Setting `SPRING_DB` explicitly still wins over detection, so an *explicit* value is now the likeliest cause of a divergence. A hibernated room (pid 0, port 0) has no row and is not a divergence; it no longer warns.
 
 Details: [docs/debugging-tools.md](../../../docs/debugging-tools.md#mcp-server-setup) (setup + the "Readiness phases, and the one way they lie" section).
+
+## Arguments are checked before the call runs
+
+A missing **required** argument, or a near-miss field name, is refused up front
+by name — it no longer reaches the handler to fail as a driver error or a raw
+verb usage line. The one worth knowing about is the typo case: `set_los
+{enabled:true}` (the field is `enable`) used to be read as *no arguments*, so
+the tool took its documented "omit ⇒ report current state" branch and answered
+`ally0=off …`, which reads like confirmation it turned LOS off. Now it says
+`no argument "enabled" — did you mean "enable"?`. Unrelated extra properties
+are still passed through untouched.
 
 ## Server URLs & port discovery
 
@@ -103,7 +114,7 @@ Prefer `exec_lua` for Lua snippets and `query_db` for SQL — `api_request` is t
 
 ## Authoring scenarios
 
-**Validate before you write, and never trust a silent success.** A scenario file is read by two different parsers with two different silent failures, and `validate_scenario` is the only thing that sees both without a boot. The loop: `validate_scenario({luaSource})` until zero errors → `write_scenario` (re-validates, writes, resyncs, **confirms `offered:true`**) → `launch_scenario`. Three traps it exists for: (a) a file that touches `VFS`/`Spring.*`/`GG` **at file scope** loads fine in-game and is *invisible in the lobby forever* — the lobby's discovery pass is a bare `lua_State`; (b) `skipped` findings mean **not checked** (no baked def cache ⇒ every unknown-def rule was skipped — run a game once to bake); (c) never write a `gen_*` file — the scenario DB owns that namespace and its orphan sweep deletes any it does not claim.
+**Validate before you write, and never trust a silent success.** Read `counts.skipped` and the warnings, not just `ok` — a war with no `world.map` is a `warning`, not an error (the lobby stores it with an empty map affinity rather than rejecting it), and it means every map-dependent pass was skipped. A scenario file is read by two different parsers with two different silent failures, and `validate_scenario` is the only thing that sees both without a boot. The loop: `validate_scenario({luaSource})` until zero errors → `write_scenario` (re-validates, writes, resyncs, **confirms `offered:true`**) → `launch_scenario`. Three traps it exists for: (a) a file that touches `VFS`/`Spring.*`/`GG` **at file scope** loads fine in-game and is *invisible in the lobby forever* — the lobby's discovery pass is a bare `lua_State`; (b) `skipped` findings mean **not checked** (no baked def cache ⇒ every unknown-def rule was skipped — run a game once to bake); (c) never write a `gen_*` file — the scenario DB owns that namespace and its orphan sweep deletes any it does not claim.
 
 **Sequencing a war (multi-stage objectives): `phases`, not `parentId`.** An objective can carry `phases = { {childDefs…}, {childDefs…} }` — phase 2's children are created only once every phase-1 child completes, and any child that fails or expires fails the whole chain. Two traps: the **parent is itself a real objective** and must validate for its declared type, or `Create` rejects it and *the entire chain silently does not exist*; and `parentId`/`linkedId` take **runtime ids the engine mints at stage time**, so a file can never fill them in. `validate_scenario` catches every mis-shape (`objective-phases`, `objective-chain-id`).
 

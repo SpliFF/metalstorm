@@ -72,16 +72,25 @@ export function dbDivergenceWarning(port) {
  *   sqliteOpened   the game_status read ran without throwing
  *   statusRow      the room's game_status row, or null/undefined
  *   port           the room's port, for the diagnose hint
+ *   pid            the room's pid — 0 for a room with no running server
  *
  * (a) wins over (b): with the binding broken, "SQLite is available" cannot be
  * established, so only sqliteUnavailable is reported. The (b) warning fires
  * only on the full signature — the lobby (not the SQLite fallback) vouches
  * for the process, SQLite answered, and the row is absent. The caller keeps
  * its phase untouched: these annotate, they never re-phase.
+ *
+ * `pid > 0` is part of that signature. A HIBERNATED room is a lobby row with
+ * pid 0 and port 0 and legitimately no game_status row — nothing is running to
+ * publish one. Without this guard it produced the full divergence warning plus
+ * the advice to `curl :0/api/metrics`, sending the reader after a db mismatch
+ * that does not exist. list_stack and list_processes already filter on pid > 0
+ * for exactly this reason; this is the same rule in the third place it is read.
  */
-export function probeSqliteAnnotations({ processSource, bindingReason, sqliteOpened, statusRow, port }) {
+export function probeSqliteAnnotations({ processSource, bindingReason, sqliteOpened, statusRow, port, pid }) {
     if (bindingReason) return { sqliteUnavailable: bindingReason };
-    if (processSource === 'lobby' && sqliteOpened && statusRow == null) {
+    const hasRunningServer = pid === undefined || pid > 0;
+    if (processSource === 'lobby' && sqliteOpened && statusRow == null && hasRunningServer) {
         return { warning: dbDivergenceWarning(port) };
     }
     return {};

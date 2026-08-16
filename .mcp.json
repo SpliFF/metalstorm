@@ -9,8 +9,7 @@
       "args": ["tools/debug-mcp/server.js"],
       "env": {
         "LOBBY_URL": "http://127.0.0.1:8011",
-        "LOG_SERVER_URL": "http://127.0.0.1:8010",
-        "SPRING_DB": "data/spring-server.db"
+        "LOG_SERVER_URL": "http://127.0.0.1:8010"
       }
     }
   }
