@@ -306,13 +306,24 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     static NlProxy::Proxy nlProxy;
     nlProxy.Init(contentRoots.empty() ? std::string{} : contentRoots[0]);
 
-    net.AddHttpPost("/api/nl/command", RouteAuth::TokenRequired,
+    // DEFERRED (§7/M8), and the only route in this process that is. A Claude
+    // parse takes 1–3 s and NetworkServer dispatches handlers inline on its
+    // single network thread — the same thread that flushes the SSE channels
+    // carrying game state to every client in the match. Answering inline meant
+    // one player's sentence froze everyone's world for the length of the call
+    // (measured: an unrelated GET +307 ms, an SSE frame +295 ms late, for a
+    // park of only 400 ms). The handler now hands the call to a worker and
+    // returns nullopt; the event loop writes the answer when it lands.
+    // Everything cheap — no key, bad body, rate-limited, busy — still answers
+    // inline, because a refusal should not be slower than a success.
+    net.AddHttpPostDeferred("/api/nl/command", RouteAuth::TokenRequired,
                     [&ctx](const std::string&, const std::string& body,
-                           const HttpRequestHeaders& headers) -> HttpResponse {
+                           const HttpRequestHeaders& headers,
+                           const DeferredResponse& defer) -> std::optional<HttpResponse> {
         const int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
         if (userId <= 0)
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-        return nlProxy.Handle(userId, body);
+        return nlProxy.HandleDeferred(userId, body, defer);
     });
 
     // Restart-in-place: re-exec this binary with the same argv.

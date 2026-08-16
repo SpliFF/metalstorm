@@ -130,6 +130,23 @@ HttpResponse SafeInvoke(const std::string& path, const std::function<HttpRespons
     }
 }
 
+/// `SafeInvoke`'s twin for deferred handlers, which return an optional
+/// (`nullopt` = "I kept the handle"). Same guarantee, same log text: a throw
+/// is a 500, and a 500 is a real answer the dispatcher then writes now — see
+/// CheckAuthAndCallDeferred for why it also cancels the handle on that path.
+std::optional<HttpResponse> SafeInvokeOpt(const std::string& path,
+                                          const std::function<std::optional<HttpResponse>()>& fn) {
+    try {
+        return fn();
+    } catch (const std::exception& e) {
+        SLOG(SPRING_LOG_ERROR, "handler for '%s' threw: %s", path.c_str(), e.what());
+        return JsonError(500, "internal error");
+    } catch (...) {
+        SLOG(SPRING_LOG_ERROR, "handler for '%s' threw a non-standard exception", path.c_str());
+        return JsonError(500, "internal error");
+    }
+}
+
 /// True if `addr` is a loopback peer — plain IPv6 ::1, or an IPv4-mapped
 /// ::ffff:127.x.x.x address (produced when a dual-stack listener accepts
 /// an IPv4 connection into a sockaddr_in6).
@@ -187,7 +204,84 @@ std::string QueryParam(const std::string& url, const std::string& key) {
     return "";
 }
 
+/// Lets a worker thread nudge the event loop out of poll() without holding a
+/// pointer to the server. Owned by Impl as a shared_ptr and referenced weakly
+/// by every outstanding DeferredResponse, so a completion that lands after
+/// Stop() finds either a disabled waker or no waker at all — never a write to
+/// a pipe fd that has since been closed and recycled.
+struct Waker {
+    std::mutex m;
+    int fd = -1;
+    void Arm(int writeFd) { std::lock_guard<std::mutex> g(m); fd = writeFd; }
+    void Disable() { std::lock_guard<std::mutex> g(m); fd = -1; }
+    void Wake() {
+        std::lock_guard<std::mutex> g(m);
+        if (fd < 0) return;
+        char c = 1;
+        (void)write(fd, &c, 1);
+    }
+};
+
 } // namespace
+
+// ═══════════════════════════════════════════════════════════════════════
+// DeferredResponse
+// ═══════════════════════════════════════════════════════════════════════
+
+/// The shared half of a deferred response. Held by the worker (through the
+/// handle it was given) and by the event loop (through Impl::pendingDeferred),
+/// so whichever side goes away first, the other still has a valid object.
+struct DeferredResponse::State {
+    std::mutex m;
+    HttpResponse resp;
+    bool completed = false;
+    bool cancelled = false;
+    /// Path, for the log line SafeInvoke writes if the worker's work throws.
+    std::string path;
+    std::weak_ptr<Waker> waker;
+
+    /// Event-loop side: hand the response over exactly once. False while the
+    /// worker is still thinking, or forever if the handle was cancelled.
+    bool TakeIfCompleted(HttpResponse& out) {
+        std::lock_guard<std::mutex> g(m);
+        if (!completed || cancelled) return false;
+        out = std::move(resp);
+        cancelled = true;  // nothing more to deliver on this handle
+        return true;
+    }
+
+    void Cancel() {
+        std::lock_guard<std::mutex> g(m);
+        cancelled = true;
+    }
+};
+
+void DeferredResponse::Complete(HttpResponse resp) const {
+    if (!state) return;
+    std::shared_ptr<Waker> waker;
+    {
+        std::lock_guard<std::mutex> g(state->m);
+        if (state->completed || state->cancelled) return;
+        state->resp = std::move(resp);
+        state->completed = true;
+        waker = state->waker.lock();
+    }
+    // Outside the lock: Wake() takes the waker's own mutex, and the event loop
+    // takes this state's mutex from DrainDeferred.
+    if (waker) waker->Wake();
+}
+
+void DeferredResponse::CompleteWith(const std::string& path,
+                                    const std::function<HttpResponse()>& fn) const {
+    if (!state) return;
+    Complete(SafeInvoke(path.empty() ? state->path : path, fn));
+}
+
+bool DeferredResponse::Cancelled() const {
+    if (!state) return true;
+    std::lock_guard<std::mutex> g(state->m);
+    return state->cancelled;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Per-connection state
@@ -229,6 +323,11 @@ static constexpr size_t MAX_CONNECTIONS  = 1024;
 
 struct ServerConn {
     int fd = -1;
+    /// Monotonic, never reused. `connections` is keyed by fd and the kernel
+    /// recycles fds aggressively, so a deferred response that completes after
+    /// its client hung up would otherwise be written into whichever connection
+    /// inherited the number. Pending deferrals are matched on this instead.
+    uint64_t connId = 0;
     void* server = nullptr;  // back-pointer to NetworkServer::Impl (private type)
     bool remoteIsLoopback = false;  // set once from the accept()'d peer address
 
@@ -248,6 +347,11 @@ struct ServerConn {
     bool h1IsSSE = false;
     uint32_t h1SSEChannelId = UINT32_MAX;
     int64_t h1SSESubscriber = 0;  // see H2StreamData::sseSubscriber
+
+    /// A deferred POST is outstanding on this connection. HTTP/1.1 has no
+    /// stream ids, so responses must go out in request order — parsing stops
+    /// here (bytes still buffer) until the answer is written.
+    bool h1Deferred = false;
 
     // ── HTTP/2 state ──
     nghttp2_session* h2session = nullptr;
@@ -272,10 +376,26 @@ struct NetworkServer::Impl {
     std::map<int, std::unique_ptr<ServerConn>> connections;
     std::vector<int> pendingClose;
 
+    uint64_t nextConnId = 1;
+
     // Handler references (set before Start)
     const std::vector<NetworkServer::GetRoute>* getHandlers = nullptr;
     const std::vector<NetworkServer::PostRoute>* postHandlers = nullptr;
+    const std::vector<NetworkServer::PostDeferredRoute>* postDeferredHandlers = nullptr;
     const RouteAuthCallbacks* authCallbacks = nullptr;
+
+    // ── Deferred responses (M8) ──
+    /// Handles handed to a worker thread and not yet written back. Touched
+    /// ONLY on the network thread; the cross-thread half is inside each
+    /// State's own mutex. Bounded by construction: at most one per HTTP/1.1
+    /// connection and one per HTTP/2 stream.
+    struct Pending {
+        std::shared_ptr<DeferredResponse::State> state;
+        uint64_t connId = 0;
+        int32_t streamId = -1;  ///< -1 ⇒ HTTP/1.1
+    };
+    std::vector<Pending> pendingDeferred;
+    std::shared_ptr<Waker> waker = std::make_shared<Waker>();
 
     // SSE channels
     struct SSEChannel { std::string pattern; bool identified = false; };
@@ -352,47 +472,161 @@ struct NetworkServer::Impl {
     /// exactly like a handler can — invoking them outside the wrapper meant a
     /// throwing callback still crashed dispatch, the class of failure
     /// SafeInvoke exists to eliminate.
+    /// The gate itself, shared by the plain and the deferred POST paths so
+    /// there is exactly one implementation of "is this caller allowed". Called
+    /// from inside SafeInvoke by both — the callbacks are SQLite-backed and can
+    /// throw. Returns the rejection, or nullopt to proceed.
+    std::optional<HttpResponse> PostAuthGate(RouteAuth auth, const HttpRequestHeaders& hdrs) {
+        if (auth == RouteAuth::Public) return std::nullopt;
+        int64_t userId = 0;
+        if (authCallbacks && authCallbacks->validateToken)
+            userId = authCallbacks->validateToken(hdrs.authorization);
+        const bool tokenOk = userId > 0;
+        const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
+        switch (auth) {
+            case RouteAuth::TokenRequired:
+                if (!tokenOk) return JsonError(401, "unauthorized");
+                break;
+            case RouteAuth::AdminOnly:
+                if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
+                break;
+            case RouteAuth::LocalhostOrAdmin:
+                if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
+                break;
+            default: break;
+        }
+        return std::nullopt;
+    }
+
     HttpResponse CheckAuthAndCall(const NetworkServer::PostRoute& route, const std::string& path,
                                    const std::string& body, const HttpRequestHeaders& hdrs) {
         return SafeInvoke(path, [&]() -> HttpResponse {
-            if (route.auth != RouteAuth::Public) {
-                int64_t userId = 0;
-                if (authCallbacks && authCallbacks->validateToken)
-                    userId = authCallbacks->validateToken(hdrs.authorization);
-                const bool tokenOk = userId > 0;
-                const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
-                switch (route.auth) {
-                    case RouteAuth::TokenRequired:
-                        if (!tokenOk) return JsonError(401, "unauthorized");
-                        break;
-                    case RouteAuth::AdminOnly:
-                        if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
-                        break;
-                    case RouteAuth::LocalhostOrAdmin:
-                        if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
-                        break;
-                    default: break;
-                }
-            }
+            if (auto rejected = PostAuthGate(route.auth, hdrs)) return *rejected;
             return route.handler(path, body, hdrs);
         });
     }
 
-    HttpResponse DispatchPost(const std::string& url, const std::string& body,
-                              const HttpRequestHeaders& hdrs) {
+    /// The deferred twin (M8). Mints a handle, runs the handler through the
+    /// same exception guard, and registers the handle only if the handler
+    /// actually kept it.
+    ///
+    /// The `state->Cancel()` on the answered-now path is load-bearing for the
+    /// case where the handler spawned its worker and THEN threw: SafeInvokeOpt
+    /// turns that into a 500 we are about to write, so the handle must be
+    /// poisoned or the worker would later write a second response onto the
+    /// same connection.
+    std::optional<HttpResponse> CheckAuthAndCallDeferred(
+            const NetworkServer::PostDeferredRoute& route, const std::string& path,
+            const std::string& body, const HttpRequestHeaders& hdrs,
+            uint64_t connId, int32_t streamId) {
+        auto state = std::make_shared<DeferredResponse::State>();
+        state->path = path;
+        state->waker = waker;
+        const DeferredResponse handle{state};
+
+        auto answered = SafeInvokeOpt(path, [&]() -> std::optional<HttpResponse> {
+            if (auto rejected = PostAuthGate(route.auth, hdrs)) return rejected;
+            return route.handler(path, body, hdrs, handle);
+        });
+
+        if (answered) {
+            state->Cancel();
+            return answered;
+        }
+        pendingDeferred.push_back({std::move(state), connId, streamId});
+        return std::nullopt;
+    }
+
+    /// `conn`/`streamId` identify where a deferred answer would be written
+    /// back to (`streamId` < 0 means HTTP/1.1). Returns nullopt when the
+    /// matched route deferred; the caller must then leave the request open.
+    std::optional<HttpResponse> DispatchPost(const std::string& url, const std::string& body,
+                                             const HttpRequestHeaders& hdrs,
+                                             uint64_t connId, int32_t streamId) {
         auto qpos = url.find('?');
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
         SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
+        // Exact matches first, then wildcards — deferred routes participate in
+        // the same ordering, so registering one cannot shadow or be shadowed
+        // by a plain route it does not literally collide with.
         for (auto& route : *postHandlers) {
             if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
                 return CheckAuthAndCall(route, path, body, hdrs);
+        }
+        for (auto& route : *postDeferredHandlers) {
+            if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
+                return CheckAuthAndCallDeferred(route, path, body, hdrs, connId, streamId);
         }
         for (auto& route : *postHandlers) {
             if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
                 return CheckAuthAndCall(route, path, body, hdrs);
         }
-        return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
+        for (auto& route : *postDeferredHandlers) {
+            if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
+                return CheckAuthAndCallDeferred(route, path, body, hdrs, connId, streamId);
+        }
+        return HttpResponse{.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
+    }
+
+    // ── Deferred response delivery (M8) ──
+
+    ServerConn* FindConnById(uint64_t connId) {
+        for (auto& [fd, conn] : connections)
+            if (conn && conn->connId == connId) return conn.get();
+        return nullptr;
+    }
+
+    /// Poison every pending handle for a connection (or for one HTTP/2 stream
+    /// of it, when `streamId >= 0`). The worker keeps its shared_ptr and its
+    /// `Complete()` becomes a no-op; nothing it is using is freed here.
+    void CancelDeferredFor(uint64_t connId, int32_t streamId) {
+        for (auto it = pendingDeferred.begin(); it != pendingDeferred.end(); ) {
+            if (it->connId == connId && (streamId < 0 || it->streamId == streamId)) {
+                it->state->Cancel();
+                it = pendingDeferred.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void DrainDeferred() {
+        if (pendingDeferred.empty()) return;
+
+        // Collect first, THEN write: writing an HTTP/1.1 answer resumes that
+        // connection's parser, which can dispatch a pipelined request that
+        // defers again and pushes onto pendingDeferred — reallocating the
+        // vector under an iterator we were still holding.
+        struct Ready { HttpResponse resp; uint64_t connId; int32_t streamId; };
+        std::vector<Ready> ready;
+        for (auto it = pendingDeferred.begin(); it != pendingDeferred.end(); ) {
+            HttpResponse resp;
+            if (it->state->TakeIfCompleted(resp)) {
+                ready.push_back({std::move(resp), it->connId, it->streamId});
+                it = pendingDeferred.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        for (auto& r : ready) {
+            ServerConn* conn = FindConnById(r.connId);
+            // Gone: the client disconnected between completing and this tick.
+            // The id is never reissued, so this is a miss, not a mis-delivery.
+            if (!conn) continue;
+
+            if (r.streamId < 0) {
+                H1WriteResponse(*conn, r.resp);
+                conn->h1Deferred = false;
+                H1TryParse(*conn);  // anything pipelined behind it
+            } else {
+                auto sit = conn->h2streams.find(r.streamId);
+                if (sit == conn->h2streams.end()) continue;  // stream was reset
+                H2SubmitResponse(*conn, sit->second, r.resp);
+                H2FlushSession(*conn);
+            }
+        }
     }
 
     int MatchSSEChannel(const std::string& url) {
@@ -513,8 +747,15 @@ struct NetworkServer::Impl {
             }
         } else if (c.h1Method == "POST") {
             auto resp = DispatchPost(c.h1Path, c.h1ReadBuf.substr(
-                c.h1ReadBuf.find("\r\n\r\n") + 4, c.h1ContentLength), c.h1Headers);
-            H1WriteResponse(c, resp);
+                c.h1ReadBuf.find("\r\n\r\n") + 4, c.h1ContentLength), c.h1Headers,
+                c.connId, /*streamId=*/-1);
+            // nullopt ⇒ a deferred route kept the handle. Write nothing; the
+            // parse state below is still reset (so the next request on this
+            // keep-alive connection parses cleanly) but h1Deferred stops the
+            // parser until DrainDeferred writes the answer. HTTP/1.1 has no
+            // stream ids: responses MUST leave in request order.
+            if (resp) H1WriteResponse(c, *resp);
+            else c.h1Deferred = true;
         } else {
             HttpResponse resp = {.contentType = "text/plain",
                                  .body = {'4','0','5'}, .status = 405};
@@ -540,7 +781,9 @@ struct NetworkServer::Impl {
         // S5: cap buffered request size. Covers both an oversize body and a
         // header flood / bodyless stream that never completes (the parse loop
         // would otherwise keep returning "need more data" while the buffer
-        // grows without bound).
+        // grows without bound). Applies while a deferred answer is outstanding
+        // too — a client pipelining into a parked connection must not be able
+        // to grow this buffer without bound either.
         if (c.h1ReadBuf.size() > MAX_REQUEST_BODY) {
             HttpResponse resp = {.contentType = "text/plain",
                                  .body = {'4','1','3'}, .status = 413};
@@ -548,6 +791,15 @@ struct NetworkServer::Impl {
             pendingClose.push_back(c.fd);
             return;
         }
+
+        H1TryParse(c);
+    }
+
+    /// Parse and dispatch as many complete requests as the buffer holds.
+    /// Split out of H1HandleData because DrainDeferred re-enters it with no
+    /// new bytes, to pick up whatever was pipelined behind a deferred request.
+    void H1TryParse(ServerConn& c) {
+        if (c.h1IsSSE || c.h1Deferred) return;
 
         while (true) {
             if (!c.h1HeadersDone) {
@@ -613,8 +865,9 @@ struct NetworkServer::Impl {
 
             H1ProcessRequest(c);
 
-            // If SSE, stop processing further requests
-            if (c.h1IsSSE) return;
+            // If SSE — or if the request deferred — stop processing further
+            // requests on this connection.
+            if (c.h1IsSSE || c.h1Deferred) return;
 
             // Check if there's another pipelined request
             if (c.h1ReadBuf.empty()) return;
@@ -724,6 +977,20 @@ struct NetworkServer::Impl {
         return 0;
     }
 
+    /// Stream teardown (M8). Two jobs, both new: cancel any deferred response
+    /// still owed on this stream — a client that RST_STREAMs mid-call must not
+    /// have a 1–3 s-late answer submitted onto a dead stream — and erase the
+    /// H2StreamData, which nothing used to do, so a long-lived h2 connection
+    /// accumulated one map entry per request it ever made.
+    static int OnStreamClose(nghttp2_session* session, int32_t stream_id,
+                             uint32_t error_code, void* user_data) {
+        auto* conn = static_cast<ServerConn*>(user_data);
+        auto* impl = static_cast<Impl*>(conn->server);
+        impl->CancelDeferredFor(conn->connId, stream_id);
+        conn->h2streams.erase(stream_id);
+        return 0;
+    }
+
     // Process a complete HTTP/2 request
     void H2ProcessRequest(ServerConn& conn, int32_t streamId) {
         auto it = conn.h2streams.find(streamId);
@@ -759,8 +1026,12 @@ struct NetworkServer::Impl {
             auto resp = DispatchGet(stream.path, conn.remoteIsLoopback);
             H2SubmitResponse(conn, stream, resp, /*omitBody=*/isHead);
         } else if (stream.method == "POST") {
-            auto resp = DispatchPost(stream.path, stream.body, stream.headers);
-            H2SubmitResponse(conn, stream, resp);
+            auto resp = DispatchPost(stream.path, stream.body, stream.headers,
+                                     conn.connId, streamId);
+            // nullopt ⇒ deferred: leave the stream open with no response
+            // submitted. Unlike HTTP/1.1 nothing has to stall — other streams
+            // on this connection carry on, which is the whole point of h2.
+            if (resp) H2SubmitResponse(conn, stream, *resp);
         } else {
             H2SubmitResponse(conn, stream, {.status = 405});
         }
@@ -835,6 +1106,7 @@ struct NetworkServer::Impl {
         nghttp2_session_callbacks_set_on_header_callback(cbs, OnHeader);
         nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, OnFrameRecv);
         nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, OnDataChunkRecv);
+        nghttp2_session_callbacks_set_on_stream_close_callback(cbs, OnStreamClose);
 
         nghttp2_session_server_new(&conn.h2session, cbs, &conn);
         nghttp2_session_callbacks_del(cbs);
@@ -869,6 +1141,7 @@ struct NetworkServer::Impl {
 
             auto conn = std::make_unique<ServerConn>();
             conn->fd = fd;
+            conn->connId = nextConnId++;
             conn->server = this;
             conn->remoteIsLoopback = IsLoopbackAddr(addr);
             connections[fd] = std::move(conn);
@@ -954,6 +1227,10 @@ struct NetworkServer::Impl {
     void CloseConnection(int fd) {
         auto it = connections.find(fd);
         if (it == connections.end()) return;
+        // Poison any deferred answer still owed here BEFORE the fd goes back
+        // to the kernel — the whole reason pending handles are matched on a
+        // never-reused connId rather than on this fd.
+        if (it->second) CancelDeferredFor(it->second->connId, /*streamId=*/-1);
         connections.erase(it);  // destructor closes fd and frees nghttp2 session
     }
 
@@ -1037,15 +1314,24 @@ void NetworkServer::AddHttpPost(const std::string& pattern, RouteAuth auth, Http
     httpPostHandlers.push_back({pattern, auth, std::move(handler)});
 }
 
+void NetworkServer::AddHttpPostDeferred(const std::string& pattern, RouteAuth auth,
+                                        HttpPostDeferredHandler handler) {
+    httpPostDeferredHandlers.push_back({pattern, auth, std::move(handler)});
+}
+
 void NetworkServer::SetRouteAuthCallbacks(RouteAuthCallbacks callbacks) {
     routeAuthCallbacks = std::move(callbacks);
 }
 
 std::vector<RouteInfo> NetworkServer::GetRegisteredRoutes() const {
     std::vector<RouteInfo> out;
-    out.reserve(httpGetHandlers.size() + httpPostHandlers.size());
+    out.reserve(httpGetHandlers.size() + httpPostHandlers.size() + httpPostDeferredHandlers.size());
     for (auto& r : httpGetHandlers) out.push_back({"GET", r.pattern, r.auth});
     for (auto& r : httpPostHandlers) out.push_back({"POST", r.pattern, r.auth});
+    // Deferred routes are ordinary POSTs to everything that reads this — the
+    // route-table snapshot tests classify by auth, and *how* a route produces
+    // its response is not a security property.
+    for (auto& r : httpPostDeferredHandlers) out.push_back({"POST", r.pattern, r.auth});
     return out;
 }
 
@@ -1107,6 +1393,7 @@ bool NetworkServer::Start(int port) {
     // Set handler references for Impl
     impl->getHandlers = &httpGetHandlers;
     impl->postHandlers = &httpPostHandlers;
+    impl->postDeferredHandlers = &httpPostDeferredHandlers;
     impl->authCallbacks = &routeAuthCallbacks;
 
     // Create wakeup pipe
@@ -1116,6 +1403,9 @@ bool NetworkServer::Start(int port) {
     }
     SetNonBlocking(impl->wakePipe[0]);
     SetNonBlocking(impl->wakePipe[1]);
+    // Arm the waker so a deferred response completing on a worker thread pops
+    // the loop out of poll() immediately instead of waiting out its timeout.
+    impl->waker->Arm(impl->wakePipe[1]);
 
     running.store(true);
     networkThread = std::thread(&NetworkServer::NetworkThreadFunc, this, port);
@@ -1129,6 +1419,15 @@ void NetworkServer::Stop() {
 
     if (networkThread.joinable())
         networkThread.join();
+
+    // Disarm before the pipe fds close: a worker that completes after this
+    // point must not write to an fd number the kernel has already reissued.
+    // Then poison every handle still outstanding — the worker keeps its
+    // shared_ptr and its Complete() becomes a no-op, so a call still inside
+    // curl when the match ended cannot touch anything being torn down here.
+    impl->waker->Disable();
+    for (auto& p : impl->pendingDeferred) p.state->Cancel();
+    impl->pendingDeferred.clear();
 
     // Cleanup
     impl->connections.clear();
@@ -1245,6 +1544,9 @@ void NetworkServer::NetworkThreadFunc(int port) {
 
         // Process SSE event queue
         impl->DrainSSEQueue();
+
+        // Write back any deferred response a worker thread finished (M8).
+        impl->DrainDeferred();
 
         // Flush write buffers for connections that got SSE data
         for (auto& [fd, conn] : impl->connections) {
