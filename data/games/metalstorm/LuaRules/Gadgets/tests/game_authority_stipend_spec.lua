@@ -8,9 +8,13 @@ local mock = require('tests.authority_charge_mock')
 
 local STIPEND_PERIOD = 1800    -- game_authority.lua's STIPEND_PERIOD_FRAMES
 
+-- The player exists so team 0 does (GetTeamList is derived from the roster) and
+-- is registered as NOT ARRIVED: GameStart seeds a join grant into every ACTIVE
+-- player, and this file's subject is the team stipend, so an arrived player
+-- would put 100 minted authority into every ledger assertion below.
 local function stipendWorld(perMinute)
     local world, gadgetObj = mock.new()
-    world.setPlayer(1, 0)
+    world.setPlayer(1, 0, false)
     world.modOptions.authority_team_stipend = perMinute
     gadgetObj:GameStart()
     return world, gadgetObj
@@ -19,7 +23,7 @@ end
 describe("team stipend (§2)", function()
     it("is opt-in: no stipend modoption pays nothing", function()
         local world, gadgetObj = mock.new()
-        world.setPlayer(1, 0)
+        world.setPlayer(1, 0, false)   -- see stipendWorld
         gadgetObj:GameStart()
         local before = world.trp(0, 'authority_pool')
         gadgetObj:GameFrame(STIPEND_PERIOD)

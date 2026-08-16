@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "Server/RoomManager.h"
+#include "Server/SqliteThreading.h"
 #include "Server/WarDirector.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarSlotReservation.h"
@@ -289,5 +291,105 @@ TEST_CASE("task 2 / §10 slot race: N concurrent joins, exactly one seat") {
     // ...and the seat comes back when the winner never arrives.
     const int64_t after = kNow + WAR_SLOT_RESERVATION_TTL_SECONDS;
     CHECK(WarSlotReservations::LiveCount(db, 7, "compact", after) == 0);
+    sqlite3_close(db);
+}
+
+// --- The lobby's OWN shape: many threads, ONE handle -------------------------
+//
+// The race case above opens one connection per thread, which is right for the
+// cross-PROCESS race it tests and is exactly why it could not catch this: a
+// transaction is a property of the CONNECTION, so with a handle each there is
+// nothing to interleave. The lobby has the other shape — `mapDb` is a single
+// `sqlite3*` shared by the NetworkServer route threads (which call `Reserve`
+// from POST /api/wars/deploy) and main()'s 10 Hz loop (which persists rooms and
+// runs the 30 s war sweep). Serialized mode makes each STATEMENT safe there and
+// does nothing for a transaction.
+//
+// Before `SqliteWriteTransaction`, `Reserve` opened a raw `BEGIN IMMEDIATE` on
+// that shared handle. `RoomManager::WriteTransactionLocked` then saw
+// `sqlite3_get_autocommit() == 0`, concluded it was nested inside its OWN
+// transaction, ran its body inline and returned true — and `Reserve`'s
+// `SideFull` path issued `ROLLBACK`, throwing the room away. A room that
+// reported itself persisted, silently gone.
+//
+// So: a full side (every `Reserve` rolls back) racing room persistence on ONE
+// handle, and the assertion is on the ROOMS, not on the reservations.
+TEST_CASE("task 2: a reservation rollback cannot discard a room persisted on "
+          "the same shared handle") {
+    FileDb file("shared-handle");
+
+    // FULLMUTEX explicitly: the lobby's `mapDb` is opened with
+    // `kSqliteSharedOpenFlags` under process-wide serialized mode, and without
+    // it this handle would be NOMUTEX (macOS builds libsqlite3 THREADSAFE=2)
+    // — the two threads would corrupt the connection's own allocator and the
+    // case would fail for D33's reason instead of this one.
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2(file.path.string().c_str(), &db,
+                            kSqliteSharedOpenFlags, nullptr) == SQLITE_OK);
+    sqlite3_busy_timeout(db, kSqliteBusyTimeoutMs);
+    RoomManager::EnsureTables(db);
+
+    // Fill the one seat the side has, so every Reserve below takes the
+    // BEGIN → count → SideFull → ROLLBACK path.
+    REQUIRE(WarSlotReservations::Reserve(db, 7, "compact", 500, kNow).outcome ==
+            SlotReserveOutcome::Granted);
+
+    RoomManager rooms;
+    rooms.SetDatabase(db);
+
+    constexpr int kRounds = 150;
+    std::atomic<int> unexpected{0};
+    std::atomic<bool> go{false};
+
+    // The Deploy-route thread.
+    std::thread reserver([&] {
+        while (!go.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        for (int i = 0; i < kRounds; ++i) {
+            const auto r =
+                WarSlotReservations::Reserve(db, 7, "compact", 600 + i, kNow);
+            if (r.outcome != SlotReserveOutcome::SideFull)
+                unexpected++;
+        }
+    });
+
+    // main()'s 10 Hz loop. CreateRoom write-throughs the room row and its three
+    // child tables under RoomManager's own transaction discipline.
+    std::vector<uint32_t> created;
+    created.reserve(kRounds);
+    std::thread persister([&] {
+        go.store(true, std::memory_order_release);
+        for (int i = 0; i < kRounds; ++i) {
+            created.push_back(rooms.CreateRoom(
+                "room-" + std::to_string(i), "meridian_basin", "metalstorm",
+                8, "", /*hostPlayerId=*/1000u + i, /*hostClientId=*/0,
+                "host" + std::to_string(i)));
+        }
+    });
+
+    reserver.join();
+    persister.join();
+    rooms.SetDatabase(nullptr);
+
+    CHECK(unexpected.load() == 0);
+    REQUIRE(created.size() == kRounds);
+
+    // The assertion this case exists for: every room RoomManager reported
+    // persisted is on disk. Read on a SECOND connection so an in-flight
+    // transaction on the first cannot flatter the result.
+    sqlite3* verify = nullptr;
+    REQUIRE(sqlite3_open(file.path.string().c_str(), &verify) == SQLITE_OK);
+    int survived = 0;
+    for (const uint32_t id : created) {
+        sqlite3_stmt* st = nullptr;
+        REQUIRE(sqlite3_prepare_v2(verify, "SELECT COUNT(*) FROM rooms WHERE id=?",
+                                   -1, &st, nullptr) == SQLITE_OK);
+        sqlite3_bind_int64(st, 1, static_cast<int64_t>(id));
+        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1)
+            survived++;
+        sqlite3_finalize(st);
+    }
+    CHECK(survived == static_cast<int>(created.size()));
+    sqlite3_close(verify);
     sqlite3_close(db);
 }

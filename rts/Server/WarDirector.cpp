@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <sqlite3.h>
 
+#include "SqliteThreading.h"
+
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -262,76 +264,85 @@ bool WarDirector::Register(sqlite3* db, uint32_t roomId,
 
     // One transaction for the whole war: a `wars` row whose sides half failed
     // is a war nobody can join and every seeding pass would then re-find.
-    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-
+    //
+    // Through `SqliteWriteTransaction` and not a hand-rolled BEGIN/COMMIT pair,
+    // because `db` here is the lobby's SHARED handle: the 30 s war sweep runs
+    // this on main()'s loop while a Deploy route thread is inside
+    // `WarSlotReservations::Reserve` on the same connection. A raw BEGIN would
+    // fail with SQLITE_ERROR (not SQLITE_BUSY, so no retry helps), these writes
+    // would land inside the reservation's transaction, and the COMMIT below
+    // would commit that in-flight reservation early — granting a seat on a
+    // full side. See the RULE in SqliteThreading.h.
     bool ok = true;
-    {
-        static const char* kSql =
-            "INSERT INTO wars (room_id, name, theatre, scenario, state, origin,"
-            "                  season_id, created_at, retired_at,"
-            "                  last_active_frame, spawned_slot_cap) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0) "
-            "ON CONFLICT(room_id) DO UPDATE SET "
-            "  name=excluded.name, theatre=excluded.theatre,"
-            "  scenario=excluded.scenario, state=excluded.state,"
-            "  origin=excluded.origin, season_id=excluded.season_id,"
-            "  created_at=excluded.created_at, retired_at=0,"
-            "  last_active_frame=0, spawned_slot_cap=0";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-            BindText(stmt, 2, plan.name);
-            BindText(stmt, 3, plan.theatre);
-            BindText(stmt, 4, plan.scenario);
-            BindText(stmt, 5, WarStateToString(WarState::Seeding));
-            BindText(stmt, 6, WarOriginToString(plan.origin));
-            BindText(stmt, 7, plan.seasonId);
-            sqlite3_bind_int64(stmt, 8, now);
-            ok = sqlite3_step(stmt) == SQLITE_DONE;
-        } else {
-            ok = false;
+    const bool committed = SqliteWriteTransaction(db, "WarRegister", [&] {
+        {
+            static const char* kSql =
+                "INSERT INTO wars (room_id, name, theatre, scenario, state, origin,"
+                "                  season_id, created_at, retired_at,"
+                "                  last_active_frame, spawned_slot_cap) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0) "
+                "ON CONFLICT(room_id) DO UPDATE SET "
+                "  name=excluded.name, theatre=excluded.theatre,"
+                "  scenario=excluded.scenario, state=excluded.state,"
+                "  origin=excluded.origin, season_id=excluded.season_id,"
+                "  created_at=excluded.created_at, retired_at=0,"
+                "  last_active_frame=0, spawned_slot_cap=0";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                BindText(stmt, 2, plan.name);
+                BindText(stmt, 3, plan.theatre);
+                BindText(stmt, 4, plan.scenario);
+                BindText(stmt, 5, WarStateToString(WarState::Seeding));
+                BindText(stmt, 6, WarOriginToString(plan.origin));
+                BindText(stmt, 7, plan.seasonId);
+                sqlite3_bind_int64(stmt, 8, now);
+                ok = sqlite3_step(stmt) == SQLITE_DONE;
+            } else {
+                ok = false;
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
-    }
 
-    // Room ids are reused, so the sides of whatever last held this id are
-    // deleted rather than merged into. An upsert alone would leave a dead
-    // war's faction sitting in the new war's side list.
-    if (ok) {
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, "DELETE FROM war_sides WHERE room_id=?", -1,
-                               &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-            ok = sqlite3_step(stmt) == SQLITE_DONE;
-        } else {
-            ok = false;
+        // Room ids are reused, so the sides of whatever last held this id are
+        // deleted rather than merged into. An upsert alone would leave a dead
+        // war's faction sitting in the new war's side list.
+        if (ok) {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, "DELETE FROM war_sides WHERE room_id=?", -1,
+                                   &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                ok = sqlite3_step(stmt) == SQLITE_DONE;
+            } else {
+                ok = false;
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
-    }
 
-    for (const auto& s : plan.sides) {
-        if (!ok) break;
-        static const char* kSql =
-            "INSERT INTO war_sides (room_id, faction_id, team, slot_cap,"
-            "                       start_box, incentivised) "
-            "VALUES (?, ?, ?, ?, ?, ?)";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-            BindText(stmt, 2, s.factionId);
-            sqlite3_bind_int(stmt, 3, static_cast<int>(s.team));
-            sqlite3_bind_int64(stmt, 4, static_cast<int64_t>(s.slotCap));
-            sqlite3_bind_int(stmt, 5, s.startBox);
-            sqlite3_bind_int(stmt, 6, s.incentivised ? 1 : 0);
-            ok = sqlite3_step(stmt) == SQLITE_DONE;
-        } else {
-            ok = false;
+        for (const auto& s : plan.sides) {
+            if (!ok) break;
+            static const char* kSql =
+                "INSERT INTO war_sides (room_id, faction_id, team, slot_cap,"
+                "                       start_box, incentivised) "
+                "VALUES (?, ?, ?, ?, ?, ?)";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                BindText(stmt, 2, s.factionId);
+                sqlite3_bind_int(stmt, 3, static_cast<int>(s.team));
+                sqlite3_bind_int64(stmt, 4, static_cast<int64_t>(s.slotCap));
+                sqlite3_bind_int(stmt, 5, s.startBox);
+                sqlite3_bind_int(stmt, 6, s.incentivised ? 1 : 0);
+                ok = sqlite3_step(stmt) == SQLITE_DONE;
+            } else {
+                ok = false;
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
-    }
 
-    sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", nullptr, nullptr, nullptr);
-    return ok;
+        return ok ? SQLITE_OK : SQLITE_ABORT;
+    });
+    return ok && committed;
 }
 
 bool WarDirector::SetState(sqlite3* db, uint32_t roomId, WarState to,
@@ -506,19 +517,25 @@ unsigned WarDirector::WarsFielding(sqlite3* db, const std::string& factionId) {
 
 bool WarDirector::Forget(sqlite3* db, uint32_t roomId) {
     if (!db) return false;
-    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+    // Shared handle, one transaction helper — see `Register` above and the RULE
+    // in SqliteThreading.h. This one is also reached from RoomManager's
+    // room-delete chokepoint, so it can legitimately run INSIDE another
+    // transaction on this thread; the helper runs it inline there rather than
+    // opening a second one that would fail.
     bool ok = true;
-    for (const char* sql : {"DELETE FROM war_sides WHERE room_id=?",
-                            "DELETE FROM wars WHERE room_id=?"}) {
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-            ok = ok && sqlite3_step(stmt) == SQLITE_DONE;
-        } else {
-            ok = false;
+    const bool committed = SqliteWriteTransaction(db, "WarForget", [&] {
+        for (const char* sql : {"DELETE FROM war_sides WHERE room_id=?",
+                                "DELETE FROM wars WHERE room_id=?"}) {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                ok = ok && sqlite3_step(stmt) == SQLITE_DONE;
+            } else {
+                ok = false;
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
-    }
-    sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", nullptr, nullptr, nullptr);
-    return ok;
+        return ok ? SQLITE_OK : SQLITE_ABORT;
+    });
+    return ok && committed;
 }

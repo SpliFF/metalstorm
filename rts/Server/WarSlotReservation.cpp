@@ -85,148 +85,169 @@ SlotReserveResult WarSlotReservations::Reserve(sqlite3* db, uint32_t roomId,
     if (ttlSeconds <= 0)
         ttlSeconds = WAR_SLOT_RESERVATION_TTL_SECONDS;
 
-    // The write lock is taken HERE, before the first read, and that ordering
-    // is the whole point: a deferred transaction would read the counts under a
-    // shared lock, and two of them would both see the same free seat before
-    // either tried to write.
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) !=
-        SQLITE_OK) {
-        return r;  // Error — busy past the timeout. Fail closed.
-    }
-
+    // The write lock is taken by `SqliteWriteTransaction` (BEGIN IMMEDIATE)
+    // BEFORE the first read, and that ordering is the whole point: a deferred
+    // transaction would read the counts under a shared lock, and two of them
+    // would both see the same free seat before either tried to write.
+    //
+    // It is that helper and not a hand-rolled pair because `db` is the lobby's
+    // SHARED handle — the same `sqlite3*` RoomManager persists rooms on from
+    // the other thread. A raw BEGIN here interleaves with theirs on one
+    // connection, and the rollback below would then discard THEIR committed
+    // room write. See the RULE in SqliteThreading.h.
+    //
+    // The outcome is carried out of the body in `r`; the body's return code
+    // only decides commit-or-rollback. `SideFull`, `NoSuchSide` and `Error`
+    // roll back (nothing they did should survive); `Granted`, `Renewed` and
+    // `AlreadySeated` commit.
     auto finish = [&](SlotReserveOutcome outcome, bool commit) {
         r.outcome = outcome;
-        sqlite3_exec(db, commit ? "COMMIT" : "ROLLBACK", nullptr, nullptr,
-                     nullptr);
-        return r;
+        // Any non-busy, non-OK code rolls back and is not retried. SQLITE_ABORT
+        // says "this is a decision, not a failure" — a full side must not be
+        // re-counted three times.
+        return commit ? SQLITE_OK : SQLITE_ABORT;
     };
 
-    // 1. The side, and its cap. No row → this war does not field that faction.
-    {
-        sqlite3_stmt* stmt = nullptr;
-        const char* kSql =
-            "SELECT slot_cap FROM war_sides WHERE room_id=? AND faction_id=?";
-        if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+    const bool committed = SqliteWriteTransaction(db, "WarSlotReserve", [&] {
+        // 1. The side, and its cap. No row → this war does not field that faction.
+        {
+            sqlite3_stmt* stmt = nullptr;
+            const char* kSql =
+                "SELECT slot_cap FROM war_sides WHERE room_id=? AND faction_id=?";
+            if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+                sqlite3_finalize(stmt);
+                return finish(SlotReserveOutcome::Error, false);
+            }
+            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+            BindText(stmt, 2, factionId);
+            const bool found = sqlite3_step(stmt) == SQLITE_ROW;
+            if (found)
+                r.slotCap = static_cast<unsigned>(sqlite3_column_int64(stmt, 0));
             sqlite3_finalize(stmt);
-            return finish(SlotReserveOutcome::Error, false);
+            if (!found)
+                return finish(SlotReserveOutcome::NoSuchSide, false);
         }
-        sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-        BindText(stmt, 2, factionId);
-        const bool found = sqlite3_step(stmt) == SQLITE_ROW;
-        if (found)
-            r.slotCap = static_cast<unsigned>(sqlite3_column_int64(stmt, 0));
-        sqlite3_finalize(stmt);
-        if (!found)
-            return finish(SlotReserveOutcome::NoSuchSide, false);
-    }
 
-    // 2. Already seated? A rejoin holds its seat already (WarRejoinPolicy's
-    // `bypassCapacity` is the same rule stated from the seating side), so it
-    // needs no reservation — and taking one would count the returning player
-    // against the cap a second time. Any stale reservation of theirs is
-    // dropped on the way out for exactly that reason.
-    {
-        unsigned mine = 0;
+        // 2. Already seated? A rejoin holds its seat already (WarRejoinPolicy's
+        // `bypassCapacity` is the same rule stated from the seating side), so it
+        // needs no reservation — and taking one would count the returning player
+        // against the cap a second time. Any stale reservation of theirs is
+        // dropped on the way out for exactly that reason.
+        {
+            unsigned mine = 0;
+            if (!CountQuery(db,
+                    "SELECT COUNT(*) FROM war_player_bindings "
+                    "WHERE room_id=? AND faction_id=? AND account_id=?",
+                    roomId, factionId, {accountId}, mine))
+                return finish(SlotReserveOutcome::Error, false);
+            if (mine > 0) {
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_prepare_v2(db,
+                        "DELETE FROM war_slot_reservations "
+                        "WHERE room_id=? AND account_id=?",
+                        -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+                    sqlite3_bind_int64(stmt, 2, accountId);
+                    sqlite3_step(stmt);
+                }
+                sqlite3_finalize(stmt);
+                return finish(SlotReserveOutcome::AlreadySeated, true);
+            }
+        }
+
+        // 3. The count the decision is made on: durable seats plus seats held by
+        // somebody else's in-flight join. This account is excluded from both — it
+        // holds neither (2 just proved it is not bound), and its own outstanding
+        // reservation is a retry, not a rival.
         if (!CountQuery(db,
                 "SELECT COUNT(*) FROM war_player_bindings "
-                "WHERE room_id=? AND faction_id=? AND account_id=?",
-                roomId, factionId, {accountId}, mine))
+                "WHERE room_id=? AND faction_id=? AND account_id<>?",
+                roomId, factionId, {accountId}, r.bound))
             return finish(SlotReserveOutcome::Error, false);
-        if (mine > 0) {
+        if (!CountQuery(db,
+                "SELECT COUNT(*) FROM war_slot_reservations r "
+                "WHERE r.room_id=? AND r.faction_id=? AND r.expires_at>? "
+                "  AND r.account_id<>? "
+                // A reservation whose join COMPLETED is not a second seat. The
+                // process that seats a player is the game server (it writes the
+                // binding) and it has no reason to call back into the lobby, so
+                // the release is expressed here as a fact rather than as an event
+                // somebody has to remember to send: once the binding exists, the
+                // reservation stops counting, immediately and everywhere. Without
+                // this the joiner holds two seats against their own side for the
+                // rest of the TTL.
+                "  AND NOT EXISTS (SELECT 1 FROM war_player_bindings b "
+                "                  WHERE b.room_id=r.room_id "
+                "                    AND b.account_id=r.account_id)",
+                roomId, factionId, {now, accountId}, r.reserved))
+            return finish(SlotReserveOutcome::Error, false);
+
+        // Cap 0 is unlimited. Otherwise the side is full when every seat is
+        // spoken for, and `>=` rather than `>` because the seat being asked for
+        // is the one after the ones counted.
+        if (r.slotCap != 0 && r.bound + r.reserved >= r.slotCap)
+            return finish(SlotReserveOutcome::SideFull, false);
+
+        // 4. Did this account already hold a live one? Read before the upsert so
+        // the outcome can tell a first grant from a retry.
+        bool renewed = false;
+        {
+            unsigned live = 0;
+            if (CountQuery(db,
+                    "SELECT COUNT(*) FROM war_slot_reservations "
+                    "WHERE room_id=? AND faction_id=? AND expires_at>? "
+                    "  AND account_id=?",
+                    roomId, factionId, {now, accountId}, live))
+                renewed = live > 0;
+        }
+
+        {
+            static const char* kSql =
+                "INSERT INTO war_slot_reservations "
+                "  (room_id, faction_id, account_id, reserved_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(room_id, account_id) DO UPDATE SET "
+                // The faction is re-asserted rather than left alone: an account
+                // whose faction was overridden by an operator (§1b) must not keep
+                // a seat reserved on the side it no longer belongs to.
+                "  faction_id=excluded.faction_id,"
+                "  reserved_at=excluded.reserved_at,"
+                "  expires_at=excluded.expires_at";
             sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(db,
-                    "DELETE FROM war_slot_reservations "
-                    "WHERE room_id=? AND account_id=?",
-                    -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-                sqlite3_bind_int64(stmt, 2, accountId);
-                sqlite3_step(stmt);
+            if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+                sqlite3_finalize(stmt);
+                return finish(SlotReserveOutcome::Error, false);
             }
+            r.expiresAt = now + ttlSeconds;
+            sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+            BindText(stmt, 2, factionId);
+            sqlite3_bind_int64(stmt, 3, accountId);
+            sqlite3_bind_int64(stmt, 4, now);
+            sqlite3_bind_int64(stmt, 5, r.expiresAt);
+            const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
             sqlite3_finalize(stmt);
-            return finish(SlotReserveOutcome::AlreadySeated, true);
+            if (!ok) {
+                r.expiresAt = 0;
+                return finish(SlotReserveOutcome::Error, false);
+            }
         }
+
+        return finish(renewed ? SlotReserveOutcome::Renewed
+                              : SlotReserveOutcome::Granted,
+                      true);
+    });
+
+    // A committed decision stands as it is. An UNCOMMITTED one that believed
+    // it had granted a seat did not reach disk (a competing process held the
+    // write lock past the retries), and reporting a grant for a row that is
+    // not there would double-book the side — so it fails closed, exactly as a
+    // refused BEGIN used to.
+    if (!committed && r.outcome != SlotReserveOutcome::SideFull &&
+        r.outcome != SlotReserveOutcome::NoSuchSide) {
+        r.outcome = SlotReserveOutcome::Error;
+        r.expiresAt = 0;
     }
-
-    // 3. The count the decision is made on: durable seats plus seats held by
-    // somebody else's in-flight join. This account is excluded from both — it
-    // holds neither (2 just proved it is not bound), and its own outstanding
-    // reservation is a retry, not a rival.
-    if (!CountQuery(db,
-            "SELECT COUNT(*) FROM war_player_bindings "
-            "WHERE room_id=? AND faction_id=? AND account_id<>?",
-            roomId, factionId, {accountId}, r.bound))
-        return finish(SlotReserveOutcome::Error, false);
-    if (!CountQuery(db,
-            "SELECT COUNT(*) FROM war_slot_reservations r "
-            "WHERE r.room_id=? AND r.faction_id=? AND r.expires_at>? "
-            "  AND r.account_id<>? "
-            // A reservation whose join COMPLETED is not a second seat. The
-            // process that seats a player is the game server (it writes the
-            // binding) and it has no reason to call back into the lobby, so
-            // the release is expressed here as a fact rather than as an event
-            // somebody has to remember to send: once the binding exists, the
-            // reservation stops counting, immediately and everywhere. Without
-            // this the joiner holds two seats against their own side for the
-            // rest of the TTL.
-            "  AND NOT EXISTS (SELECT 1 FROM war_player_bindings b "
-            "                  WHERE b.room_id=r.room_id "
-            "                    AND b.account_id=r.account_id)",
-            roomId, factionId, {now, accountId}, r.reserved))
-        return finish(SlotReserveOutcome::Error, false);
-
-    // Cap 0 is unlimited. Otherwise the side is full when every seat is
-    // spoken for, and `>=` rather than `>` because the seat being asked for
-    // is the one after the ones counted.
-    if (r.slotCap != 0 && r.bound + r.reserved >= r.slotCap)
-        return finish(SlotReserveOutcome::SideFull, false);
-
-    // 4. Did this account already hold a live one? Read before the upsert so
-    // the outcome can tell a first grant from a retry.
-    bool renewed = false;
-    {
-        unsigned live = 0;
-        if (CountQuery(db,
-                "SELECT COUNT(*) FROM war_slot_reservations "
-                "WHERE room_id=? AND faction_id=? AND expires_at>? "
-                "  AND account_id=?",
-                roomId, factionId, {now, accountId}, live))
-            renewed = live > 0;
-    }
-
-    {
-        static const char* kSql =
-            "INSERT INTO war_slot_reservations "
-            "  (room_id, faction_id, account_id, reserved_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(room_id, account_id) DO UPDATE SET "
-            // The faction is re-asserted rather than left alone: an account
-            // whose faction was overridden by an operator (§1b) must not keep
-            // a seat reserved on the side it no longer belongs to.
-            "  faction_id=excluded.faction_id,"
-            "  reserved_at=excluded.reserved_at,"
-            "  expires_at=excluded.expires_at";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
-            sqlite3_finalize(stmt);
-            return finish(SlotReserveOutcome::Error, false);
-        }
-        r.expiresAt = now + ttlSeconds;
-        sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
-        BindText(stmt, 2, factionId);
-        sqlite3_bind_int64(stmt, 3, accountId);
-        sqlite3_bind_int64(stmt, 4, now);
-        sqlite3_bind_int64(stmt, 5, r.expiresAt);
-        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-        sqlite3_finalize(stmt);
-        if (!ok) {
-            r.expiresAt = 0;
-            return finish(SlotReserveOutcome::Error, false);
-        }
-    }
-
-    return finish(renewed ? SlotReserveOutcome::Renewed
-                          : SlotReserveOutcome::Granted,
-                  true);
+    return r;
 }
 
 bool WarSlotReservations::Release(sqlite3* db, uint32_t roomId,

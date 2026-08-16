@@ -434,3 +434,61 @@ describe("AI profile transport (§10 task 6)", function()
         assert.is_nil(world.trp(1, 'ai_profile_3'))
     end)
 end)
+
+-- The Σ slotCap player slots a war is pre-allocated at spawn
+-- (PLAN-metalstorm-wars.md §8.1) are in the player list from frame 0 with
+-- nobody in them, which is why GameStart's seed loop passes `activeOnly`. What
+-- it protects is tenure: joinFrame is the tie-break reassignLeader sorts on, so
+-- stamping an empty chair at frame 0 makes the seat out-rank every human who
+-- actually turns up — and aims a team objective at somebody who is not there.
+describe("GameStart roster seed (wars §8.1)", function()
+    it("seeds only players who have actually arrived", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.frame = 0
+        world.setPlayer(1, 1, true)        -- the human this war booted with
+        world.setPlayer(2, 1, false)       -- a seat pre-allocated for a joiner
+        world.setPlayer(3, 1, false)       -- and another
+        world.lowestParticipationByTeam[1] = 42
+
+        gadgetObj:GameStart()
+
+        -- One suggestion, aimed at the one person present.
+        assert.are.equal(1, #world.suggestCalls)
+        assert.are.equal(1, world.suggestCalls[1].playerID)
+
+        -- And no tenure for the empty chairs — the assertion that matters,
+        -- because tenure is what elects a leader.
+        local state = {}
+        gadgetObj:Save(state)
+        assert.are.equal(0, state.joinFrame[1])
+        assert.is_nil(state.joinFrame[2])
+        assert.is_nil(state.joinFrame[3])
+    end)
+
+    it("dates a joiner's tenure from their arrival, not from the war's boot", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.frame = 0
+        world.setPlayer(1, 1, false)       -- seat, lower playerID than the human
+        world.setPlayer(2, 1, true)        -- the human present at boot
+        gadgetObj:GameStart()
+        assert.are.equal(2, world.trp(1, 'team_leader'))
+
+        -- The joiner lands on their seat much later.
+        world.frame = 5000
+        world.setPlayer(1, 1, true)
+        gadgetObj:PlayerAdded(1)
+
+        local state = {}
+        gadgetObj:Save(state)
+        assert.are.equal(5000, state.joinFrame[1])
+
+        -- So when the incumbent goes, the seat does not inherit the team on a
+        -- tenure it never served: player 1 leads because they are the only one
+        -- left, at frame 5000, not because they were "there from frame 0".
+        world.setPlayer(2, 1, false)
+        gadgetObj:PlayerRemoved(2, 'timeout')
+        assert.are.equal(1, world.trp(1, 'team_leader'))
+    end)
+end)
