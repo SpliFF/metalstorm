@@ -2,6 +2,7 @@
 
 #include "RoomManager.h"
 #include "WarPlayerBindings.h"
+#include "WarSlotReservation.h"
 #include "GameEventsDb.h"
 #include "GameServersDb.h"
 #include "AuthTokens.h"
@@ -437,6 +438,11 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     // A roster of accounts that never fought here, complete with their pools
     // (PLAN-metalstorm-lobby task 4).
     WarPlayerBindings::DeleteForRoom(db, roomId);
+    // Seats held for joins that will now never land. Inherited, these are
+    // worse than a leak in the specific way this chokepoint is about: the next
+    // war on this id would boot with its sides already partly reserved by
+    // accounts that never asked to fight in it (PLAN-metalstorm-wars §4).
+    WarSlotReservations::DeleteForRoom(db, roomId);
     // A story: the war log the rejoin digest reads back to a player.
     GameEventsDb::DeleteForRoom(db, roomId);
     // A WORLD. `warresume::LatestSnapshot` partitions on (game_id, room_id) and
