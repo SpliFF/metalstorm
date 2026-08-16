@@ -442,6 +442,11 @@ set(LOBBY_SERVER_SOURCES
     # table (and the faction override deletes from it); the game server writes
     # it. Pure sqlite, no sim — same shape as GameServersDb below.
     rts/Server/WarPlayerBindings.cpp
+    # PLAN-metalstorm-wars.md §9 task 1: the War Director — the `wars` /
+    # `war_sides` tables and the seed→boot-call planner. LOBBY ONLY, and that
+    # is the point: it decides which wars exist and never touches sim state,
+    # so the game server has no reason to link it.
+    rts/Server/WarDirector.cpp
     # PLAN-metalstorm-lobby.md §8 task 9a: the friends graph. LOBBY ONLY —
     # unlike the bindings above, the game server neither reads nor writes it,
     # so it is deliberately not in the shared set.
@@ -583,6 +588,10 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
+        # PLAN-metalstorm-wars.md task 1: the War Director. Its whole output is
+        # DB rows and one JSON boot call, so test_war_director.cpp drives the
+        # real store against an in-memory db — no lobby, no sim, no server.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarDirector.cpp
         # task 9a — test_friends.cpp drives the real store against an
         # in-memory db, and the two policy headers beside it are pure.
         ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp

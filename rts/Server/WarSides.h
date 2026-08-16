@@ -70,6 +70,34 @@ inline WarSides ParseWarSides(const std::string& spec) {
     return out;
 }
 
+/// Encode sides back into the `war_sides` modoption form.
+///
+/// The counterpart to `ParseWarSides`, and the ONE place the grammar is
+/// written — `ScenarioDiscovery::EncodeWarSides` builds its list and then
+/// delegates here, and PLAN-metalstorm-wars.md's War Director derives the
+/// modoption from its `war_sides` rows through the same call. Three readers
+/// parse this string in three processes; two independent writers of it is the
+/// shape that lets a faction be seated on team 0 in one and refused in
+/// another.
+///
+/// A faction key carrying ',' or ':' is DROPPED rather than emitted, because
+/// it would silently reshape the list for every downstream parser — the same
+/// rule, and the same reason, as `EncodeWarSideCapacities` below.
+inline std::string EncodeWarSides(const WarSides& sides) {
+    std::string out;
+    for (const auto& [faction, team] : sides) {
+        if (faction.empty() || faction.find(',') != std::string::npos ||
+            faction.find(':') != std::string::npos)
+            continue;
+        if (!out.empty())
+            out += ',';
+        out += faction;
+        out += ':';
+        out += std::to_string(static_cast<unsigned>(team));
+    }
+    return out;
+}
+
 /// `0` means "no capacity limit", which is what a war that never declares one
 /// gets. Chosen so an unset/absent value is permissive: a war that forgot to
 /// size its sides should let players in and be rebalanced by §6's seeding,

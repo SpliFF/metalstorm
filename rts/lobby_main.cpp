@@ -18,6 +18,7 @@
 #include "Server/ReplayFile.h"
 #include "Server/RoomManager.h"
 #include "Server/RuntimeAIRoster.h"
+#include "Server/WarDirector.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1055,6 +1056,17 @@ int main(int argc, char *argv[]) {
   // and, like ScenarioDb above, it is migrated rather than dropped on a schema
   // bump: a row here is the only copy of the thing.
   WarPlayerBindings::EnsureTable(mapDb);
+
+  // wars / war_sides — the war OBJECT, as opposed to the room it runs in
+  // (PLAN-metalstorm-wars.md §1/§9 task 1, WarDirector.h). Strictly an
+  // extension of `rooms`: the map, the port, the session kind and the roster
+  // stay where RoomManager keeps them, and these two tables carry only what
+  // `rooms` has no column for — the war's lifecycle stage, why it was
+  // created, and what its sides are supposed to be when no game server is
+  // running to be asked. Lobby-only (the Director never touches sim state),
+  // and migrated additively rather than dropped for the same reason as the
+  // bindings above: a row here is the only copy of the thing.
+  WarDirector::EnsureTables(mapDb);
 
   // friend_edges — the §8 social graph (task 9a). Lobby-only: unlike the
   // bindings above, nothing in the game server reads or writes it, so this is
