@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,6 +61,81 @@ struct HttpRequestHeaders {
 /// Handler for an HTTP POST endpoint. Receives URL, body, and headers.
 using HttpPostHandler = std::function<HttpResponse(const std::string& url, const std::string& body,
                                                     const HttpRequestHeaders& headers)>;
+
+class NetworkServer;
+
+/// A promise to answer an HTTP request later, from another thread
+/// (PLAN-metalstorm-command-language.md §7/M8).
+///
+/// WHY THIS EXISTS. `NetworkServer` runs ONE network thread and dispatches
+/// route handlers inline on it — and that same thread flushes the SSE
+/// channels every client in the match tails for game state. A handler that
+/// blocks (the NL proxy's 1–3 s call to Claude) therefore does not just make
+/// its own caller wait: it holds back everyone's state stream for the whole
+/// duration. `tests/test_network_server_blocking.cpp` measures exactly that.
+///
+/// A worker pool does not fix it, because an `HttpPostHandler` has to *return*
+/// the response — whichever thread runs it is parked until the answer exists.
+/// So a deferred handler instead answers `std::nullopt` ("not yet") and keeps
+/// one of these. The event loop leaves the request open, and writes the
+/// response when `Complete()` lands.
+///
+/// LIFETIME. Copyable and cheap; both the worker and the server hold the same
+/// shared state, so neither owns the other. If the client disconnects, or the
+/// match ends, the server *cancels* the handle — a later `Complete()` is then
+/// a silent no-op rather than a write into a recycled socket. Cancellation
+/// never frees anything the worker still holds.
+///
+/// THREAD SAFETY. `Complete`, `CompleteWith` and `Cancelled` are safe to call
+/// from any thread. `Complete` is idempotent: the first one wins.
+class DeferredResponse {
+public:
+    /// Default-constructed handles are inert — every method is a no-op. Only
+    /// `NetworkServer` hands out live ones.
+    DeferredResponse() = default;
+
+    /// Deliver the response. Thread-safe, idempotent, and a no-op once the
+    /// handle has been cancelled. Wakes the event loop so the bytes go out on
+    /// the next poll rather than up to the poll timeout later.
+    void Complete(HttpResponse resp) const;
+
+    /// Run `fn` and `Complete()` whatever it returns, with `fn` wrapped in the
+    /// SAME exception guard `DispatchGet`/`DispatchPost` apply to every route
+    /// handler — a throw becomes a 500, not a crash.
+    ///
+    /// Use this, not `Complete(fn())`, from a worker thread: an exception
+    /// escaping a thread's top frame is `std::terminate`, i.e. the whole match
+    /// process dies. That is the exact failure mode the synchronous wrapper
+    /// exists to prevent, and a deferred handler must not be able to reopen it
+    /// by moving the work one thread sideways.
+    void CompleteWith(const std::string& path,
+                      const std::function<HttpResponse()>& fn) const;
+
+    /// True once nobody is left to read the answer — the client disconnected
+    /// or the server stopped. Worth checking before starting expensive work.
+    bool Cancelled() const;
+
+    /// False for a default-constructed (inert) handle.
+    bool Valid() const { return state != nullptr; }
+
+private:
+    friend class NetworkServer;
+    struct State;
+    explicit DeferredResponse(std::shared_ptr<State> s) : state(std::move(s)) {}
+    std::shared_ptr<State> state;
+};
+
+/// Handler for a POST endpoint that may answer later. Returning a response
+/// answers NOW; returning `std::nullopt` means "I kept `defer` and will
+/// complete it from another thread".
+///
+/// The optional is the point: the deferred route's cheap refusals (disabled,
+/// malformed body, rate-limited, busy) stay on the network thread, where they
+/// belong. Making the failure path pay a thread hop would make it slower than
+/// the success path.
+using HttpPostDeferredHandler = std::function<std::optional<HttpResponse>(
+    const std::string& url, const std::string& body,
+    const HttpRequestHeaders& headers, const DeferredResponse& defer)>;
 
 /// Required classification for every registered route (PLAN-security-hardening
 /// G20 — "every new route defaults to open" because auth lived per-lambda with
@@ -124,6 +200,20 @@ public:
     /// Register an HTTP POST endpoint. Must be called before Start().
     void AddHttpPost(const std::string& pattern, RouteAuth auth, HttpPostHandler handler);
 
+    /// Register a POST endpoint that may answer asynchronously (M8). Same
+    /// RouteAuth enforcement and the same `SafeInvoke` guard as `AddHttpPost`;
+    /// the only difference is that the handler may return `std::nullopt` and
+    /// complete the `DeferredResponse` from another thread. Must be called
+    /// before Start(). Reported by `GetRegisteredRoutes()` as an ordinary
+    /// "POST" — deferral is a transport detail, not a security classification.
+    ///
+    /// Deliberately a SECOND registration call rather than a change to
+    /// `HttpPostHandler`: exactly one route in this codebase blocks long
+    /// enough to need it, and rewriting ~40 handlers to carry a handle they
+    /// never use would be a large diff whose only effect is risk.
+    void AddHttpPostDeferred(const std::string& pattern, RouteAuth auth,
+                             HttpPostDeferredHandler handler);
+
     /// Register an SSE (Server-Sent Events) endpoint pattern.
     /// Returns a channel ID for pushing events via SendSSE().
     /// Must be called before Start().
@@ -178,10 +268,12 @@ private:
 
     struct GetRoute { std::string pattern; RouteAuth auth; HttpGetHandler handler; };
     struct PostRoute { std::string pattern; RouteAuth auth; HttpPostHandler handler; };
+    struct PostDeferredRoute { std::string pattern; RouteAuth auth; HttpPostDeferredHandler handler; };
 
     // HTTP handlers registered before Start()
     std::vector<GetRoute> httpGetHandlers;
     std::vector<PostRoute> httpPostHandlers;
+    std::vector<PostDeferredRoute> httpPostDeferredHandlers;
     RouteAuthCallbacks routeAuthCallbacks;
 
     std::thread networkThread;

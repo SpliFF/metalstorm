@@ -28,8 +28,10 @@
 
 #include "NetworkServer.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -266,10 +268,15 @@ private:
 
 /// Owns the key, the prompt and the limiter for one match.
 ///
-/// Construct once at startup (`Init`), then `Handle` per request. Not copied,
-/// and safe to call from the HTTP thread only — the limiter is unguarded
-/// because `NetworkServer` dispatches POSTs on a single thread today. If that
-/// ever changes, the limiter grows a mutex; nothing else here holds state.
+/// Construct once at startup (`Init`), then `HandleDeferred` per request.
+///
+/// THREADING (M8). `Init` and `HandleDeferred` are network-thread-only: the
+/// rate limiter is unguarded, and admission is the last thing that happens
+/// there. Everything after admission runs on a detached worker — `Call` reads
+/// only members that `Init` froze, and the rollup is behind `statsMutex`. The
+/// destructor waits (bounded, one second past curl's own timeout) for those
+/// workers, so process teardown cannot pull this object out from under a
+/// thread still inside `curl_easy_perform`.
 class Proxy {
 public:
     /// Read the key from the environment and load the schema + vocabulary from
@@ -283,8 +290,39 @@ public:
     /// gets 503 `{"error":"nl-disabled"}`.
     bool Enabled() const { return enabled; }
 
-    /// The whole route body: gate, rate-limit, call, validate, answer.
+    ~Proxy();
+
+    /// The whole route body, synchronously: gate, rate-limit, call, validate,
+    /// answer. Blocks for the duration of the upstream call — kept for the
+    /// doctest suite and for any caller that is not on an event loop. The
+    /// route itself uses `HandleDeferred`.
     HttpResponse Handle(int64_t userId, const std::string& body);
+
+    /// The route body, off the network thread (§7/M8).
+    ///
+    /// The cheap refusals — disabled, malformed, rate-limited, busy — are
+    /// returned RIGHT HERE, on the caller's thread, because they cost
+    /// microseconds and routing them through a worker would make saying "no"
+    /// slower than saying "yes". Only a request that is actually going to
+    /// spend money is handed to a worker, and this then returns `nullopt`:
+    /// `defer` carries the answer back to the event loop when the call lands.
+    ///
+    /// Must be called on the network thread (the rate limiter is unguarded and
+    /// admission happens here). The worker touches only `Call`'s immutable
+    /// inputs and the mutex-guarded rollup.
+    std::optional<HttpResponse> HandleDeferred(int64_t userId, const std::string& body,
+                                               const DeferredResponse& defer);
+
+    /// How many upstream calls may be in flight for one match at once.
+    ///
+    /// There is deliberately NO queue behind this: over the cap the route
+    /// answers 503 `nl-busy` at once and `nl-client.ts`'s existing 503 branch
+    /// falls back to the local parser. Queueing would mean a player's next
+    /// sentence waits behind other people's calls and THEN still pays 1–3 s,
+    /// which is worse than a refusal they can see. Four rather than one so a
+    /// couple of players can talk simultaneously; bounded because each call is
+    /// a thread and real money.
+    static constexpr int kMaxConcurrentCalls = 4;
 
     /// Exposed for the doctest suite and for the eval harness — the exact
     /// bytes that go up as the cached system block.
@@ -308,8 +346,25 @@ private:
     std::string effort = kDefaultEffort;
     RateLimiter limiter;
     Stats stats;
+    /// The rollup is folded from worker threads now, so it needs a lock. The
+    /// LIMITER deliberately does not: admission still happens on the network
+    /// thread, which is the only place `Allow` is ever called from.
+    mutable std::mutex statsMutex;
+    std::atomic<int> inFlight{0};
+
+    /// The gates that run before a token is spent: enabled, well-formed,
+    /// under the rate limit. Returns the refusal, or nullopt with `req`
+    /// filled in. Network-thread-only (it drives the limiter).
+    std::optional<HttpResponse> Admit(int64_t userId, const std::string& body,
+                                      ParsedRequest& req);
+
+    /// Everything after admission: the upstream call, the usage log line and
+    /// the rollup. Runs on a worker thread under `HandleDeferred`, inline
+    /// under `Handle`.
+    HttpResponse Finish(int64_t userId, const ParsedRequest& req);
 
     /// One HTTPS round trip. Hard 6 s timeout (§3), non-streaming.
+    /// Re-entrant: reads only members that are immutable after `Init`.
     CallResult Call(const ParsedRequest& req);
 };
 

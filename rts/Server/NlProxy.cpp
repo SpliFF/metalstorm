@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #define LOG_SECTION "server"
 
@@ -586,22 +587,16 @@ CallResult Proxy::Call(const ParsedRequest& req) {
     return result;
 }
 
-HttpResponse Proxy::Handle(int64_t userId, const std::string& body) {
-    if (!enabled)
-        return ErrorResponse(503, "nl-disabled");
+Proxy::~Proxy() {
+    // A detached worker is still holding `this`. The upstream call has a hard
+    // 6 s timeout, so waiting a little past that is bounded — and the
+    // alternative is a thread reading a destroyed prompt/key at process exit.
+    // Only ever costs anything when a match is torn down mid-utterance.
+    for (int i = 0; i < 700 && inFlight.load() > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
 
-    ParsedRequest req;
-    if (auto err = ParseRequest(body, req))
-        return ErrorResponse(err->status, err->code);
-
-    if (!limiter.Allow(userId)) {
-        const int retry = limiter.RetryAfterSeconds(userId);
-        SLOG(SPRING_LOG_NOTICE, "nl-proxy: user %lld rate limited (retry in %ds)",
-             static_cast<long long>(userId), retry);
-        HttpResponse resp = ErrorResponse(429, "nl-rate-limited");
-        return resp;
-    }
-
+HttpResponse Proxy::Finish(int64_t userId, const ParsedRequest& req) {
     const CallResult call = Call(req);
 
     // §3: "log usage tokens per request". One line, greppable, no utterance
@@ -617,11 +612,74 @@ HttpResponse Proxy::Handle(int64_t userId, const std::string& body) {
     // M7 dashboard: the per-request line above answers "what did THIS cost";
     // this one answers "is the p50 still under the bar", which is the question
     // the model choice turns on and which no single request can answer.
-    stats.Record(call);
-    if (stats.DueForLog())
-        SLOG(SPRING_LOG_NOTICE, "%s", stats.SummaryLine().c_str());
+    // Locked because M8 folds this from a worker thread: two concurrent
+    // talkers would otherwise race the ring cursor and the token totals.
+    std::string rollup;
+    {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        stats.Record(call);
+        if (stats.DueForLog()) rollup = stats.SummaryLine();
+    }
+    if (!rollup.empty()) SLOG(SPRING_LOG_NOTICE, "%s", rollup.c_str());
 
     return HttpAuth::JsonResponse(call.status, call.body);
+}
+
+/// The gates that run before a single token is spent. Shared by the sync and
+/// the deferred entry points so there is one answer to "may this request
+/// proceed", not two that can drift.
+std::optional<HttpResponse> Proxy::Admit(int64_t userId, const std::string& body,
+                                         ParsedRequest& req) {
+    if (!enabled)
+        return ErrorResponse(503, "nl-disabled");
+
+    if (auto err = ParseRequest(body, req))
+        return ErrorResponse(err->status, err->code);
+
+    if (!limiter.Allow(userId)) {
+        const int retry = limiter.RetryAfterSeconds(userId);
+        SLOG(SPRING_LOG_NOTICE, "nl-proxy: user %lld rate limited (retry in %ds)",
+             static_cast<long long>(userId), retry);
+        return ErrorResponse(429, "nl-rate-limited");
+    }
+    return std::nullopt;
+}
+
+HttpResponse Proxy::Handle(int64_t userId, const std::string& body) {
+    ParsedRequest req;
+    if (auto refused = Admit(userId, body, req))
+        return *refused;
+    return Finish(userId, req);
+}
+
+std::optional<HttpResponse> Proxy::HandleDeferred(int64_t userId, const std::string& body,
+                                                  const DeferredResponse& defer) {
+    ParsedRequest req;
+    if (auto refused = Admit(userId, body, req))
+        return refused;
+
+    // The concurrency cap. fetch_add-then-check rather than a compare loop:
+    // a transient overshoot by one is harmless here (the loser gives its slot
+    // straight back), and the alternative is a CAS retry on the network thread.
+    if (inFlight.fetch_add(1) >= kMaxConcurrentCalls) {
+        inFlight.fetch_sub(1);
+        SLOG(SPRING_LOG_NOTICE, "nl-proxy: user %lld refused — %d calls already in flight",
+             static_cast<long long>(userId), kMaxConcurrentCalls);
+        return ErrorResponse(503, "nl-busy");
+    }
+
+    // `req` is copied, not referenced: this frame is gone the moment we return
+    // nullopt. `defer` is a shared handle — if the client hangs up or the match
+    // ends, the server cancels it and the Complete() below becomes a no-op.
+    std::thread([this, userId, req, defer]() {
+        // The answer already has nowhere to go (client gone between dispatch
+        // and this thread starting). Don't pay for a call nobody will read.
+        if (!defer.Cancelled())
+            defer.CompleteWith("/api/nl/command", [&] { return Finish(userId, req); });
+        inFlight.fetch_sub(1);
+    }).detach();
+
+    return std::nullopt;
 }
 
 }  // namespace NlProxy
