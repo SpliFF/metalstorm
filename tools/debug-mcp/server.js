@@ -1988,8 +1988,22 @@ const TOOLS = [
                 relics: { type: 'integer', description: '0-32' },
                 wrecks: { type: 'integer', description: '0-32' },
                 bridges: { type: 'integer', description: '0-32' },
+                works: { type: 'integer', description: '0-32' },
+                harbour: { type: 'integer', description: '0-32' },
+                shanty: { type: 'integer', description: '0-32' },
                 hostility: { type: 'string', description: 'Generator enum (see scenariogen.py --hostility).' },
                 roster: { type: 'string', description: 'Generator enum (see scenariogen.py --roster).' },
+                coverage: {
+                    type: 'boolean',
+                    description: 'Full-coverage war: force the preset that can reach every def ms_defs knows, '
+                        + 'then REFUSE unless the staged war really contains one of each. Explicit knobs still '
+                        + 'win, so coverage+towns:5 means five towns.',
+                },
+                player: {
+                    type: 'boolean',
+                    description: 'Generate for a HUMAN: drop the mutual-ground-reachability gate, so islands, '
+                        + 'rivers and straits produce a scenario instead of a refusal.',
+                },
             },
             required: ['mapId'],
         },
