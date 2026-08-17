@@ -1007,11 +1007,9 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         print(f"yard pads: {len(yard_pads)} prepared, "
               f"{len(yard_refusals)} station(s) refused")
         yd.report_pad_refusals(yard_refusals)
-        yd.report_pad_relief(h, yard_pads, cell)
-        # ...and the ramp INTO each pad, which the relief report cannot see:
-        # a plateau is flat by construction and can still sit above an
-        # unclimbable verge (roads R4d, yards.pad_ramps).
-        yd.report_pad_ramps(h, yard_pads, cell)
+        # The pad relief/ramp instruments do NOT run here: rivers regrades the
+        # pad verges and cuts into the plateaus below, so a reading taken now
+        # is a surface the map does not ship — see the 7c block.
         rd.report_delivered_grades(network, h, cell, rp)
         # Water crossings (roads R3b) — an archipelago plans one network per
         # island, so every crossing here is an INLAND ford: the sea between two
@@ -1159,6 +1157,19 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # took the shipped arc's 16-32 elmo band from 1.59 to 1.11).
     report_surface(h, cell, "shipped", terrain=terrain,
                    relief_target=relief_target)
+    # The pad instruments read HERE, for the same reason — this generator is
+    # the one that levels pads BEFORE rivers (meridian2 runs rivers first), and
+    # the river bank clamp regrades the pad verges and cuts relief back into
+    # the plateaus (roads FIND 30: sundered_arc printed 28.1 deg for both pads
+    # at the old call site inside the loop; the shipped bytes read 22.0/26.8,
+    # and one verdict flipped). Measured stage by stage: rivers moves the pads,
+    # connect (0 sills) and 16-bit quantization move them by <0.1 deg. Still
+    # instruments, not gates — but now they describe the map that ships.
+    yd.report_pad_relief(h, yard_pads, cell)
+    # ...and the ramp INTO each pad, which the relief report cannot see: a
+    # plateau is flat by construction and can still sit above an unclimbable
+    # verge (roads R4d, yards.pad_ramps).
+    yd.report_pad_ramps(h, yard_pads, cell)
 
     # 8. final climate + biomes on the settled surface
     slope, temp, moist = fields(h)
