@@ -1257,5 +1257,244 @@ class TestFeatureDefsAreReal(unittest.TestCase):
                          (32, 40))
 
 
+class TestFullCoverageTemplates(unittest.TestCase):
+    """The coverage claim's half that needs no map: can the templates even
+    NAME every def?
+
+    Separated from the generated-war test on purpose. "No template mentions
+    ms_comms_relay" and "the war that ran did not happen to place one" are
+    different defects with different fixes, and a single test that only ever
+    generates cannot tell you which you have — nor can it run at all in a
+    checkout with no map data, which is every fresh clone (data/maps is
+    gitignored).
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+        self.facts = ms_defs.load(GAME_DIR)
+
+    def _nameable(self):
+        from scenario_templates import SITE_TEMPLATES
+        named = {d for tpl in CLUSTER_TEMPLATES.values()
+                 for d, _w, _lo, _hi in tpl["buildings"] + tpl["garrison"]}
+        named |= {d for roster in ARMY_ROSTERS.values() for d, _c, _s in roster}
+        named |= set(SITE_TEMPLATES)
+        # The town planner names its own defs out of town_templates.py rather
+        # than out of CLUSTER_TEMPLATES, so its roster has to be asked
+        # separately or the six shanty defs read as uncovered.
+        import town_templates as tt
+        named |= set(tt.role_options(self.facts).get("_all", []))
+        for role, spec in tt.LOT_ROLES.items():
+            named |= set(spec["defs"])
+        for spec in tt.POPULACE.values():
+            named |= {d for d, _w in spec["defs"]}
+        return named
+
+    def test_every_shipped_def_is_nameable_by_some_template(self):
+        """The directive's real target: no def is placeable by nothing.
+
+        This is the check that would have caught the original gap — eleven
+        buildings (the buildings_support.lua tail plus the naval yard) that no
+        cluster, site or roster mentioned, so no generated war could ever
+        contain one however it was seeded.
+        """
+        missing = sorted(set(self.facts) - self._nameable())
+        self.assertEqual(missing, [],
+                         "these shipped defs are named by no template, so no "
+                         "generated war can ever stage one")
+
+    def test_full_roster_fields_every_mobile_def(self):
+        mobile = {n for n, f in self.facts.items() if not f.building}
+        full = {d for d, _c, _s in ARMY_ROSTERS["full"]}
+        self.assertEqual(sorted(mobile - full), [],
+                         "the `full` roster is meant to be every mobile def")
+
+    def test_full_roster_reaches_all_three_movement_classes(self):
+        """Invariant 5 grades every mask a roster contains, so the roster has
+        to contain them: a coverage war graded on VEH alone would reproduce the
+        Meridian failure for the HEAVY and INFANTRY halves of its own army."""
+        classes = {self.facts[d].movementclass
+                   for d, _c, _s in ARMY_ROSTERS["full"]
+                   if self.facts[d].movementclass}
+        self.assertEqual(classes, {"VEH", "HEAVY", "INFANTRY"})
+
+    def test_full_roster_carries_no_naval_def(self):
+        """The constraint that was expected to bite and does not.
+
+        ms_defs.load() deliberately excludes ships/subs/transports (its own
+        docstring: the naval classes are not scenario-generator content), so
+        there is no def in the catalog the placer could be asked to beach. If
+        that ever changes, THIS is the test that should fail first — quietly
+        acquiring a SHIP-class roster entry would turn every landing zone
+        without a berth into a generation refusal.
+        """
+        for d, _c, _s in ARMY_ROSTERS["full"]:
+            self.assertNotEqual(self.facts[d].movementclass, "SHIP", d)
+
+    def test_standard_and_light_rosters_are_untouched(self):
+        """Existing wars and tests depend on these two exactly as they are."""
+        self.assertEqual([d for d, _c, _s in ARMY_ROSTERS["standard"]],
+                         ["ms_tanks_s2", "ms_tanks_s3", "ms_soldiers_s1",
+                          "ms_artillery_s2", "ms_engineers_s1",
+                          "ms_scout_buggy", "ms_supply_truck", "ms_radar_s1"])
+        self.assertEqual([d for d, _c, _s in ARMY_ROSTERS["light"]],
+                         ["ms_tanks_s1", "ms_soldiers_s1", "ms_engineers_s1"])
+
+    def test_coverage_overrides_only_ever_raise_a_minimum(self):
+        """A coverage war must be a SUPERSET of an ordinary one.
+
+        An override that lowered a min would make the harness stage fewer of
+        something than the wars it is supposed to be covering, which is the one
+        way a coverage preset can be actively misleading.
+        """
+        from scenario_templates import COVERAGE_MIN_OVERRIDES
+        for kind, overrides in COVERAGE_MIN_OVERRIDES.items():
+            tpl = CLUSTER_TEMPLATES[kind]
+            mins = {d: lo for d, _w, lo, _hi in tpl["buildings"]}
+            for defname, want in overrides.items():
+                self.assertIn(defname, mins,
+                              f"{kind} has no {defname} to override")
+                self.assertGreaterEqual(want, mins[defname],
+                                        f"{kind}/{defname} override lowers a minimum")
+
+
+class TestFullCoverageWar(unittest.TestCase):
+    """The generated article: a `--coverage` war really does contain one of
+    everything, and its objectives are not all `control`.
+
+    techno_lands is the target because it is the shipped map with the widest
+    region budget that also plans towns — coverage needs one free region per
+    cluster kind on top of the sites and relics, and a township needs ground
+    flat enough for streets. meridian_basin plans no towns at any seed (its
+    scarps refuse every candidate), which is a property of that map and is why
+    it is not used here.
+    """
+
+    MAP = "techno_lands_final_2.60_wide"
+    SEEDS = (11, 23, 42)
+
+    def setUp(self):
+        if MAPS_DIR is None:
+            self.skipTest("no data/maps/ reachable (it is gitignored); "
+                          "set MS_MAPS_DIR to run the coverage matrix")
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+        self.d = os.path.join(MAPS_DIR, self.MAP)
+        if not os.path.isdir(self.d):
+            self.skipTest(f"{self.MAP} is missing from {MAPS_DIR}")
+        self.facts = ms_defs.load(GAME_DIR)
+
+    def _gen(self, seed):
+        return sg.generate(self.d, seed=seed, game_dir=GAME_DIR,
+                           coverage=True, test_scenario=False)
+
+    def test_every_def_is_staged_and_every_side_fields_every_mobile_def(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _lua, meta = self._gen(seed)
+                self.assertEqual(meta["uncovered_defs"], [])
+                self.assertEqual(meta["staged_def_count"],
+                                 meta["catalog_def_count"])
+                mobile = {n for n, f in self.facts.items() if not f.building}
+                for team, defs in meta["per_side_defs"].items():
+                    self.assertEqual(sorted(mobile - set(defs)), [],
+                                     f"side {team} is missing mobile defs")
+
+    def test_an_ordinary_war_covers_far_less_which_is_the_whole_point(self):
+        """The control. If a default war already staged all 67 defs the
+        coverage machinery would be dead weight, and this number is the
+        measurement that says it is not — 24 of 67 on this map at this seed.
+        """
+        _lua, plain = sg.generate(self.d, seed=11, game_dir=GAME_DIR,
+                                  test_scenario=False)
+        _lua, cov = self._gen(11)
+        self.assertLess(plain["staged_def_count"], cov["staged_def_count"])
+        self.assertFalse(plain["coverage"])
+        self.assertTrue(cov["coverage"])
+
+    def test_objectives_span_more_than_control(self):
+        """The other half of the directive. Three types, and exactly one of
+        them terminal."""
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                lua, _meta = self._gen(seed)
+                types = set(re.findall(r"\{ type = '(\w+)'", code_only(lua)))
+                self.assertIn("control", types)
+                self.assertIn("protect", types)
+                self.assertIn("extract", types)
+                self.assertEqual(count_victory_flags(lua), 1,
+                                 "exactly one terminal objective, or the war "
+                                 "cannot end")
+
+    def test_the_non_control_objectives_carry_the_params_their_type_needs(self):
+        """Each type module validates its own params and REFUSES at create
+        time otherwise — and a refused objective is silent, so a generated war
+        can ship with objectives that never exist. protect additionally
+        requires expiresAtFrame (protect.init has no other way to resolve).
+        """
+        lua, _meta = self._gen(11)
+        body = code_only(lua)
+        for block in re.findall(r"\{ type = 'protect'.*?\n(?=\s*(?:\{|--|\}))",
+                                body, re.S):
+            self.assertIn("targetUnitIDs", block)
+            self.assertIn("_populateTargetsFrom", block)
+            self.assertIn("role = 'ambient'", block)
+            self.assertRegex(block, r"expiresAtFrame = \d+")
+        for block in re.findall(r"\{ type = 'extract'.*?\n(?=\s*(?:\{|--|\}))",
+                                body, re.S):
+            for key in ("payloadUnitIDs", "pickupArea", "extractArea",
+                        "holdFrames", "threshold", "_populatePayloadFrom"):
+                self.assertIn(key, block)
+
+    def test_a_coverage_war_has_a_civilian_town_with_people_in_it(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _lua, meta = self._gen(seed)
+                self.assertTrue(meta["towns"], "no planned township")
+                self.assertGreater(meta["civilians"], 0)
+
+    def test_the_coverage_gate_refuses_rather_than_shipping_a_gap(self):
+        """The negative control, and the reason the gate exists at all.
+
+        Every layer under it is best-effort — place_cluster drops a building it
+        cannot site and says nothing — so without the gate an incomplete
+        coverage war is indistinguishable from a complete one. A map too small
+        to hold the cluster set must therefore REFUSE, not thin out.
+        """
+        with SyntheticMap(flat_map, "synth_cov") as d:
+            with self.assertRaises(sg.Rejected):
+                sg.generate(d, seed=11, game_dir=GAME_DIR, coverage=True,
+                            test_scenario=False)
+            # ...while the SAME map still generates an ordinary war. Both halves
+            # matter: a refusal that also broke the default path would not be a
+            # coverage gate, it would be a map the generator had stopped
+            # supporting.
+            lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+            self.assertEqual(count_victory_flags(lua), 1)
+            self.assertFalse(meta["coverage"])
+
+    def test_the_gate_names_the_defs_that_are_missing(self):
+        """A refusal a reader can act on. `flat_map` is 1024 elmos square and
+        cannot hold the cluster set, so it is a reliable producer of shortfall
+        — but it can refuse for several reasons, so this asserts the message
+        shape rather than one particular seed's list."""
+        with SyntheticMap(wide_flat_map, "synth_cov_wide") as d:
+            try:
+                sg.generate(d, seed=11, game_dir=GAME_DIR, coverage=True,
+                            test_scenario=False)
+            except sg.Rejected as e:
+                if "--coverage asked for" in str(e):
+                    self.assertRegex(str(e), r"(stages none of|fields none of|"
+                                             r"no planned township)")
+
+    def test_coverage_is_deterministic(self):
+        """Invariant 4 still holds with the preset on."""
+        a, _ = self._gen(11)
+        b, _ = self._gen(11)
+        self.assertEqual(a, b)
+
+
 if __name__ == "__main__":
     unittest.main()

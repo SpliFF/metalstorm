@@ -155,6 +155,152 @@ CLUSTER_TEMPLATES = {
             ("ms_supply_truck", 2, 0, 1),   # ore has to leave somehow
         ],
     },
+    # ----------------------------------------------------------------------
+    # The two coverage clusters (full-coverage war, 2026-08-18)
+    # ----------------------------------------------------------------------
+    # These exist because eleven shipped building defs were placeable by
+    # nothing. The town/outpost/base/mine mix above plus town_templates.py
+    # reaches 24 of the 35 buildings ms_defs.load() knows; the leftovers were
+    # the support tail (buildings_support.lua) and the naval yard, and a def
+    # no template names is a def no generated war can ever show — which is
+    # exactly the gap the full-coverage directive is about.
+    #
+    # Both are ordinary cluster kinds, not a special case: they go through
+    # place_cluster like every other kind, they take a `--works` / `--harbour`
+    # count on the CLI, and `--coverage` merely turns them on. Adding a fourth
+    # cluster kind was always meant to be a table entry (module docstring), so
+    # this is that mechanism being used rather than extended.
+    #
+    # `min` is 1 on every coverage def deliberately: a weighted draw makes
+    # coverage probabilistic, and "the war usually contains a comms relay" is
+    # not a coverage guarantee. place_cluster is still best-effort per
+    # building (it drops one it cannot site), so the guarantee is completed by
+    # gate_full_coverage in scenariogen.py, which REFUSES rather than shipping
+    # a war that quietly missed a def.
+    "works": {
+        "label": "Support Works",
+        "radius": 460,
+        # A rear-area depot complex: it wants the same buildable flats a base
+        # does, and it is the one cluster that reads as logistics rather than
+        # as a fight.
+        "prefers": ["buildzone", "plain"],
+        "buildings": [
+            ("ms_command_post",     3, 1, 1),
+            ("ms_field_workshop",   3, 1, 2),
+            ("ms_comms_relay",      2, 1, 1),
+            ("ms_rail_platform",    2, 1, 1),
+            # Both min 1 rather than 0. A supply dump is what a support works
+            # IS, and its `0` made it the last def a coverage war could miss
+            # (measured on scorched_crossing seed 3 and meridian seed 3, where
+            # ms_supply_dump was the single absent def); ms_staticdefense_s1 is
+            # here because the light gun nest is otherwise a town-template draw
+            # only, and a planned township does not go through this table's
+            # override path at all.
+            ("ms_supply_dump",      2, 1, 2),
+            ("ms_staticdefense_s1", 1, 1, 2),
+        ],
+        "garrison": [
+            ("ms_engineers_s1", 3, 1, 2),
+            ("ms_supply_truck", 3, 1, 2),
+            ("ms_fuel_tanker",  2, 0, 1),
+            ("ms_militia",      1, 0, 1),
+        ],
+    },
+    "harbour": {
+        "label": "Harbour Works",
+        "radius": 420,
+        # KNOWN COSMETIC LIMIT, recorded rather than papered over: a harbour
+        # here is not on the water. Two independent reasons, and neither is
+        # worth breaking to fix.
+        #   1. `prefers` cannot ask for a coast. scenariogen's `candidates()`
+        #      SKIPS every region tagged water or island outright, so a
+        #      water-first preference list would be dead data — hence the dry
+        #      tags below.
+        #   2. Only ms_port_crane grades itself against the water mask
+        #      (SITE_TEMPLATES.needs_water); shipyard, wharf and mast declare
+        #      no such requirement, so the placer has nothing to gate on.
+        # Water-gating the three would mean a coverage war refuses to generate
+        # on any map without a coast — a worse trade for a harness whose job is
+        # to put every def on screen. The port crane still lands on a real
+        # berth, via the site layer, so the water case is covered there.
+        "prefers": ["buildzone", "plain", "chokepoint"],
+        "buildings": [
+            ("ms_shipyard",       3, 1, 1),
+            ("ms_pontoon_wharf",  2, 1, 1),
+            ("ms_mooring_mast",   2, 1, 2),
+            # The crane is ALSO a SITE_TEMPLATES entry, and that is the copy
+            # that stands on a real berth (`needs_water`, graded against the
+            # mask). This one is the coverage fallback: the site layer draws
+            # last and competes for regions with every cluster, so on a map
+            # whose region budget runs out before ms_port_crane's turn the
+            # crane is simply absent — measured on techno_lands, which came
+            # 66/67 with the crane the only miss. A harbour that has one
+            # anyway costs nothing and takes the crane off the region budget.
+            ("ms_port_crane",     2, 1, 1),
+            ("ms_depot",          1, 0, 1),
+        ],
+        "garrison": [
+            ("ms_civilians",  3, 1, 2),
+            ("ms_civtruck",   2, 1, 1),
+            ("ms_militia",    2, 0, 1),
+        ],
+    },
+    "shanty": {
+        "label": "Shanty Camp",
+        "radius": 400,
+        "prefers": ["plain", "buildzone", "chokepoint"],
+        # The informal settlement, and the answer to a measured problem rather
+        # than an invented flavour. Six shipped defs — shanty block, market
+        # stalls, meeting hall, water works, watchtower, barricade set — were
+        # placeable ONLY by the town planner, and only then when the seeded
+        # town happened to draw the archetype and wall tier that use them. On
+        # meridian_basin at seed 11 all six were absent from a war with three
+        # planned towns in it, which is exactly the class of miss the coverage
+        # directive is about: not "rare", but "not reachable on purpose".
+        #
+        # Put together, those six ARE a settlement: a walled block of
+        # self-built housing with a market, a hall to argue in, a standpipe and
+        # somebody watching the road. That is a Township's opposite number and
+        # a thing the setting wants anyway, so this is an ordinary cluster kind
+        # a war may ask for, not a fixture that only exists to satisfy a test.
+        #
+        # Every min is 1 because that is the whole point — a weighted draw here
+        # would put the six defs back exactly where they started.
+        "buildings": [
+            ("ms_shanty_block",     5, 1, 3),
+            ("ms_market_stalls",    3, 1, 2),
+            ("ms_meeting_hall",     2, 1, 1),
+            ("ms_water_works",      2, 1, 1),
+            ("ms_watchtower",       2, 1, 2),
+            ("ms_barricade_set",    2, 1, 3),
+        ],
+        "garrison": [
+            ("ms_civilians", 4, 1, 3),
+            ("ms_militia",   3, 1, 2),
+            ("ms_civbus",    1, 0, 1),
+        ],
+    },
+}
+
+# The cluster kinds a war places by default, in the order the CLI counts them.
+# The coverage kinds are deliberately absent: an ordinary war should not grow a
+# shipyard because the generator learned how to place one.
+DEFAULT_CLUSTER_KINDS = ["town", "outpost", "base", "mine"]
+COVERAGE_CLUSTER_KINDS = ["works", "harbour", "shanty"]
+
+# Minimums a --coverage war raises on templates it shares with ordinary wars.
+# A DATA OVERRIDE rather than an edit to the templates themselves, because the
+# two callers want different things and only one of them is a harness: an
+# ordinary Forward Base draws its foundry and airbase (both min 0 above), and
+# that variation is the difference between four generated bases and one base
+# generated four times. A coverage war cannot afford the draw, so it says so
+# here — in one table a reader can diff against the templates — instead of
+# flattening the variation for everybody.
+COVERAGE_MIN_OVERRIDES = {
+    "base":    {"ms_foundry": 1, "ms_airbase": 1},
+    "mine":    {"ms_transit_hub": 1},
+    "outpost": {"ms_staticdefense_s3": 1, "ms_staticdefense_s4": 1},
+    "town":    {"ms_staticdefense_s1": 1, "ms_depot": 1},
 }
 
 # --------------------------------------------------------------------------
@@ -434,6 +580,90 @@ ARMY_ROSTERS = {
         ("ms_tanks_s1",    4, 140),
         ("ms_soldiers_s1", 6, 100),
         ("ms_engineers_s1", 1, 120),
+    ],
+    # ----------------------------------------------------------------------
+    # full — every mobile def the generator can address, one roster (2026-08-18)
+    # ----------------------------------------------------------------------
+    # The full-coverage directive's unit half: each side fields at least one of
+    # every unit type. "Every unit type" means ms_defs.load()'s catalog, which
+    # is 32 mobile defs plus the four radar masts, and NOT the whole of
+    # data/games/metalstorm/units/ — ships.lua, subs.lua, fighters.lua and
+    # bombers.lua are not in ms_defs' read set at all (see its `load` docstring:
+    # "the naval/air classes are not scenario-generator content"), and
+    # transports.lua is excluded by name because ms_landing_ship is
+    # movementclass SHIP and the generator has no water placement. So the naval
+    # constraint the roster was expected to hit never arises: there is no def
+    # here the placer could be asked to beach. That is a real answer about the
+    # roster/map pair, not a weakened invariant — invariant 5 still grades every
+    # mask this roster contains, which is now all three of VEH, HEAVY and
+    # INFANTRY rather than the two `standard` reaches.
+    #
+    # Counts are deliberately small. This is a coverage harness, not a battle:
+    # 36 entries at `standard`'s counts would be ~250 units at one landing zone,
+    # and every extra copy is more ground `usable()` has to find clear. Tiers
+    # taper 3/2/1/1 because an s4 is a 5x5-to-6x6 footprint and two of them cost
+    # more room than three s1s.
+    #
+    # The radar masts are immobile (spacing 0, speed 0): staged, published, and
+    # never a path gate — the same shape `standard` already uses for
+    # ms_radar_s1. They are units_ rows rather than cluster buildings because
+    # radar is a SIDE's asset; a coverage war that only ever showed a radar mast
+    # as neutral scenery would not have covered the player-facing case.
+    "full": [
+        # -- line armour: VEH, VEH, HEAVY, HEAVY -------------------------
+        ("ms_tanks_s1",       3, 130),
+        ("ms_tanks_s2",       2, 150),
+        ("ms_tanks_s3",       1, 170),   # HEAVY — forces the strict mask check
+        ("ms_tanks_s4",       1, 190),   # HEAVY
+        # -- walkers: VEH x3 then HEAVY ----------------------------------
+        ("ms_mechs_s1",       2, 130),
+        ("ms_mechs_s2",       2, 150),
+        ("ms_mechs_s3",       1, 170),
+        ("ms_mechs_s4",       1, 190),   # HEAVY
+        # -- infantry: the INFANTRY mask, 45 deg where HEAVY gets 24 -----
+        ("ms_soldiers_s1",    3, 100),
+        ("ms_soldiers_s2",    2, 120),
+        ("ms_soldiers_s3",    1, 140),
+        ("ms_soldiers_s4",    1, 160),
+        # -- indirect fire. ms_artillery_s4 (23 elmos/s) is the slowest
+        #    staged unit in this roster and therefore the one the
+        #    contestability arithmetic reads — see the `worst` computation in
+        #    scenariogen.generate, which takes the MINIMUM staged speed.
+        ("ms_artillery_s1",   2, 140),
+        ("ms_artillery_s2",   1, 160),
+        ("ms_artillery_s3",   1, 180),   # HEAVY
+        ("ms_artillery_s4",   1, 200),   # HEAVY
+        # -- engineers (INFANTRY) ----------------------------------------
+        ("ms_engineers_s1",   2, 110),
+        ("ms_engineers_s2",   1, 130),
+        ("ms_engineers_s3",   1, 150),
+        ("ms_engineers_s4",   1, 170),
+        # -- recon, command and the logistics tail -----------------------
+        ("ms_scout_buggy",    2, 130),
+        ("ms_courier_car",    1, 120),
+        ("ms_obs_balloon",    1, 140),
+        ("ms_command_s2",     1, 150),
+        ("ms_supply_truck",   1, 140),
+        ("ms_fuel_tanker",    1, 140),
+        ("ms_expedition_rig", 1, 150),
+        ("ms_technical",      1, 130),
+        # -- the civilian rolling stock and population. On a player team
+        #    rather than in a town on purpose: these defs are otherwise only
+        #    ever staged as neutral township residents, so a coverage war that
+        #    skipped them here would leave their team-coloured case unshown.
+        #    They do NOT go through the civilian registry (that is the
+        #    `civilians` block's job, and a `units` row is invisible to it) —
+        #    which is also why the objective layer's area queries are anchored
+        #    on towns and sites, never on a landing zone.
+        ("ms_civtruck",       1, 130),
+        ("ms_civbus",         1, 140),
+        ("ms_civilians",      2, 100),
+        ("ms_militia",        2, 110),
+        # -- static: staged, but never a path gate (speed 0) -------------
+        ("ms_radar_s1",       1, 0),
+        ("ms_radar_s2",       1, 0),
+        ("ms_radar_s3",       1, 0),
+        ("ms_radar_s4",       1, 0),
     ],
 }
 

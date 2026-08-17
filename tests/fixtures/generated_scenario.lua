@@ -47,8 +47,7 @@ return {
             -- `team` is deliberately absent — naming a place says nothing
             -- about who holds it, and the tactical objective on this same
             -- region below is what makes that a question.
-            { key = 'r0_1', name = 'Umber Shelf', x = 1189, z = 1540 },
-            { key = 'r2_0', name = 'Vesper Forge', x = 2905, z = 1189 },
+            { key = 'r0_2', name = 'Vesper Watch', x = 1189, z = 2905 },
         },
 
         -- PLACED HISTORY (PLAN-metalstorm-model-integration §M3/§M4).
@@ -66,18 +65,18 @@ return {
             -- and they do NOT animate: FeatureRenderer thin-instances one
             -- mesh per def, so the spire's authored ring orbit goes
             -- unplayed — recorded in the def's static_clip_unplayed.
-            { def = 'ms_monolith_spire', x = 682, z = 2047, name = 'Cell 0 1 Spire' },
+            { def = 'ms_monolith_spire', x = 505, z = 2175, name = 'Cell 0 1 Spire' },
 
             -- THE WRECK FIELD, on the ground the war is about. These
             -- BLOCK (features/wrecks.lua), so the generator stamps every
             -- one into the passability mask and re-runs the reachability
             -- gate: a field that walls off the crossing it decorates is
             -- the Meridian defect re-created out of scenery.
-            { def = 'ms_tank_wreck', x = 1850, z = 3447, facing = 'north' },
-            { def = 'ms_tank_wreck', x = 1893, z = 3283, facing = 'north' },
-            { def = 'ms_colossus_wreck', x = 1914, z = 3561, facing = 'east', name = 'Cell 1 2 Hulk' },
-            { def = 'ms_tank_wreck', x = 2005, z = 3216, facing = 'east' },
-            { def = 'ms_tank_wreck', x = 2053, z = 3611, facing = 'north' },
+            { def = 'ms_tank_wreck', x = 2066, z = 3212, facing = 'south' },
+            { def = 'ms_train_wreck', x = 1889, z = 3535, facing = 'east' },
+            { def = 'ms_colossus_wreck', x = 1953, z = 3235, facing = 'east', name = 'Cell 1 2 Hulk' },
+            { def = 'ms_tank_wreck', x = 2219, z = 3310, facing = 'east' },
+            { def = 'ms_train_wreck', x = 2261, z = 3692, facing = 'south' },
         },
     },
 
@@ -95,35 +94,20 @@ return {
     -- this town's PARLEY VENUE. `key` is the region key, so a town needs
     -- no second namespace: it is addressed exactly as its region is.
     towns = {
-        -- Umber Shelf: main_street, open, 11 lot(s), 0 gateway(s), 10 civilian entr(y/ies)
+        -- Vesper Watch: grid_quarter, stockade, 11 lot(s), 6 gateway(s), 16 civilian entr(y/ies)
         {
-            key       = 'r0_1',
-            name      = 'Umber Shelf',
-            region    = 'r0_1',
-            x = 1189, z = 1540, radius = 760,
-            archetype = 'main_street', defense = 'open',
+            key       = 'r0_2',
+            name      = 'Vesper Watch',
+            region    = 'r0_2',
+            x = 1189, z = 2905, radius = 760,
+            archetype = 'grid_quarter', defense = 'stockade',
             -- The meeting hall: exactly one per town, and the venue a
             -- parley addressed to the civilian estate about this
             -- district is held at. GG.Towns resolves it to a live
             -- unitID by looking for this def at this position once the
             -- units below are staged; destroy it and the estate has
             -- nowhere left to negotiate about this town.
-            hall = { def = 'ms_meeting_hall', x = 1055, z = 1338 },
-        },
-        -- Vesper Forge: grid_quarter, open, 10 lot(s), 0 gateway(s), 12 civilian entr(y/ies)
-        {
-            key       = 'r2_0',
-            name      = 'Vesper Forge',
-            region    = 'r2_0',
-            x = 2905, z = 1189, radius = 760,
-            archetype = 'grid_quarter', defense = 'open',
-            -- The meeting hall: exactly one per town, and the venue a
-            -- parley addressed to the civilian estate about this
-            -- district is held at. GG.Towns resolves it to a live
-            -- unitID by looking for this def at this position once the
-            -- units below are staged; destroy it and the estate has
-            -- nowhere left to negotiate about this town.
-            hall = { def = 'ms_meeting_hall', x = 3029, z = 1437 },
+            hall = { def = 'ms_meeting_hall', x = 1351, z = 2746 },
         },
     },
 
@@ -154,8 +138,8 @@ return {
             profile = 'npc_raider',
             slate   = {
                 kinds   = { 'garrison', 'raid' },
-                home    = 'r0_2',
-                targets = { 'r1_0', 'r1_1' },
+                home    = 'r2_0',
+                targets = { 'r0_1', 'r1_0' },
                 reach   = 2,
             },
             -- Deliberately meagre: an NPC has no objective income, so
@@ -215,88 +199,99 @@ return {
         -- then issues CMD_MOVE at every ambient entry every tick, which
         -- would enroll immobile buildings in a move loop they can never
         -- satisfy.
-        -- Forward Base: Cell 0 2 (r0_2) — hostile team 2
-        { def = 'ms_command_nexus', team = 2, x = 682, z = 3412, facing = 'south' },
-        { def = 'ms_garrison', team = 2, x = 465, z = 3385, facing = 'south' },
-        { def = 'ms_staticdefense_s3', team = 2, x = 507, z = 3543, facing = 'south' },
-        { def = 'ms_staticdefense_s3', team = 2, x = 896, z = 3372, facing = 'south' },
-        { def = 'ms_garrison', team = 2, x = 682, z = 3630, facing = 'south' },
-        { def = 'ms_staticdefense_s4', team = 2, x = 884, z = 3492, facing = 'south' },
-        { def = 'ms_tanks_s2', team = 2, x = 864, z = 3262, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        { def = 'ms_soldiers_s2', team = 2, x = 551, z = 3215, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        { def = 'ms_soldiers_s2', team = 2, x = 831, z = 3593, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        { def = 'ms_soldiers_s2', team = 2, x = 653, z = 3178, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        { def = 'ms_supply_truck', team = 2, x = 745, z = 3184, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        { def = 'ms_command_s2', team = 2, x = 445, z = 3218, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 3412 } } } },
-        -- Outpost: Cell 1 1 (r1_1) — hostile team 2
-        { def = 'ms_garrison', team = 2, x = 2047, z = 2047, facing = 'south' },
-        { def = 'ms_staticdefense_s2', team = 2, x = 2095, z = 2191, facing = 'south' },
-        { def = 'ms_staticdefense_s2', team = 2, x = 1901, z = 2091, facing = 'south' },
-        { def = 'ms_soldiers_s1', team = 2, x = 2255, z = 2088, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 2047 } } } },
-        { def = 'ms_technical', team = 2, x = 1992, z = 1841, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 2047 } } } },
-        { def = 'ms_technical', team = 2, x = 1854, z = 1955, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 2047 } } } },
-        { def = 'ms_artillery_s2', team = 2, x = 2187, z = 2207, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 2047 } } } },
-        -- Outpost: Cell 1 0 (r1_0) — hostile team 2
-        { def = 'ms_garrison', team = 2, x = 2047, z = 682, facing = 'south' },
-        { def = 'ms_staticdefense_s2', team = 2, x = 2020, z = 532, facing = 'south' },
-        { def = 'ms_garrison', team = 2, x = 1930, z = 878, facing = 'south' },
-        { def = 'ms_staticdefense_s4', team = 2, x = 1836, z = 594, facing = 'south' },
-        { def = 'ms_soldiers_s1', team = 2, x = 2242, z = 767, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
-        { def = 'ms_soldiers_s1', team = 2, x = 2252, z = 624, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
-        { def = 'ms_technical', team = 2, x = 1836, z = 717, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
-        { def = 'ms_technical', team = 2, x = 2195, z = 834, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
-        { def = 'ms_artillery_s2', team = 2, x = 2086, z = 472, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        -- Vesper Watch (r0_2) — neutral (Gaia). A PLANNED town: 11 building(s)
+        -- on 6 street(s), stockade defense. `facing` is load-bearing here and not
+        -- decoration: a town's buildings FRONT THEIR STREET, which is
+        -- what makes a row read as a row, and the engine derives the
+        -- blocked footprint from it by swapping the sizes.
+        { def = 'ms_meeting_hall', team = 'neutral', x = 1351, z = 2746, facing = 'west' },
+        { def = 'ms_market_stalls', team = 'neutral', x = 1270, z = 3158, facing = 'west' },
+        { def = 'ms_watchtower', team = 'neutral', x = 1757, z = 2672, facing = 'east' },
+        { def = 'ms_water_works', team = 'neutral', x = 690, z = 3137, facing = 'west' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 1096, z = 2502, facing = 'east' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 1385, z = 2537, facing = 'west' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 1016, z = 3126, facing = 'east' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 990, z = 3335, facing = 'east' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 767, z = 2515, facing = 'west' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 1435, z = 3431, facing = 'south' },
+        { def = 'ms_shanty_block', team = 'neutral', x = 975, z = 2732, facing = 'south' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 496, z = 3361, facing = 'south' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 539, z = 2559, facing = 'west' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 594, z = 2306, facing = 'north' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 1929, z = 2521, facing = 'east' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 1911, z = 2778, facing = 'east' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 1590, z = 3659, facing = 'south' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 782, z = 3557, facing = 'south' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 1800, z = 2444, facing = 'north' },
+        { def = 'ms_barricade_set', team = 'neutral', x = 1664, z = 3454, facing = 'east' },
         -- Township: Cell 2 1 (r2_1) — neutral (Gaia)
         { def = 'ms_habitat', team = 'neutral', x = 3412, z = 2047, facing = 'south' },
-        { def = 'ms_habitat', team = 'neutral', x = 3396, z = 2298, facing = 'south' },
-        { def = 'ms_civilians', team = 'neutral', x = 3528, z = 1841, facing = 'south' },
-        { def = 'ms_militia', team = 'neutral', x = 3470, z = 1818, facing = 'south' },
-        -- Umber Shelf (r0_1) — neutral (Gaia). A PLANNED town: 11 building(s)
-        -- on 6 street(s), open defense. `facing` is load-bearing here and not
-        -- decoration: a town's buildings FRONT THEIR STREET, which is
-        -- what makes a row read as a row, and the engine derives the
-        -- blocked footprint from it by swapping the sizes.
-        { def = 'ms_meeting_hall', team = 'neutral', x = 1055, z = 1338, facing = 'east' },
-        { def = 'ms_market_stalls', team = 'neutral', x = 1299, z = 1549, facing = 'west' },
-        { def = 'ms_watchtower', team = 'neutral', x = 1856, z = 1412, facing = 'west' },
-        { def = 'ms_water_works', team = 'neutral', x = 1699, z = 993, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 1391, z = 973, facing = 'west' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 1035, z = 1944, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 838, z = 1588, facing = 'south' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 1520, z = 2085, facing = 'north' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 1520, z = 1841, facing = 'south' },
-        { def = 'ms_habitat', team = 'neutral', x = 1617, z = 1597, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 1904, z = 1620, facing = 'west' },
-        -- Vesper Forge (r2_0) — neutral (Gaia). A PLANNED town: 10 building(s)
-        -- on 6 street(s), open defense. `facing` is load-bearing here and not
-        -- decoration: a town's buildings FRONT THEIR STREET, which is
-        -- what makes a row read as a row, and the engine derives the
-        -- blocked footprint from it by swapping the sizes.
-        { def = 'ms_meeting_hall', team = 'neutral', x = 3029, z = 1437, facing = 'west' },
-        { def = 'ms_market_stalls', team = 'neutral', x = 3024, z = 1016, facing = 'west' },
-        { def = 'ms_watchtower', team = 'neutral', x = 2398, z = 830, facing = 'west' },
-        { def = 'ms_water_works', team = 'neutral', x = 2419, z = 1461, facing = 'west' },
-        { def = 'ms_habitat', team = 'neutral', x = 3371, z = 910, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 2786, z = 795, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 3066, z = 806, facing = 'west' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 2755, z = 1423, facing = 'east' },
-        { def = 'ms_shanty_block', team = 'neutral', x = 3026, z = 1647, facing = 'west' },
-        { def = 'ms_habitat', team = 'neutral', x = 2680, z = 1001, facing = 'south' },
+        { def = 'ms_depot', team = 'neutral', x = 3311, z = 2278, facing = 'south' },
+        { def = 'ms_staticdefense_s1', team = 'neutral', x = 3568, z = 2108, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 3515, z = 2258, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 3192, z = 1961, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 3188, z = 2123, facing = 'south' },
+        -- Township: Cell 1 1 (r1_1) — neutral (Gaia)
+        { def = 'ms_habitat', team = 'neutral', x = 2047, z = 2047, facing = 'south' },
+        { def = 'ms_habitat', team = 'neutral', x = 2129, z = 2284, facing = 'south' },
+        { def = 'ms_depot', team = 'neutral', x = 1829, z = 1919, facing = 'south' },
+        { def = 'ms_habitat', team = 'neutral', x = 1812, z = 2138, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 2047, z = 1811, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 2278, z = 2090, facing = 'south' },
+        { def = 'ms_civilians', team = 'neutral', x = 1971, z = 1823, facing = 'south' },
+        { def = 'ms_militia', team = 'neutral', x = 2253, z = 1934, facing = 'south' },
+        -- Forward Base: Cell 2 0 (r2_0) — hostile team 2
+        { def = 'ms_command_nexus', team = 2, x = 3412, z = 682, facing = 'south' },
+        { def = 'ms_garrison', team = 2, x = 3204, z = 748, facing = 'south' },
+        { def = 'ms_staticdefense_s3', team = 2, x = 3620, z = 745, facing = 'south' },
+        { def = 'ms_staticdefense_s3', team = 2, x = 3611, z = 592, facing = 'south' },
+        { def = 'ms_foundry', team = 2, x = 3357, z = 358, facing = 'south' },
+        { def = 'ms_tanks_s2', team = 2, x = 3673, z = 838, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_tanks_s2', team = 2, x = 3466, z = 981, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_tanks_s2', team = 2, x = 3335, z = 977, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_soldiers_s2', team = 2, x = 3128, z = 569, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_soldiers_s2', team = 2, x = 3659, z = 503, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_soldiers_s2', team = 2, x = 3592, z = 436, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_supply_truck', team = 2, x = 3711, z = 623, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        { def = 'ms_supply_truck', team = 2, x = 3744, z = 508, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 3412, 0, 682 } } } },
+        -- Outpost: Cell 1 0 (r1_0) — hostile team 2
+        { def = 'ms_garrison', team = 2, x = 2047, z = 682, facing = 'south' },
+        { def = 'ms_staticdefense_s2', team = 2, x = 1897, z = 654, facing = 'south' },
+        { def = 'ms_garrison', team = 2, x = 2058, z = 454, facing = 'south' },
+        { def = 'ms_staticdefense_s2', team = 2, x = 2198, z = 694, facing = 'south' },
+        { def = 'ms_soldiers_s1', team = 2, x = 2136, z = 875, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 1842, z = 742, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 1870, z = 801, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        { def = 'ms_technical', team = 2, x = 2213, z = 549, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        { def = 'ms_scout_buggy', team = 2, x = 1900, z = 527, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 2047, 0, 682 } } } },
+        -- Outpost: Cell 0 1 (r0_1) — hostile team 2
+        { def = 'ms_garrison', team = 2, x = 682, z = 2047, facing = 'south' },
+        { def = 'ms_staticdefense_s2', team = 2, x = 533, z = 2015, facing = 'south' },
+        { def = 'ms_staticdefense_s2', team = 2, x = 690, z = 1895, facing = 'south' },
+        { def = 'ms_depot', team = 2, x = 892, z = 1959, facing = 'south' },
+        { def = 'ms_soldiers_s1', team = 2, x = 473, z = 2089, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 768, z = 1852, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 512, z = 1917, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
+        { def = 'ms_technical', team = 2, x = 743, z = 2251, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
+        { def = 'ms_artillery_s2', team = 2, x = 833, z = 2197, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
 
         -- NAMED RESOURCE SITES (§M4, worldbuilding decision 1). One
         -- capturable structure each, on Gaia, named after the region it
@@ -309,27 +304,27 @@ return {
         -- it anchors an objective and because it is somewhere the story
         -- can point at, not because it produces.
         -- Cell 0 2 Grain Silo (r0_2)
-        { def = 'ms_grain_silo', team = 'neutral', x = 821, z = 2998, facing = 'south', name = 'Cell 0 2 Grain Silo' },
+        { def = 'ms_grain_silo', team = 'neutral', x = 767, z = 3343, facing = 'south', name = 'Cell 0 2 Grain Silo' },
         -- Cell 1 1 Metal Pit (r1_1)
-        { def = 'ms_metal_pit', team = 'neutral', x = 1912, z = 2219, facing = 'south', name = 'Cell 1 1 Metal Pit' },
+        { def = 'ms_metal_pit', team = 'neutral', x = 2162, z = 1861, facing = 'south', name = 'Cell 1 1 Metal Pit' },
         -- Cell 2 1 Oil Derrick (r2_1)
-        { def = 'ms_oil_derrick', team = 'neutral', x = 3204, z = 1979, facing = 'south', name = 'Cell 2 1 Oil Derrick' },
+        { def = 'ms_oil_derrick', team = 'neutral', x = 3325, z = 1846, facing = 'south', name = 'Cell 2 1 Oil Derrick' },
 
         -- ANCIENT-TECH GUARDIANS (§M4, worldbuilding directive 4). The
         -- relic itself is a FEATURE (see world.features above); what can
         -- be fought is the band squatting on it. Anarchic archetype —
         -- gun trucks and militia, not line armour.
         -- guarding Cell 0 1 Spire (r0_1)
-        { def = 'ms_technical', team = 2, x = 518, z = 1972, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_technical', team = 2, x = 861, z = 2041, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_militia', team = 2, x = 747, z = 1879, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_militia', team = 2, x = 841, z = 2129, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_soldiers_s1', team = 2, x = 844, z = 1970, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
+        { def = 'ms_technical', team = 2, x = 388, z = 2312, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
+        { def = 'ms_technical', team = 2, x = 339, z = 2104, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
+        { def = 'ms_militia', team = 2, x = 277, z = 2072, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
+        { def = 'ms_militia', team = 2, x = 400, z = 2028, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
+        { def = 'ms_militia', team = 2, x = 356, z = 1973, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
     },
 
     -- ======================================================================
@@ -358,30 +353,23 @@ return {
     -- objective is about.
     civilians = {
         units = {
-            -- Umber Shelf (r0_1): 3 market, 2 parked, 1 traffic, 4 residents
-            { def = 'ms_civilians', x = 1262, z = 1618, facing = 'west', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1269, z = 1478, facing = 'west', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1239, z = 1546, facing = 'west', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civbus', x = 1459, z = 1558, facing = 'east', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civtruck', x = 1552, z = 971, facing = 'west', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civtruck', x = 1190, z = 1373, facing = 'south', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1520, z = 1982, facing = 'north', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1585, z = 1944, facing = 'south', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1742, z = 1572, facing = 'east', role = 'ambient', town = 'r0_1' },
-            { def = 'ms_civilians', x = 1811, z = 1677, facing = 'west', role = 'ambient', town = 'r0_1' },
-            -- Vesper Forge (r2_0): 2 market, 2 parked, 3 traffic, 5 residents
-            { def = 'ms_civilians', x = 2987, z = 1080, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2994, z = 950, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civtruck', x = 3178, z = 1025, facing = 'east', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civtruck', x = 2575, z = 1470, facing = 'east', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civtruck', x = 3522, z = 1130, facing = 'south', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civbus', x = 2914, z = 1039, facing = 'south', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civtruck', x = 2308, z = 1060, facing = 'south', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2944, z = 1432, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2327, z = 1501, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2974, z = 838, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2934, z = 1642, facing = 'west', role = 'ambient', town = 'r2_0' },
-            { def = 'ms_civilians', x = 2669, z = 1126, facing = 'south', role = 'ambient', town = 'r2_0' },
+            -- Vesper Watch (r0_2): 4 militia, 2 market, 2 parked, 2 traffic, 6 residents
+            { def = 'ms_militia', x = 612, z = 2805, facing = 'west', role = 'garrison', town = 'r0_2' },
+            { def = 'ms_militia', x = 1004, z = 2337, facing = 'north', role = 'garrison', town = 'r0_2' },
+            { def = 'ms_militia', x = 1256, z = 2365, facing = 'north', role = 'garrison', town = 'r0_2' },
+            { def = 'ms_militia', x = 1620, z = 2440, facing = 'north', role = 'garrison', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1225, z = 3225, facing = 'west', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1243, z = 3082, facing = 'west', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civtruck', x = 1433, z = 3179, facing = 'east', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civtruck', x = 840, z = 3156, facing = 'east', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civbus', x = 1808, z = 2894, facing = 'south', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civtruck', x = 1210, z = 2756, facing = 'south', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1266, z = 2699, facing = 'west', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1192, z = 2514, facing = 'east', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1289, z = 2525, facing = 'west', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1112, z = 3138, facing = 'east', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 1086, z = 3347, facing = 'east', role = 'ambient', town = 'r0_2' },
+            { def = 'ms_civilians', x = 958, z = 2826, facing = 'south', role = 'ambient', town = 'r0_2' },
         },
     },
 
@@ -419,7 +407,39 @@ return {
         { type = 'control', scope = 'tactical', forTeam = nil, region = 'r0_2', reward = 130, expiresAtFrame = nil },  -- Cell 0 2 Grain Silo
         { type = 'control', scope = 'tactical', forTeam = nil, region = 'r1_0', reward = 110, expiresAtFrame = nil },  -- Outpost
         { type = 'control', scope = 'tactical', forTeam = nil, region = 'r1_1', reward = 130, expiresAtFrame = nil },  -- Cell 1 1 Metal Pit
-        { type = 'control', scope = 'tactical', forTeam = nil, region = 'r2_0', reward = 110, expiresAtFrame = nil },  -- Township
+        { type = 'control', scope = 'tactical', forTeam = nil, region = 'r2_0', reward = 110, expiresAtFrame = nil },  -- Forward Base
         { type = 'control', scope = 'tactical', forTeam = nil, region = 'r2_1', reward = 130, expiresAtFrame = nil },  -- Cell 2 1 Oil Derrick
+
+        -- PROTECT. The township's `ambient` residents, resolved at
+        -- frame 30 by game_scenario.lua's deferred sweep (the units do
+        -- not exist when this file is parsed). `expiresAtFrame` is
+        -- MANDATORY for this type — protect.init refuses an open-ended
+        -- one, because 'survive until expiry' has no other way to
+        -- resolve — and expiry counts as SUCCESS here, uniquely.
+        --
+        -- quorum 1: the town does not have to come through whole, it
+        -- has to come through. A quorum of 'everyone' would fail the
+        -- objective to the first stray shell and teach a player that
+        -- the objective was never really theirs to win.
+        -- Vesper Watch (r0_2): 16 residents
+        { type = 'protect', scope = 'tactical', forTeam = 0,
+          params = { targetUnitIDs = {}, quorum = 1 },
+          _populateTargetsFrom = { x = 1189, z = 2905, r = 760, role = 'ambient' },
+          reward = 120, expiresAtFrame = 9000 },
+
+        -- EXTRACT. Two phases: hold `threshold` strength inside the
+        -- pickup area for `holdFrames`, then the payload is moved to
+        -- the extract area and >= quorum arriving completes it. The
+        -- move is done BY THE GADGET, which is what makes this type
+        -- authorable from a generated file at all — no player can
+        -- order a civilian anywhere.
+        -- Vesper Watch (r0_2) -> side 1's landing zone
+        { type = 'extract', scope = 'tactical', forTeam = 1,
+          params = { payloadUnitIDs = {},
+              pickupArea = { x = 1189, z = 2905, r = 760 },
+              extractArea = { x = 3412, z = 3412, r = 400 },
+              holdFrames = 300, threshold = 5000, quorum = 1 },
+          _populatePayloadFrom = { x = 1189, z = 2905, r = 760, role = 'ambient' },
+          reward = 150, expiresAtFrame = 27000 },
     },
 }
