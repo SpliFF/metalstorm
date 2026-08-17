@@ -32,6 +32,8 @@ each test is here for:
   * **a map with no pads is an ordinary map**, and every shipped map is in that
     state until the packages are regenerated.
 """
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -208,6 +210,35 @@ class PlannedPads(unittest.TestCase):
         self.assertEqual(len(relief_rows), 1, tally)
         self.assertGreater(relief_rows[0][1], 1, "the measurement was not folded")
         self.assertEqual(yd.report_pad_refusals([]), [])
+
+    def test_an_island_map_reports_the_CONTRACT_and_not_just_a_histogram(self):
+        """Roads Call 1, answered 2026-08-18: zero pads is the contract.
+
+        The histogram alone describes a defect — 58 refusal lines and no pads
+        reads as a broken planner. `out_of_contract=True` is the generator saying
+        "this is an island map", and what it buys is that the report states the
+        continental contract in words. Asserted on the printed text because the
+        text IS the deliverable here: the finding was that a reader could not
+        tell intent from breakage.
+        """
+        h, net, raster = flat_net()
+        zz = np.arange(h.shape[0])[:, None]
+        h = h + (zz % 2) * 400.0
+        _pads, refusals = yd.plan_yard_pads(net, h, raster, CELL, 0.0,
+                                            road_params=RP)
+        self.assertTrue(refusals, "the fixture refused nothing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            plain = yd.report_pad_refusals(refusals)
+        with contextlib.redirect_stdout(buf := io.StringIO()):
+            island = yd.report_pad_refusals(refusals, out_of_contract=True)
+        text = buf.getvalue()
+        self.assertEqual(plain, island, "the flag changed the histogram")
+        self.assertIn("OUT OF CONTRACT", text)
+        self.assertIn("not a defect", text)
+        # the profile it names must be the one actually in force, not a literal
+        p = yd.YardParams()
+        self.assertIn(f"{2.0 * p.half_along:.0f}x{2.0 * p.half_away:.0f}", text)
 
     def test_the_frontage_class_filter_excludes_a_class(self):
         p = yd.YardParams(classes=(rd.ROAD_HIGHWAY,))
@@ -473,6 +504,93 @@ class TheDrivewayIntoAPad(unittest.TestCase):
                                msg=f"{coarse:.1f} deg at 16-elmo cells vs "
                                    f"{fine:.1f} at 4 — the reading is following "
                                    f"the grid instead of the engine's square")
+
+
+class TheDrivewayGate(unittest.TestCase):
+    """`refuse_undrivable_pads` — roads Call 2, answered 2026-08-18.
+
+    The class above measures the mesa; this one is the map declining to offer it.
+    FIND 16 shipped the ramp as an instrument on the reasoning that only the
+    scenario layer can refuse with a building in hand, and FIND 29 then measured
+    the risk fire: `sundered_arc` `pad_1` delivered a 26.8-degree driveway against
+    HEAVY's `maxslope` 24 and was published anyway. An instrument that is right
+    and ignored ships the defect to the first player who drives a heavy in.
+    """
+
+    @staticmethod
+    def _mesa():
+        """A pad plateaued on an 11.3-degree hillside — `TheDrivewayIntoAPad`'s
+        fixture, which that class proves delivers an over-limit driveway."""
+        n = 200
+        h = np.fromfunction(lambda r, c: 60.0 + r * (0.2 * CELL), (n, n))
+        elmos = n * CELL
+        hw = np.array([[200.0, elmos / 2.0], [elmos - 200.0, elmos / 2.0]])
+        net = rd.RoadNetwork(links=[rd.RoadLink(hw, rd.ROAD_HIGHWAY, 0, 1)])
+        raster = rd.rasterize_network(net, h.shape, CELL, RP)
+        pads, _r = yd.plan_yard_pads(net, h, raster, CELL, 0.0, road_params=RP)
+        return yd.level_yard_pads(h, pads, CELL), net, pads
+
+    def test_an_undrivable_pad_is_refused_with_its_grade(self):
+        h, _net, pads = self._mesa()
+        self.assertTrue(pads, "the fixture planned no pad to refuse")
+        kept, refused = yd.refuse_undrivable_pads(h, pads, CELL)
+        self.assertTrue(refused, "the mesa was published")
+        self.assertEqual(len(kept) + len(refused), len(pads),
+                         "the gate lost or invented a pad")
+        for pad, drive in refused:
+            self.assertIn(pad, pads)
+            self.assertGreater(drive, yd.YardParams().warn_ramp_deg,
+                               "a pad was refused for a grade inside the limit")
+
+    def test_a_drivable_pad_is_kept(self):
+        """The positive half. A gate that refuses everything is not a gate."""
+        h, net, raster = flat_net()
+        pads, _r = yd.plan_yard_pads(net, h, raster, CELL, 0.0, road_params=RP)
+        levelled = yd.level_yard_pads(h, pads, CELL)
+        kept, refused = yd.refuse_undrivable_pads(levelled, pads, CELL)
+        self.assertEqual(refused, [], "a flat map lost a pad to the gate")
+        self.assertEqual(kept, pads)
+
+    def test_the_gate_decides_PUBLICATION_and_not_the_terrain(self):
+        """A refused pad keeps its tarmac, deliberately.
+
+        The deck carve and the plateau are in the heightmap before any surface
+        exists to gate on, so unpicking them would mean re-running the grader.
+        Withholding the `yards` row makes the pad a rest stop; the ground is
+        unchanged, and this test is what says that is the intent.
+        """
+        h, _net, pads = self._mesa()
+        before = h.copy()
+        yd.refuse_undrivable_pads(h, pads, CELL)
+        np.testing.assert_array_equal(h, before,
+                                      "the gate moved the heightmap")
+
+    def test_nothing_undrivable_reaches_the_published_file(self):
+        """End to end: the gate's output is what the emitter writes."""
+        h, net, pads = self._mesa()
+        kept, refused = yd.refuse_undrivable_pads(h, pads, CELL)
+        self.assertTrue(refused, "the fixture refused nothing to check")
+        text = pkg.emit_roads_lua(net, CELL, RP, crossings=[], yards=kept)
+        for pad, _drive in refused:
+            self.assertNotIn(f"x = {pad.x:.0f}, z = {pad.z:.0f}", text,
+                             "an undrivable pad was published anyway")
+        self.assertEqual(text.count('key = "pad_'), len(kept))
+
+    def test_the_limit_is_HEAVYs_maxslope_and_the_gate_reads_it(self):
+        """The gate must read `warn_ramp_deg` rather than a second copy of 24.
+
+        `YardParams`' own comment claims it is the only rule looking at the
+        driveway; a hard-coded 24 in the gate would make that comment a lie and
+        would not follow anyone who retunes the class.
+        """
+        h, _net, pads = self._mesa()
+        wide = yd.YardParams(warn_ramp_deg=89.0)
+        kept, refused = yd.refuse_undrivable_pads(h, pads, CELL, wide)
+        self.assertEqual(refused, [], "the gate ignored a raised limit")
+        self.assertEqual(kept, pads)
+        tight = yd.YardParams(warn_ramp_deg=0.0)
+        kept, refused = yd.refuse_undrivable_pads(h, pads, CELL, tight)
+        self.assertEqual(kept, [], "the gate ignored a lowered limit")
 
 
 class ThePublishedPad(unittest.TestCase):

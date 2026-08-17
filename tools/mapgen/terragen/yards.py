@@ -78,6 +78,32 @@ class YardParams:
     lot inside it or refuses — see `road_frontage.parcels_from_pads`. A pad too
     small for everything on the roster would be tarmac nothing can use, which is
     why `tests/test_yards.py` checks the defaults against those templates.
+
+    **THIS PROFILE IS A CONTINENTAL CONTRACT** (roads Call 1, answered
+    2026-08-18). 560 x 600 elmos of flat ground beside a link is a fact about a
+    map with continental roads. An archipelago's serpentine coastal links cannot
+    host it, and the measurement says so on both island maps that ship:
+
+      | map | pads | refused | top refusal |
+      |---|---|---|---|
+      | `skerry_reach` | **0** | 58 | "would cover the carriageway" x34 |
+      | `sundered_arc` | **2** | 68 | "would cover the carriageway" x36 |
+      | `meridian_basin` | 6 | — | (continental; fits fine) |
+
+    It is **footprint versus carriageway, not steepness** — a pad set beside an
+    island road lands on another stretch of the same road. So an island map is
+    simply a map with no roadside yards, and that is the contract rather than a
+    defect. Deliberately NOT fixed by either cheap route:
+
+      * **No per-generator `YardParams` override.** A smaller island profile
+        splits the yard roster into "fits everywhere" and "fits on continents",
+        which is a content contract and not a parameter. Declining to open it.
+      * **The carriageway test is not touched.** Allowing a pad to overlap a
+        *different* link changes what a pad means (this module's header: the gate
+        a pad must pass is the deck it must not touch).
+
+    A generator on an island map passes `out_of_contract=True` to
+    `report_pad_refusals` so the zero reads as intended at generation time.
     """
     half_along: float = 280.0     # half the frontage, along the carriageway
     half_away: float = 300.0      # half the depth, back from the frontage line
@@ -106,15 +132,19 @@ class YardParams:
     # can refuse with a building in hand.
     warn_relief_deg: float = 6.0
     # The grade a DRIVEWAY may deliver — the ramp `level_yard_pads` leaves in the
-    # verge between the pad's road edge and the carriageway. Reported, never a
-    # gate, for `warn_relief_deg`'s reason. 24 degrees is HEAVY's `maxslope`
+    # verge between the pad's road edge and the carriageway. **Now a PUBLICATION
+    # GATE and no longer only a warning** (roads Call 2, answered 2026-08-18):
+    # `refuse_undrivable_pads` withholds the `yards` row of any pad whose
+    # DELIVERED driveway beats this, because FIND 29 measured the risk this
+    # parameter was carrying actually fire. 24 degrees is HEAVY's `maxslope`
     # (data/games/metalstorm/gamedata/moveinfo.tdf CLASS2), the strictest ground
-    # class in the game; VEH is 32 and INFANTRY 45. Nothing else in this pipeline
-    # ever reads this number: `plan_yard_pads` bounds the PRE-flatten relief of
+    # class in the game; VEH is 32 and INFANTRY 45. It is the ONLY rule that
+    # looks at the driveway: `plan_yard_pads` bounds the PRE-flatten relief of
     # the pad's own ground and `report_pad_relief` measures what is delivered ON
     # the pad, and a pad can pass both while standing on a plateau nothing can
-    # drive up. Measured on Meridian Basin at 23.4 degrees against this 24 —
-    # i.e. the shipped map clears it by luck, not by construction (roads R4d).
+    # drive up. Measured on Meridian Basin at 22.9 degrees against this 24 —
+    # i.e. the shipped map clears it by luck, not by construction (roads R4d),
+    # which is why the gate is the backstop and not the fix.
     warn_ramp_deg: float = 24.0
 
 
@@ -509,8 +539,17 @@ def pad_relief(height: np.ndarray, pad: YardPad, cellsize: float) -> float:
     return float(hh.max() - hh.min())
 
 
-def report_pad_refusals(refusals: list[YardRefusal]) -> list[tuple[str, int]]:
+def report_pad_refusals(refusals: list[YardRefusal],
+                        out_of_contract: bool = False,
+                        params: YardParams | None = None
+                        ) -> list[tuple[str, int]]:
     """Print WHY the stations that carry no pad carry none, commonest first.
+
+    `out_of_contract` is the caller saying "this is an island map", and it makes
+    the report state the CONTRACT rather than leaving a reader to infer it from
+    the histogram (roads Call 1). A generator that prints "0 prepared, 58
+    refused" and nothing else has described a defect; the zero is the answer.
+    See `YardParams`' docstring for the measurement behind it.
 
     The third instrument beside `report_pad_relief` and `report_pad_ramps`, and
     the one a map with NO pads needs: those two print one line per pad, so a map
@@ -532,6 +571,20 @@ def report_pad_refusals(refusals: list[YardRefusal]) -> list[tuple[str, int]]:
     out = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
     for reason, n in out:
         print(f"  yard refused x{n}: {reason}")
+    if out_of_contract:
+        p = params or YardParams()
+        deck = sum(n for reason, n in out
+                   if "cover the carriageway" in reason)
+        print(f"  yards: ISLAND MAP — roadside yards are OUT OF CONTRACT here, "
+              f"and this is not a defect. The "
+              f"{2.0 * p.half_along:.0f}x{2.0 * p.half_away:.0f}-elmo yard "
+              f"profile is a CONTINENTAL contract (see YardParams): an "
+              f"archipelago's serpentine coastal links cannot host it. "
+              f"{deck} of {len(refusals)} refusals are footprint-vs-"
+              f"carriageway, not steepness — a pad set beside an island road "
+              f"lands on another stretch of the same road. Roads Call 1, "
+              f"answered 2026-08-18: an island map is a map with no roadside "
+              f"yards.")
     return out
 
 
@@ -659,6 +712,61 @@ def report_pad_ramps(height: np.ndarray, pads: list[YardPad], cellsize: float,
               f"{drive:.1f} deg over {p.setback:.0f} elmos of verge "
               f"(limit {p.warn_ramp_deg:.0f}), cut faces {cut:.1f} deg")
     return out
+
+
+def refuse_undrivable_pads(
+    height: np.ndarray,
+    pads: list[YardPad],
+    cellsize: float,
+    params: YardParams | None = None,
+) -> tuple[list[YardPad], list[tuple[YardPad, float]]]:
+    """(publishable pads, [(refused pad, its driveway grade)]) — THE GATE.
+
+    **A pad HEAVY cannot drive into is not published.** This is the backstop
+    FIND 16 carried as a risk and FIND 29 watched fire: `report_pad_ramps` shipped
+    as an instrument on the reasoning that only the scenario layer can refuse with
+    a building in hand, and its own banner predicted what then happened —
+    `sundered_arc` `pad_1` delivered a **26.8-degree** driveway against HEAVY's
+    `maxslope` **24**. An instrument that is right and ignored ships the defect to
+    the first player who tries to drive a heavy in. So the map now declines to
+    offer prepared ground it cannot offer a way onto.
+
+    **Why this is NOT inside `plan_yard_pads`, which is where you would look for
+    it.** The planner runs before the flatten, before the plateau and (in
+    `archipelago.py`) before rivers, so at plan time the delivered driveway does
+    not exist yet and is not predictable from what does: FIND 32 measured the same
+    two pads at **28.1 deg** immediately after levelling and **22.2 / 26.0** after
+    rivers regraded the verge. A gate in the planner would gate on the wrong
+    number — the whole finding of FIND 30. It therefore runs where the shipped
+    surface is in hand, beside `report_pad_ramps`, and gates PUBLICATION.
+
+    **What a refused pad leaves behind, deliberately: its tarmac.** The deck carve
+    and the plateau are already in the heightmap and the road raster by the time
+    any surface exists to measure, and unpicking them would mean re-running the
+    grader. So the ground stays graded tarmac and only the published `yards` row
+    is withheld — which is honest about what is there. An unreachable pad with no
+    row is a highway rest stop nothing stages on, exactly this module's
+    building-less lot, and the scenario layer simply never sees it.
+    """
+    p = params or YardParams()
+    kept: list[YardPad] = []
+    refused: list[tuple[YardPad, float]] = []
+    for pad in pads:
+        drive, _cut = pad_ramps(height, pad, cellsize, p)
+        if drive > p.warn_ramp_deg:
+            refused.append((pad, drive))
+        else:
+            kept.append(pad)
+    print(f"  yards: driveway gate — {len(kept)} of {len(pads)} pad(s) "
+          f"publishable, {len(refused)} refused past {p.warn_ramp_deg:.0f} deg")
+    for pad, drive in refused:
+        print(f"  yard REFUSED (undrivable): "
+              f"{rd.ROAD_CLASS_NAMES.get(pad.road_class, '?')} link {pad.link} "
+              f"at ({pad.x:.0f}, {pad.z:.0f}) — delivered driveway "
+              f"{drive:.1f} deg over {p.setback:.0f} elmos of verge beats "
+              f"HEAVY's maxslope {p.warn_ramp_deg:.0f}. The tarmac stays; the "
+              f"yard is not published.")
+    return kept, refused
 
 
 def emit_yards_lua(pads: list[YardPad]) -> list[str]:

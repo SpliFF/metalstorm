@@ -34,7 +34,6 @@ return {
     -- a rest stop. See tools/mapgen/terragen/yards.py.
     yards = {
         { key = "pad_0", class = 0, name = "highway", x = 1522, z = 3184, heading = 15408, half_along = 280, half_away = 300, link = 1 },
-        { key = "pad_1", class = 1, name = "road", x = 2708, z = 3324, heading = 17527, half_along = 280, half_away = 300, link = 5 },
     },
     -- Bridge crossings: stretches of deck under water that are
     -- narrow enough for a chain of spans. `heading` is the road's

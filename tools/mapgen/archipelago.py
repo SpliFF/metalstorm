@@ -1006,11 +1006,16 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
               f"{len(network.junctions)} junctions; length by class: {_mix})")
         print(f"yard pads: {len(yard_pads)} prepared, "
               f"{len(yard_refusals)} station(s) refused")
-        yd.report_pad_refusals(yard_refusals)
-        # The pad relief/ramp instruments do NOT run here: rivers regrades the
-        # pad verges and cuts into the plateaus below, so a reading taken now
-        # is a surface the map does not ship — see the 7c block.
-        rd.report_delivered_grades(network, h, cell, rp)
+        # `out_of_contract=True`: every map this generator builds is an
+        # archipelago, and the 560x600 yard profile is a continental contract
+        # (roads Call 1, answered 2026-08-18 — see YardParams). The zero-to-two
+        # pads an island map fits are the contract, so the report says so rather
+        # than leaving a reader to infer it from 58 refusal lines.
+        yd.report_pad_refusals(yard_refusals, out_of_contract=True)
+        # The pad relief/ramp instruments do NOT run here, and neither does
+        # `report_delivered_grades`: rivers regrades the pad verges and the deck
+        # alike, so a reading taken now is a surface the map does not ship — see
+        # the 7c block.
         # Water crossings (roads R3b) — an archipelago plans one network per
         # island, so every crossing here is an INLAND ford: the sea between two
         # islands is not something the planner ever routes across. Measured on
@@ -1170,6 +1175,21 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # plateau is flat by construction and can still sit above an unclimbable
     # verge (roads R4d, yards.pad_ramps).
     yd.report_pad_ramps(h, yard_pads, cell)
+    # ...and now the GATE, on the same shipped surface the instrument just read:
+    # a pad whose delivered driveway beats HEAVY's maxslope is not published
+    # (roads Call 2, answered 2026-08-18). It has to be here rather than in
+    # `plan_yard_pads` because this is the first point the delivered driveway
+    # exists at all — FIND 32's whole finding. `yard_pads` is rebound, so the
+    # `mapdata/roads.lua` emit below publishes only what is drivable; the
+    # tarmac carves further down deliberately still see every pad, because the
+    # graded ground is already in `h` and withholding its surface would leave an
+    # unexplained flat spot instead of a rest stop.
+    yard_pads_all = yard_pads
+    yard_pads, yard_undrivable = yd.refuse_undrivable_pads(h, yard_pads, cell)
+    # The deck's own delivered grade also reads HERE and not in the loop: it had
+    # the identical pre-rivers defect FIND 30 found in the pad instruments
+    # (roads FIND 32 thread 1), measured rather than assumed.
+    rd.report_delivered_grades(network, h, cell, rp)
 
     # 8. final climate + biomes on the settled surface
     slope, temp, moist = fields(h)
@@ -1191,8 +1211,13 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     rd.carve_junction_aprons(_surf_raster, network.junctions, cell, rp)
     # Both rasters get every carve (the apron note's reason): a pad that is deck
     # in one and not the other is a hole in the typemap where the tarmac is.
-    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
-    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
+    # `yard_pads_all` and not `yard_pads`: a pad the driveway gate refused still
+    # HAS its graded tarmac in `h` (it was carved before the flatten, long before
+    # any surface existed to gate on), so it keeps its surface too. Publishing no
+    # `yards` row for it makes it a rest stop; skipping the carve as well would
+    # make it a bare flat spot with a hole in the typemap.
+    yd.carve_yard_pads(_surf_raster, yard_pads_all, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads_all, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     print("road surfaces (%d deck cells): %s" % (_deck, ", ".join(
         "%s %.1f%%" % (rd.SURFACE_NAMES[k], 100.0 * int((road_class == k).sum()) / _deck)
