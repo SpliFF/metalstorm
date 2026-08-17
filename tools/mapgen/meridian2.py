@@ -420,6 +420,14 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     # a plateau is flat by construction and can still sit above an
     # unclimbable verge (roads R4d, yards.pad_ramps).
     yd.report_pad_ramps(h, yard_pads, cell)
+    # ...and the GATE (roads Call 2, answered 2026-08-18): a pad whose delivered
+    # driveway beats HEAVY's maxslope is not published. Safe to read `h` here —
+    # this generator runs rivers BEFORE roads and nothing below moves the
+    # heightmap, which is why its instruments always agreed with the shipped
+    # bytes where archipelago's did not (roads FIND 32). On this map the gate
+    # refuses nothing: the worst driveway is 22.9 deg of the 24 allowed.
+    yard_pads_all = yard_pads
+    yard_pads, yard_undrivable = yd.refuse_undrivable_pads(h, yard_pads, cell)
     # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
     # ford is graded where the deck now stands and not where the planner drew
     # it. Published in mapdata/roads.lua; nothing is placed here (terragen/
@@ -478,8 +486,10 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     # The pads again, on the class raster this time: both rasters get every
     # carve, for the reason the apron note gives — a pad that is deck in one and
     # not in the other is a hole in the typemap exactly where the tarmac is.
-    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
-    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
+    # `yard_pads_all`: a pad the driveway gate refused keeps its tarmac, because
+    # the graded ground is already in `h` — see refuse_undrivable_pads.
+    yd.carve_yard_pads(_surf_raster, yard_pads_all, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads_all, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     _surf_mix = ", ".join(
         f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
