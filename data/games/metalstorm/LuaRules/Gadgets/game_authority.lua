@@ -79,6 +79,13 @@ local prevLedger                   = {}
 
 GG.Authority                       = GG.Authority or {}
 
+--- The war-end escrow outcome (PLAN-metalstorm-wars.md §7), re-exported from
+--- the pure ledger module so `game_objectives.lua`'s war-end sweep can name it
+--- without VFS.Including another gadget's private module. Authority owns the
+--- escrow vocabulary; this is the one word of it that another gadget needs to
+--- say, and there is exactly one spelling of it.
+GG.Authority.ESCROW_WAR_END        = Escrow.WAR_END
+
 --- Export ledger counters (PLAN-metalstorm-economy.md §1: for stats-dump
 --- and game_events hooks). Returns { [teamID] = {mint=N, burn=M, move=K, unmapped=U}, ... }
 function GG.Authority.ExportLedger()
@@ -473,12 +480,23 @@ function GG.Authority.EscrowTotal(objectiveID)
     return Escrow.total(escrowState, objectiveID)
 end
 
---- Resolve an objective's escrow. outcome = 'complete' | 'expired' | 'failed'.
+--- Resolve an objective's escrow.
+--- outcome = 'complete' | 'expired' | 'failed' | 'war_end'.
 --- 'complete': caller already awarded EscrowTotal(objectiveID) as part of
 ---   the reward — this just clears the ledger. 'expired'/'failed': returns
 ---   each stake to its staker's player pool, or to their team pool if
 ---   they've since left (§6 "escrow stays on the objective... on
 ---   resolve, the staker's returned share goes to their team pool").
+---
+--- 'war_end' is the war's own terminal sweep (PLAN-metalstorm-wars.md §7
+--- `resolving`, task 4) and it routes EVERY stake team-ward. This closes the
+--- gap §7.2 recorded and deliberately left open: that pass reused 'expired',
+--- whose player-pool branch made the disposition depend on who was still
+--- connected at the final frame — two players who staked the same bounty on
+--- the same dead objective got different answers because one of them had a
+--- browser tab open. §7's rule is not a rounding of the ordinary one, it is a
+--- different rule ("never to individuals"), so it gets its own outcome rather
+--- than a flag on this one.
 function GG.Authority.SettleEscrow(objectiveID, outcome)
     local refunds = Escrow.settle(escrowState, objectiveID, outcome, function(playerID)
         local active = select(2, Spring.GetPlayerInfo(playerID, false))
@@ -526,10 +544,11 @@ end
 --- pool state during normal play — shared by every charge site
 --- (ChargeOrder for AllowCommand, ChargeDirective/ChargeStandingOrder for
 --- directive/standing-order create) so pool debit + ledger tagging + hooks
---- never diverge between call sites. `class` tags the ledger entry
---- (authority_cost.lua order_class key — a bookkeeping label; `cost` is
---- already computed by the caller).
-local function debitPools(teamID, playerID, cost, class)
+--- never diverge between call sites. `reason` tags the ledger entry (an
+--- authority/ledger.lua REASON_CLASS key — a bookkeeping label; `cost` is
+--- already computed by the caller). For a unit order that key is the
+--- authority_cost.lua order_class name; other charge sites pass their own.
+local function debitPools(teamID, playerID, cost, reason)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
     local teamPool = getTeamPool(teamID)
@@ -553,16 +572,29 @@ local function debitPools(teamID, playerID, cost, class)
         -- Tag the team→player subsidy as a 'move' (§1: player_fallback)
         Ledger.tagCharge(ledgerState, teamID, spentFromTeam, 'player_fallback')
     end
-    -- Tag the full charge as a burn
+    -- Tag the full charge under the caller's reason (burn for an order, but a
+    -- tribute/fee caller passes its own — D62)
     if totalCharged > 0 then
-        Ledger.tagCharge(ledgerState, teamID, totalCharged, class)
+        Ledger.tagCharge(ledgerState, teamID, totalCharged, reason)
     end
     return true
 end
 
 --- `cmdID` is used to classify the charge reason for ledger tagging.
-function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
-    return debitPools(unitTeam, playerID, cost, Classify.orderClass(cmdID or 0))
+---
+--- `reason` (endtoend D62) overrides that classification for the callers that
+--- are not unit orders at all. This function is also the game's generic
+--- player-then-team pool debit — game_parley.lua draws a tribute and a
+--- proposal fee through it — and without a reason of their own those callers
+--- had to borrow the COST-table key as the ACCOUNTING reason. A tribute is
+--- pool-to-pool (the payee's half is already tagged 'tribute'/move), so filing
+--- the payer's half as an order class made the payer team's `burn` counter
+--- overstate by the tribute total for a transaction that burns nothing.
+--- Defaults to `Classify.orderClass(cmdID)` so the ordinary order path — every
+--- caller through game_authority_charge.lua's AllowCommand hook — is unchanged.
+function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID, reason)
+    return debitPools(unitTeam, playerID, cost,
+                      reason or Classify.orderClass(cmdID or 0))
 end
 
 --- Σ authority_cost_base over an org group's current roster (mirrors the
@@ -698,7 +730,38 @@ end
 -- Lifecycle
 -- ============================================================
 
+-- ── What the clients mirror, and the one number that says it is stale ──
+--
+-- ui/lib/authority-cost.js evaluates this gadget's cost formula client-side from
+-- the build-exported authority_cost.json, and its header states the fail-safe:
+-- "a `version` mismatch between the JSON and the live game state disables
+-- prediction". Nothing was publishing the live version, so the mismatch was
+-- undetectable — a client holding a cached JSON from before a patch predicted
+-- confidently wrong costs, and a wrong prediction is worse than none (the red
+-- cursor says an order is affordable and the sim refuses it).
+--
+-- Published as a gameRulesParam, so it reaches every client through the ordinary
+-- params stream and rides the snapshot like the rest of them. Re-published on
+-- DefsReconciled below, which is the case a fresh Initialize does NOT cover: a
+-- resumed war's clients reconnect into a process that booted with the NEW spec.
+local function publishCostSpecVersion()
+    Spring.SetGameRulesParam('authority_cost_version', tonumber(CostSpec.version) or 0)
+end
+
+-- PLAN-def-reconciliation task 4 (§2 step 5). This gadget holds no def-derived
+-- state to repair, and that is worth stating rather than leaving as an absence:
+-- every cost it charges is read from the live def AT THE MOMENT OF THE CHARGE
+-- (GG.Authority.OrderCost reads `authority_cost_base` off UnitDefs per call), so
+-- a retune reaches the next order with nothing cached in between. Its ledger and
+-- escrow hold authority amounts, which are money already spent and not a def's
+-- opinion. What the patch DOES invalidate is what the clients believe about the
+-- formula — so the handler's whole job is to tell them.
+function gadget:DefsReconciled(delta)
+    publishCostSpecVersion()
+end
+
 function gadget:Initialize()
+    publishCostSpecVersion()
     -- Read modoptions here too (not just GameStart): Initialize always runs
     -- (cold start + gadget reload), covering test scenes that skip GameStart
     -- — the §6 "authority_cost_scale=0 ... must not even require pools to
@@ -736,7 +799,16 @@ function gadget:GameStart()
             setTeamPool(teamID, STARTING_TEAM_AUTHORITY)
         end
     end
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    -- ACTIVE players only (the `true` second argument), and that filter is
+    -- load-bearing twice over. A war is pre-allocated Σ slotCap empty player
+    -- slots at spawn (PLAN-metalstorm-wars.md §8.1) so a dynamic joiner has a
+    -- seat to land on; seeding them here would mint one join grant per EMPTY
+    -- seat, into a pool nobody can spend and a team ledger that would be
+    -- wrong. The same reasoning already applied to a disconnected row: nobody
+    -- is sitting there. Everyone who actually arrives is granted through the
+    -- PlayerAdded hook the server fires on their join (PlayerOnboarding.h),
+    -- which is the same call this loop makes.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
 end

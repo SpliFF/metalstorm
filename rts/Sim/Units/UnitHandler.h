@@ -81,6 +81,13 @@ public:
 	// ids in use. Observed exactly that on the first live row.
 	unsigned int NumFreeUnitIDs() const { return idPool.GetSize(); }
 	unsigned int MaxUnitIDs() const { return idPool.MaxSize(); }
+
+	// PLAN-long-uptime S5 task 6. GetUnitSpawnGen above guards consumers that
+	// hold an id for a few frames INSIDE the sim; this guards the one that
+	// holds ids for the whole match OUTSIDE it — a remote client, whose
+	// id-keyed associations the sim cannot enumerate. Bumps only when an id
+	// actually becomes re-issuable. See SimObjectIDPool::GetRecycleEpoch.
+	uint32_t IdRecycleEpoch() const { return idPool.GetRecycleEpoch(); }
 	uint64_t TotalUnitSpawnGens() const {
 		uint64_t sum = 0;
 		for (uint16_t g: spawnGens)

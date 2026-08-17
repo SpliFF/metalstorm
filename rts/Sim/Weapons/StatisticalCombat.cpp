@@ -129,6 +129,7 @@ StatCombat::Tuning StatCombat::ParseTuning(
 	t.minVolleyDamage  = ReadFloat(customParams, "min_volley_damage",     t.minVolleyDamage);
 	t.skipFireStrength = ReadFloat(customParams, "skip_fire_strength",    t.skipFireStrength);
 	t.targetingCadence = ReadInt  (customParams, "targeting_cadence",     t.targetingCadence);
+	t.minFireChance    = ReadFloat(customParams, "stat_min_fire_chance",  t.minFireChance);
 	return t;
 }
 
@@ -149,6 +150,34 @@ float StatCombat::HitProbability(const Tuning& t, float dist, float range,
 	p += t.heightBonus * std::clamp(heightDelta, -1.0f, 1.0f);
 
 	return std::clamp(p, 0.0f, 1.0f);
+}
+
+float StatCombat::ComputeHitChance(const CWeapon* w, const float3& targetPos)
+{
+	if (w == nullptr || w->owner == nullptr || w->weaponDef == nullptr)
+		return 0.0f;
+
+	const float3 firePos = w->GetAimFromPos(true);
+	const float  dist    = firePos.distance(targetPos);
+
+	// Height advantage from a ground sample at attacker vs target (PLAN §2.2).
+	const float attackerGround = CGround::GetHeightReal(firePos.x, firePos.z);
+	const float targetGround   = CGround::GetHeightReal(targetPos.x, targetPos.z);
+	const float heightDelta    = (attackerGround - targetGround) / HEIGHT_REF_SPAN;
+
+	return HitProbability(w->weaponDef->statTuning, dist, w->range,
+	                      w->owner->IsMoving(), heightDelta);
+}
+
+bool StatCombat::HoldsFire(const Tuning& t, float hitChance)
+{
+	// 0 (or a negative, from a fat-fingered def) disables the gate entirely.
+	return (t.minFireChance > 0.0f) && (hitChance < t.minFireChance);
+}
+
+bool StatCombat::SkipsFire(const Tuning& t, float strengthFraction)
+{
+	return (t.skipFireStrength > 0.0f) && (strengthFraction < t.skipFireStrength);
 }
 
 float StatCombat::VolleyDamage(float defDamage, float strengthFraction,
@@ -194,19 +223,15 @@ void StatisticalCombatManager::EnqueueVolley(const CWeapon* weapon,
 	// rather than trickling damage in a death spiral. 0 => never skip.
 	const float strengthFraction = (attacker->maxHealth > 0.0f)
 		? (attacker->health / attacker->maxHealth) : 1.0f;
-	if (tuning.skipFireStrength > 0.0f && strengthFraction < tuning.skipFireStrength)
+	if (StatCombat::SkipsFire(tuning, strengthFraction))
 		return;
 
 	const float3 firePos = weapon->GetAimFromPos(true);
 	const float  dist    = firePos.distance(targetPos);
 
-	// Height advantage from a ground sample at attacker vs target (PLAN §2.2).
-	const float attackerGround = CGround::GetHeightReal(firePos.x, firePos.z);
-	const float targetGround   = CGround::GetHeightReal(targetPos.x, targetPos.z);
-	const float heightDelta     = (attackerGround - targetGround) / HEIGHT_REF_SPAN;
-
-	const float p = StatCombat::HitProbability(tuning, dist, weapon->range,
-	                                           attacker->IsMoving(), heightDelta);
+	// Same helper CWeapon::UpdateFire's hold-fire gate consults, so the shot the
+	// gate judged worth taking is resolved at exactly that chance (§A2).
+	const float p = StatCombat::ComputeHitChance(weapon, targetPos);
 
 	// Synced RNG — deterministic, replay/snapshot-exact (PLAN §2.2).
 	const bool hit = (gsRNG.NextFloat() < p);

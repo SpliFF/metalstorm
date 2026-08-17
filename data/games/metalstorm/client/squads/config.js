@@ -156,26 +156,31 @@ export const DEFAULT_CONFIG = {
   // the shipping client sets it). Must be >= lodFullMemberBudget to mean
   // anything; a smaller value is ignored.
   //
-  // 8 000 is measured (M23, XL900, 1920x1200): `entity` is linear in drawn
-  // members at 0.261 us each over 10 850 -> 6 889, so 8 000 buys ~2 000 fewer
-  // members for ~-0.38 ms of `entity` and only bites past ~690 sim units. It is
-  // deliberately NOT the aggressive setting: 5 500 (= the steering budget, the
-  // lowest legal value) buys ~-0.94 ms but iconises 430 of 780 squads, and the
-  // thinning is visible at a zoomed-out pose. The 2 500-member band between the
-  // two budgets is squads that keep their full roster while losing only their
-  // steering — the cheap demotion first, the visible one last.
+  // 8 000 is measured (M23, XL900, 1920x1200). It is deliberately NOT the
+  // aggressive setting: 5 500 (= the steering budget, the lowest legal value)
+  // iconises 430 of 780 squads and the thinning is visible at a zoomed-out pose.
+  // The 2 500-member band between the two budgets is squads that keep their full
+  // roster while losing only their steering — the cheap demotion first, the
+  // visible one last.
   //
-  // ⚠️ This is a per-machine number like `lodFullMemberBudget`, and it is
-  // currently under-valued by the backend: `freeSlot` never lowers a pool's
-  // `highWater`, so releasing a member frees its slot but the pool keeps
-  // uploading and drawing it. That is why a removed member is worth 0.261 us
-  // here and not the ~0.35 us/member floor M21 measured. Raise this once the
-  // pools compact (PLAN-perf M24).
+  // ⚠️ `entity` is NOT linear in drawn members (PLAN-perf M25, 2026-08-15), so
+  // do not price a change to this knob off a single us/member figure. Measured
+  // at XL900 / 856 squads: the marginal cost of a drawn member is ~0.35 us in
+  // the bottom band (0 -> 2 568) and ~0.11 us in the top (8 723 -> 10 640),
+  // against a whole-population average of 0.278 us. A budget cut near the top of
+  // the range therefore buys the LEAST per member removed. (An earlier version
+  // of this comment blamed the gap on the pools never compacting; M24 compacted
+  // them and it moved nothing.)
   lodDrawnMemberBudget: 8000,
   // How many members an `icon` squad keeps. 0 is the pre-M23 behaviour (the
   // squad disappears) and is measurement-only — it is the upper bound on what
   // the tier can ever buy, not a shippable fidelity.
   iconMemberCount: 3,
+  // Measurement-only (PLAN-perf M25): reverse the LOD ranking so both budgets
+  // demote the NEAREST squads. Exists so a tier's per-member slope can be
+  // re-measured on a different population; shipping armed would demote exactly
+  // what the player is looking at.
+  lodRankInvert: false,
 
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.
@@ -263,6 +268,61 @@ export const DEFAULT_CONFIG = {
   // with explicit UnitLoaded/UnitUnloaded callins once streamed — fragile by
   // design.
   transportHeuristicRadius: 40,
+
+  // --- Frame-time governor (PLAN-metalstorm-squad-performance.md §12c,
+  // §14 S2) -----------------------------------------------------------------
+  // Hardware-adaptive by construction: both budget inputs are MEASURED on the
+  // running machine (governor.js), never a squad/member count. A 120 Hz
+  // desktop and a 25 fps laptop steady-state at different ladder levels from
+  // the exact same constants below.
+  //
+  // These five keys, and the SquadManager wiring that reads them, were lost by
+  // the landing merge that brought S2 to main (`1baa239a5e`, 2026-08-06 branch
+  // sweep): it resolved config.js / squad-manager.js / squad.js to main's side
+  // while keeping the branch's new files, so `governor.js` and its 13 tests
+  // landed and everything they drive did not. `>= undefined` is permanently
+  // false, so the ladder could never leave level 0. Do not "tidy" an unused-
+  // looking governor key away — grep governor.js first.
+
+  // Policy, not throughput: how much of a frame squads deserve, and the
+  // floor frame time used to size that share (so a machine bursting well
+  // past 60 fps doesn't get handed an unbounded budget).
+  squadFrameShare: 0.35,
+  frameBudgetCapMs: 33.3,
+  // EMA smoothing for the governor's own cost sample.
+  governorCostEmaAlpha: 0.05,
+  // Asymmetric hysteresis (§12c): escalate fast, relax slow, so the ladder
+  // never oscillates at the budget boundary.
+  governorEscalateFrames: 30,
+  governorRelaxFrames: 240,
+
+  // --- SoA engine (PLAN-metalstorm-squad-performance.md §10) ---------------
+  // 'soa' (default since S7 — PLAN-metalstorm-squad-performance.md §14 S7)
+  // routes construction/sync/casualty/LOD through soa-squad.js's store-backed
+  // SquadRec + soa-kernel.js's array kernel. 'oo' (Squad/Member classes above)
+  // is retained as the S6 parity oracle and as an escape hatch
+  // (`config.engine: 'oo'`). Same SquadManager public API either way.
+  engine: 'soa',
+  // Initial member-array pool capacity (soa-store.js); doubles on overflow.
+  soaInitialMembers: 4096,
+
+  // --- Seedable RNG (§10f) -------------------------------------------------
+  // The ONE randomness seam in the squad modules: the death-stagger interval
+  // draw, in BOTH engines (`squad.js _staggerInterval`, `soa-squad.js
+  // staggerInterval`). Threaded so the OO-vs-SoA parity suite (§14 S6) can
+  // seed both engines identically — swap for a seeded generator in a test,
+  // never call Math.random() directly from squad logic.
+  //
+  // Deliberately a wrapper, not a bare `Math.random` reference: capturing the
+  // reference at module-eval time silently defeats `vi.spyOn(Math, 'random')`,
+  // which squad-casualties.test.js uses to pin the stagger interval.
+  //
+  // Landed twice (S0 `154e62c0d9`, re-fixed by S1 `5dc8f9951c`) and lost both
+  // times to a landing merge resolving config.js/squad.js to the other side —
+  // the same accident, on the same two files, that the governor-key comment
+  // above records for `1baa239a5e`. Restored by S6, which cannot exist without
+  // it. Do not "tidy" it away as unused: grep `cfg.random` in both engines.
+  random: () => Math.random(),
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

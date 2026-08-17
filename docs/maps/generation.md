@@ -49,6 +49,7 @@ don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 | `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (8-neighbour transfers) — both `@njit`. Accepts a per-cell erodibility field (lithology variation). |
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + **orographic rainfall sweep**, §4c), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
+| `bridges.py` | **Road water crossings** (§4d): every stretch of planned deck that runs under water, graded into chains of `ms_road_bridge` spans (centre, span count, and the road's own tangent as a Spring heading) or into refusals with reasons. Publishes into `mapdata/roads.lua`; places nothing, because no map feature format carries a spawn `y`. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
 | `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones), the **climate-scoped palettes** (`palette_for(climate)` → species list + `wooded` biome set; `temperate` is `TEMPERATE_SPECIES` itself), and the **stratified-jitter hash engine** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
 | `placement.py` | The **prop & ground-stamp placement subsystem** (§6): declarative `Layer`s = suitability field × sampler (`scatter`/`clusters`) × emit target (`FeatureEmit` → featureplacer entries, `StampEmit` → ground fields the bake composites). Composable suitability helpers (`biome_suitability`, `slope_window`, `below_cliffs`). |
@@ -442,6 +443,110 @@ than a lattice artifact. And the reading has a sample-count floor (2.35 /
 1.84 / 1.68 at 257 / 513 / 1025 cells for one isotropic fBm), so only
 compare surfaces at the same grid size — which is also why `--fast` is not
 even a *look* at an arc map: its coarse LEM grid is 4× coarser in elmos.
+
+## 4d. Road water crossings (`terragen/bridges.py`)
+
+The road planner PRICES water (`RoadParams.water_penalty`) rather than
+forbidding it, so a generated network fords its rivers and inlets. Those fords
+are the only places on a map where a bridge span means anything, and R3b makes
+them a published fact rather than something a later stage has to guess at:
+`find_crossings` walks the delivered surface under every link and grades each
+wet stretch, `emit_roads_lua` writes the survivors into `mapdata/roads.lua`,
+and `scenariogen` prefers them over its own blind narrowest-gap search
+(`find_crossing`, which had no idea where the roads were).
+
+What is graded, and why each rule is a rule:
+
+* **fordable** — `max_depth <= 20` (VEH's wade depth from `moveinfo.tdf`). The
+  span is non-blocking decoration, so the ford UNDER it is what units actually
+  cross; a wet stretch deeper than that is a broken ROUTE and is reported as
+  one, not decorated over.
+* **3..24 spans**, sized by `floor(chord / pitch)` over the water. One segment
+  is a plank over a ditch; past 24 the gap is open water and the chain is a
+  landfill.
+* **every span centre over water**, asked of the same centred arithmetic
+  `game_scenario.lua`'s `stageFeatures` uses. This is what refuses a crossing
+  that bends inside the water: the chain is straight even when the road is not.
+* **heading = the road's tangent**, in Spring heading units (0 = FACING_NORTH,
+  direction `(sin t, -cos t)` = the model's local -Z). The blind search could
+  only offer a cardinal.
+
+**The map does not place the spans, and cannot.** A featureplacer objectlist
+entry has no `y`, and `CFeatureHandler::LoadFeaturesFromMap` spawns at
+`CGround::GetHeightReal` — so a map-authored chain lies on the riverbed
+(§M3 measured -31.0 / -34.5 / -45.9 / -57.6 for four spans laid without a
+spawn height). `stageFeatures` takes an explicit `y`, and a chain staged at
+`y = 0` over water holds level because `floating = true` zeroes gravity there.
+So the scenario stages, the map publishes.
+
+**A span is decoration and v1 says so.** `features/bridges.lua` ships
+`blocking = false` because Spring pathing is single-layer and a blocking span
+is a wall across the gap it exists to open; units wade the ford under the deck
+rather than driving on it. When the `deckHeight` engine ask lands
+(`.tasks/notes/model-integration.md`), these crossings are already the right
+places to raise.
+
+Measured on the shipped generators (`--fast`): skerry_reach has 4 wet
+stretches, 2 bridgeable (11 spans) and 2 refused — a 56-elmo ditch and a
+992-elmo, 11.4-deep inland channel that is 37 spans wide. meridian_basin has
+none: its authored ford decks sit at -6 but the planner does not route a deck
+through them.
+
+Tests: `tools/mapgen/tests/test_bridges.py` (25 cases). The heading convention
+is pinned against `game_scenario.lua` itself, and the pitch against
+`features/bridges.lua`'s `customparams.chain_pitch`.
+
+## 4e. Roadside yards (`tools/mapgen/road_frontage.py`, roads R4)
+
+The other half of the published road graph. R2's `links` block exists so a
+later stage can plug into a real road instead of guessing where one is; R3b
+spent the `crossings` half of that file, and this spends the `links` half.
+
+**A yard is a relation to a ROAD, and nothing else in the scenario layer has
+one.** Every other placer in `scenariogen` is anchored to a REGION — a ring
+search outward from the region anchor, terrain-checked, dodging what is already
+there — and that relation puts a supply depot in the middle of a field. R4 adds
+one placer whose anchor is a link: a building set back from the carriageway,
+its apron between it and the road, and vehicles parked on the apron.
+
+* **The parcel is a `town_planner.Lot`**, carved off the link the way
+  `_carve_lots` slices a street. That keeps ONE frontage convention in the
+  tree — the frame, the box projection and the cardinal all come from
+  `town_stager`, not from a second derivation of the same geometry.
+* **`_yard_anchor` is `town_stager._anchor_for` with the sign flipped.** A town
+  house fronts the street and its yard falls behind it; a depot's yard is
+  between it and the road, because that is where the lorries stand. Nothing but
+  a measurement distinguishes the two, so `tests/test_road_frontage.py`
+  measures it on both sides of the road.
+* **`classes` is the requirement, and it refuses rather than relaxes.** R2
+  planned a hierarchy (highway 0 / road 1 / track 2) precisely so a consumer
+  could ask for a road of a given standard; a fuel stop asks for a highway and
+  is ABSENT, by name, from a map that has none.
+* **Nothing is built on the deck.** A building blocks, so a yard on the
+  carriageway severs the route the road exists to provide and does it silently.
+  `_clears_deck` gates the shed and every parked vehicle against the published
+  polyline (not against the parcel's local frame — a link bends), and the yards
+  then go through `gate_blocking_features_leave_the_war_fightable` alongside
+  the wreck field, because "off the deck" is local and "the armies can still
+  reach each other" is global.
+* **The parked vehicles are ordinary Gaia units.** `ms_civtruck`/`ms_civbus`
+  carry `customparams.civilian = '1'`, so `estate.registerBuilding` files them
+  at `UnitCreated` with role **`estate`** — which is what keeps them parked:
+  `routines.tick()` wanders and flees only the `ambient` ones.
+
+**What is NOT here, and why it is not a missing feature.** The brief also asks
+for driveway/parking splat markings and a standalone lot with no building. Both
+are baked-at-generation-time work and this is a scenario-time placer: the splat
+distribution, the albedo and the typemap are all final before `scenariogen`
+ever reads the map, which is the same seam `emit_roads_lua`'s header describes
+(a town discovered afterwards cannot move a road). A lot with no building also
+has no footprint to anchor or to own its clearance. Both want a terragen-side
+layer that plans yards at generation time from the same link graph.
+
+Tests: `tools/mapgen/tests/test_road_frontage.py` (13 cases), including the
+`mapdata/roads.lua` `links` round trip — the reader dropped the final vertex of
+every polyline on its first cut, which read as a map whose roads were simply
+not there.
 
 ## 5. Texturing model
 

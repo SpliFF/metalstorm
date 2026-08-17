@@ -25,13 +25,16 @@ local WINDING_DOWN_FRAMES = 300   -- must match the gadget's constant
 --- `unoccupied` is the set of teams the engine MATERIALISED but nobody plays
 --- (leader -1). Seating two sides on teams 0 and 4 allocates 1-3 as filler,
 --- so this is the ordinary live shape, not an edge case.
-local function load(sides, victoryCount, teams, unoccupied)
+--- @param startRegions  the scenario's `world.regions` block (wars §7's
+---   foothold census reads it: each entry is a side's declared landing zone).
+local function load(sides, victoryCount, teams, unoccupied, startRegions)
     local world = {
         frame = 0,
         gameRulesParams = {},
         completeHooks = {},
         gameOverCalls = {},     -- each entry is the winners list as passed
         expireCalls = 0,
+        sweepResult = { 1, 2 },   -- completed, expired
         echoes = {},
         -- Gaia is the last team index, exactly as the engine allocates it.
         teams = teams or { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
@@ -91,19 +94,28 @@ local function load(sides, victoryCount, teams, unoccupied)
     _G.GG = {
         Objectives = {
             OnComplete = function(fn) world.completeHooks[#world.completeHooks + 1] = fn end,
+            -- Returns `completed, expired` (wars §7 task 4): the war-end sweep
+            -- pays out anything whose criteria were MET inside the last eval
+            -- window and writes off the rest. `world.sweepResult` lets a case
+            -- choose the split; the default is the mixed one, because the two
+            -- numbers being carried separately all the way to the archive is
+            -- the property under test.
             ExpireAllActive = function()
                 world.expireCalls = world.expireCalls + 1
                 -- Assert ordering at the moment of the call: escrow must
                 -- settle BEFORE the game is declared over, never after.
                 assert.are.equal(0, #world.gameOverCalls)
                 assert.are.equal('resolving', world.gameRulesParams['war_state'])
-                return 3
+                return world.sweepResult[1], world.sweepResult[2]
             end,
             VictoryObjectiveCount = function()
                 return victoryCount == nil and 1 or victoryCount
             end,
         },
-        Scenario = sides and { name = 'meridian_basin', data = { sides = sides } } or nil,
+        Scenario = sides and {
+            name = 'meridian_basin',
+            data = { sides = sides, world = { regions = startRegions } },
+        } or nil,
     }
 
     dofile('./game_gameover.lua')
@@ -203,6 +215,42 @@ describe("victory objective completing", function()
         world.complete(VICTORY_OBJ, 4)
         world.runTo(WINDING_DOWN_FRAMES)
         assert.are.equal(1, world.expireCalls)
+    end)
+
+    -- §7 `resolving`: "Record the final scoreboard into the archive." The sim
+    -- cannot write the archive (no DB callout from synced Lua), so what it owns
+    -- is FREEZING the numbers at the instant the war ended and stamping them,
+    -- for the server's heartbeat scraper to carry lobby-ward.
+    it("publishes the settlement split for the archive", function()
+        local world = load(MERIDIAN_SIDES)
+        world.sweepResult = { 2, 5 }
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal(2, world.gameRulesParams['war_settled_complete'])
+        assert.are.equal(5, world.gameRulesParams['war_settled_expired'])
+    end)
+
+    it("stamps the frame the war actually ended on", function()
+        -- Without it the archive races game_teams' 30 s scoreboard cadence and
+        -- the sim freeze: a war ending 29 s into a cadence would archive a
+        -- scoreboard half a minute out of date.
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal(WINDING_DOWN_FRAMES, world.gameRulesParams['war_final_frame'])
+    end)
+
+    it("tolerates a sweep that reports only a total (no split)", function()
+        -- An older objectives gadget returns one value. The counts degrade to
+        -- (n, 0) rather than to nil arithmetic, because a gameover that throws
+        -- here would leave the war permanently in 'resolving'.
+        local world = load(MERIDIAN_SIDES)
+        world.sweepResult = { 3 }
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal(3, world.gameRulesParams['war_settled_complete'])
+        assert.are.equal(0, world.gameRulesParams['war_settled_expired'])
+        assert.are.equal(1, #world.gameOverCalls)
     end)
 
     it("declares game over exactly once, not once per frame", function()
@@ -511,5 +559,82 @@ describe("snapshot Save/Load", function()
         load(MERIDIAN_SIDES)
         assert.are.equal('function', type(_G.gadget.Save))
         assert.are.equal('function', type(_G.gadget.Load))
+    end)
+end)
+
+-- ── The foothold census (wars §7 faction elimination, task 4) ──────────────
+--
+-- The sim COUNTS, the Director DECIDES. These cases pin the counting half:
+-- what "a foothold" is, and — the one that matters most — that an absent or
+-- unusable census reports "cannot tell" rather than "everybody is eliminated".
+describe("foothold census", function()
+    local HOMES = {
+        { key = 'amber_row', team = 0 },
+        { key = 'iron_bend', team = 4 },
+    }
+    local PERIOD = 150
+
+    it("counts a side's own start regions that it still owns", function()
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, HOMES)
+        world.gameRulesParams['region_amber_row_team'] = 0
+        world.gameRulesParams['region_iron_bend_team'] = 4
+        world.runTo(PERIOD)
+        assert.are.equal(1, world.gameRulesParams['war_footholds_known'])
+        assert.are.equal(1, world.gameRulesParams['war_footholds_0'])
+        assert.are.equal(1, world.gameRulesParams['war_footholds_4'])
+    end)
+
+    it("reports zero for a side pushed off its own ground", function()
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, HOMES)
+        world.gameRulesParams['region_amber_row_team'] = 4   -- taken
+        world.gameRulesParams['region_iron_bend_team'] = 4
+        world.runTo(PERIOD)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_0'])
+        -- Team 4 took amber_row, but amber_row is team 0's declared home and
+        -- not one of team 4's, so team 4's own count is still just iron_bend.
+        assert.are.equal(1, world.gameRulesParams['war_footholds_4'])
+    end)
+
+    it("does not count a region captured ELSEWHERE as a foothold", function()
+        -- §7 is "all its start regions gone", so a faction sitting on someone
+        -- else's ground with none of its own is eliminated. Counting captures
+        -- would make the condition unreachable in practice.
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, HOMES)
+        world.gameRulesParams['region_amber_row_team'] = 4
+        world.gameRulesParams['region_iron_bend_team'] = 4
+        world.gameRulesParams['region_raven_basin_team'] = 0   -- team 0's conquest
+        world.runTo(PERIOD)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_0'])
+    end)
+
+    it("an unowned start region is not held", function()
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, HOMES)
+        world.gameRulesParams['region_amber_row_team'] = -1
+        world.runTo(PERIOD)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_0'])
+    end)
+
+    it("says 'cannot tell' when the scenario declares no start regions", function()
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, nil)
+        world.runTo(PERIOD)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_known'])
+        assert.is_nil(world.gameRulesParams['war_footholds_0'])
+    end)
+
+    it("says 'cannot tell' when there is no scenario at all", function()
+        local world = load(nil)
+        world.runTo(PERIOD)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_known'])
+    end)
+
+    it("keeps counting through wind-down, so the archive gets the last push", function()
+        local world = load(MERIDIAN_SIDES, nil, nil, nil, HOMES)
+        world.gameRulesParams['region_amber_row_team'] = 0
+        world.runTo(PERIOD)
+        assert.are.equal(1, world.gameRulesParams['war_footholds_0'])
+        world.complete(VICTORY_OBJ, 4)
+        world.gameRulesParams['region_amber_row_team'] = 4   -- lost during the grace
+        world.runTo(PERIOD * 2)
+        assert.are.equal(0, world.gameRulesParams['war_footholds_0'])
     end)
 end)

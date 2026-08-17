@@ -103,6 +103,28 @@ TEST_CASE("TickIntervalMicros: pacing maths") {
     CHECK(TickIntervalMicros(TickMode::Realtime, 1.0f, 0) == 33333);
 }
 
+TEST_CASE("LuaConditionPollDue: once per game-second, from frame 30 (FU1)") {
+    // The regression this pins: the poll gate used to be every 30 GAME-SECONDS
+    // (frame % 900), so a run with stopAt.frame <= 900 exited via frame-limit
+    // having never evaluated its luaCondition even once — silently, since an
+    // unevaluated predicate produces no output at all.
+    CHECK_FALSE(LuaConditionPollDue(0, 30));   // pre-GameStart, nothing to poll
+    CHECK_FALSE(LuaConditionPollDue(29, 30));
+    CHECK(LuaConditionPollDue(30, 30));        // first poll inside a short run
+    CHECK_FALSE(LuaConditionPollDue(31, 30));
+    CHECK(LuaConditionPollDue(60, 30));
+
+    // A 300-frame run (a common short fixture) must poll at least once — this
+    // is exactly the check the old 900-frame cadence failed.
+    bool polled = false;
+    for (int64_t f = 1; f <= 300; ++f)
+        polled = polled || LuaConditionPollDue(f, 30);
+    CHECK(polled);
+
+    // Degenerate gameSpeed falls back to 30, same as TickIntervalMicros.
+    CHECK(LuaConditionPollDue(30, 0));
+}
+
 TEST_CASE("StopReasonName covers every reason") {
     CHECK(std::string(StopReasonName(StopReason::None)) == "none");
     CHECK(std::string(StopReasonName(StopReason::FrameLimit)) == "frame-limit");
@@ -191,6 +213,52 @@ TEST_CASE("ParseConfig: modOptions") {
     // Wrong type is ignored the same way a malformed aiSlot is.
     Config e;
     REQUIRE(ParseConfig(R"({"modOptions":[1,2]})", e, err));
+    CHECK(e.modOptions.empty());
+}
+
+TEST_CASE("ParseConfig: top-level scenario (S4.3)") {
+    // The manifest asymmetry this closes: every other consumer of a launch
+    // manifest requires `scenario` at the TOP LEVEL (the lobby overwrites a
+    // modoption-only spelling with the map's default), while headless accepted
+    // ONLY the modoption — so no single file booted the same war both ways.
+    auto opts = [](const Config& c) {
+        std::unordered_map<std::string, std::string> m(c.modOptions.begin(), c.modOptions.end());
+        return m;
+    };
+    std::string err;
+
+    Config a;
+    REQUIRE(ParseConfig(R"({"map":"meridian_basin","scenario":"crossing_standoff"})", a, err));
+    CHECK(opts(a)["scenario"] == "crossing_standoff");
+    CHECK(a.modOptions.size() == 1);
+
+    // Both spellings in one file: top-level is authoritative, and exactly ONE
+    // pair survives (two `scenario` modoptions would make the winner depend on
+    // whichever end of the list server_main happened to read).
+    Config b;
+    REQUIRE(ParseConfig(
+        R"({"scenario":"crossing_standoff","modOptions":{"scenario":"stale","waves":"3"}})",
+        b, err));
+    CHECK(opts(b)["scenario"] == "crossing_standoff");
+    CHECK(opts(b)["waves"] == "3");
+    CHECK(b.modOptions.size() == 2);
+
+    // "" is the "explicitly no scenario" spelling — forwarded, not dropped.
+    Config c;
+    REQUIRE(ParseConfig(R"({"scenario":""})", c, err));
+    REQUIRE(c.modOptions.size() == 1);
+    CHECK(c.modOptions[0].first == "scenario");
+    CHECK(c.modOptions[0].second.empty());
+
+    // Regression: no scenario anywhere means no pair invented.
+    Config d;
+    REQUIRE(ParseConfig(R"({"map":"meridian_basin"})", d, err));
+    CHECK(d.modOptions.empty());
+
+    // A non-string scenario is ignored like any other malformed field, rather
+    // than aborting the run at start-up.
+    Config e;
+    REQUIRE(ParseConfig(R"({"scenario":42})", e, err));
     CHECK(e.modOptions.empty());
 }
 

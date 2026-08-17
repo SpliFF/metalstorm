@@ -40,6 +40,7 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 
 from terragen import biomes as bio
+from terragen import bridges as brg
 from terragen import erosion as ero
 from terragen import hydrology as hyd
 from terragen import noise as tn
@@ -48,10 +49,13 @@ from terragen import rivers as riv
 from terragen import roads as rd
 from terragen import selftest as stest
 from terragen import smf
+from terragen import yards as yd
 
 import civilians_gen as civ
 import meridian as m1   # the v1 generator, kept for its layout-only emitters
+import ms_defs
 
+GAME_DIR = os.path.join(REPO_ROOT, "data", "games", "metalstorm")
 LAYOUT_PATH = os.path.join(HERE, "meridian_layout.json")
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260727
@@ -341,30 +345,100 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
           f"({len(net.polylines)} reaches, "
           f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
 
-    # 6. roads: district centres + convoy waypoints + gates
+    # 6. roads: district centres + convoy waypoints + gates.
+    #
+    # roads R2 — the endpoints now carry ROLES, and the roles are what build the
+    # hierarchy (roads.plan_network). The reading of this map's own layout:
+    #   * a MARKET district is a major town — a highway destination. The
+    #     habitats are not: making every civilian district a trunk node was the
+    #     first reading and it produced a network that is 90 % highway by length
+    #     and 95 % bitumen by area, i.e. a hierarchy that classifies everything
+    #     into its top tier and therefore says nothing. Four district centres
+    #     plus two gates is six trunk nodes and an MST over six nodes is five
+    #     links — the whole map;
+    #   * a habitat district and a convoy waypoint are villages on the way,
+    #     joined by an ordinary road to wherever the trunk passes them;
+    #   * the two gates are the network's PORTALS. They sit on start pads rather
+    #     than on the map border, and that is the right reading anyway: what a
+    #     portal means to the planner is "the trunk has to reach here", and on a
+    #     two-base map the bases are exactly that. Nothing on this map is a POI
+    #     yet, so there is no track tier — see PLAN-maps §2c.
     sites = []
+    roles = []
     for d in layout["civilian_districts"]:
         r = next(r for r in layout["regions"] if r["key"] == d)
         b = r["bbox"]
         sites.append(((b["x0"] + b["x1"]) / 2.0, (b["z0"] + b["z1"]) / 2.0))
+        roles.append(rd.NODE_TOWN if d.endswith("_market") else rd.NODE_MINOR)
     for route in layout["convoy_routes"]:
         for wp in route["waypoints"]:
             sites.append((wp["x"], wp["z"]))
+            roles.append(rd.NODE_MINOR)
     for sx, sz in (starts[1], starts[5]):  # a gate per side joins the network
         sites.append((sx, sz))
+        roles.append(rd.NODE_EDGE)
     # see the note at archipelago.py's road step: M9a retired the terrain-slope
     # wall in favour of a grade block plus a side-hill price
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
                        water_penalty=30.0)
-    polylines = rd.plan_roads(h, 0.0, cell, sites, rp)
-    road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+    net = rd.plan_network(h, 0.0, cell, sites, roles, rp)
+    polylines = net.polylines
+    raster = rd.rasterize_network(net, h.shape, cell, rp)
+    road_mask, road_dist = raster.mask, raster.dist
     # worn junction plazas where routes meet (district centres + waypoints;
     # the trailing 2 gate sites sit on start pads — no plaza there)
     plaza_sites = sites[:-2]
     rd.carve_plazas(road_mask, road_dist, plaza_sites, 85.0, cell, rp)
-    h = rd.flatten_under_roads(h, road_dist, cell, rp)
+    # ...and an apron where a lesser way meets the deck it joins, which is a
+    # different place from a plaza: a plaza is authored at a site, a junction is
+    # wherever the planner found the cheapest point on the trunk.
+    rd.carve_junction_aprons(raster, net.junctions, cell, rp)
+    # 6b. roadside yard PADS (roads R4b): prepared ground beside a link for the
+    # scenario layer to stand a depot on. Carved as ordinary deck, and BEFORE the
+    # flatten, because a pad that is not in the raster when the grader runs is a
+    # pad nothing ever levels — see terragen/yards.py.
+    yard_pads, yard_refusals = yd.plan_yard_pads(net, h, raster, cell, 0.0)
+    yd.carve_yard_pads(raster, yard_pads, cell, rp)
+    # ONE flatten pass over the combined field. Per-class passes would grade the
+    # crossing twice — see roads.flatten_network.
+    h = rd.flatten_network(h, raster, cell, rp)
+    # ...and the pads are PLATEAUED after it, not by it: the grader blends toward
+    # a blur, which does nothing to a uniform slope, so a pad it "graded" comes
+    # off a ramp still on the ramp (terragen/yards.py measured 31.2 of 31.5
+    # elmos). A yard is cut into graded ground, in that order.
+    h = yd.level_yard_pads(h, yard_pads, cell)
+    _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
+                     for k, v in sorted(net.length_by_class().items()) if v > 0)
     print(f"roads done {time.time()-t_start:.0f}s "
-          f"({len(polylines)} segments, {len(plaza_sites)} plazas)")
+          f"({len(polylines)} segments, {len(plaza_sites)} plazas, "
+          f"{len(net.junctions)} junctions; length by class: {_mix})")
+    print(f"yard pads: {len(yard_pads)} prepared, "
+          f"{len(yard_refusals)} station(s) refused")
+    yd.report_pad_refusals(yard_refusals)
+    yd.report_pad_relief(h, yard_pads, cell)
+    # ...and the ramp INTO each pad, which the relief report cannot see:
+    # a plateau is flat by construction and can still sit above an
+    # unclimbable verge (roads R4d, yards.pad_ramps).
+    yd.report_pad_ramps(h, yard_pads, cell)
+    # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
+    # ford is graded where the deck now stands and not where the planner drew
+    # it. Published in mapdata/roads.lua; nothing is placed here (terragen/
+    # bridges.py explains why a map-authored span sinks to the seabed).
+    cross_params = brg.CrossingParams(
+        pitch=ms_defs.feature_chain_pitch(GAME_DIR))
+    crossings, crossing_refusals = brg.find_crossings(
+        net, h, cell, 0.0, cross_params)
+    _fordable = [r for r in crossing_refusals if r.fordable]
+    print(f"crossings: {len(crossings)} bridgeable "
+          f"({sum(c.spans for c in crossings)} spans), "
+          f"{len(_fordable)} unbridged ford(s), "
+          f"{len(crossing_refusals) - len(_fordable)} wet stretches refused")
+    for r in crossing_refusals:
+        print(f"  crossing {'ford, unbridged' if r.fordable else 'REFUSED'}"
+              f": {r.describe()}")
+    # the grade the DELIVERED deck holds, which is not the grade the planner
+    # costed — the instrument warns when they disagree (roads R2 finding)
+    rd.report_delivered_grades(net, h, cell, rp)
 
     # 7. biomes
     gy, gx = np.gradient(h, cell)
@@ -387,6 +461,30 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
     print(f"biomes done {time.time()-t_start:.0f}s ({climate}, land): "
           f"{bio.format_biome_mix(b)}")
+
+    # 7a. road surface classes (roads R1). Classification needs moisture, so it
+    # runs here rather than in step 6 — the polylines and the graded height are
+    # both final by now, and the class raster is grown by the same distance
+    # transform that produced road_dist, so it cannot disagree with road_mask.
+    # R2: sealing now follows the HIERARCHY (a highway is bitumen because it is
+    # a highway), so R1's longest-40 %-by-length budget — which was a proxy for
+    # exactly this — is not consulted.
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell,
+                                 road_classes=net.road_classes)
+    _surf_raster = rd.rasterize_network(net, h.shape, cell, rp, surfaces=road_cls)
+    road_class = _surf_raster.surf
+    rd.carve_plaza_classes(road_class, plaza_sites, 85.0, cell)
+    rd.carve_junction_aprons(_surf_raster, net.junctions, cell, rp)
+    # The pads again, on the class raster this time: both rasters get every
+    # carve, for the reason the apron note gives — a pad that is deck in one and
+    # not in the other is a hole in the typemap exactly where the tarmac is.
+    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
+    _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
+    _surf_mix = ", ".join(
+        f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
+        for k in (rd.SURF_BITUMEN, rd.SURF_DIRT, rd.SURF_MUD))
+    print(f"road surfaces ({_deck} deck cells): {_surf_mix}")
 
     # 7b. placement (terragen/placement.py): vegetation + boulder features,
     # scree/sand ground stamps. Stamps always run — the albedo bake and
@@ -535,7 +633,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         from terragen import bake as bk
         os.makedirs(out_dir, exist_ok=True)
         baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                               stamps=stamps)
+                               stamps=stamps, road_class=road_class)
         shade = bk.hillshade(h, cell)
         Image.fromarray(bk.make_minimap(baker, shade)).save(
             os.path.join(out_dir, "preview.png"))
@@ -575,14 +673,18 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
-        feature_files=contract_files, stamps=stamps,
+        roads_lua=pkg.emit_roads_lua(net, cell, rp, crossings=crossings,
+                                     yards=yard_pads,
+                                     refusals=crossing_refusals,
+                                     p_cross=cross_params),
+        feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 
     # quick-look preview (albedo * hillshade) for iteration without the client
     from PIL import Image
     from terragen import bake as bk
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                           stamps=stamps)
+                           stamps=stamps, road_class=road_class)
     shade = bk.hillshade(h, cell)
     Image.fromarray(bk.make_minimap(baker, shade)).save(os.path.join(out_dir, "preview.png"))
 

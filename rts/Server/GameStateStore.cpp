@@ -131,7 +131,21 @@ bool IsCorruption(DecodeStatus s) {
     return false;
 }
 
-// Header layout (little-endian), total kHeaderSize == 112:
+uint64_t DefsDigestOf(const std::string& defsKey) {
+    if (defsKey.empty()) return 0;
+    // FNV-1a 64. The key is already a content digest (DefsCache::
+    // ComputeContentKey); this only folds it to the header's word width.
+    uint64_t h = 1469598103934665603ull;
+    for (const unsigned char c : defsKey) {
+        h ^= uint64_t(c);
+        h *= 1099511628211ull;
+    }
+    // 0 is the header's "not recorded". A real key that folded to it would be
+    // silently indistinguishable from no key, so it is nudged instead.
+    return h ? h : 1ull;
+}
+
+// Header layout (little-endian), total kHeaderSize == 120:
 //   0   4   magic "SPSN"
 //   4   2   version
 //   6   2   codec
@@ -143,6 +157,7 @@ bool IsCorruption(DecodeStatus s) {
 //   40  8   compSize
 //   48  32  sha256(raw payload)
 //   80  32  mapDigest
+//   112 8   defsHash (v2; recorded, never matched — see BlobMeta::defsHash)
 std::vector<uint8_t> EncodeBlob(const std::vector<uint8_t>& payload, BlobMeta& meta) {
     meta.rawSize = payload.size();
     Sha256(payload.data(), payload.size(), meta.rawSha256);
@@ -179,6 +194,7 @@ std::vector<uint8_t> EncodeBlob(const std::vector<uint8_t>& payload, BlobMeta& m
     PutU64(h + 40, uint64_t(comp.size()));
     std::memcpy(h + 48, meta.rawSha256, 32);
     std::memcpy(h + 80, meta.mapDigest, 32);
+    PutU64(h + 112, meta.defsHash);
     if (!comp.empty()) std::memcpy(h + kHeaderSize, comp.data(), comp.size());
     return out;
 }
@@ -205,6 +221,10 @@ DecodeStatus DecodeBlob(const uint8_t* blob, size_t size, const BlobMeta& expect
     const uint64_t compSize = GetU64(blob + 40);
     std::memcpy(meta.rawSha256, blob + 48, 32);
     std::memcpy(meta.mapDigest, blob + 80, 32);
+    // Read, and then NOT compared against expect.defsHash. See
+    // BlobMeta::defsHash: a defs change is the input to the reconcile pass,
+    // not a reason to refuse the snapshot that needs it.
+    meta.defsHash = GetU64(blob + 112);
 
     // E1 first: refuse foreign snapshots before spending CPU on inflate.
     if (meta.engineHash != expect.engineHash || meta.layoutHash != expect.layoutHash)
@@ -293,8 +313,18 @@ void GameStateStore::EnsureTables(sqlite3* db) {
         "  raw_size INTEGER NOT NULL,"
         "  blob_size INTEGER NOT NULL,"
         "  sha256 TEXT NOT NULL,"
+        "  defs_hash TEXT NOT NULL DEFAULT '',"
         "  blob BLOB NOT NULL"
         ")", nullptr, nullptr, nullptr);
+    // Migration for a database written before PLAN-def-reconciliation task 1.
+    // ALTER TABLE on a column that already exists is an error, not a no-op, so
+    // the duplicate-column failure is the expected outcome on a current schema
+    // and is ignored — the same shape every other add-a-column migration in
+    // this tree uses. Empty rather than '0000000000000000' by default, so a
+    // query can tell "taken before the column existed" from "taken before the
+    // key existed" without opening a blob.
+    sqlite3_exec(db, "ALTER TABLE game_snapshots ADD COLUMN defs_hash TEXT NOT NULL DEFAULT ''",
+                 nullptr, nullptr, nullptr);
     // Every query partitions on (game_id, room_id) — see the header's "ROOM
     // SCOPING". The old game_id-only index is dropped rather than left behind:
     // nothing reads by game_id alone any more, so it would only cost writes.
@@ -440,6 +470,10 @@ int32_t GameStateStore::Enqueue(uint32_t roomId, const std::string& label,
     job.label  = label.empty() ? "auto" : label;
     job.meta   = ExpectedMeta();
     job.meta.frame = serializer->Frame();
+    // Stamped here and not in ExpectedMeta(), whose other caller is the decode
+    // path's `expect`: the defs key is recorded, never matched against, so it
+    // must not appear in the value that names what this binary will accept.
+    job.meta.defsHash = defsHash.load(std::memory_order_relaxed);
 
     // The only step that must run on the sim thread, and the only one the
     // stall budget covers.
@@ -559,8 +593,8 @@ bool GameStateStore::WriteJob(const Job& job, std::string& err) {
     if (sqlite3_prepare_v2(db,
             "INSERT INTO game_snapshots"
             " (game_id, room_id, frame, taken_at, engine_hash, map_hash, label,"
-            "  raw_size, blob_size, sha256, blob)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)", -1, &st, nullptr) != SQLITE_OK) {
+            "  raw_size, blob_size, sha256, defs_hash, blob)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", -1, &st, nullptr) != SQLITE_OK) {
         err = std::string("prepare failed: ") + sqlite3_errmsg(db);
         sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
         return false;
@@ -570,6 +604,12 @@ bool GameStateStore::WriteJob(const Job& job, std::string& err) {
     std::snprintf(engineHex, sizeof(engineHex), "%016llx",
                   static_cast<unsigned long long>(meta.engineHash));
     const std::string sha = HexDigest(meta.rawSha256);
+    // '' for a snapshot taken before the defs key existed — hex of 0 would
+    // claim a vocabulary the snapshot never recorded.
+    char defsHex[32] = {0};
+    if (meta.defsHash != 0)
+        std::snprintf(defsHex, sizeof(defsHex), "%016llx",
+                      static_cast<unsigned long long>(meta.defsHash));
 
     sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(st, 2, int(job.roomId));
@@ -581,7 +621,8 @@ bool GameStateStore::WriteJob(const Job& job, std::string& err) {
     sqlite3_bind_int64(st, 8, sqlite3_int64(meta.rawSize));
     sqlite3_bind_int64(st, 9, sqlite3_int64(blob.size()));
     sqlite3_bind_text(st, 10, sha.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_blob64(st, 11, blob.data(), sqlite3_uint64(blob.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 11, defsHex, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob64(st, 12, blob.data(), sqlite3_uint64(blob.size()), SQLITE_TRANSIENT);
 
     const int rc = sqlite3_step(st);
     sqlite3_finalize(st);

@@ -17,6 +17,12 @@
 -- pre-AI2 standing-order fallback is GONE (plan §10 task 5): there is only the
 -- real path now.
 
+-- The intent tag (`ai.intent`, PLAN-ai-synced-write.md §2.5) rides the SAME
+-- query-string codec the guidance gadget decodes with. `wire.lua` is a copy in
+-- this folder, not a reach into LuaRules/ — the AI4 sandbox forbids that; see
+-- that file's header for the drift guard.
+local Wire = require('wire')
+
 local Actuators = {}
 Actuators.__index = Actuators
 
@@ -75,8 +81,9 @@ function Actuators._detect()
         log            = has('log'),               -- server-log channel (headless)
         marker         = has('marker') or has('setMarker'),
         stakeBounty    = has('stakeBounty'),      -- authority stake from AI
-        respond        = has('respondProposal'),  -- interaction I1
-        propose        = has('propose'),          -- interaction I1
+        respond        = has('respondProposal'),  -- interaction §6.2 (not on the surface)
+        propose        = has('propose'),          -- interaction §6.2 (not on the surface)
+        sendMessage    = has('sendMessage'),      -- I1/SG1 (AI → synced RecvLuaMsg)
     }
 end
 
@@ -102,6 +109,18 @@ function Actuators:issueDirective(groupHandle, spec)
     return _G.AI.issueDirective(groupHandle or 0, spec)
 end
 
+--- Send an opaque message into synced game Lua (engine ask I1 / SG1). The
+--- engine drains it on the sim thread and hands it to `gadget:RecvLuaMsg(msg,
+--- playerID)` — the SAME entry point a human's wire message lands on, with this
+--- AI's real playerID (AI3 made AI slots real players), so the gadget's
+--- validated-writer checks work unchanged. Fire-and-forget: the engine returns
+--- false when its 2 KB size clamp rejects the payload, and a throttled AI is
+--- meant to degrade, not raise.
+function Actuators:sendMessage(msg)
+    if not self.caps.sendMessage then return false end
+    return _G.AI.sendMessage(msg)
+end
+
 --- Set an engagement/casualty/ROE posture on a group (nearly free, §authority).
 function Actuators:setPosture(groupHandle, postureJson)
     if not self.caps.setPosture then return false end
@@ -123,7 +142,7 @@ function Actuators:stakeBounty(objectiveDef, amount)
     if self.caps.stakeBounty then
         return _G.AI.stakeBounty(objectiveDef, amount)
     end
-    return false   -- needs the AI-side authority stake path (I1-adjacent)
+    return false   -- needs the AI-side authority stake verb (no engine ask blocks it)
 end
 
 --- Narrate via chat (plan §5.1 — spend is socially visible). Best-effort.
@@ -151,7 +170,11 @@ function Actuators:marker(pos, txt)
     return false
 end
 
---- Respond to / originate a parley proposal (interaction §6.2, engine ask I1).
+--- Respond to / originate a parley proposal (interaction §6.2). NOT gated on an
+--- engine ask any more: I1 landed (`AI.sendMessage`, see :112), so parley could
+--- be spoken over the same wire commands a human's panel sends — these two verbs
+--- are simply unimplemented on the runtime surface, and building them on the
+--- message funnel is PLAN-metalstorm-ai task 4(a) work, not this lane's.
 function Actuators:respondProposal(id, decision) -- decision: accept|reject|counterTerms
     if self.caps.respond then return _G.AI.respondProposal(id, decision) end
     return false
@@ -221,6 +244,41 @@ function Actuators:_directiveSpec(d, picture, priority)
     }
 end
 
+--- Issue one directive AND tag it with the planner goal it serves.
+---
+--- PLAN-ai-synced-write.md §2.5: the goal id is what the veto loop keys on
+--- (`planner.lua`'s `guidance.veto[goal.id]`), and the synced side's only view
+--- of a directive is the authority charge, which knows nothing about goals. So
+--- the AI states the correlation itself: an `ai.intent` message pushed
+--- IMMEDIATELY BEFORE the directive it describes. Both are AICommands on one
+--- queue, they drain in push order in the same TickAI batch on the sim thread,
+--- and `GG.AIGuidance.RecordIntent` consumes the tag when the charge for that
+--- directive fires in the same frame.
+---
+--- Two ordering properties this function exists to hold, both easy to lose by
+--- inlining it back into the call sites:
+---   1. The tag is sent ONLY when the directive really goes out. A skipped
+---      directive (unmapped name, region with no geometry, verb unavailable)
+---      that still tagged would leave a pending goal id for the NEXT directive
+---      to steal — the gadget's frame-end sweep bounds the damage, it does not
+---      prevent it.
+---   2. The tag is sent BEFORE, never after. Push order is the entire
+---      correlation mechanism; a tag arriving after its directive annotates
+---      nothing (the charge already ran) and mis-annotates the next one.
+--- An untagged directive is legitimate and lossless — the intent line simply
+--- carries no goal id and the panel renders no Veto button for it.
+function Actuators:_issueTagged(d, spec)
+    if not self.caps.issueDirective then return false end
+    if d.goalId ~= nil then
+        self:sendMessage(Wire.encode('ai.intent', {
+            goalId = d.goalId,
+            dt     = spec.type,
+            region = d.region,
+        }))
+    end
+    return self:issueDirective(0, spec)          -- 0 = area scope
+end
+
 --=============================================================================
 -- apply — consume the planner's plan.  One entry point main.lua calls.
 --=============================================================================
@@ -245,7 +303,7 @@ function Actuators:apply(plan, picture)
                 self:_applyPosture(d, picture)
             elseif d.type == 'directive' then
                 local spec = self:_directiveSpec(d, picture, priority)
-                if spec then self:issueDirective(0, spec) end   -- 0 = area scope
+                if spec then self:_issueTagged(d, spec) end
             elseif d.type == 'build' then
                 self:initiateBuild(d.factoryId, d.defName)
             end
@@ -255,8 +313,9 @@ function Actuators:apply(plan, picture)
     end
 
     -- Intent report (interaction §6.3): publish the assignment table so the
-    -- co-commander is legible + vetoable. Transport is the guidance blob (I1);
-    -- until then we keep it locally and narrate a one-line summary.
+    -- co-commander is legible + vetoable. The published transport is the synced
+    -- charge path (see _publishIntent); the local copy is what the AI itself
+    -- reasons over, plus the one-line narration.
     self.lastIntent = plan.intent
     self:_publishIntent(plan.intent)
 end
@@ -270,7 +329,10 @@ function Actuators:_applyPosture(d, picture)
     local spec = self:_directiveSpec(
         { directive = d.directive or 'DEFEND', region = d.region, strength = d.strength },
         picture, priority)
-    if spec then self:issueDirective(0, spec) end
+    -- Tagged like any other directive: a DEFEND posture is charged through the
+    -- same path, so its intent line is vetoable too (its spend is 0, which is
+    -- exactly the case a human most wants to be able to override).
+    if spec then self:_issueTagged(d, spec) end
 end
 
 --=============================================================================
@@ -302,7 +364,7 @@ function Actuators:_suggestDirective(d, picture)
         tostring(d.directive), where, cost)
     self:chat(suggestion)
 
-    -- TODO(onboarding §3 / integration I1): when the suggested_for hint verb
+    -- TODO(onboarding §3): when the suggested_for hint verb
     -- exists (game_ai_guidance.lua writing a suggestion rulesParam that the
     -- native-UI objective card reads), emit it here:
     --   AI.setSuggestedObjective(goalId, groupId)  -- lights the card
@@ -348,10 +410,14 @@ function Actuators:_publishIntent(intent)
     -- directive is charged, game_authority_charge.lua calls
     -- GG.AIGuidance.RecordIntent, so ai-command-panel.js renders exactly the
     -- directives the AI actually paid for (spend socially visible, §5.1/§6.3).
-    -- The AI VM is a separate Lua state and cannot write synced rulesParams, so
-    -- driving the report from the charge (which already crosses into synced with
-    -- the AI's playerID) is the honest transport — no fabricated AI→synced write
-    -- path. This local hook keeps lastIntent for the tick summary only.
+    -- Driving the report from the charge is what keeps it AUTHORITATIVE: a line
+    -- exists only for a directive that really was created and paid for, so an
+    -- authority-vetoed directive leaves no phantom line. That is still true now
+    -- that engine ask I1 has landed — the AI can write into synced Lua
+    -- (`AI.sendMessage`, see `_issueTagged`), but it uses that only to ANNOTATE
+    -- the charge-driven line with the goal id the veto loop keys on, never to
+    -- publish a line of its own. This local hook keeps lastIntent for the tick
+    -- summary only.
 end
 
 function Actuators:noteError(frame, err)

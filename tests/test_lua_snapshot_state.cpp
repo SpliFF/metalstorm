@@ -103,10 +103,11 @@ Value Decoded(const std::vector<uint8_t>& bytes) {
 // ─────────────────────────── the value tree ───────────────────────────
 
 TEST_CASE("task 1d: the census is armed") {
-    // Same tripwire as 1c's structs: a sixth member of luasnapshot::Value fails
-    // the build in SimSnapshot.cpp until the codec writes it.
+    // Same tripwire as 1c's structs: a seventh member of luasnapshot::Value
+    // fails the build in SimSnapshot.cpp until the codec writes it. Six as of
+    // Q-P6 (the `i` integer payload).
     Value v;
-    CHECK(simsnapshot::census::LuaValue(v) == 5);
+    CHECK(simsnapshot::census::LuaValue(v) == 6);
 }
 
 TEST_CASE("task 1d: Field and Nodes read the tree without walking it by hand") {
@@ -179,7 +180,13 @@ TEST_CASE("task 1d: the awkward numbers survive") {
     CHECK(decoded == captured);
 
     REQUIRE(captured.table.size() == 7);
-    CHECK(captured.table[0].second.num == 9007199254740991.0);
+    // 2^53-1 is written `9007199254740991` in Lua 5.4, which is an *integer*
+    // literal, so it rides the Q-P6 subtype and is exact rather than merely
+    // unrounded.
+    CHECK(captured.table[0].second.type == Value::Type::Integer);
+    CHECK(captured.table[0].second.i == 9007199254740991LL);
+    CHECK(captured.table[6].second.type == Value::Type::Integer);
+    CHECK(captured.table[6].second.i == -2147483648LL);
     // -0.0: compared bitwise by Value::operator==, so this asserts the sign
     // bit made the trip (checked to fail with a memcmp-free comparison).
     CHECK(std::signbit(decoded.table[1].second.num));
@@ -189,6 +196,60 @@ TEST_CASE("task 1d: the awkward numbers survive") {
     CHECK(decoded.table[4].second.num == doctest::Approx(0.1));
     // A denormal is still a number the encoder must not normalise away.
     CHECK(decoded.table[5].second.num > 0.0);
+}
+
+TEST_CASE("Q-P6: a restored counter is still an integer, so a key built from it is spelled the same") {
+    // The live defect this closes: a gadget's `seq` came back from a resume as a
+    // float, and `'warlog_' .. seq .. '_kind'` then published `warlog_1.0_kind`
+    // — a rules param key the war-digest drain and every objective lookup do not
+    // read. Nothing about the *value* was wrong (the strict round-trip held all
+    // 30 hashes and all 26 units), so the assertion has to be on the subtype and
+    // on the string a gadget builds from it, not on equality.
+    LuaFixture lua;
+    lua.Eval("{ seq = 1, count = 41 + 1, deliberateFloat = 3.0, ratio = 0.5, "
+             "big = 9007199254740993 }");
+
+    const Value captured = CaptureTop(lua.L);
+    const Value decoded  = Decoded(Bytes(captured));
+    REQUIRE(decoded == captured);
+
+    // A deliberate float with an integral value stays a float — this is what
+    // option B3 (push integral doubles as integers) would have got wrong, and
+    // the reason the wire subtype was worth a codec bump.
+    REQUIRE(decoded.Field("deliberateFloat") != nullptr);
+    CHECK(decoded.Field("deliberateFloat")->type == Value::Type::Number);
+    REQUIRE(decoded.Field("ratio") != nullptr);
+    CHECK(decoded.Field("ratio")->type == Value::Type::Number);
+    // 2^53+1 is not representable as a double, so the integer path is the only
+    // one that can carry it back unchanged.
+    REQUIRE(decoded.Field("big") != nullptr);
+    CHECK(decoded.Field("big")->i == 9007199254740993LL);
+
+    std::string err;
+    REQUIRE(luasnapshot::Push(lua.L, decoded, err));
+
+    // The gadget's own idiom, run against the restored table.
+    lua_pushstring(lua.L, "warlog_");
+    lua_getfield(lua.L, -2, "seq");
+    lua_pushstring(lua.L, "_kind");
+    lua_concat(lua.L, 3);
+    CHECK(std::string(lua_tostring(lua.L, -1)) == "warlog_1_kind");
+    lua_pop(lua.L, 1);
+
+    const auto mathType = [&](const char* field) {
+        lua_getglobal(lua.L, "math");
+        lua_getfield(lua.L, -1, "type");
+        lua_getfield(lua.L, -3, field);
+        REQUIRE(lua_pcall(lua.L, 1, 1, 0) == 0);
+        const std::string t = lua_tostring(lua.L, -1) ? lua_tostring(lua.L, -1) : "nil";
+        lua_pop(lua.L, 2);   // result + math
+        return t;
+    };
+    CHECK(mathType("seq") == "integer");
+    CHECK(mathType("count") == "integer");
+    CHECK(mathType("deliberateFloat") == "float");
+    CHECK(mathType("ratio") == "float");
+    lua_pop(lua.L, 2);   // the restored table + the captured source
 }
 
 TEST_CASE("task 1d: a string is bytes, not a C string") {
@@ -217,13 +278,18 @@ TEST_CASE("task 1d: boolean and numeric keys are keys too") {
     const Value decoded  = Decoded(Bytes(captured));
     CHECK(decoded == captured);
 
-    // Canonical order puts booleans before numbers, and false before true.
+    // Canonical order puts booleans before numbers, and false before true. The
+    // two number subtypes share one sort class and interleave by value, so the
+    // float 1.5 still sorts before the integer 2 (Q-P6: ordering must not
+    // depend on which subtype a gadget happened to write).
     REQUIRE(captured.table.size() == 4);
     CHECK(captured.table[0].first.type == Value::Type::Bool);
     CHECK(captured.table[0].first.b == false);
     CHECK(captured.table[1].first.b == true);
+    CHECK(captured.table[2].first.type == Value::Type::Number);
     CHECK(captured.table[2].first.num == 1.5);
-    CHECK(captured.table[3].first.num == 2.0);
+    CHECK(captured.table[3].first.type == Value::Type::Integer);
+    CHECK(captured.table[3].first.i == 2);
 }
 
 // ───────────────────────────── determinism ─────────────────────────────
@@ -339,6 +405,59 @@ TEST_CASE("task 1d: a refusal leaves the Lua stack exactly as it was") {
     Value v;
     std::string err;
     CHECK_FALSE(luasnapshot::Capture(lua.L, -1, v, err));
+    CHECK(lua_gettop(lua.L) == top);
+}
+
+TEST_CASE("task 1d: legal nesting deeper than LUA_MINSTACK is walked, not written past") {
+    // D64(a). The walk holds TWO Lua stack slots per open level (the lua_next
+    // key and the value under inspection) but Lua only guarantees LUA_MINSTACK
+    // = 20 free slots to a C function. Without lua_checkstack the walk ran off
+    // the end of the stack array at nesting depth 22 — well inside kMaxDepth,
+    // so on state a gadget is entitled to hand us — and lua_next's write landed
+    // in the heap past it. api_check is compiled out, so nothing raised: it was
+    // a silent out-of-bounds write that corrupted the allocator and killed the
+    // process somewhere else, later, at about 1 run in 3.
+    //
+    // ⚠️ THIS CASE CANNOT FAIL WITHOUT A SANITIZER — pre-fix it passes, because
+    // the overflow is silent and the captured tree is still correct. It pins
+    // the reachable contract (a legal depth is accepted; an illegal one is
+    // refused by path, not by crashing). The instrument that DOES fail pre-fix
+    // is AddressSanitizer, and it is deterministic there; reproduce with:
+    //
+    //   clang++ -std=c++20 -g -O0 -fsanitize=address -I rts -I rts/lib/lua/include \
+    //     <driver>.cpp rts/Lua/LuaSnapshotState.cpp rts/lib/lua/src/*.cpp -o /tmp/d64
+    //
+    // ...capturing a table nested 22+ deep. Baseline: heap-buffer-overflow,
+    // 8-byte WRITE in luaH_next (ltable.cpp:363) via LuaSnapshotState.cpp:157.
+    const int legal = luasnapshot::kMaxDepth - 1;   // 31: deepest accepted level
+
+    LuaFixture lua;
+    const std::string src =
+        "(function() local root = {} local t = root "
+        "for i = 1, " + std::to_string(legal - 1) + " do t.child = {} t = t.child end "
+        "t.leaf = 'end' return root end)()";
+    lua.Eval(src.c_str());
+
+    const int top = lua_gettop(lua.L);
+    Value v;
+    std::string err;
+    REQUIRE(luasnapshot::Capture(lua.L, -1, v, err));
+    CHECK(lua_gettop(lua.L) == top);
+    CHECK(Decoded(Bytes(v)) == v);
+
+    // The tree really is that deep — otherwise this passes by capturing nothing.
+    int measured = 0;
+    for (const Value* n = &v; n->type == Value::Type::Table && !n->table.empty(); ) {
+        ++measured;
+        const Value& child = n->table[0].second;
+        if (child.type != Value::Type::Table) break;
+        n = &child;
+    }
+    CHECK(measured == legal);
+
+    // Push has the same contract, one slot worse (table + key + value per level).
+    REQUIRE(luasnapshot::Push(lua.L, v, err));
+    lua_pop(lua.L, 1);
     CHECK(lua_gettop(lua.L) == top);
 }
 

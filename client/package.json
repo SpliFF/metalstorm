@@ -5,10 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/check-protocol-schema.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "wire": "node wire/run-wire-client.mjs",
+    "wire:churn": "node wire/run-wire-churn.mjs"
   },
   "devDependencies": {
     "@babylonjs/addons": "^9.1.0",
@@ -17,8 +20,11 @@
     "@babylonjs/inspector": "^9.1.0",
     "@babylonjs/materials": "^9.1.0",
     "@babylonjs/serializers": "^9.1.0",
+    "@fails-components/webtransport": "^1.6.7",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.7",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "gltf-validator": "^2.0.0-dev.3.10",
+    "happy-dom": "^20.11.2",
     "typescript": "~6.0.2",
     "vite": "^8.0.4",
     "vitest": "^4.1.2"

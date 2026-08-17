@@ -41,9 +41,16 @@ def find_maps_dir():
     Map data is gitignored, so a taskherd clone has none of its own while the
     checkout it was cloned from does — the same situation regions_from_map.py's
     "anchor on the MAP dir" comment describes.
+
+    ⚠ `MS_MAPS_DIR` is checked FIRST, and the order is the whole point. A lane
+    clone that has generated even one map has a `data/maps` of its own — it
+    just holds the terragen maps and not the external ones this matrix targets
+    — so a local-first order made the override unreachable in exactly the case
+    it exists for, and the matrix failed with "scorched_crossing_v2.4 is
+    missing" however the variable was set.
     """
-    for cand in (os.path.join(REPO, "data", "maps"),
-                 os.environ.get("MS_MAPS_DIR", "")):
+    for cand in (os.environ.get("MS_MAPS_DIR", ""),
+                 os.path.join(REPO, "data", "maps")):
         if cand and os.path.isdir(cand):
             return cand
     try:
@@ -102,10 +109,11 @@ def write_map(root: str, name: str, heights, regions) -> str:
     return d
 
 
-def grid_regions(cols: int, rows: int, home_cells, wall_between=None):
+def grid_regions(cols: int, rows: int, home_cells, wall_between=None,
+                 elmos: int = ELMOS):
     """A `cols` x `rows` lattice of rectangular regions, 4-connected."""
     out = []
-    cw, ch = ELMOS // cols, ELMOS // rows
+    cw, ch = elmos // cols, elmos // rows
     for rz in range(rows):
         for cx in range(cols):
             i = rz * cols + cx
@@ -136,6 +144,25 @@ def flat_map(root, name="synth_flat"):
     heights = [10.0] * (SAMPLES * SAMPLES)
     return write_map(root, name, heights,
                      grid_regions(4, 4, {(0, 0), (3, 3)}))
+
+
+# A town needs roughly 1500 elmos of ground across (`scenariogen.TOWN_RADII`
+# bottoms out at 648, and a town is two radii wide), so `flat_map`'s 1024-elmo
+# square with its 256-elmo cells cannot hold one at any radius — every region
+# refuses with "offmap". That is correct behaviour and it is also why the town
+# path needs a bigger synthetic map of its own: without one the golden fixture
+# carries no `towns` and no `civilians` block, and test_scenario_discovery.cpp —
+# the ONLY place a generated file's Lua purity is actually proved against the
+# lobby's bare lua_State — would never see either.
+WIDE_SAMPLES = 513                 # 512 * 8 = 4096 elmos square
+WIDE_ELMOS = (WIDE_SAMPLES - 1) * 8
+
+
+def wide_flat_map(root, name="synth_wide"):
+    """Four times `flat_map` across: big enough that a region can hold a town."""
+    heights = [10.0] * (WIDE_SAMPLES * WIDE_SAMPLES)
+    return write_map(root, name, heights,
+                     grid_regions(3, 3, {(0, 0), (2, 2)}, elmos=WIDE_ELMOS))
 
 
 def walled_map(root, name="synth_walled"):
@@ -325,6 +352,10 @@ class TestGeneratorOnSyntheticMaps(unittest.TestCase):
         The region graph in this fixture still declares the two halves adjacent,
         so a generator that verified connectivity on the graph would sail
         through. Only the passability mask sees the wall.
+
+        Note the bare call: no mode is passed, and it still refuses. That is the
+        default under test as much as the gate is — see
+        `test_the_gate_is_kept_by_default_not_by_opting_in`.
         """
         with SyntheticMap(walled_map, "synth_walled") as d:
             with self.assertRaises(sg.Rejected) as cm:
@@ -427,6 +458,329 @@ class TestGeneratorOnSyntheticMaps(unittest.TestCase):
         self.assertGreaterEqual(meta["hold_frames"], sg.DEFAULT_VICTORY_HOLD_FRAMES)
 
 
+class TestPlannedTowns(unittest.TestCase):
+    """The `town` cluster kind goes through the town planner (T4).
+
+    Everything here is measured on `wide_flat_map`, because `flat_map`'s
+    1024-elmo square cannot hold a town at any radius — which is itself the
+    first thing asserted, since "the planner quietly did nothing" and "this map
+    has no room" are the same output with different meanings.
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def wide(self, seed=11):
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
+            return sg.generate(d, seed=seed, game_dir=GAME_DIR)
+
+    def test_a_map_with_room_gets_planned_towns(self):
+        _lua, meta = self.wide()
+        self.assertTrue(meta["towns"], "no town planned on a 4 km flat map")
+        for t in meta["towns"]:
+            self.assertGreaterEqual(t["lots"], 5)
+            self.assertGreaterEqual(t["buildings"], 1)
+            self.assertGreater(t["civilians"], 0)
+
+    def test_a_map_with_no_room_falls_back_and_says_why(self):
+        """The scatter is the FALLBACK, not a failure — but a silent one would
+        be indistinguishable from a broken toolchain."""
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            _lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR)
+        self.assertEqual([], meta["towns"])
+        self.assertTrue(meta["town_refusals"])
+        for key, why in meta["town_refusals"]:
+            self.assertTrue(key and why)
+        # ...and the map still gets its towns, as scattered clusters.
+        self.assertTrue(any(k == "town" for k, _r, _o in meta["clusters"]))
+
+    def test_a_towns_key_is_its_regions_key(self):
+        """The whole reason a town needs no second namespace."""
+        _lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertEqual(t["key"], t["region"])
+        cluster_regions = {r for k, r, _o in meta["clusters"] if k == "town"}
+        for t in meta["towns"]:
+            self.assertIn(t["key"], cluster_regions)
+
+    def test_every_town_has_exactly_one_meeting_hall(self):
+        """`unique` is a contract the parley venue rests on."""
+        _lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertIsNotNone(t["hall"], f"{t['key']} has no parley venue")
+        lua = self.wide()[0]
+        self.assertEqual(len(meta["towns"]), lua.count("            hall = {"))
+
+    def test_the_hall_is_a_unit_the_scenario_actually_stages(self):
+        """The gadget resolves the venue by looking for that def at that spot;
+        a hall the `units` block never staged resolves to nothing, and the town
+        then negotiates exactly as if its hall had been destroyed."""
+        lua, meta = self.wide()
+        units = parse_units(lua)
+        for t in meta["towns"]:
+            hall = t["hall"]
+            self.assertTrue(
+                any(u["def"] == hall["def"] and u["x"] == hall["x"]
+                    and u["z"] == hall["z"] for u in units),
+                f"{t['key']}'s hall is not in the units block")
+
+    def test_a_planned_town_is_always_the_estates_however_hostile_the_knob(self):
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
+            _lua, meta = sg.generate(d, seed=11, hostility="hostile",
+                                     game_dir=GAME_DIR)
+        town_keys = {t["key"] for t in meta["towns"]}
+        self.assertTrue(town_keys)
+        for kind, key, owner in meta["clusters"]:
+            if key in town_keys:
+                self.assertEqual("neutral", owner)
+
+    def test_the_town_region_is_named_after_the_town_and_given_no_team(self):
+        lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertIn(
+                f"{{ key = '{t['key']}', name = '{t['name']}', "
+                f"x = {t['x']}, z = {t['z']} }},", lua)
+        # ...and never with a team, which would silently reassign the region.
+        for line in lua.splitlines():
+            if "name = '" in line and "key = '" in line:
+                self.assertNotIn("team =", line)
+
+    def test_civilians_go_on_the_civilians_wire_and_buildings_do_not(self):
+        """Two wires, and swapping either way is a real bug: a building in the
+        civilians block is enrolled in a CMD_MOVE it can never satisfy, and a
+        civilian in `units` is invisible to the registry every objective and the
+        estate read."""
+        lua, meta = self.wide()
+        civ_block = lua.split("civilians = {")[1].split("objectives = {")[0]
+        buildings = {"ms_habitat", "ms_depot", "ms_transit_hub"}
+        for name in buildings:
+            self.assertNotIn(f"def = '{name}'", civ_block)
+        people = {"ms_civilians", "ms_militia", "ms_civtruck", "ms_civbus"}
+        self.assertTrue(any(f"def = '{n}'" in civ_block for n in people))
+
+        # Scoped to the PLANNED towns. `place_cluster`'s own town/mine clusters
+        # legitimately put ms_civilians in `units` — that path predates the
+        # registry and is the metalstorm-scenario lane's, untouched here. What
+        # must not happen is a PLANNED town's residents going down that wire,
+        # where the estate and every objective query are blind to them.
+        #
+        # NEUTRAL entries only, and that qualifier is load-bearing rather than a
+        # loophole. A town's residents are Gaia's — `populate_town` has no other
+        # owner to give them — so "a resident leaked onto the `units` wire" is
+        # always a NEUTRAL civilian def standing in the town. A HOSTILE one is a
+        # different animal with a different owner: §M4 relic guardians are
+        # ms_militia on a hostile team, and `_rank_regions` deliberately lets a
+        # relic share an already-occupied region ("a township WITH a grain silo
+        # is the normal arrangement"), so a guard band squatting in a town's
+        # outskirts is that lane's intended output, not this lane's leak.
+        # Matching on the def name alone cannot tell the two apart — militia
+        # serve both roles — so it is the team that decides.
+        for t in meta["towns"]:
+            for e in parse_units(lua):
+                if e["def"] not in people or e["team"] != "neutral":
+                    continue
+                d = math.hypot(e["x"] - t["x"], e["z"] - t["z"])
+                self.assertGreater(
+                    d, t["radius"],
+                    f"a civilian was staged through `units` inside {t['key']}")
+
+    def test_every_civilian_names_a_declared_town(self):
+        """The loader rejects one that does not; catching it here is cheaper
+        than at GameStart."""
+        lua, meta = self.wide()
+        declared = {t["key"] for t in meta["towns"]}
+        found = 0
+        for m in re.finditer(r"town = '([^']+)' \}", lua):
+            found += 1
+            self.assertIn(m.group(1), declared)
+        self.assertEqual(found, meta["civilians"])
+
+    def test_town_buildings_carry_a_real_facing(self):
+        """A town's buildings FRONT THEIR STREET. All-south would mean the
+        planner's facings were dropped somewhere between the stager and emit —
+        and the engine derives the blocked footprint from the facing, so the
+        clearance gates would then be grading the wrong rectangles."""
+        lua, meta = self.wide()
+        if not meta["towns"]:
+            self.skipTest("no town planned")
+        facings = {u["facing"] for u in parse_units(lua)
+                   if u.get("team") == "neutral"}
+        self.assertGreater(len(facings), 1, facings)
+
+    def test_towns_differ_across_seeds(self):
+        shapes = []
+        for seed in (11, 12, 13):
+            _lua, meta = self.wide(seed)
+            shapes.append(tuple((t["archetype"], t["defense"], t["lots"],
+                                 t["civilians"]) for t in meta["towns"]))
+        self.assertEqual(len(set(shapes)), len(shapes),
+                         "three seeds produced the same towns")
+
+    def test_the_same_seed_reproduces_the_same_towns(self):
+        a, ma = self.wide()
+        b, mb = self.wide()
+        self.assertEqual(a, b)
+        self.assertEqual(ma["towns"], mb["towns"])
+
+class TestInvariant5IsConditionalOnAudience(unittest.TestCase):
+    """Invariant 5's mutual-reachability half applies to TEST scenarios only.
+
+    The ruling this encodes: a map whose landing zones lie in different
+    components of the passability mask is a LEGITIMATE map — islands, a river,
+    a strait — and the crossing is a transport problem. It is a defect only for
+    a scenario generated to be run by MACHINES, where two armies that cannot
+    meet make a headless war that never resolves and nobody is watching.
+
+    Two things this suite is careful about, because both are how the gate could
+    rot into a rubber stamp from the other direction:
+
+      * the DEFAULT must be the strict mode, so an automated caller keeps the
+        gate without knowing it exists;
+      * the refusals that no transport fixes must survive BOTH modes.
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_the_gate_is_kept_by_default_not_by_opting_in(self):
+        """The signature default, asserted directly.
+
+        `test_a_map_split_by_a_cliff_is_REJECTED` proves the bare call refuses;
+        this proves WHY, so a future edit that flips the default is caught here
+        with a message about the default rather than there with a message about
+        a cliff.
+        """
+        import inspect
+        sig = inspect.signature(sg.generate)
+        self.assertIs(sig.parameters["test_scenario"].default, True,
+                      "a test scenario that generates WITHOUT the gate is worse "
+                      "than one that refuses: the refusal is visible, the "
+                      "stalemate is not")
+        self.assertIs(
+            inspect.signature(sg.gate_reachability).parameters["mutual"].default,
+            True)
+        self.assertIs(
+            inspect.signature(
+                sg.gate_blocking_features_leave_the_war_fightable
+            ).parameters["mutual"].default, True)
+
+    def test_the_same_split_map_generates_for_a_player(self):
+        """The whole point. Same fixture, same seed, opposite outcome."""
+        with SyntheticMap(walled_map, "synth_walled") as d:
+            with self.assertRaises(sg.Rejected):
+                sg.generate(d, seed=11, game_dir=GAME_DIR)
+            lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+        self.assertEqual(count_victory_flags(lua), 1)
+        self.assertIs(meta["test_scenario"], False)
+        self.assertIs(meta["mutually_reachable"], False)
+
+    def test_the_player_file_does_not_claim_a_reachability_it_never_checked(self):
+        """The emitted header is the first thing a reader trusts."""
+        with SyntheticMap(walled_map, "synth_walled") as d:
+            player, _ = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            test, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
+        self.assertIn("mutually", test)
+        self.assertIn("PLAYER SCENARIO", player)
+        self.assertNotIn("are mutually\n-- reachable", player)
+        self.assertIn("--player", player,
+                      "the reproduce line must carry the mode, or following it "
+                      "prints a refusal instead of this file")
+
+    def test_a_connected_map_generates_identically_in_both_modes(self):
+        """`want_comp` is dropped, not weakened.
+
+        On a map with one component the constraint it imposed was vacuous, so
+        the player path must not perturb a single placement. If this ever
+        fails, the player path has started making different choices rather than
+        merely refusing less — and every existing golden fixture is downstream
+        of that.
+        """
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            strict, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
+            relaxed, _ = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                     test_scenario=False)
+        # Only the header prose may differ.
+        self.assertEqual(strict[strict.index("return {"):],
+                         relaxed[relaxed.index("return {"):])
+
+    def test_a_point_on_impassable_ground_is_refused_in_BOTH_modes(self):
+        """No transport fixes a position nothing can stand on.
+
+        `component_at` snaps to the nearest passable sample within 64 samples
+        (regions_from_map._nearest_passable_component), because a start pad may
+        legitimately sit one sample off a cliff edge. So `component -1` means
+        no passable ground within 512 elmos in any direction — that is what has
+        to be built here, not merely a point on a ridge.
+        """
+        with SyntheticMap(flat_map, "synth_buried") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        buried = (3 * span) // 4
+        smothered = terrain.blocked_copy(
+            [(buried - 900, mid - 900, buried + 900, mid + 900)])
+        points = [("west", 200, mid), ("buried east", buried, mid)]
+        # The bare map is fine in both modes — it is the stamp that buries it.
+        sg.gate_reachability(terrain, points, "synth", mutual=True)
+        for mutual in (True, False):
+            with self.subTest(mutual=mutual):
+                with self.assertRaises(sg.Rejected) as cm:
+                    sg.gate_reachability(smothered, points, "synth",
+                                         mutual=mutual)
+                self.assertIn("not on passable ground", str(cm.exception))
+                self.assertIn("buried east", str(cm.exception))
+
+    def test_the_wreck_gate_still_refuses_a_side_stranded_by_scenery(self):
+        """Decoration may not decide the war — on the player path too.
+
+        The two points here share a component of the BARE map, so a wreck field
+        that separates them took something away. That is the Meridian defect
+        made of scenery, and it is refused in both modes.
+        """
+        with SyntheticMap(flat_map, "wreckgate_player") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        wall = [(mid - 40, z, mid + 40, z + 200) for z in range(0, span, 200)]
+        points = [("west", 200, mid), ("east", span - 200, mid)]
+        sg.gate_reachability(terrain, points, "synth", mutual=False)   # passes bare
+        with self.assertRaises(sg.Rejected) as cm:
+            sg.gate_blocking_features_leave_the_war_fightable(
+                terrain, wall, points, "synth", mutual=False)
+        self.assertIn("unfightable", str(cm.exception))
+
+    def test_the_wreck_gate_does_not_blame_scenery_for_the_sea(self):
+        """The other half of the player-path ruling, and the reason it is not
+        just the strict gate again.
+
+        On a map already split, a wreck field on one side has not severed
+        anything: the two points were in different components before it was
+        placed. Refusing here would be the generator blaming decoration for the
+        map — which is what a naive re-run of the strict gate does, so this is
+        also the test that the two modes are genuinely different code paths.
+        """
+        with SyntheticMap(walled_map, "wreckgate_split") as d:
+            terrain, _ = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        points = [("west landing", 400, mid), ("east landing", span - 400, mid)]
+        # A few wrecks well clear of either point, on the western half.
+        wrecks = [(1200, mid - 300 + 200 * i, 1400, mid - 100 + 200 * i)
+                  for i in range(3)]
+        # Strict mode refuses this map at all — that is the map, not the wrecks.
+        with self.assertRaises(sg.Rejected):
+            sg.gate_blocking_features_leave_the_war_fightable(
+                terrain, wrecks, points, "synth", mutual=True)
+        # Player mode lets it through: nothing was taken away.
+        sg.gate_blocking_features_leave_the_war_fightable(
+            terrain, wrecks, points, "synth", mutual=False)
+
+
 class TestGoldenFixture(unittest.TestCase):
     """tests/fixtures/generated_scenario.lua must still be what the generator emits.
 
@@ -447,7 +801,7 @@ class TestGoldenFixture(unittest.TestCase):
             self.skipTest(f"no game content at {GAME_DIR}")
 
     def test_fixture_matches_a_fresh_generation(self):
-        with SyntheticMap(flat_map, "synth_flat") as d:
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
             lua, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
         with open(self.FIXTURE, encoding="utf-8") as f:
             on_disk = f.read()
@@ -456,6 +810,22 @@ class TestGoldenFixture(unittest.TestCase):
             "tests/fixtures/generated_scenario.lua is stale. Regenerate it:\n"
             "  python3 tools/mapgen/tests/regen_fixture.py\n"
             "and re-check what tests/test_scenario_discovery.cpp asserts about it.")
+
+    def test_the_fixture_carries_a_planned_town(self):
+        """...so the C++ purity test actually sees the blocks a town adds.
+
+        The fixture moved off `flat_map` (1024 elmos, no region big enough for a
+        town) onto `wide_flat_map` for exactly this: `towns` and `civilians` are
+        new syntax, and test_scenario_discovery.cpp running the file through the
+        lobby's bare `lua_State` is the ONLY place their purity is proved. A
+        fixture with no town would leave that unproved and look fine.
+        """
+        with open(self.FIXTURE, encoding="utf-8") as f:
+            on_disk = f.read()
+        self.assertIn("    towns = {", on_disk)
+        self.assertIn("    civilians = {", on_disk)
+        self.assertIn("role = 'ambient'", on_disk)
+        self.assertIn("hall = {", on_disk)
 
 
 class TestEmittedFileIsPureLua(unittest.TestCase):
@@ -617,6 +987,12 @@ def parse_units(lua: str) -> list[dict]:
              "x": int(m.group(3)), "z": int(m.group(4))}
         c = re.search(r"count\s*=\s*(\d+)", rest)
         s = re.search(r"spacing\s*=\s*(\d+)", rest)
+        f = re.search(r"facing\s*=\s*'([a-z]+)'", rest)
+        # A planned town's buildings FRONT THEIR STREET, so `facing` stopped
+        # being the constant 'south' every scattered cluster emits — and the
+        # engine derives the blocked footprint from it (Unit.cpp:224-225), so a
+        # test grading placement has to be able to see it.
+        e["facing"] = f.group(1) if f else None
         if c:
             e["count"] = int(c.group(1))
         if s:
@@ -641,7 +1017,8 @@ def parse_features(lua: str) -> list[dict]:
         rest = m.group("rest")
         e = {"def": m.group(1), "x": int(m.group(2)), "z": int(m.group(3))}
         for key, pat in (("y", r"\by\s*=\s*(-?\d+)"),
-                         ("chain", r"\bchain\s*=\s*(\d+)")):
+                         ("chain", r"\bchain\s*=\s*(\d+)"),
+                         ("heading", r"\bheading\s*=\s*(-?\d+)")):
             hit = re.search(pat, rest)
             if hit:
                 e[key] = int(hit.group(1))
@@ -878,6 +1255,245 @@ class TestFeatureDefsAreReal(unittest.TestCase):
         self.assertEqual(fdefs["ms_tank_wreck"], (4, 5))
         self.assertEqual(sg.feature_half_extent(fdefs, "ms_tank_wreck"),
                          (32, 40))
+
+
+class TestFullCoverageTemplates(unittest.TestCase):
+    """The coverage claim's half that needs no map: can the templates even
+    NAME every def?
+
+    Separated from the generated-war test on purpose. "No template mentions
+    ms_comms_relay" and "the war that ran did not happen to place one" are
+    different defects with different fixes, and a single test that only ever
+    generates cannot tell you which you have — nor can it run at all in a
+    checkout with no map data, which is every fresh clone (data/maps is
+    gitignored).
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+        self.facts = ms_defs.load(GAME_DIR)
+
+    def _nameable(self):
+        from scenario_templates import SITE_TEMPLATES
+        named = {d for tpl in CLUSTER_TEMPLATES.values()
+                 for d, _w, _lo, _hi in tpl["buildings"] + tpl["garrison"]}
+        named |= {d for roster in ARMY_ROSTERS.values() for d, _c, _s in roster}
+        named |= set(SITE_TEMPLATES)
+        # The town planner names its own defs out of town_templates.py rather
+        # than out of CLUSTER_TEMPLATES, so its roster has to be asked
+        # separately or the six shanty defs read as uncovered.
+        import town_templates as tt
+        named |= set(tt.role_options(self.facts).get("_all", []))
+        for role, spec in tt.LOT_ROLES.items():
+            named |= set(spec["defs"])
+        for spec in tt.POPULACE.values():
+            named |= {d for d, _w in spec["defs"]}
+        return named
+
+    def test_every_shipped_def_is_nameable_by_some_template(self):
+        """The directive's real target: no def is placeable by nothing.
+
+        This is the check that would have caught the original gap — eleven
+        buildings (the buildings_support.lua tail plus the naval yard) that no
+        cluster, site or roster mentioned, so no generated war could ever
+        contain one however it was seeded.
+        """
+        missing = sorted(set(self.facts) - self._nameable())
+        self.assertEqual(missing, [],
+                         "these shipped defs are named by no template, so no "
+                         "generated war can ever stage one")
+
+    def test_full_roster_fields_every_mobile_def(self):
+        mobile = {n for n, f in self.facts.items() if not f.building}
+        full = {d for d, _c, _s in ARMY_ROSTERS["full"]}
+        self.assertEqual(sorted(mobile - full), [],
+                         "the `full` roster is meant to be every mobile def")
+
+    def test_full_roster_reaches_all_three_movement_classes(self):
+        """Invariant 5 grades every mask a roster contains, so the roster has
+        to contain them: a coverage war graded on VEH alone would reproduce the
+        Meridian failure for the HEAVY and INFANTRY halves of its own army."""
+        classes = {self.facts[d].movementclass
+                   for d, _c, _s in ARMY_ROSTERS["full"]
+                   if self.facts[d].movementclass}
+        self.assertEqual(classes, {"VEH", "HEAVY", "INFANTRY"})
+
+    def test_full_roster_carries_no_naval_def(self):
+        """The constraint that was expected to bite and does not.
+
+        ms_defs.load() deliberately excludes ships/subs/transports (its own
+        docstring: the naval classes are not scenario-generator content), so
+        there is no def in the catalog the placer could be asked to beach. If
+        that ever changes, THIS is the test that should fail first — quietly
+        acquiring a SHIP-class roster entry would turn every landing zone
+        without a berth into a generation refusal.
+        """
+        for d, _c, _s in ARMY_ROSTERS["full"]:
+            self.assertNotEqual(self.facts[d].movementclass, "SHIP", d)
+
+    def test_standard_and_light_rosters_are_untouched(self):
+        """Existing wars and tests depend on these two exactly as they are."""
+        self.assertEqual([d for d, _c, _s in ARMY_ROSTERS["standard"]],
+                         ["ms_tanks_s2", "ms_tanks_s3", "ms_soldiers_s1",
+                          "ms_artillery_s2", "ms_engineers_s1",
+                          "ms_scout_buggy", "ms_supply_truck", "ms_radar_s1"])
+        self.assertEqual([d for d, _c, _s in ARMY_ROSTERS["light"]],
+                         ["ms_tanks_s1", "ms_soldiers_s1", "ms_engineers_s1"])
+
+    def test_coverage_overrides_only_ever_raise_a_minimum(self):
+        """A coverage war must be a SUPERSET of an ordinary one.
+
+        An override that lowered a min would make the harness stage fewer of
+        something than the wars it is supposed to be covering, which is the one
+        way a coverage preset can be actively misleading.
+        """
+        from scenario_templates import COVERAGE_MIN_OVERRIDES
+        for kind, overrides in COVERAGE_MIN_OVERRIDES.items():
+            tpl = CLUSTER_TEMPLATES[kind]
+            mins = {d: lo for d, _w, lo, _hi in tpl["buildings"]}
+            for defname, want in overrides.items():
+                self.assertIn(defname, mins,
+                              f"{kind} has no {defname} to override")
+                self.assertGreaterEqual(want, mins[defname],
+                                        f"{kind}/{defname} override lowers a minimum")
+
+
+class TestFullCoverageWar(unittest.TestCase):
+    """The generated article: a `--coverage` war really does contain one of
+    everything, and its objectives are not all `control`.
+
+    techno_lands is the target because it is the shipped map with the widest
+    region budget that also plans towns — coverage needs one free region per
+    cluster kind on top of the sites and relics, and a township needs ground
+    flat enough for streets. meridian_basin plans no towns at any seed (its
+    scarps refuse every candidate), which is a property of that map and is why
+    it is not used here.
+    """
+
+    MAP = "techno_lands_final_2.60_wide"
+    SEEDS = (11, 23, 42)
+
+    def setUp(self):
+        if MAPS_DIR is None:
+            self.skipTest("no data/maps/ reachable (it is gitignored); "
+                          "set MS_MAPS_DIR to run the coverage matrix")
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+        self.d = os.path.join(MAPS_DIR, self.MAP)
+        if not os.path.isdir(self.d):
+            self.skipTest(f"{self.MAP} is missing from {MAPS_DIR}")
+        self.facts = ms_defs.load(GAME_DIR)
+
+    def _gen(self, seed):
+        return sg.generate(self.d, seed=seed, game_dir=GAME_DIR,
+                           coverage=True, test_scenario=False)
+
+    def test_every_def_is_staged_and_every_side_fields_every_mobile_def(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _lua, meta = self._gen(seed)
+                self.assertEqual(meta["uncovered_defs"], [])
+                self.assertEqual(meta["staged_def_count"],
+                                 meta["catalog_def_count"])
+                mobile = {n for n, f in self.facts.items() if not f.building}
+                for team, defs in meta["per_side_defs"].items():
+                    self.assertEqual(sorted(mobile - set(defs)), [],
+                                     f"side {team} is missing mobile defs")
+
+    def test_an_ordinary_war_covers_far_less_which_is_the_whole_point(self):
+        """The control. If a default war already staged all 67 defs the
+        coverage machinery would be dead weight, and this number is the
+        measurement that says it is not — 24 of 67 on this map at this seed.
+        """
+        _lua, plain = sg.generate(self.d, seed=11, game_dir=GAME_DIR,
+                                  test_scenario=False)
+        _lua, cov = self._gen(11)
+        self.assertLess(plain["staged_def_count"], cov["staged_def_count"])
+        self.assertFalse(plain["coverage"])
+        self.assertTrue(cov["coverage"])
+
+    def test_objectives_span_more_than_control(self):
+        """The other half of the directive. Three types, and exactly one of
+        them terminal."""
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                lua, _meta = self._gen(seed)
+                types = set(re.findall(r"\{ type = '(\w+)'", code_only(lua)))
+                self.assertIn("control", types)
+                self.assertIn("protect", types)
+                self.assertIn("extract", types)
+                self.assertEqual(count_victory_flags(lua), 1,
+                                 "exactly one terminal objective, or the war "
+                                 "cannot end")
+
+    def test_the_non_control_objectives_carry_the_params_their_type_needs(self):
+        """Each type module validates its own params and REFUSES at create
+        time otherwise — and a refused objective is silent, so a generated war
+        can ship with objectives that never exist. protect additionally
+        requires expiresAtFrame (protect.init has no other way to resolve).
+        """
+        lua, _meta = self._gen(11)
+        body = code_only(lua)
+        for block in re.findall(r"\{ type = 'protect'.*?\n(?=\s*(?:\{|--|\}))",
+                                body, re.S):
+            self.assertIn("targetUnitIDs", block)
+            self.assertIn("_populateTargetsFrom", block)
+            self.assertIn("role = 'ambient'", block)
+            self.assertRegex(block, r"expiresAtFrame = \d+")
+        for block in re.findall(r"\{ type = 'extract'.*?\n(?=\s*(?:\{|--|\}))",
+                                body, re.S):
+            for key in ("payloadUnitIDs", "pickupArea", "extractArea",
+                        "holdFrames", "threshold", "_populatePayloadFrom"):
+                self.assertIn(key, block)
+
+    def test_a_coverage_war_has_a_civilian_town_with_people_in_it(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _lua, meta = self._gen(seed)
+                self.assertTrue(meta["towns"], "no planned township")
+                self.assertGreater(meta["civilians"], 0)
+
+    def test_the_coverage_gate_refuses_rather_than_shipping_a_gap(self):
+        """The negative control, and the reason the gate exists at all.
+
+        Every layer under it is best-effort — place_cluster drops a building it
+        cannot site and says nothing — so without the gate an incomplete
+        coverage war is indistinguishable from a complete one. A map too small
+        to hold the cluster set must therefore REFUSE, not thin out.
+        """
+        with SyntheticMap(flat_map, "synth_cov") as d:
+            with self.assertRaises(sg.Rejected):
+                sg.generate(d, seed=11, game_dir=GAME_DIR, coverage=True,
+                            test_scenario=False)
+            # ...while the SAME map still generates an ordinary war. Both halves
+            # matter: a refusal that also broke the default path would not be a
+            # coverage gate, it would be a map the generator had stopped
+            # supporting.
+            lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                    test_scenario=False)
+            self.assertEqual(count_victory_flags(lua), 1)
+            self.assertFalse(meta["coverage"])
+
+    def test_the_gate_names_the_defs_that_are_missing(self):
+        """A refusal a reader can act on. `flat_map` is 1024 elmos square and
+        cannot hold the cluster set, so it is a reliable producer of shortfall
+        — but it can refuse for several reasons, so this asserts the message
+        shape rather than one particular seed's list."""
+        with SyntheticMap(wide_flat_map, "synth_cov_wide") as d:
+            try:
+                sg.generate(d, seed=11, game_dir=GAME_DIR, coverage=True,
+                            test_scenario=False)
+            except sg.Rejected as e:
+                if "--coverage asked for" in str(e):
+                    self.assertRegex(str(e), r"(stages none of|fields none of|"
+                                             r"no planned township)")
+
+    def test_coverage_is_deterministic(self):
+        """Invariant 4 still holds with the preset on."""
+        a, _ = self._gen(11)
+        b, _ = self._gen(11)
+        self.assertEqual(a, b)
 
 
 if __name__ == "__main__":

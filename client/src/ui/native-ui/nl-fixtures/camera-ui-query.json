@@ -1,0 +1,350 @@
+{
+  "_comment": "Golden fixtures for M3's LOCAL verbs — camera, panels and LOS-honest queries (PLAN-metalstorm-command-language.md §6.2-§6.4). Every fixture here sets `ports: true`, so it runs against the REAL CameraPort (over a recording worker channel), the REAL UiActionRegistry and the REAL QueryEngine. The M1 fixtures in groups-ui-query.json keep running the same kinds with NO ports, which is still a live configuration and still has to refuse by name — the two files cover the two states.",
+
+  "_los": "The LOS-honesty fixtures are the point of this file. A context makes an enemy exist OUT of LOS by leaving it out of `visible` — there is no visible:false flag, because the real mirror has no such thing. `enemy-out-of-los` and `enemy-in-los` differ ONLY in that one list, so the pair proves the answer tracks vision rather than the question.",
+
+  "fixtures": [
+    {
+      "name": "zoom to a region moves the camera there",
+      "utterance": "zoom to Northgate",
+      "context": "basin",
+      "ports": true,
+      "expected": {
+        "say": "Camera to Northgate.",
+        "actions": [{ "kind": "camera", "camera": { "op": "focus", "targetRef": "Northgate" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:2000,500"],
+        "saysLike": ["camera on Northgate"]
+      }
+    },
+
+    {
+      "name": "zoom to a grid sector — the M2 sector names, addressed by camera",
+      "utterance": "zoom to sector B9",
+      "context": "basin",
+      "ports": true,
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "focus", "targetRef": "Sector B9" } }]
+      },
+      "expect": { "sends": [], "camera": ["focusOn:800,900"] }
+    },
+
+    {
+      "name": "a camera target that resolves to nothing refuses — it does not frame the origin",
+      "utterance": "zoom to Atlantis",
+      "context": "basin",
+      "ports": true,
+      "note": "The failure mode this replaced: the M1 port signature returned void, so the executor printed 'camera on Atlantis' for a name nothing resolved. A port that can fail has to be able to say so.",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "focus", "targetRef": "Atlantis" } }]
+      },
+      "expect": { "sends": [], "camera": [], "refusals": 1, "saysLike": ["I don't know a place or force called \"Atlantis\""] }
+    },
+
+    {
+      "name": "an ambiguous camera target still asks",
+      "utterance": "zoom to Rand",
+      "context": "ambiguous-places",
+      "ports": true,
+      "note": "Camera resolution is non-strict (score dominance is enough — framing the wrong hill costs a keystroke, not the line), but a genuine tie is still a question. 'Rand' ties at the prefix tier.",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "focus", "targetRef": "Rand" } }]
+      },
+      "expect": { "sends": [], "camera": [], "clarifies": true }
+    },
+
+    {
+      "name": "the whole map",
+      "utterance": "show me the whole map",
+      "context": "basin",
+      "ports": true,
+      "expected": { "actions": [{ "kind": "camera", "camera": { "op": "fitMap" } }] },
+      "expect": { "sends": [], "camera": ["fitMap"], "saysLike": ["whole map"] }
+    },
+
+    {
+      "name": "zoom in scales the CURRENT distance",
+      "utterance": "zoom in",
+      "context": "basin",
+      "ports": true,
+      "note": "The worker exposes an absolute orbit distance, not a step, so the port reads the live pose and scales it. The fixture pose sits ~1131 elmos out; one step in is 0.6× that.",
+      "expected": { "actions": [{ "kind": "camera", "camera": { "op": "zoom", "dir": "in" } }] },
+      "expect": { "sends": [], "camera": ["orbit:679"], "saysLike": ["zoomed in"] }
+    },
+
+    {
+      "name": "follow a squad tracks its centroid",
+      "utterance": "follow Chimera Squad",
+      "context": "basin",
+      "ports": true,
+      "note": "The first frame is immediate — a follow that waited a tick before moving would look broken. Chimera's eight members are spread around (900, 1100).",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "follow", "targetRef": "Chimera Squad" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:912,1104"],
+        "following": "Chimera Squad",
+        "saysLike": ["following Chimera Squad", "move the camera yourself to stop"]
+      }
+    },
+
+    {
+      "name": "following a place says so instead of pretending to follow it",
+      "utterance": "follow Northgate",
+      "context": "basin",
+      "ports": true,
+      "note": "A region doesn't move. Saying 'following' would be a small lie that makes the camera look broken when it never moves again.",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "follow", "targetRef": "Northgate" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:2000,500"],
+        "following": null,
+        "saysLike": ["doesn't move"]
+      }
+    },
+
+    {
+      "name": "following a squad with nothing in the mirror refuses",
+      "utterance": "follow Chimera Squad",
+      "context": "no-census",
+      "ports": true,
+      "note": "No snapshot ⇒ no centroid ⇒ nothing to follow. Starting a follow that never moves the camera is indistinguishable from a broken one.",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "follow", "targetRef": "Chimera Squad" } }]
+      },
+      "expect": { "sends": [], "camera": [], "following": null, "refusals": 1, "saysLike": ["nothing to follow"] }
+    },
+
+    {
+      "name": "the minimap goes full screen",
+      "utterance": "show me the minimap, full screen",
+      "context": "basin",
+      "ports": true,
+      "note": "A plan §0 example utterance, and the one registry entry that HAS a full-screen mode. It changes the canvas size and nothing else — same scene, same ortho frustum, same team fog.",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "fullscreen", "panelId": "minimap" } }]
+      },
+      "expect": { "sends": [], "ui": ["fullscreen:minimap"], "saysLike": ["Minimap full screen"] }
+    },
+
+    {
+      "name": "\"full screen\" on a panel that has no such mode refuses by name",
+      "utterance": "show me the scoreboard full screen",
+      "context": "basin",
+      "ports": true,
+      "note": "Falling back to `open` would give the player a 236px rail panel for a sentence that asked for the opposite — the kind of lie that makes a voice interface feel broken.",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "fullscreen", "panelId": "scoreboard-panel" } }]
+      },
+      "expect": { "sends": [], "ui": [], "refusals": 1, "saysLike": ["no full-screen mode"] }
+    },
+
+    {
+      "name": "the diplomacy panel opens by alias",
+      "utterance": "open the diplomacy panel",
+      "context": "basin",
+      "ports": true,
+      "note": "`parley-panel` is what the manifest calls it and 'diplomacy panel' is what a player says. The alias lives in metalstorm.ui.json next to the title, not in a client-side table that would drift from it.",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "open", "panelId": "parley-panel" } }]
+      },
+      "expect": { "sends": [], "ui": ["open:parley-panel"], "saysLike": ["Parley open"] }
+    },
+
+    {
+      "name": "closing a panel reports it closed",
+      "utterance": "close the scoreboard",
+      "context": "basin",
+      "ports": true,
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "close", "panelId": "scoreboard-panel" } }]
+      },
+      "expect": { "sends": [], "ui": ["close:scoreboard-panel"], "saysLike": ["Scoreboard closed"] }
+    },
+
+    {
+      "name": "a panel nobody registered refuses instead of opening the nearest one",
+      "utterance": "open the pineapple panel",
+      "context": "basin",
+      "ports": true,
+      "note": "There is no fuzzy fallback in the registry. Opening the closest-sounding panel to a word the player didn't say is worse than admitting the miss.",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "open", "panelId": "pineapple" } }]
+      },
+      "expect": { "sends": [], "ui": [], "refusals": 1, "saysLike": ["don't have a panel called" ] }
+    },
+
+    {
+      "name": "how many tanks — counted from the mirror, joined on ms_class",
+      "utterance": "how many tanks do we have",
+      "context": "basin",
+      "ports": true,
+      "note": "19 tank-class units: Chimera 8 + Basilisk 6 + Warhound 5 (its two attached engineers are engineers, so they are NOT counted — a squad's dominant class picks the SQUAD, but a count counts units).",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "tanks", "side": "own" } }]
+      },
+      "expect": { "sends": [], "saysLike": ["You have 19 tanks"] }
+    },
+
+    {
+      "name": "how many HEAVY tanks — the scale narrows it",
+      "utterance": "how many heavy tanks do we have left?",
+      "context": "basin",
+      "ports": true,
+      "note": "A plan §0 example utterance. Chimera (8) + Basilisk (6) are ms_scale 3; Warhound is scale 2 and drops out.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "tanks", "scale": 3, "side": "own" } }]
+      },
+      "expect": { "sends": [], "saysLike": ["You have 14 heavy tanks"] }
+    },
+
+    {
+      "name": "a class you own none of answers zero, not an error",
+      "utterance": "how many ships do we have",
+      "context": "basin",
+      "ports": true,
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "ships", "side": "own" } }]
+      },
+      "expect": { "sends": [], "saysLike": ["You have no ships"] }
+    },
+
+    {
+      "name": "an enemy count is qualified by what is spotted",
+      "utterance": "how many enemy tanks are there",
+      "context": "enemy-in-los",
+      "ports": true,
+      "note": "\"3 enemy tanks in sight\" is true; \"the enemy has 3 tanks\" would be a guess dressed as a fact. The wording carries the difference.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "tanks", "side": "enemy" } }]
+      },
+      "expect": { "sends": [], "saysLike": ["3 enemy tanks are in sight", "only what's spotted right now"] }
+    },
+
+    {
+      "name": "LOS-HONESTY — an enemy that exists outside LOS is \"not currently spotted\"",
+      "utterance": "locate the enemy tanks",
+      "context": "enemy-out-of-los",
+      "ports": true,
+      "note": "THE pillar-3 fixture. The board HAS enemy tanks — `enemy-out-of-los` documents them — but they are not in `visible`, i.e. not in the player's filtered stream. The engine cannot see them because there is nothing unfiltered for it to read, and it must say 'not currently spotted' rather than 'you have none' or nothing at all. The camera must not move either: a camera that swung to an unspotted enemy would be the wallhack the words denied.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "enemy tanks", "side": "enemy" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": [],
+        "saysLike": ["Enemy tanks: not currently spotted"]
+      }
+    },
+
+    {
+      "name": "LOS-HONESTY, the other half — spotted enemies get a position",
+      "utterance": "locate the enemy tanks",
+      "context": "enemy-in-los",
+      "ports": true,
+      "note": "Identical utterance, identical board except that the enemy tanks ARE in `visible`. If this one didn't answer with a place, the fixture above would be passing for the wrong reason (a query engine that never finds anything).",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "enemy tanks", "side": "enemy" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:3000,3000"],
+        "saysLike": ["Enemy tanks: 3 near Slag Forge", "spotted now"]
+      }
+    },
+
+    {
+      "name": "where is my own squad — from the same mirror, with a region name",
+      "utterance": "where is Chimera Squad",
+      "context": "basin",
+      "ports": true,
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "Chimera Squad", "side": "own" } }]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:912,1104"],
+        "saysLike": ["Chimera Squad is near", "8 of 8 in sight"]
+      }
+    },
+
+    {
+      "name": "locating a place points the camera at it",
+      "utterance": "where is the Grain Silo",
+      "context": "basin",
+      "ports": true,
+      "note": "A place name is public knowledge — it arrived on the same rulesParams stream every client gets — so framing one reveals nothing that wasn't already shared.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "Grain Silo", "side": "own" } }]
+      },
+      "expect": { "sends": [], "camera": ["focusOn:1200,1800"], "saysLike": ["Grain Silo is near"] }
+    },
+
+    {
+      "name": "locating something that is neither a place nor a unit class refuses",
+      "utterance": "where is the enemy commander",
+      "context": "basin",
+      "ports": true,
+      "note": "'commander' is not in the shipped class vocabulary and no enemy-force producer exists yet, so there is nothing to resolve. The name refusal is the useful one — a vaguer 'I can't answer that' would hide which half failed.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "enemy commander", "side": "enemy" } }]
+      },
+      "expect": { "sends": [], "camera": [], "refusals": 1, "saysLike": ["don't know a place or force"] }
+    },
+
+    {
+      "name": "no census means no answer — never an answer of zero",
+      "utterance": "how many tanks do we have",
+      "context": "no-census",
+      "ports": true,
+      "note": "\"You have no tanks\" and \"I can't see your units right now\" are different claims and only one of them is true here. This is the assertion that keeps them apart.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "tanks", "side": "own" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["can't read your units right now"] }
+    },
+
+    {
+      "name": "authority, from the team rules params",
+      "utterance": "how much authority do we have",
+      "context": "basin-authority",
+      "ports": true,
+      "expected": { "actions": [{ "kind": "query", "query": { "op": "resources" } }] },
+      "expect": { "sends": [], "saysLike": ["you have 92 authority", "team pool holds 720"] }
+    },
+
+    {
+      "name": "objectives lists only the active ones",
+      "utterance": "what are we supposed to be doing",
+      "context": "basin-authority",
+      "ports": true,
+      "note": "A settled objective is not the answer to 'what now'. Objective 2 is complete and must not appear.",
+      "expected": { "actions": [{ "kind": "query", "query": { "op": "objectives" } }] },
+      "expect": { "sends": [], "saysLike": ["Hold Fallow Gate"] }
+    },
+
+    {
+      "name": "asking is never ordering, even in a multi-action envelope",
+      "utterance": "zoom to Northgate and tell me how many tanks we have",
+      "context": "basin",
+      "ports": true,
+      "note": "The one rule that has to hold across every kind in this file: nothing here reaches sendCommand. A camera move and a question are not orders and cost no authority.",
+      "expected": {
+        "actions": [
+          { "kind": "camera", "camera": { "op": "focus", "targetRef": "Northgate" } },
+          { "kind": "query", "query": { "op": "count", "class": "tanks", "side": "own" } }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "camera": ["focusOn:2000,500"],
+        "saysLike": ["camera on Northgate", "You have 19 tanks"]
+      }
+    }
+  ]
+}

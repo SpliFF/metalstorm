@@ -91,7 +91,9 @@ local function findNearestSafeRegion(x, z, gaiaTeam)
     return bestNeighbor
 end
 
---- Tick ambient civilians: idle wander between sites, flee combat regions.
+--- Tick ambient civilians: idle wander around home, flee combat regions.
+--- (Was "wander between sites" — see the WANDER branch for the town-scale
+--- migration that turned out to be.)
 function routines.tick(civ, frame)
     local gaiaTeam = civ.gaiaTeam
 
@@ -136,7 +138,26 @@ function routines.tick(civ, frame)
                 -- Unit is idle, give it a wander order
                 -- 50% chance to wander, to avoid constant movement
                 if math.random() < 0.5 then
-                    local site = findNearestSite(civ, x, z, data.site)
+                    -- AROUND HOME FIRST, and only then toward another site.
+                    --
+                    -- FOUND IN THE BROWSER (town-planner T4, generated
+                    -- scenario on techno_lands, frame ~7000): every civilian
+                    -- in two of the map's three towns had walked out of them
+                    -- and piled into the third. findNearestSite below returns
+                    -- the nearest site that is NOT this unit's own, which is a
+                    -- commute — harmless when a map's authored sites are a few
+                    -- hundred elmos apart, and a mass migration when they are
+                    -- TOWNS four kilometres apart. Two of three districts
+                    -- emptied themselves within four minutes of sim.
+                    --
+                    -- `homePos` is already the anchor the flee branch above
+                    -- walks a frightened civilian back to; using it here too
+                    -- makes "where this civilian lives" one fact with one
+                    -- meaning instead of two that disagree. The old
+                    -- between-sites walk stays as the fallback for population
+                    -- with no home recorded.
+                    local site = data.homePos
+                        or findNearestSite(civ, x, z, data.site)
                     if site then
                         -- Move to a random point near the site (not exactly at it)
                         local angle = math.random() * 2 * math.pi

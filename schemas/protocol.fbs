@@ -38,16 +38,24 @@ struct Vec3 {
 // ============================================================
 
 // First message on the game-server control stream (C1). The server enforces
-// protocol_version against its own CURRENT_PROTOCOL_VERSION and rejects a
-// mismatch (or a missing handshake) with AuthStatus.VersionMismatch before
-// honouring AuthRequest. The canonical version lives in two places that must
-// move together: Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h)
-// and PROTOCOL_VERSION (client/src/core/connection.ts). Bump on any breaking
-// change to this schema or the binary envelope formats; additive,
-// default-valued fields do not require a bump.
+// BOTH fields against its own copies and rejects a mismatch (or a missing
+// handshake) with AuthStatus.VersionMismatch before honouring AuthRequest.
+//
+// schema_hash is the real drift guard (PLAN-protocol-guard §2.2): sha256 of
+// the binary schema, emitted into both sides by scripts/regen-protocol.sh, so
+// any wire-visible change to THIS FILE rejects a stale cached bundle without
+// anyone remembering to bump anything. Never hand-edit either copy.
+//
+// protocol_version survives as a rare, manual epoch counter for the breaks the
+// schema text cannot see: the binary envelope framings (0x02-0x09) and a
+// semantic reinterpretation of an existing field. It lives in two places that
+// must move together — Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/
+// HandshakePolicy.h) and PROTOCOL_VERSION (client/src/core/protocol-version.ts).
+// A schema-visible change no longer needs it; the hash covers that.
 table Handshake {
     protocol_version: uint16;
     client_version: string;
+    schema_hash: string;        // sha256 of the .bfbs; see regen-protocol.sh
 }
 
 table AuthRequest {
@@ -596,6 +604,30 @@ table GameStarted {
 table GameRestarting {
 }
 
+/// Server → client: execute `code` in the browser (dev/test relay,
+/// PLAN-test-automation P7). `target` picks the executor:
+///   "worker"  — the render worker's global scope (same engine hooks as evalJs)
+///   "js"      — the main thread's global scope
+///   "widgets" — the in-worker LuaUI runtime via window.widgets.eval (Lua)
+///   "test"    — window.test harness expression on main
+/// A client that is not a DEV build (and lacks ?allowClientEval=1) answers
+/// success:false without evaluating anything.
+table ClientEvalRequest {
+    request_id: uint32;
+    target: string;
+    code: string;
+}
+
+/// Client → server reply to a ClientEvalRequest. Classified `Ignored` by
+/// SyncedInputJournal (ReplayControl precedent): never journaled, so a
+/// replay can never re-execute an eval; dropped on any server without a
+/// matching waiter.
+table ClientEvalResponse {
+    request_id: uint32;
+    success: bool;
+    output: string;
+}
+
 /// Response to a ConsoleCommand.
 table ConsoleResponse {
     request_id: uint32;
@@ -711,6 +743,7 @@ union ClientPayload {
     GroupDirectiveRemove,
     GroupPosture,
     ReplayControl,
+    ClientEvalResponse,
 }
 
 table ClientMessage {
@@ -2403,6 +2436,7 @@ union ServerPayload {
     RulesParamKeyDictionary,
     PlayerRoster,
     ReplayState,
+    ClientEvalRequest,
 }
 
 table ServerMessage {

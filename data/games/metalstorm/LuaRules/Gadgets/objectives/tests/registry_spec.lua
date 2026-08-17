@@ -292,6 +292,38 @@ describe("phase chaining (§4.7)", function()
         gadgetObj:UnitDestroyed(80, nil, 3, nil, nil, nil)   -- no attacker -> child expires, not completes
         assert.are.equal('failed', world.rp(parentId, 'state'))
     end)
+
+    -- S4/D3. `parentId` is forwarded verbatim from scenario files now, so a
+    -- child can name a parent that was created WITHOUT `phases` — that parent
+    -- has no phaseDefs/phaseIdx/phaseChildren, and every line of the advance
+    -- path used to raise on nil. The error surfaced inside resolveObjective,
+    -- which gadgetHandler answers by removing this gadget: one mis-authored
+    -- scenario field killed the entire objectives evaluator, silently, for the
+    -- rest of the war. The parent must simply take no part.
+    it("ignores a child naming a parent that has no phases at all", function()
+        local world, gadgetObj = mock.new()
+        world.frame = 0
+        world.regionOwner.r1 = 1
+        world.setUnit(85, { x = 0, z = 0, team = 3 })
+
+        local plainId = GG.Objectives.Create({
+            type = 'control', forTeam = 1, reward = 100,
+            params = { regionKey = 'r1', holdFrames = 999999 },
+        })
+        local childId = GG.Objectives.Create({
+            type = 'kill', forTeam = 1, reward = 10, parentId = plainId,
+            params = { targetUnitID = 85 },
+        })
+        assert.is_number(plainId)
+        assert.is_number(childId)
+
+        world.kill(85)
+        gadgetObj:UnitDestroyed(85, nil, 3, nil, nil, 1)
+
+        assert.are.equal('complete', world.rp(childId, 'state'))
+        assert.are.equal('active', world.rp(plainId, 'state'))
+        assert.is_nil(world.rp(plainId, 'phase'))
+    end)
 end)
 
 describe("resolve-retention window (§1)", function()

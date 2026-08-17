@@ -119,6 +119,7 @@ __pycache__/
 # through, and DECISIONS.md is a local orchestration audit — keep on disk,
 # out of the repo.
 PLAN-archive/
+PLAN-test-automation/
 DECISIONS.md
 
 # Replay files the game server writes at runtime (one per room, plus test

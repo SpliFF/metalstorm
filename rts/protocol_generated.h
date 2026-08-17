@@ -213,6 +213,14 @@ struct GameRestarting;
 struct GameRestartingBuilder;
 struct GameRestartingT;
 
+struct ClientEvalRequest;
+struct ClientEvalRequestBuilder;
+struct ClientEvalRequestT;
+
+struct ClientEvalResponse;
+struct ClientEvalResponseBuilder;
+struct ClientEvalResponseT;
+
 struct ConsoleResponse;
 struct ConsoleResponseBuilder;
 struct ConsoleResponseT;
@@ -913,11 +921,12 @@ enum ClientPayload : uint8_t {
   ClientPayload_GroupDirectiveRemove = 43,
   ClientPayload_GroupPosture = 44,
   ClientPayload_ReplayControl = 45,
+  ClientPayload_ClientEvalResponse = 46,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_ReplayControl
+  ClientPayload_MAX = ClientPayload_ClientEvalResponse
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[46] {
+inline const ClientPayload (&EnumValuesClientPayload())[47] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -964,13 +973,14 @@ inline const ClientPayload (&EnumValuesClientPayload())[46] {
     ClientPayload_GroupDirective,
     ClientPayload_GroupDirectiveRemove,
     ClientPayload_GroupPosture,
-    ClientPayload_ReplayControl
+    ClientPayload_ReplayControl,
+    ClientPayload_ClientEvalResponse
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[47] = {
+  static const char * const names[48] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -1017,13 +1027,14 @@ inline const char * const *EnumNamesClientPayload() {
     "GroupDirectiveRemove",
     "GroupPosture",
     "ReplayControl",
+    "ClientEvalResponse",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_ReplayControl)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_ClientEvalResponse)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -1212,6 +1223,10 @@ template<> struct ClientPayloadTraits<SpringWeb::ReplayControl> {
   static const ClientPayload enum_value = ClientPayload_ReplayControl;
 };
 
+template<> struct ClientPayloadTraits<SpringWeb::ClientEvalResponse> {
+  static const ClientPayload enum_value = ClientPayload_ClientEvalResponse;
+};
+
 template<typename T> struct ClientPayloadUnionTraits {
   static const ClientPayload enum_value = ClientPayload_NONE;
 };
@@ -1394,6 +1409,10 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::GroupPostureT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::ReplayControlT> {
   static const ClientPayload enum_value = ClientPayload_ReplayControl;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::ClientEvalResponseT> {
+  static const ClientPayload enum_value = ClientPayload_ClientEvalResponse;
 };
 
 struct ClientPayloadUnion {
@@ -1785,6 +1804,14 @@ struct ClientPayloadUnion {
   const SpringWeb::ReplayControlT *AsReplayControl() const {
     return type == ClientPayload_ReplayControl ?
       reinterpret_cast<const SpringWeb::ReplayControlT *>(value) : nullptr;
+  }
+  SpringWeb::ClientEvalResponseT *AsClientEvalResponse() {
+    return type == ClientPayload_ClientEvalResponse ?
+      reinterpret_cast<SpringWeb::ClientEvalResponseT *>(value) : nullptr;
+  }
+  const SpringWeb::ClientEvalResponseT *AsClientEvalResponse() const {
+    return type == ClientPayload_ClientEvalResponse ?
+      reinterpret_cast<const SpringWeb::ClientEvalResponseT *>(value) : nullptr;
   }
 };
 
@@ -2544,11 +2571,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_RulesParamKeyDictionary = 45,
   ServerPayload_PlayerRoster = 46,
   ServerPayload_ReplayState = 47,
+  ServerPayload_ClientEvalRequest = 48,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_ReplayState
+  ServerPayload_MAX = ServerPayload_ClientEvalRequest
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[48] {
+inline const ServerPayload (&EnumValuesServerPayload())[49] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -2597,13 +2625,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[48] {
     ServerPayload_RulesParamUpdate,
     ServerPayload_RulesParamKeyDictionary,
     ServerPayload_PlayerRoster,
-    ServerPayload_ReplayState
+    ServerPayload_ReplayState,
+    ServerPayload_ClientEvalRequest
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[49] = {
+  static const char * const names[50] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -2652,13 +2681,14 @@ inline const char * const *EnumNamesServerPayload() {
     "RulesParamKeyDictionary",
     "PlayerRoster",
     "ReplayState",
+    "ClientEvalRequest",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_ReplayState)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_ClientEvalRequest)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2855,6 +2885,10 @@ template<> struct ServerPayloadTraits<SpringWeb::ReplayState> {
   static const ServerPayload enum_value = ServerPayload_ReplayState;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::ClientEvalRequest> {
+  static const ServerPayload enum_value = ServerPayload_ClientEvalRequest;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -3045,6 +3079,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerRosterT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::ReplayStateT> {
   static const ServerPayload enum_value = ServerPayload_ReplayState;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::ClientEvalRequestT> {
+  static const ServerPayload enum_value = ServerPayload_ClientEvalRequest;
 };
 
 struct ServerPayloadUnion {
@@ -3453,6 +3491,14 @@ struct ServerPayloadUnion {
     return type == ServerPayload_ReplayState ?
       reinterpret_cast<const SpringWeb::ReplayStateT *>(value) : nullptr;
   }
+  SpringWeb::ClientEvalRequestT *AsClientEvalRequest() {
+    return type == ServerPayload_ClientEvalRequest ?
+      reinterpret_cast<SpringWeb::ClientEvalRequestT *>(value) : nullptr;
+  }
+  const SpringWeb::ClientEvalRequestT *AsClientEvalRequest() const {
+    return type == ServerPayload_ClientEvalRequest ?
+      reinterpret_cast<const SpringWeb::ClientEvalRequestT *>(value) : nullptr;
+  }
 };
 
 bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *obj, ServerPayload type);
@@ -3808,6 +3854,7 @@ struct HandshakeT : public ::flatbuffers::NativeTable {
   typedef Handshake TableType;
   uint16_t protocol_version = 0;
   std::string client_version{};
+  std::string schema_hash{};
 };
 
 struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -3815,7 +3862,8 @@ struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef HandshakeBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_PROTOCOL_VERSION = 4,
-    VT_CLIENT_VERSION = 6
+    VT_CLIENT_VERSION = 6,
+    VT_SCHEMA_HASH = 8
   };
   uint16_t protocol_version() const {
     return GetField<uint16_t>(VT_PROTOCOL_VERSION, 0);
@@ -3823,11 +3871,16 @@ struct Handshake FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *client_version() const {
     return GetPointer<const ::flatbuffers::String *>(VT_CLIENT_VERSION);
   }
+  const ::flatbuffers::String *schema_hash() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SCHEMA_HASH);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_PROTOCOL_VERSION, 2) &&
            VerifyOffset(verifier, VT_CLIENT_VERSION) &&
            verifier.VerifyString(client_version()) &&
+           VerifyOffset(verifier, VT_SCHEMA_HASH) &&
+           verifier.VerifyString(schema_hash()) &&
            verifier.EndTable();
   }
   HandshakeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3845,6 +3898,9 @@ struct HandshakeBuilder {
   void add_client_version(::flatbuffers::Offset<::flatbuffers::String> client_version) {
     fbb_.AddOffset(Handshake::VT_CLIENT_VERSION, client_version);
   }
+  void add_schema_hash(::flatbuffers::Offset<::flatbuffers::String> schema_hash) {
+    fbb_.AddOffset(Handshake::VT_SCHEMA_HASH, schema_hash);
+  }
   explicit HandshakeBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3859,8 +3915,10 @@ struct HandshakeBuilder {
 inline ::flatbuffers::Offset<Handshake> CreateHandshake(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint16_t protocol_version = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> client_version = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> client_version = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> schema_hash = 0) {
   HandshakeBuilder builder_(_fbb);
+  builder_.add_schema_hash(schema_hash);
   builder_.add_client_version(client_version);
   builder_.add_protocol_version(protocol_version);
   return builder_.Finish();
@@ -3869,12 +3927,15 @@ inline ::flatbuffers::Offset<Handshake> CreateHandshake(
 inline ::flatbuffers::Offset<Handshake> CreateHandshakeDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint16_t protocol_version = 0,
-    const char *client_version = nullptr) {
+    const char *client_version = nullptr,
+    const char *schema_hash = nullptr) {
   auto client_version__ = client_version ? _fbb.CreateString(client_version) : 0;
+  auto schema_hash__ = schema_hash ? _fbb.CreateString(schema_hash) : 0;
   return SpringWeb::CreateHandshake(
       _fbb,
       protocol_version,
-      client_version__);
+      client_version__,
+      schema_hash__);
 }
 
 ::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -7870,6 +7931,196 @@ inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(
 
 ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers::FlatBufferBuilder &_fbb, const GameRestartingT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct ClientEvalRequestT : public ::flatbuffers::NativeTable {
+  typedef ClientEvalRequest TableType;
+  uint32_t request_id = 0;
+  std::string target{};
+  std::string code{};
+};
+
+/// Server → client: execute `code` in the browser (dev/test relay,
+/// PLAN-test-automation P7). `target` picks the executor:
+///   "worker"  — the render worker's global scope (same engine hooks as evalJs)
+///   "js"      — the main thread's global scope
+///   "widgets" — the in-worker LuaUI runtime via window.widgets.eval (Lua)
+///   "test"    — window.test harness expression on main
+/// A client that is not a DEV build (and lacks ?allowClientEval=1) answers
+/// success:false without evaluating anything.
+struct ClientEvalRequest FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ClientEvalRequestT NativeTableType;
+  typedef ClientEvalRequestBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_REQUEST_ID = 4,
+    VT_TARGET = 6,
+    VT_CODE = 8
+  };
+  uint32_t request_id() const {
+    return GetField<uint32_t>(VT_REQUEST_ID, 0);
+  }
+  const ::flatbuffers::String *target() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_TARGET);
+  }
+  const ::flatbuffers::String *code() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_CODE);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_REQUEST_ID, 4) &&
+           VerifyOffset(verifier, VT_TARGET) &&
+           verifier.VerifyString(target()) &&
+           VerifyOffset(verifier, VT_CODE) &&
+           verifier.VerifyString(code()) &&
+           verifier.EndTable();
+  }
+  ClientEvalRequestT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(ClientEvalRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<ClientEvalRequest> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct ClientEvalRequestBuilder {
+  typedef ClientEvalRequest Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_request_id(uint32_t request_id) {
+    fbb_.AddElement<uint32_t>(ClientEvalRequest::VT_REQUEST_ID, request_id, 0);
+  }
+  void add_target(::flatbuffers::Offset<::flatbuffers::String> target) {
+    fbb_.AddOffset(ClientEvalRequest::VT_TARGET, target);
+  }
+  void add_code(::flatbuffers::Offset<::flatbuffers::String> code) {
+    fbb_.AddOffset(ClientEvalRequest::VT_CODE, code);
+  }
+  explicit ClientEvalRequestBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ClientEvalRequest> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ClientEvalRequest>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ClientEvalRequest> CreateClientEvalRequest(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t request_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> target = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> code = 0) {
+  ClientEvalRequestBuilder builder_(_fbb);
+  builder_.add_code(code);
+  builder_.add_target(target);
+  builder_.add_request_id(request_id);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<ClientEvalRequest> CreateClientEvalRequestDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t request_id = 0,
+    const char *target = nullptr,
+    const char *code = nullptr) {
+  auto target__ = target ? _fbb.CreateString(target) : 0;
+  auto code__ = code ? _fbb.CreateString(code) : 0;
+  return SpringWeb::CreateClientEvalRequest(
+      _fbb,
+      request_id,
+      target__,
+      code__);
+}
+
+::flatbuffers::Offset<ClientEvalRequest> CreateClientEvalRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct ClientEvalResponseT : public ::flatbuffers::NativeTable {
+  typedef ClientEvalResponse TableType;
+  uint32_t request_id = 0;
+  bool success = false;
+  std::string output{};
+};
+
+/// Client → server reply to a ClientEvalRequest. Classified `Ignored` by
+/// SyncedInputJournal (ReplayControl precedent): never journaled, so a
+/// replay can never re-execute an eval; dropped on any server without a
+/// matching waiter.
+struct ClientEvalResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ClientEvalResponseT NativeTableType;
+  typedef ClientEvalResponseBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_REQUEST_ID = 4,
+    VT_SUCCESS = 6,
+    VT_OUTPUT = 8
+  };
+  uint32_t request_id() const {
+    return GetField<uint32_t>(VT_REQUEST_ID, 0);
+  }
+  bool success() const {
+    return GetField<uint8_t>(VT_SUCCESS, 0) != 0;
+  }
+  const ::flatbuffers::String *output() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_OUTPUT);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_REQUEST_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_SUCCESS, 1) &&
+           VerifyOffset(verifier, VT_OUTPUT) &&
+           verifier.VerifyString(output()) &&
+           verifier.EndTable();
+  }
+  ClientEvalResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(ClientEvalResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<ClientEvalResponse> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct ClientEvalResponseBuilder {
+  typedef ClientEvalResponse Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_request_id(uint32_t request_id) {
+    fbb_.AddElement<uint32_t>(ClientEvalResponse::VT_REQUEST_ID, request_id, 0);
+  }
+  void add_success(bool success) {
+    fbb_.AddElement<uint8_t>(ClientEvalResponse::VT_SUCCESS, static_cast<uint8_t>(success), 0);
+  }
+  void add_output(::flatbuffers::Offset<::flatbuffers::String> output) {
+    fbb_.AddOffset(ClientEvalResponse::VT_OUTPUT, output);
+  }
+  explicit ClientEvalResponseBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ClientEvalResponse> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ClientEvalResponse>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ClientEvalResponse> CreateClientEvalResponse(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t request_id = 0,
+    bool success = false,
+    ::flatbuffers::Offset<::flatbuffers::String> output = 0) {
+  ClientEvalResponseBuilder builder_(_fbb);
+  builder_.add_output(output);
+  builder_.add_request_id(request_id);
+  builder_.add_success(success);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<ClientEvalResponse> CreateClientEvalResponseDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t request_id = 0,
+    bool success = false,
+    const char *output = nullptr) {
+  auto output__ = output ? _fbb.CreateString(output) : 0;
+  return SpringWeb::CreateClientEvalResponse(
+      _fbb,
+      request_id,
+      success,
+      output__);
+}
+
+::flatbuffers::Offset<ClientEvalResponse> CreateClientEvalResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ConsoleResponseT : public ::flatbuffers::NativeTable {
   typedef ConsoleResponse TableType;
   uint32_t request_id = 0;
@@ -8461,6 +8712,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::ReplayControl *payload_as_ReplayControl() const {
     return payload_type() == SpringWeb::ClientPayload_ReplayControl ? static_cast<const SpringWeb::ReplayControl *>(payload()) : nullptr;
   }
+  const SpringWeb::ClientEvalResponse *payload_as_ClientEvalResponse() const {
+    return payload_type() == SpringWeb::ClientPayload_ClientEvalResponse ? static_cast<const SpringWeb::ClientEvalResponse *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -8651,6 +8905,10 @@ template<> inline const SpringWeb::GroupPosture *ClientMessage::payload_as<Sprin
 
 template<> inline const SpringWeb::ReplayControl *ClientMessage::payload_as<SpringWeb::ReplayControl>() const {
   return payload_as_ReplayControl();
+}
+
+template<> inline const SpringWeb::ClientEvalResponse *ClientMessage::payload_as<SpringWeb::ClientEvalResponse>() const {
+  return payload_as_ClientEvalResponse();
 }
 
 struct ClientMessageBuilder {
@@ -13807,6 +14065,8 @@ struct LobbyGameInfoT : public ::flatbuffers::NativeTable {
   std::string description{};
   std::string version{};
   std::string lighting{};
+  bool archived = false;
+  std::string archived_reason{};
 };
 
 /// One game plugin discovered under data/games. Shown in the
@@ -13821,7 +14081,9 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_DISPLAY_NAME = 6,
     VT_DESCRIPTION = 8,
     VT_VERSION = 10,
-    VT_LIGHTING = 12
+    VT_LIGHTING = 12,
+    VT_ARCHIVED = 14,
+    VT_ARCHIVED_REASON = 16
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -13845,6 +14107,21 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *lighting() const {
     return GetPointer<const ::flatbuffers::String *>(VT_LIGHTING);
   }
+  /// True when the game is kept on disk but is not playable — its port
+  /// is unmaintained and starting it does not produce a match
+  /// (PLAN-endtoend.md D26). Discovery still lists it: the folder is
+  /// real, `/api/rooms/direct` still stages it for fixtures, and a game
+  /// that silently vanished from the dropdown would read as a bug. The
+  /// picker renders it disabled instead, and `POST /api/rooms` refuses
+  /// it. Read from the game config's `archived` field.
+  bool archived() const {
+    return GetField<uint8_t>(VT_ARCHIVED, 0) != 0;
+  }
+  /// Why it is archived, in one sentence, shown to the player on the
+  /// disabled option. Empty when `archived` is false.
+  const ::flatbuffers::String *archived_reason() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ARCHIVED_REASON);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -13857,6 +14134,9 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(version()) &&
            VerifyOffset(verifier, VT_LIGHTING) &&
            verifier.VerifyString(lighting()) &&
+           VerifyField<uint8_t>(verifier, VT_ARCHIVED, 1) &&
+           VerifyOffset(verifier, VT_ARCHIVED_REASON) &&
+           verifier.VerifyString(archived_reason()) &&
            verifier.EndTable();
   }
   LobbyGameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -13883,6 +14163,12 @@ struct LobbyGameInfoBuilder {
   void add_lighting(::flatbuffers::Offset<::flatbuffers::String> lighting) {
     fbb_.AddOffset(LobbyGameInfo::VT_LIGHTING, lighting);
   }
+  void add_archived(bool archived) {
+    fbb_.AddElement<uint8_t>(LobbyGameInfo::VT_ARCHIVED, static_cast<uint8_t>(archived), 0);
+  }
+  void add_archived_reason(::flatbuffers::Offset<::flatbuffers::String> archived_reason) {
+    fbb_.AddOffset(LobbyGameInfo::VT_ARCHIVED_REASON, archived_reason);
+  }
   explicit LobbyGameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -13900,13 +14186,17 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(
     ::flatbuffers::Offset<::flatbuffers::String> display_name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> description = 0,
     ::flatbuffers::Offset<::flatbuffers::String> version = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> lighting = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> lighting = 0,
+    bool archived = false,
+    ::flatbuffers::Offset<::flatbuffers::String> archived_reason = 0) {
   LobbyGameInfoBuilder builder_(_fbb);
+  builder_.add_archived_reason(archived_reason);
   builder_.add_lighting(lighting);
   builder_.add_version(version);
   builder_.add_description(description);
   builder_.add_display_name(display_name);
   builder_.add_id(id);
+  builder_.add_archived(archived);
   return builder_.Finish();
 }
 
@@ -13916,19 +14206,24 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfoDirect(
     const char *display_name = nullptr,
     const char *description = nullptr,
     const char *version = nullptr,
-    const char *lighting = nullptr) {
+    const char *lighting = nullptr,
+    bool archived = false,
+    const char *archived_reason = nullptr) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto display_name__ = display_name ? _fbb.CreateString(display_name) : 0;
   auto description__ = description ? _fbb.CreateString(description) : 0;
   auto version__ = version ? _fbb.CreateString(version) : 0;
   auto lighting__ = lighting ? _fbb.CreateString(lighting) : 0;
+  auto archived_reason__ = archived_reason ? _fbb.CreateString(archived_reason) : 0;
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       id__,
       display_name__,
       description__,
       version__,
-      lighting__);
+      lighting__,
+      archived,
+      archived_reason__);
 }
 
 ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -19332,6 +19627,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::ReplayState *payload_as_ReplayState() const {
     return payload_type() == SpringWeb::ServerPayload_ReplayState ? static_cast<const SpringWeb::ReplayState *>(payload()) : nullptr;
   }
+  const SpringWeb::ClientEvalRequest *payload_as_ClientEvalRequest() const {
+    return payload_type() == SpringWeb::ServerPayload_ClientEvalRequest ? static_cast<const SpringWeb::ClientEvalRequest *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -19532,6 +19830,10 @@ template<> inline const SpringWeb::ReplayState *ServerMessage::payload_as<Spring
   return payload_as_ReplayState();
 }
 
+template<> inline const SpringWeb::ClientEvalRequest *ServerMessage::payload_as<SpringWeb::ClientEvalRequest>() const {
+  return payload_as_ClientEvalRequest();
+}
+
 struct ServerMessageBuilder {
   typedef ServerMessage Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
@@ -19576,6 +19878,7 @@ inline void Handshake::UnPackTo(HandshakeT *_o, const ::flatbuffers::resolver_fu
   (void)_resolver;
   { auto _e = protocol_version(); _o->protocol_version = _e; }
   { auto _e = client_version(); if (_e) _o->client_version = _e->str(); }
+  { auto _e = schema_hash(); if (_e) _o->schema_hash = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<Handshake> Handshake::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const HandshakeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -19588,10 +19891,12 @@ inline ::flatbuffers::Offset<Handshake> CreateHandshake(::flatbuffers::FlatBuffe
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const HandshakeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _protocol_version = _o->protocol_version;
   auto _client_version = _o->client_version.empty() ? 0 : _fbb.CreateString(_o->client_version);
+  auto _schema_hash = _o->schema_hash.empty() ? 0 : _fbb.CreateString(_o->schema_hash);
   return SpringWeb::CreateHandshake(
       _fbb,
       _protocol_version,
-      _client_version);
+      _client_version,
+      _schema_hash);
 }
 
 inline AuthRequestT *AuthRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -21227,6 +21532,70 @@ inline ::flatbuffers::Offset<GameRestarting> CreateGameRestarting(::flatbuffers:
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameRestartingT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   return SpringWeb::CreateGameRestarting(
       _fbb);
+}
+
+inline ClientEvalRequestT *ClientEvalRequest::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<ClientEvalRequestT>(new ClientEvalRequestT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void ClientEvalRequest::UnPackTo(ClientEvalRequestT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = request_id(); _o->request_id = _e; }
+  { auto _e = target(); if (_e) _o->target = _e->str(); }
+  { auto _e = code(); if (_e) _o->code = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<ClientEvalRequest> ClientEvalRequest::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalRequestT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateClientEvalRequest(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<ClientEvalRequest> CreateClientEvalRequest(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalRequestT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ClientEvalRequestT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _request_id = _o->request_id;
+  auto _target = _o->target.empty() ? 0 : _fbb.CreateString(_o->target);
+  auto _code = _o->code.empty() ? 0 : _fbb.CreateString(_o->code);
+  return SpringWeb::CreateClientEvalRequest(
+      _fbb,
+      _request_id,
+      _target,
+      _code);
+}
+
+inline ClientEvalResponseT *ClientEvalResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<ClientEvalResponseT>(new ClientEvalResponseT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void ClientEvalResponse::UnPackTo(ClientEvalResponseT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = request_id(); _o->request_id = _e; }
+  { auto _e = success(); _o->success = _e; }
+  { auto _e = output(); if (_e) _o->output = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<ClientEvalResponse> ClientEvalResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateClientEvalResponse(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<ClientEvalResponse> CreateClientEvalResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ClientEvalResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ClientEvalResponseT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _request_id = _o->request_id;
+  auto _success = _o->success;
+  auto _output = _o->output.empty() ? 0 : _fbb.CreateString(_o->output);
+  return SpringWeb::CreateClientEvalResponse(
+      _fbb,
+      _request_id,
+      _success,
+      _output);
 }
 
 inline ConsoleResponseT *ConsoleResponse::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -23452,6 +23821,8 @@ inline void LobbyGameInfo::UnPackTo(LobbyGameInfoT *_o, const ::flatbuffers::res
   { auto _e = description(); if (_e) _o->description = _e->str(); }
   { auto _e = version(); if (_e) _o->version = _e->str(); }
   { auto _e = lighting(); if (_e) _o->lighting = _e->str(); }
+  { auto _e = archived(); _o->archived = _e; }
+  { auto _e = archived_reason(); if (_e) _o->archived_reason = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<LobbyGameInfo> LobbyGameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -23467,13 +23838,17 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::F
   auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
   auto _version = _o->version.empty() ? 0 : _fbb.CreateString(_o->version);
   auto _lighting = _o->lighting.empty() ? 0 : _fbb.CreateString(_o->lighting);
+  auto _archived = _o->archived;
+  auto _archived_reason = _o->archived_reason.empty() ? 0 : _fbb.CreateString(_o->archived_reason);
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       _id,
       _display_name,
       _description,
       _version,
-      _lighting);
+      _lighting,
+      _archived,
+      _archived_reason);
 }
 
 inline GameListUpdateT::GameListUpdateT(const GameListUpdateT &o) {
@@ -25660,6 +26035,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::ReplayControl *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_ClientEvalResponse: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalResponse *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -25859,6 +26238,10 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::ReplayControl *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_ClientEvalResponse: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalResponse *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -26046,6 +26429,10 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::ReplayControlT *>(value);
       return CreateReplayControl(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_ClientEvalResponse: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalResponseT *>(value);
+      return CreateClientEvalResponse(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -26230,6 +26617,10 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_ReplayControl: {
       value = new SpringWeb::ReplayControlT(*reinterpret_cast<SpringWeb::ReplayControlT *>(u.value));
+      break;
+    }
+    case ClientPayload_ClientEvalResponse: {
+      value = new SpringWeb::ClientEvalResponseT(*reinterpret_cast<SpringWeb::ClientEvalResponseT *>(u.value));
       break;
     }
     default:
@@ -26464,6 +26855,11 @@ inline void ClientPayloadUnion::Reset() {
       delete ptr;
       break;
     }
+    case ClientPayload_ClientEvalResponse: {
+      auto ptr = reinterpret_cast<SpringWeb::ClientEvalResponseT *>(value);
+      delete ptr;
+      break;
+    }
     default: break;
   }
   value = nullptr;
@@ -26661,6 +27057,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_ReplayState: {
       auto ptr = reinterpret_cast<const SpringWeb::ReplayState *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_ClientEvalRequest: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalRequest *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;
@@ -26870,6 +27270,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::ReplayState *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_ClientEvalRequest: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalRequest *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -27065,6 +27469,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::ReplayStateT *>(value);
       return CreateReplayState(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_ClientEvalRequest: {
+      auto ptr = reinterpret_cast<const SpringWeb::ClientEvalRequestT *>(value);
+      return CreateClientEvalRequest(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -27257,6 +27665,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_ReplayState: {
       value = new SpringWeb::ReplayStateT(*reinterpret_cast<SpringWeb::ReplayStateT *>(u.value));
+      break;
+    }
+    case ServerPayload_ClientEvalRequest: {
+      value = new SpringWeb::ClientEvalRequestT(*reinterpret_cast<SpringWeb::ClientEvalRequestT *>(u.value));
       break;
     }
     default:
@@ -27498,6 +27910,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_ReplayState: {
       auto ptr = reinterpret_cast<SpringWeb::ReplayStateT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_ClientEvalRequest: {
+      auto ptr = reinterpret_cast<SpringWeb::ClientEvalRequestT *>(value);
       delete ptr;
       break;
     }

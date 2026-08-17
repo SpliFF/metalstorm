@@ -44,6 +44,11 @@ export interface TestHarnessDeps {
     getSelection: () => readonly number[];
     /** Latest camera pose from the cached `gp:sceneState` feed (sync). */
     getCameraPose: () => CamPose | null;
+    /** Latest gameFrame from the cached `gp:sceneState` feed, with the age of
+     *  that reading (ms). null before the first feed message. */
+    getSceneFrame: () => { gameFrame: number; ageMs: number } | null;
+    /** Latest presentation-clock snapshot (`gp:sceneState.timing`), or null. */
+    getTiming: () => { anchored: boolean; newestFrame: number } | null;
     /** The live main-thread `Minimap`, or null when no game session owns one.
      *  The minimap is the one rendered surface outside the worker, so it needs
      *  its own capture route — see `minimapScreenshot`. */
@@ -54,6 +59,67 @@ export interface TestHarnessDeps {
 export interface MinimapCaptureSource {
     captureFrame(): string;
     captureFrameStats(): MinimapFrameStats;
+}
+
+/** Options for `captureFrame`. `region` is in DEVICE pixels (the worker
+ *  canvas backing store), not CSS pixels — on a dpr>1 display a CSS-pixel
+ *  region crops the wrong area (P5 R7). */
+export interface CaptureFrameOpts {
+    format?: 'png' | 'jpeg';
+    quality?: number;          // jpeg only, 0..1
+    maxDim?: number;           // default 1280 (longest edge of the output)
+    region?: { x: number; y: number; width: number; height: number };
+    stats?: boolean;           // worker-side luminance of the downsampled pixels
+    /** `false` = do not render; read the preserved drawing buffer as it
+     *  stands. Repeat calls are then byte-identical (same `frameId`), which is
+     *  the only way to compare two captures of ONE frame. Only meaningful
+     *  under `pause()` — a running render loop overwrites the buffer. Default
+     *  (`true`) renders, so a paused capture reflects the CURRENT camera and
+     *  state and therefore advances `frameId`. */
+    render?: boolean;
+}
+
+export interface CaptureFrameResult {
+    dataUrl: string;           // image/png or image/jpeg
+    width: number;             // downsampled output size
+    height: number;
+    /** Babylon `scene.getFrameId()` — the count of RENDERS behind these
+     *  pixels. Two captures with the same `frameId` are the same frame (that
+     *  is what `render: false` gives you). Not `engine.frameId`, which counts
+     *  render-loop ticks and keeps advancing while paused. */
+    frameId: number;
+    gameFrame: number;         // worker sim frame at capture time
+    /** Luminance of the downsampled pixels (0..255), only with `stats: true`. */
+    stats?: { min: number; max: number; mean: number };
+}
+
+/** One-call readiness snapshot — see `readyState()`. */
+export interface ReadyState {
+    harness: true;
+    worker: { alive: boolean; sceneStateAgeMs: number | null };
+    connection: { authenticated: boolean; authFailed: string | null; receivedState: boolean };
+    frame: { gameFrame: number | null; anchored: boolean; newestBaseFrame: number };
+    render: { frameId: number; meshCount: number; terrainMeshCount: number };
+}
+
+/** A parsed row of the LuaUI widget list (see `widgets()`). */
+export interface WidgetRow {
+    status: string;            // 'active' | 'disabled' | 'failed'
+    name: string;
+    author: string;
+    basename: string;
+    error: string;
+    desc: string;
+    layer: string;
+    enabled: string;
+}
+
+export interface CameraDriftReport {
+    posDriftElmos: number;
+    lookAtDriftElmos: number;
+    before: CamPose;
+    after: CamPose;
+    withinTolerance: boolean;
 }
 
 export interface ExecResult {
@@ -122,6 +188,33 @@ export class TestHarness {
         const r = await this.execOnGameServer('server', code);
         if (!r.success) throw new Error(`[test] server "${code}" → ${r.output}`);
         return r.output;
+    }
+
+    /** Execute a verb in the `server` exec scope asking for its STRUCTURED
+     *  form (the `json ` prefix), and return the parsed object.
+     *
+     *  Converted verbs: frame, state, units [team], unit_state <id>,
+     *  combat_summary, `log status`, `los status`, `cheats status`, spawn.
+     *  Anything else runs normally and answers text — that, and a game server
+     *  too old to know the prefix (it replies `unknown command: json …`), both
+     *  throw here rather than handing back something that only looks parsed.
+     *  A converted verb's own error arrives as `{error: "…"}` with the request
+     *  reported successful, so check the key. */
+    async serverJson<T = Record<string, unknown>>(
+        verb: ServerVerb, ...args: (string | number)[]
+    ): Promise<T> {
+        const code = [verb, ...args.map(String)].join(' ').trim();
+        const r = await this.execOnGameServer('server', `json ${code}`);
+        if (!r.success) {
+            if (r.output.startsWith('unknown command: json'))
+                throw new Error(`[test] server "json ${code}" → game server predates the json prefix`);
+            throw new Error(`[test] server "json ${code}" → ${r.output}`);
+        }
+        try {
+            return JSON.parse(r.output) as T;
+        } catch {
+            throw new Error(`[test] server "json ${code}" → not JSON (unconverted verb?): ${r.output}`);
+        }
     }
 
     /** Execute a Lua snippet in the LuaRules synced state. Returns the
@@ -288,10 +381,28 @@ export class TestHarness {
         void this.deps.workerCall('perfReset');
     }
 
+    /** Reset the profiler, wait a REAL measurement window, then dump — the
+     *  perfDump-doesn't-wait trap closed (callers that reset and immediately
+     *  dump measure an empty window). Returns `{ perf, squad }`; `squad` is
+     *  null unless `opts.squad` and the loaded squad module exposes counters. */
+    async perfCapture(windowMs = 5000, opts: { squad?: boolean } = {}):
+        Promise<{ perf: unknown; squad: unknown }> {
+        this.perfReset();
+        if (opts.squad) this.squadPerfReset();
+        await wait(windowMs);
+        const perf = await this.perfDump(windowMs);
+        const squad = opts.squad ? await this.squadPerf().catch(() => null) : null;
+        return { perf, squad };
+    }
+
     /** Squad-system perf counters (PLAN-metalstorm-squad-performance.md §14
      *  S0): per-tier squad/member counts, neighbour checks, matrix writes, and
      *  EMA-smoothed grid-rebuild/step/flush timings from the live SquadManager.
-     *  The scenario-ladder recipe dumps this alongside perfDump() per rung. */
+     *  The scenario-ladder recipe dumps this alongside perfDump() per rung.
+     *
+     *  Returns **null** when the runtime-served squad module exposes no
+     *  counters. Before P5 the worker had no `squadPerf` dispatch case at all,
+     *  so this threw `unknown test method` on every build. */
     async squadPerf(): Promise<unknown> {
         return this.deps.workerCall('squadPerf');
     }
@@ -647,6 +758,31 @@ export class TestHarness {
         return await this.deps.workerCall('screenshot') as string;
     }
 
+    /**
+     * Deterministic screenshot: the worker renders and reads pixels in ONE
+     * task, so a capture can no longer land between frames (the historical
+     * black/stale-frame retry loop). Under `pause()` the worker renders
+     * explicitly, so repeated calls return the SAME frame.
+     *
+     * `stats: true` computes min/max/mean luminance worker-side over the
+     * downsampled pixels — no Image decode, no main thread, no DOM.
+     *
+     * A capture under `pause()` still RENDERS by default (so
+     * pause → focusOn → capture shows the new view), which advances
+     * `frameId`; pass `render: false` for a byte-identical re-read of the
+     * frame already in the buffer.
+     *
+     * THREE capture surfaces exist and are NOT composited:
+     *   - this — the worker's WebGL canvas (game world only);
+     *   - chrome-devtools `take_screenshot` — DOM + HUD only, it cannot see a
+     *     WebGL2 canvas;
+     *   - `minimapScreenshot()` — the main-thread minimap engine.
+     * Compositing them is the caller's job: take both and overlay.
+     */
+    async captureFrame(opts: CaptureFrameOpts = {}): Promise<CaptureFrameResult> {
+        return await this.deps.workerCall('captureFrame', [opts]) as CaptureFrameResult;
+    }
+
     /** Save the current canvas to a downloaded PNG file. */
     async saveScreenshot(filename?: string): Promise<string> {
         const url = await this.screenshot();
@@ -659,13 +795,13 @@ export class TestHarness {
         return url;
     }
 
-    /** High-resolution screenshot. DEFERRED in GW8 — the RTT screenshot
-     *  helper (BABYLON.Tools.CreateScreenshotUsingRenderTarget) needs the
-     *  engine + camera, which are in the worker; not yet wired for a custom
-     *  resolution. Falls back to the canvas-resolution `screenshot()`. */
+    /** High-resolution screenshot at an arbitrary resolution, rendered through
+     *  an offscreen render target in the worker (where the engine + camera
+     *  live). Honours its arguments — before P5 it voided them and returned a
+     *  canvas-resolution `screenshot()`. Pause-safe: the RTT renders its own
+     *  frame. */
     async highResScreenshot(width = 1920, height = 1080): Promise<string> {
-        void width; void height;
-        return this.screenshot();
+        return await this.deps.workerCall('highResScreenshot', [width, height]) as string;
     }
 
     /** Capture the **minimap** as a PNG data-URL. A third capture route,
@@ -699,6 +835,238 @@ export class TestHarness {
      *  cached sceneState feed (sync). */
     get selection(): readonly number[] {
         return this.deps.getSelection();
+    }
+
+    // ─── Org groups ─────────────────────────────────────────────────
+
+    /**
+     * Form an org group with a name and members, through the client's own
+     * `OrgGroup` create path (the one the org panel will post).
+     *
+     * The worker's dispatcher has had this op since the macro-UI work; the
+     * harness simply never bound it, so nothing outside the (not-yet-built) org
+     * panel could form a POPULATED group. That mattered while verifying the
+     * command language's `follow` verb (PLAN-metalstorm-command-language.md
+     * §6.2): a follow needs a group whose members are in the client mirror, and
+     * Metalstorm ships no way to make one — its manifest has no org panel and,
+     * per the M2 field notes, `strategos` never calls `createGroup`. The
+     * gadget-side `Spring.CreateOrgGroup` callout reachable from `test.lua()`
+     * creates the group but attaches no members.
+     *
+     * Pass an empty name to let the server assign the next callsign.
+     */
+    orgGroupCreate(name: string, memberIds: number[]): void {
+        void this.deps.workerCall('orgGroupCreate', [name, memberIds]);
+    }
+
+    /** The client's org-group snapshot (`gp:orgGroups`), as the ui-store sees it. */
+    async orgGroups(): Promise<unknown> {
+        return this.deps.workerCall('orgGroups');
+    }
+
+    // ─── Readiness (zero HTTP) ──────────────────────────────────────
+
+    /** Latest sim frame from the ~10 Hz `gp:sceneState` feed. Synchronous;
+     *  -1 before the first feed message. Up to `sceneStateAgeMs` stale — use
+     *  `readyState()` when the staleness itself matters. */
+    clientFrame(): number {
+        return this.deps.getSceneFrame()?.gameFrame ?? -1;
+    }
+
+    /**
+     * One-round-trip readiness snapshot: worker liveness, game connection,
+     * frame progress and a render census. Issues **zero HTTP requests** —
+     * unlike the old poll-the-lobby-room-state recipe, which is also wrong
+     * (room state never reaches Active for an in-game client).
+     *
+     * Never throws: a dead or wedged worker reports `worker.alive: false`
+     * with the worker-sourced fields nulled/zeroed.
+     *
+     * `worker.sceneStateAgeMs` is age of the CACHED feed, not liveness: the
+     * feed legitimately stops while the sim is paused server-side. Liveness is
+     * `worker.alive` (the round-trip), and only that.
+     */
+    async readyState(): Promise<ReadyState> {
+        const scene = this.deps.getSceneFrame();
+        const timing = this.deps.getTiming();
+        const frame = {
+            gameFrame: scene ? scene.gameFrame : null,
+            anchored: timing?.anchored ?? false,
+            newestBaseFrame: timing?.newestFrame ?? 0,
+        };
+        try {
+            const p = await this.deps.workerCall('readyProbe') as {
+                authenticated: boolean; authFailed: string | null; receivedState: boolean;
+                frameId: number; meshCount: number; terrainMeshCount: number;
+            };
+            return {
+                harness: true,
+                worker: { alive: true, sceneStateAgeMs: scene ? scene.ageMs : null },
+                connection: {
+                    authenticated: p.authenticated,
+                    authFailed: p.authFailed,
+                    receivedState: p.receivedState,
+                },
+                frame,
+                render: {
+                    frameId: p.frameId,
+                    meshCount: p.meshCount,
+                    terrainMeshCount: p.terrainMeshCount,
+                },
+            };
+        } catch {
+            return {
+                harness: true,
+                worker: { alive: false, sceneStateAgeMs: scene ? scene.ageMs : null },
+                connection: { authenticated: false, authFailed: null, receivedState: false },
+                frame,
+                render: { frameId: -1, meshCount: 0, terrainMeshCount: 0 },
+            };
+        }
+    }
+
+    // ─── Worker state queries ───────────────────────────────────────
+    //
+    // Every dispatch case below already existed in the worker; only these
+    // bindings are new — nothing outside `window.__gp('…')` string-eval could
+    // reach them.
+
+    /** The NL query engine's unit census (the shape `window.units` reads). */
+    async census(): Promise<unknown> {
+        return this.deps.workerCall('nlCensus');
+    }
+
+    /** Per-factory build queues as the client mirror sees them (confirmed vs
+     *  optimistic-pending counts). */
+    async factoryQueue(): Promise<{ unitId: number; defId: number; name: string;
+        count: number; confirmed: number; pending: number }[]> {
+        return await this.deps.workerCall('factoryQueue') as { unitId: number;
+            defId: number; name: string; count: number;
+            confirmed: number; pending: number }[];
+    }
+
+    /** Optimistic build placements not yet confirmed by the server. */
+    async pendingBuilds(): Promise<unknown[]> {
+        return await this.deps.workerCall('pendingBuilds') as unknown[];
+    }
+
+    /** Build-menu chip counts (queued vs pending) for the current selection. */
+    async buildChips(): Promise<{ defId: number; name: string;
+        queued: number; pending: number }[]> {
+        return await this.deps.workerCall('buildChips') as { defId: number; name: string;
+            queued: number; pending: number }[];
+    }
+
+    /** Entity-snapshot arrival stats — count, last arrival, and the gap since. */
+    async snapshotStats(): Promise<{ count: number; lastAtMs: number;
+        sinceMs: number; nowMs: number }> {
+        return await this.deps.workerCall('snapshotStats') as { count: number;
+            lastAtMs: number; sinceMs: number; nowMs: number };
+    }
+
+    /** The client's directive mirror (PLAN-macro-ui). */
+    async directives(): Promise<unknown> {
+        return this.deps.workerCall('directives');
+    }
+
+    /** Number of order-overlay entries currently drawn for one unit. */
+    async overlayOrders(unitId: number): Promise<number> {
+        return await this.deps.workerCall('overlayOrders', [unitId]) as number;
+    }
+
+    /** Number of live map markers. */
+    async markerCount(): Promise<number> {
+        return await this.deps.workerCall('markerCount') as number;
+    }
+
+    /** Order-acknowledgement counters (attempts vs played). Pass true to
+     *  zero them after reading. */
+    async orderAckStats(reset = false): Promise<{ attempts: number; played: number }> {
+        return await this.deps.workerCall('orderAckStats', [reset]) as
+            { attempts: number; played: number };
+    }
+
+    /** Set the selection through the client's own selection path and return
+     *  the resulting selection (contrast `select()`, which is fire-and-forget). */
+    async selectUnits(ids: number[]): Promise<number[]> {
+        return await this.deps.workerCall('selectUnits', [ids]) as number[];
+    }
+
+    /** Issue an order down the REAL client path (`Connection.sendPlayerCommand`)
+     *  — it exercises the optimistic overlay, the pending registry and the wire
+     *  encode. Contrast `order()`, which POSTs to the game server's `/api/exec`:
+     *  the sim executes it but NO client code runs. */
+    async clientOrder(unitIds: number[], cmdId: number,
+                      params: number[] = [], opts = 0): Promise<void> {
+        await this.deps.workerCall('clientOrder', [unitIds, cmdId, params, opts]);
+    }
+
+    // ─── LuaUI widgets ──────────────────────────────────────────────
+
+    /** The in-worker LuaUI widget list, parsed. `[]` until the Lua runtime
+     *  boots (it boots after auth + defs, which can take a while on a cold
+     *  first run). */
+    async widgets(): Promise<WidgetRow[]> {
+        return parseWidgetList(await this.deps.workerCall('widgetList') as string);
+    }
+
+    /** Enable (re-fetches the widget source, so it doubles as a reload) or
+     *  disable a widget by name. Returns the post-change list. */
+    async setWidget(name: string, on: boolean): Promise<WidgetRow[]> {
+        return parseWidgetList(await this.deps.workerCall('setWidget', [name, on]) as string);
+    }
+
+    // ─── Camera input lock + drift guard ────────────────────────────
+
+    /** Lock (or unlock) USER camera input in the worker. Locking also clears
+     *  held keys and drags — a CDP-synthesised keydown never gets its keyup,
+     *  so without this a measurement run drifts for its whole duration.
+     *  Programmatic camera calls keep working while locked. */
+    async lockInput(on: boolean): Promise<boolean> {
+        return await this.deps.workerCall('lockInput', [on]) as boolean;
+    }
+
+    /** Resolve once no animated camera transition is running (worker-side cap
+     *  of 10 s), instead of guessing `wait(durationMs + 16)`. */
+    async cameraSettle(timeoutMs = 10000): Promise<void> {
+        await this.deps.workerCall('cameraSettle', [timeoutMs]);
+    }
+
+    /** Run `fn` with camera input locked and the camera settled, and report
+     *  how far the pose drifted across it. Poses are read FRESH from the
+     *  worker, not from the 10 Hz cached feed. Always unlocks (finally), and
+     *  reports drift either way — whether drift invalidates a measurement is
+     *  the caller's call. */
+    async withStableCamera<T>(fn: () => Promise<T> | T,
+        opts: { toleranceElmos?: number } = {},
+    ): Promise<{ result: T; drift: CameraDriftReport }> {
+        const tol = opts.toleranceElmos ?? 1;
+        const pose = async (): Promise<CamPose> =>
+            await this.deps.workerCall('cameraPose') as CamPose;
+        await this.lockInput(true);
+        let before: CamPose;
+        let result: T;
+        let after: CamPose;
+        try {
+            await this.cameraSettle();
+            before = await pose();
+            result = await fn();
+        } finally {
+            await this.lockInput(false).catch(() => false);
+        }
+        after = await pose().catch(() => before);
+        const d = (a: Vec3, b: Vec3): number =>
+            Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+        const posDriftElmos = d(before.pos, after.pos);
+        const lookAtDriftElmos = d(before.lookAt, after.lookAt);
+        const withinTolerance = posDriftElmos <= tol && lookAtDriftElmos <= tol;
+        if (!withinTolerance) {
+            console.warn(`[test] camera drifted during withStableCamera: `
+                + `pos ${posDriftElmos.toFixed(2)} / lookAt `
+                + `${lookAtDriftElmos.toFixed(2)} elmos (tolerance ${tol})`);
+        }
+        return { result, drift: { posDriftElmos, lookAtDriftElmos,
+            before, after, withinTolerance } };
     }
 
     // ─── Composite helpers ──────────────────────────────────────────
@@ -741,6 +1109,27 @@ export class TestHarness {
         await this.order(aId, 20 /* CMD.ATTACK */, [tId]);
         return { attackerId: aId, targetId: tId };
     }
+}
+
+/**
+ * Parse the LuaUI handler's pipe-delimited widget list (see lua-ui-host's
+ * `getWidgetList`): one line per widget,
+ * `status|name|author|basename|error|desc|date|license|layer|enabled|handler`.
+ * Empty input (the runtime has not booted) → `[]`.
+ */
+export function parseWidgetList(raw: string): WidgetRow[] {
+    if (!raw) return [];
+    const rows: WidgetRow[] = [];
+    for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        const f = line.split('|');
+        rows.push({
+            status: f[0] ?? '', name: f[1] ?? '', author: f[2] ?? '',
+            basename: f[3] ?? '', error: f[4] ?? '', desc: f[5] ?? '',
+            layer: f[8] ?? '', enabled: f[9] ?? '',
+        });
+    }
+    return rows;
 }
 
 function wait(ms: number): Promise<void> {

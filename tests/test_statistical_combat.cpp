@@ -13,6 +13,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -91,6 +92,21 @@ TEST_SUITE("statistical-combat/parse") {
 		CHECK(t.skipFireStrength == doctest::Approx(0.1f));
 		CHECK(t.targetingCadence == 30);
 	}
+
+	// Hold-fire floor (PLAN-metalstorm-combat-fixes.md §A1). The default must
+	// stay 5% — it applies to EVERY statistical weapon with no def change, so
+	// silently drifting it re-opens (or over-widens) the plinking stalemate.
+	TEST_CASE("hold-fire floor defaults to 5% and reads stat_min_fire_chance") {
+		CHECK(StatCombat::ParseTuning(cp({})).minFireChance == doctest::Approx(0.05f));
+		CHECK(StatCombat::ParseTuning(cp({{"stat_min_fire_chance", "0.2"}})).minFireChance
+			== doctest::Approx(0.2f));
+		// An explicit 0 is a real value, not "absent" — it disables the gate.
+		CHECK(StatCombat::ParseTuning(cp({{"stat_min_fire_chance", "0"}})).minFireChance
+			== doctest::Approx(0.0f));
+		// An empty value is treated as absent (shared ReadFloat contract).
+		CHECK(StatCombat::ParseTuning(cp({{"stat_min_fire_chance", ""}})).minFireChance
+			== doctest::Approx(0.05f));
+	}
 }
 
 TEST_SUITE("statistical-combat/accuracy") {
@@ -130,6 +146,212 @@ TEST_SUITE("statistical-combat/accuracy") {
 		CHECK(low  < level);
 		CHECK(high <= 1.0f);
 		CHECK(low  >= 0.0f);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hold-fire floor (PLAN-metalstorm-combat-fixes.md §A) — the fix for the
+// max-range plinking stalemate: two lines volleying forever at p(hit) ~ 0,
+// nobody dying, every shot still costing a sound event, a VolleyOutcome, a
+// reload cycle and resources.
+//
+// StatCombat::HoldsFire is the gate's whole decision; ComputeHitChance (which
+// feeds it in the sim) needs a live CWeapon + heightmap, so the world-coupled
+// half is exercised by the runtime recipe in the plan, not here — same
+// constraint as test_weapon_aim_origin.cpp. What IS pinned here is the part
+// that decides whether anyone fires: the threshold algebra against
+// HitProbability, which is the exact function ComputeHitChance forwards to.
+// ---------------------------------------------------------------------------
+TEST_SUITE("statistical-combat/hold-fire") {
+	// Does a weapon with tuning `t` fire at `dist`? Composes the two pure
+	// halves the way the sim does: chance first, then the gate.
+	static bool WouldFire(const StatCombat::Tuning& t, float dist, float range,
+	                      bool moving = false, float heightDelta = 0.0f) {
+		const float p = StatCombat::HitProbability(t, dist, range, moving, heightDelta);
+		return !StatCombat::HoldsFire(t, p);
+	}
+
+	TEST_CASE("the gate is a strict below-floor test, and 0 disables it") {
+		StatCombat::Tuning t; // minFireChance 0.05
+		CHECK      (StatCombat::HoldsFire(t, 0.0f));
+		CHECK      (StatCombat::HoldsFire(t, 0.049f));
+		CHECK_FALSE(StatCombat::HoldsFire(t, 0.05f));  // exactly at the floor fires
+		CHECK_FALSE(StatCombat::HoldsFire(t, 0.9f));
+
+		// 0 keeps suppression fire possible as a def-level choice: never holds,
+		// not even at a dead-certain miss.
+		StatCombat::Tuning off; off.minFireChance = 0.0f;
+		CHECK_FALSE(StatCombat::HoldsFire(off, 0.0f));
+		// A fat-fingered negative must not invert the gate either.
+		StatCombat::Tuning neg; neg.minFireChance = -1.0f;
+		CHECK_FALSE(StatCombat::HoldsFire(neg, 0.0f));
+	}
+
+	// falloff = 1, base 0.85: p = 0.85 * (1 - d/R). p crosses 0.05 at
+	// 1 - d/R = 0.05/0.85 = 0.058824, i.e. d/R = 0.941176 — the plan's §A4
+	// sanity table. R = 500 => the boundary sits at 470.59 elmos.
+	TEST_CASE("threshold algebra, falloff 1: fires out to 94.1% of range") {
+		StatCombat::Tuning t; // accuracyFalloff 1.0
+		const float R = 500.0f;
+		const float boundary = R * (1.0f - (t.minFireChance / t.baseAccuracy));
+		CHECK(boundary == doctest::Approx(470.588f).epsilon(0.001));
+
+		CHECK      (WouldFire(t, boundary - 1.0f, R)); // inside the floor
+		CHECK_FALSE(WouldFire(t, boundary + 1.0f, R)); // sub-floor: holds
+
+		// The §A4 table, spot-checked against the gate.
+		CHECK(StatCombat::HitProbability(t, 0.90f * R, R, false, 0.0f)
+			== doctest::Approx(0.085f));            // CAI's own stop point
+		CHECK      (WouldFire(t, 0.90f * R, R));      // ...still fights as today
+		CHECK_FALSE(WouldFire(t, 0.95f * R, R));      // terrain-blocked standoff
+		CHECK_FALSE(WouldFire(t, 1.00f * R, R));      // max range: p == 0
+		CHECK      (WouldFire(t, 0.50f * R, R));      // ordinary engagement
+	}
+
+	// falloff = 2: p = 0.85 * (1 - d/R)^2, so the floor is crossed much
+	// earlier — 1 - d/R = sqrt(0.058824) = 0.242536, d/R = 0.757464. A weapon
+	// tuned to hold accuracy then drop sharply goes quiet sooner, which is the
+	// point of the exponent.
+	TEST_CASE("threshold algebra, falloff 2: the floor bites at 75.7% of range") {
+		StatCombat::Tuning t;
+		t.accuracyFalloff = 2.0f;
+		const float R = 500.0f;
+		const float boundary =
+			R * (1.0f - std::sqrt(t.minFireChance / t.baseAccuracy));
+		CHECK(boundary == doctest::Approx(378.73f).epsilon(0.001));
+
+		CHECK      (WouldFire(t, boundary - 1.0f, R));
+		CHECK_FALSE(WouldFire(t, boundary + 1.0f, R));
+		// Same distance, the two exponents disagree — falloff 2 holds where
+		// falloff 1 still fires. Pins that the gate reads the def's exponent
+		// rather than a hard-coded curve.
+		StatCombat::Tuning lin; // falloff 1
+		CHECK      (WouldFire(lin, 0.85f * R, R));
+		CHECK_FALSE(WouldFire(t,   0.85f * R, R));
+	}
+
+	// The move penalty (x0.5) can be the whole difference between firing and
+	// holding — that is the "an attacker that stops moving re-opens fire"
+	// behaviour in §A3, and it is why no hysteresis is needed initially.
+	TEST_CASE("the move penalty alone can cross the floor") {
+		StatCombat::Tuning t; // movePenalty 0.5
+		const float R = 500.0f;
+		// p_still = 0.08 (above the floor) => moving halves it to 0.04 (below).
+		const float d = R * (1.0f - (0.08f / t.baseAccuracy));
+		CHECK(StatCombat::HitProbability(t, d, R, false, 0.0f) == doctest::Approx(0.08f));
+		CHECK(StatCombat::HitProbability(t, d, R, true,  0.0f) == doctest::Approx(0.04f));
+
+		CHECK      (WouldFire(t, d, R, /*moving*/false)); // halted: opens fire
+		CHECK_FALSE(WouldFire(t, d, R, /*moving*/true));  // marching: holds
+
+		// Height advantage is the other free re-opener: additive, so a unit
+		// holding on flat ground fires from the same spot uphill of its target.
+		const float dHigh = R * (1.0f - (0.02f / t.baseAccuracy)); // p = 0.02
+		CHECK_FALSE(WouldFire(t, dHigh, R, false,  0.0f));
+		CHECK      (WouldFire(t, dHigh, R, false,  1.0f)); // +0.15 height bonus
+		// ...and uphill-of-the-attacker never rescues a sub-floor shot.
+		CHECK_FALSE(WouldFire(t, dHigh, R, false, -1.0f));
+	}
+
+	// §A3 ordering. The floor gate lives in CWeapon::UpdateFire BEFORE
+	// TryTarget / the resource spend / reloadStatus / EmitFireSound /
+	// EnqueueVolley; the E6 skip_fire_strength check lives INSIDE EnqueueVolley,
+	// i.e. after the sound has already gone out. Standing up a live CWeapon is
+	// out of reach for the headless harness (test_weapon_aim_origin.cpp has the
+	// same constraint), so this mirrors that call order over the two pure
+	// predicates and counts what each stage would emit. It pins the contract
+	// the plan cares about: a sub-floor shot emits NOTHING, while an E6 skip
+	// still emits its sound — the pre-existing quirk the floor gate must not
+	// silently inherit or paper over.
+	struct FireTally {
+		int sounds = 0;   // EmitFireSound calls
+		int volleys = 0;  // PendingVolley pushes (=> VolleyOutcome events)
+		int spends = 0;   // resource spend + reloadStatus advance
+	};
+
+	static FireTally SimulateFireTick(const StatCombat::Tuning& t, float hitChance,
+	                                  float strengthFraction) {
+		FireTally tally;
+		// --- CWeapon::UpdateFire, statistical block (Weapon.cpp) ---
+		if (StatCombat::HoldsFire(t, hitChance))
+			return tally; // hold: nothing below this line runs
+		tally.spends++;   // TryTarget, UseResources, reloadStatus
+		tally.sounds++;   // EmitFireSound
+		// --- StatisticalCombatManager::EnqueueVolley ---
+		if (StatCombat::SkipsFire(t, strengthFraction))
+			return tally; // E6: sound already emitted, volley dropped
+		tally.volleys++;
+		return tally;
+	}
+
+	TEST_CASE("a sub-floor shot emits nothing at all") {
+		StatCombat::Tuning t; // floor 0.05, E6 off
+		const FireTally held = SimulateFireTick(t, /*p*/0.01f, /*strength*/1.0f);
+		CHECK(held.sounds  == 0); // no SoundEvent on the wire
+		CHECK(held.volleys == 0); // no VolleyOutcome => client invents no tracer
+		CHECK(held.spends  == 0); // full readiness the frame the target is hittable
+
+		const FireTally fired = SimulateFireTick(t, /*p*/0.20f, /*strength*/1.0f);
+		CHECK(fired.sounds  == 1);
+		CHECK(fired.volleys == 1);
+		CHECK(fired.spends  == 1);
+	}
+
+	TEST_CASE("floor gate and E6 skip-fire both survive; the floor runs first") {
+		StatCombat::Tuning t;
+		t.skipFireStrength = 0.25f; // E6 armed
+
+		// E6 alone: above the floor but too weak — the volley is dropped inside
+		// EnqueueVolley, AFTER the sound. (Pre-existing quirk, §A3 notes it as a
+		// follow-up candidate; pinned here so a later move of the E6 check into
+		// UpdateFire is a deliberate change and not an accident.)
+		const FireTally e6 = SimulateFireTick(t, /*p*/0.50f, /*strength*/0.10f);
+		CHECK(e6.sounds  == 1);
+		CHECK(e6.volleys == 0);
+		CHECK(e6.spends  == 1);
+
+		// Both gates would trip: the floor wins because it runs first, so the
+		// sub-floor case does NOT inherit E6's stray sound.
+		const FireTally both = SimulateFireTick(t, /*p*/0.01f, /*strength*/0.10f);
+		CHECK(both.sounds  == 0);
+		CHECK(both.volleys == 0);
+		CHECK(both.spends  == 0);
+
+		// Neither trips: normal fire.
+		const FireTally ok = SimulateFireTick(t, /*p*/0.50f, /*strength*/0.90f);
+		CHECK(ok.sounds == 1);
+		CHECK(ok.volleys == 1);
+
+		// The two gates are independent knobs — disabling the floor leaves E6
+		// (and its sound) exactly as it was before this change.
+		StatCombat::Tuning noFloor = t;
+		noFloor.minFireChance = 0.0f;
+		const FireTally legacy = SimulateFireTick(noFloor, /*p*/0.01f, /*strength*/0.10f);
+		CHECK(legacy.sounds  == 1);
+		CHECK(legacy.volleys == 0);
+	}
+
+	// The gate must consume no synced randomness: it runs every fire tick for
+	// every statistical weapon, so a single stray draw would desync replays and
+	// snapshots against a build with a different floor. HitProbability and
+	// HoldsFire are the whole gate, and neither touches gsRNG — assert that by
+	// checking the stream is untouched across a batch of gate evaluations.
+	TEST_CASE("evaluating the gate consumes no gsRNG draws") {
+		StatCombat::Tuning t;
+
+		gsRNG.SetSeed(987654u, true);
+		std::vector<float> expected;
+		for (int i = 0; i < 8; ++i) expected.push_back(gsRNG.NextFloat());
+
+		gsRNG.SetSeed(987654u, true);
+		int held = 0;
+		for (int i = 0; i < 1000; ++i)
+			held += WouldFire(t, static_cast<float>(i), 500.0f, (i & 1) != 0) ? 0 : 1;
+		CHECK(held > 0); // the loop really did exercise the holding branch
+
+		std::vector<float> actual;
+		for (int i = 0; i < 8; ++i) actual.push_back(gsRNG.NextFloat());
+		CHECK(actual == expected);
 	}
 }
 

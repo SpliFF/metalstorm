@@ -109,6 +109,7 @@ private:
     static int l_createGroup(lua_State* L);
     static int l_issueDirective(lua_State* L);
     static int l_setPosture(lua_State* L);
+    static int l_sendMessage(lua_State* L);    // I1/SG1: AI → synced game Lua
 
     // Log channel: a headless server AI has no chat wire / HUD, but its
     // decisions and errors must still be visible (plan §5.1 — "spend is

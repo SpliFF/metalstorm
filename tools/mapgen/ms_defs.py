@@ -314,6 +314,66 @@ def site_kinds(game_dir: str) -> dict[str, str]:
         os.path.join(game_dir, "units", "buildings_sites.lua"), "site_kind")
 
 
+def feature_chain_pitch(game_dir: str, kind: str = "bridge") -> float:
+    """Segment spacing for a chained feature family, in elmos.
+
+    `features/bridges.lua` publishes the measured tile length as
+    `customparams.chain_pitch` so nothing downstream restates it —
+    game_scenario.lua's `featureChainPitch` reads it at stage time, and the map
+    generator needs the same number at PLAN time to size a chain of spans
+    (terragen/bridges.py).
+
+    Read off the file rather than per-def, because that is where the value is:
+    both spans get it from the shared `span()` posture helper, which is not
+    inside either def's own table. So this asserts the file speaks with one
+    voice instead of pretending to read one entry — two different pitches in one
+    family would mean a chain sized for the wrong span, which is the failure
+    §M3 spent a live boot on.
+
+    Raises rather than defaulting: a silent 24.0 here would be exactly the
+    hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    with open(path, encoding="utf-8") as fh:
+        text = _strip_comments(fh.read())
+    found = {m.group(1) for m in
+             re.finditer(r"chain_pitch\s*=\s*'([^']*)'", text)}
+    if not found:
+        raise ValueError(f"{path} declares no customparams.chain_pitch")
+    if len(found) > 1:
+        raise ValueError(f"{path} declares {len(found)} different chain "
+                         f"pitches ({sorted(found)}) — a chain sized against "
+                         f"one would be wrong for the other")
+    return float(found.pop())
+
+
+def feature_deck_top(game_dir: str, defname: str, kind: str = "bridge") -> float:
+    """How far a chained span's trafficable surface sits above its own y = 0.
+
+    The number that decides roads R3c (PLAN-maps.md §2j), read from the def
+    rather than from the forge layout script that authored the mesh: a feature's
+    y is clamped UP to the ground every tick (`CFeature::UpdatePosition`,
+    Feature.cpp:570) and can never be pushed down, so a unit driving on the
+    terrain under a span is exactly this far below the deck — and an earthwork
+    raises the span with the ground, leaving the gap unchanged.
+
+    Read PER DEF, unlike `feature_chain_pitch`: the pitch is a family fact set
+    in the shared `span()` posture (and one family cannot hold two), while the
+    deck heights genuinely differ — road 1.5, rail 3.8. A file-wide read here
+    would either raise on a correct file or attribute one span's deck to the
+    other.
+
+    Raises rather than defaulting, for the same reason the pitch does: a silent
+    constant here is the hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    tops = _read_customparam(path, "deck_top")
+    if defname not in tops:
+        raise ValueError(f"{path} declares no customparams.deck_top for "
+                         f"{defname} (declared for: {sorted(tops) or 'nothing'})")
+    return float(tops[defname])
+
+
 def verify(facts: dict[str, UnitFacts], required: list[str]) -> list[str]:
     """Problems with `required` — an unknown def, or one whose facts are unusable.
 

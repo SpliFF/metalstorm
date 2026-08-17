@@ -1,0 +1,943 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NLResponse",
+  "description": "The one shape a natural-language command may take. Either `actions` is non-empty and `clarify` is absent, or `clarify` is present and `actions` is empty — asking and acting are mutually exclusive.",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "type": "array",
+      "description": "Up to 4 actions, executed in order. Empty only when clarifying.",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "command"
+              },
+              "intent": {
+                "type": "object",
+                "properties": {
+                  "verb": {
+                    "enum": [
+                      "attack",
+                      "secure",
+                      "defend",
+                      "hold",
+                      "patrol",
+                      "screen",
+                      "scout",
+                      "escort",
+                      "withdraw",
+                      "reinforce",
+                      "build"
+                    ]
+                  },
+                  "subject": {
+                    "description": "Who executes. `selection` is what the player currently has selected; `any` is team-wide (\"whoever is free\"); `ai` hands the order to the AI commander.",
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "entity-ref"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "class-count"
+                          },
+                          "class": {
+                            "enum": [
+                              "artillery",
+                              "balloon",
+                              "bombers",
+                              "buildings",
+                              "civilians",
+                              "civvehicles",
+                              "command",
+                              "courier",
+                              "engineers",
+                              "expedition",
+                              "fighters",
+                              "landing_ship",
+                              "mechs",
+                              "radar",
+                              "scout",
+                              "ships",
+                              "sites",
+                              "soldiers",
+                              "staticdefense",
+                              "subs",
+                              "supply",
+                              "tanker",
+                              "tanks",
+                              "technical"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "description": "How many groups, 1 to 16."
+                          },
+                          "scale": {
+                            "enum": [
+                              1,
+                              2,
+                              3,
+                              4
+                            ],
+                            "description": "Unit weight class: 1 light, 2 medium, 3 heavy, 4 super-heavy."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "class",
+                          "count"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "idle-filter"
+                          },
+                          "filterClass": {
+                            "enum": [
+                              "artillery",
+                              "balloon",
+                              "bombers",
+                              "buildings",
+                              "civilians",
+                              "civvehicles",
+                              "command",
+                              "courier",
+                              "engineers",
+                              "expedition",
+                              "fighters",
+                              "landing_ship",
+                              "mechs",
+                              "radar",
+                              "scout",
+                              "ships",
+                              "sites",
+                              "soldiers",
+                              "staticdefense",
+                              "subs",
+                              "supply",
+                              "tanker",
+                              "tanks",
+                              "technical"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "filterClass"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "selection"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "any"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "ai"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "target": {
+                    "description": "Where to act. Use `point` ONLY for coordinates the context payload supplied; never guess a coordinate from a name.",
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "entity-ref"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "point"
+                          },
+                          "x": {
+                            "type": "number"
+                          },
+                          "z": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "x",
+                          "z"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "area-around"
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                          },
+                          "radius": {
+                            "type": "number",
+                            "description": "Elmos, up to 20000. Omit for the default."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "priority": {
+                    "enum": [
+                      "low",
+                      "normal",
+                      "high",
+                      "urgent"
+                    ]
+                  },
+                  "when": {
+                    "description": "The trigger gate. Omit it (or use `now`) for \"do it immediately\".",
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "now"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "under-attack"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "region-contested"
+                          },
+                          "regionRef": {
+                            "type": "string",
+                            "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "regionRef"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "objective-complete"
+                          },
+                          "objectiveRef": {
+                            "type": "string",
+                            "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "objectiveRef"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "strength-below"
+                          },
+                          "percent": {
+                            "type": "number",
+                            "description": "Strictly between 0 and 100."
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "percent"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "standing": {
+                    "type": "object",
+                    "properties": {
+                      "onSight": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "onSight"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "verb",
+                  "subject"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "kind",
+              "intent"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "guidance"
+              },
+              "guidance": {
+                "description": "Standing advice to the AI commander, not a directive to a unit.",
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "stance"
+                      },
+                      "value": {
+                        "enum": [
+                          "defensive",
+                          "balanced",
+                          "aggressive"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "paint"
+                      },
+                      "value": {
+                        "enum": [
+                          "priority",
+                          "normal",
+                          "forbidden"
+                        ]
+                      },
+                      "regionRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "value",
+                      "regionRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "lock"
+                      },
+                      "value": {
+                        "enum": [
+                          "on",
+                          "off"
+                        ]
+                      },
+                      "groupRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "value",
+                      "groupRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "delegate"
+                      },
+                      "value": {
+                        "enum": [
+                          "on",
+                          "off"
+                        ]
+                      },
+                      "objectiveRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "value",
+                      "objectiveRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "fund"
+                      },
+                      "amount": {
+                        "type": "number",
+                        "description": "One-shot authority transfer, above 0."
+                      },
+                      "rateCap": {
+                        "type": "number",
+                        "description": "Standing funding rate cap, 0 or above."
+                      }
+                    },
+                    "required": [
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "roe"
+                      },
+                      "value": {
+                        "enum": [
+                          "free",
+                          "observed_only",
+                          "deny_area"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "veto"
+                      },
+                      "goalRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "goalRef"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "guidance"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "camera"
+              },
+              "camera": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "focus"
+                      },
+                      "targetRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "targetRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "follow"
+                      },
+                      "targetRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "targetRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "fitMap"
+                      }
+                    },
+                    "required": [
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "zoom"
+                      },
+                      "dir": {
+                        "enum": [
+                          "in",
+                          "out"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "dir"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "saveView"
+                      },
+                      "slot": {
+                        "type": "integer",
+                        "description": "0 to 9."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "slot"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "loadView"
+                      },
+                      "slot": {
+                        "type": "integer",
+                        "description": "0 to 9."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "slot"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "camera"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "ui"
+              },
+              "ui": {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "open",
+                      "close",
+                      "toggle",
+                      "fullscreen"
+                    ]
+                  },
+                  "panelId": {
+                    "type": "string",
+                    "description": "A panel id from the context payload."
+                  }
+                },
+                "required": [
+                  "op",
+                  "panelId"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "kind",
+              "ui"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "query"
+              },
+              "query": {
+                "description": "A question the game answers locally. Queries never move anything.",
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "count"
+                      },
+                      "class": {
+                        "enum": [
+                          "artillery",
+                          "balloon",
+                          "bombers",
+                          "buildings",
+                          "civilians",
+                          "civvehicles",
+                          "command",
+                          "courier",
+                          "engineers",
+                          "expedition",
+                          "fighters",
+                          "landing_ship",
+                          "mechs",
+                          "radar",
+                          "scout",
+                          "ships",
+                          "sites",
+                          "soldiers",
+                          "staticdefense",
+                          "subs",
+                          "supply",
+                          "tanker",
+                          "tanks",
+                          "technical"
+                        ]
+                      },
+                      "scale": {
+                        "enum": [
+                          1,
+                          2,
+                          3,
+                          4
+                        ],
+                        "description": "Unit weight class: 1 light, 2 medium, 3 heavy, 4 super-heavy."
+                      },
+                      "side": {
+                        "enum": [
+                          "own",
+                          "enemy",
+                          "ally"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "class",
+                      "side"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "locate"
+                      },
+                      "targetRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      },
+                      "side": {
+                        "enum": [
+                          "own",
+                          "enemy"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "targetRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "status"
+                      },
+                      "subjectRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "subjectRef"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "resources"
+                      }
+                    },
+                    "required": [
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "objectives"
+                      }
+                    },
+                    "required": [
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "query"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "group"
+              },
+              "group": {
+                "description": "On a rename, omit `groupRef` to mean \"the group the player has selected\".",
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "create"
+                      },
+                      "name": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      },
+                      "memberRefs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                        }
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "rename"
+                      },
+                      "groupRef": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      },
+                      "name": {
+                        "type": "string",
+                        "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "group"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "refuse"
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the order cannot be carried out, in the player's own terms. Use this for a place or unit the context does not contain."
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "say": {
+      "type": "string",
+      "description": "One short spoken line confirming what is happening, e.g. \"Moving 2 tank squads to Randtown\". Present tense, no preamble."
+    },
+    "clarify": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "description": "One question, asked plainly."
+        },
+        "options": {
+          "type": "array",
+          "description": "Up to 6 concrete choices, each a name from the context.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pick": {
+          "type": "integer",
+          "description": "How many of the options the answer needs. Omit for one. Use it when the sentence asked for several (\"which two of these four squads?\")."
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "actions"
+  ],
+  "additionalProperties": false
+}

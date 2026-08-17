@@ -19,6 +19,8 @@ import quitConfirmHtml from '../quit-confirm/quit-confirm.html?raw';
 import quitConfirmCss from '../quit-confirm/quit-confirm.css?raw';
 import gameOverHtml from '../game-over/game-over.html?raw';
 import gameOverCss from '../game-over/game-over.css?raw';
+import briefingHtml from '../briefing/briefing.html?raw';
+import briefingCss from '../briefing/briefing.css?raw';
 
 /// Bundle of in-game UI templates. Each entry is a raw string — CSS for
 /// style keys, HTML for the rest. `renderTemplate` from `../ui.ts` does
@@ -30,6 +32,10 @@ export interface GameTemplates {
     quitConfirmCss: string;
     gameOverHtml: string;
     gameOverCss: string;
+    /// The scenario briefing splash (S2). Overridable like any other surface,
+    /// so a game can dress its own story screen.
+    briefingHtml: string;
+    briefingCss: string;
 }
 
 /// Each template's relative path under `<game>/ui/`. The same path is
@@ -41,6 +47,8 @@ const TEMPLATE_PATHS: Record<keyof GameTemplates, string> = {
     quitConfirmCss:   'quit-confirm/quit-confirm.css',
     gameOverHtml:     'game-over/game-over.html',
     gameOverCss:      'game-over/game-over.css',
+    briefingHtml:     'briefing/briefing.html',
+    briefingCss:      'briefing/briefing.css',
 };
 
 const DEFAULT_TEMPLATES: GameTemplates = {
@@ -50,6 +58,8 @@ const DEFAULT_TEMPLATES: GameTemplates = {
     quitConfirmCss,
     gameOverHtml,
     gameOverCss,
+    briefingHtml,
+    briefingCss,
 };
 
 /// Return a copy of the bundled engine-default templates.

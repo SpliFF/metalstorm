@@ -17,6 +17,7 @@
 
 #include <unistd.h>
 
+#include "Server/ReplayCompatPolicy.h"
 #include "Server/ReplayFile.h"
 
 using syncedinput::InputKind;
@@ -36,6 +37,8 @@ replay::Header SampleHeader() {
     h.gameVersion  = "1.0";
     h.mapId        = "green_flat_x34_v3";
     h.defsCacheKey = "deadbeefcafe";
+    h.schemaHash   = "0123456789abcdef0123456789abcdef"
+                     "0123456789abcdef0123456789abcdef";
     h.roomId       = 17;
     h.startFrame   = 0;
     h.seed         = 0x0123456789abcdefULL;
@@ -74,6 +77,7 @@ TEST_CASE("header round-trips every launch-spec field") {
     CHECK(out.gameVersion == in.gameVersion);
     CHECK(out.mapId == in.mapId);
     CHECK(out.defsCacheKey == in.defsCacheKey);
+    CHECK(out.schemaHash == in.schemaHash);
     CHECK(out.roomId == in.roomId);
     CHECK(out.seed == in.seed);
     // The whole point of carrying these is that `--replay <file>` needs no
@@ -810,4 +814,72 @@ TEST_CASE("a directory listing is newest-first and keeps unreadable files visibl
     CHECK(replay::ListDirectory("").empty());
 
     std::filesystem::remove_all(dir);
+}
+
+// ─────────────── Wire-schema stamp (PLAN-protocol-guard task 7) ───────────────
+
+TEST_CASE("the wire-schema rule refuses a stale recording and names both hashes") {
+    const std::string mine(Protocol::SCHEMA_HASH);
+    REQUIRE(mine.size() == 64);   // the generator emits a sha256; a truncated
+                                  // constant would make every message useless
+
+    SUBCASE("a recording made against this build's schema is admitted") {
+        const replay::CompatVerdict v = replay::CheckSchemaHash(mine);
+        CHECK(v.accepted);
+        CHECK(v.error.empty());
+    }
+
+    SUBCASE("a different schema is refused, and BOTH hashes are in the error") {
+        const std::string theirs(64, 'a');
+        const replay::CompatVerdict v = replay::CheckSchemaHash(theirs, mine);
+        REQUIRE_FALSE(v.accepted);
+        // The whole point of the message: "schema mismatch" alone cannot tell
+        // an operator whether the FILE or the BINARY is the stale one.
+        CHECK(v.error.find(theirs.substr(0, 12)) != std::string::npos);
+        CHECK(v.error.find(mine.substr(0, 12)) != std::string::npos);
+    }
+
+    SUBCASE("a pre-guard recording carries no hash and reads as <none>") {
+        const replay::CompatVerdict v = replay::CheckSchemaHash("", mine);
+        REQUIRE_FALSE(v.accepted);
+        // Distinguishable from a mismatch by wording, not only by an empty
+        // slot in the message — an operator seeing two 12-char hashes would
+        // hunt for the other build, and for this file there is none.
+        CHECK(v.error.find("<none>") != std::string::npos);
+        CHECK(v.error.find("predates") != std::string::npos);
+    }
+
+    SUBCASE("two unstamped sides are still a refusal, not an accidental match") {
+        // Equality alone would admit everything if the constant were ever
+        // empty. The rule requires a POSITIVE identification on both sides.
+        CHECK_FALSE(replay::CheckSchemaHash("", "").accepted);
+    }
+}
+
+TEST_CASE("a header written before the schema stamp still decodes, with no hash") {
+    // §2.2: no migration and no converter — but a pre-guard file must remain
+    // READABLE (the packer and the replay browser decode no payload and are
+    // unaffected). Only re-execution refuses it. This is that seam: the JSON
+    // has no `schemaHash` key at all, exactly as every file already on disk.
+    replay::Header in = SampleHeader();
+    in.schemaHash.clear();
+    const std::string preGuard = replay::EncodeHeaderJson(in);
+    // Prove the fixture really is the pre-guard shape rather than a stamped
+    // header carrying an empty string, which is a different byte sequence.
+    const std::string stripped = [&] {
+        std::string j = preGuard;
+        const std::string key = "\"schemaHash\":\"\",";
+        const size_t at = j.find(key);
+        REQUIRE(at != std::string::npos);
+        j.erase(at, key.size());
+        return j;
+    }();
+    CHECK(stripped.find("schemaHash") == std::string::npos);
+
+    replay::Header out;
+    std::string err;
+    REQUIRE(replay::DecodeHeaderJson(stripped, out, err));
+    CHECK(out.schemaHash.empty());
+    CHECK(out.gameId == in.gameId);          // the rest of the header survives
+    CHECK_FALSE(replay::CheckSchemaHash(out.schemaHash).accepted);
 }

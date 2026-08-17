@@ -100,6 +100,17 @@ public:
     /// population and the "my wars" filter (task 6) read this.
     static std::vector<WarPlayerBinding> ForRoom(sqlite3* db, uint32_t roomId);
 
+    /// Every binding an account holds, in every war, newest contact first.
+    ///
+    /// Task 9a's presence read: `last_seen_at` is re-stamped by the game
+    /// server when it seats a player and again on its 60 s state sweep, so the
+    /// newest row is the strongest statement in the system about where an
+    /// account actually is. Ordered here rather than at the call site because
+    /// "which war is this player in" has exactly one right answer and it is
+    /// this ordering — a caller sorting it a second way is a caller that can
+    /// disagree with the friends list.
+    static std::vector<WarPlayerBinding> ForAccount(sqlite3* db, int64_t accountId);
+
     /// Re-stamp the denormalised `username` on every binding an account
     /// holds (task 8c).
     ///

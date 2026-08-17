@@ -162,3 +162,85 @@ describe("routines.tick — flee (contested regions)", function()
         assert.are.same({ 200, 0, 300 }, world.moveOrders[1].params)
     end)
 end)
+
+describe("routines.tick — wander anchors on HOME, not on the next town", function()
+
+    it("REGRESSION (town-planner T4, found in the browser): a resident with a " ..
+       "homePos wanders around it and does not commute to another district", function()
+        -- WHAT WENT WRONG. `findNearestSite` returns the nearest site that is
+        -- NOT this unit's own — a commute. That is harmless when a map's
+        -- authored sites are a few hundred elmos apart, and a mass migration
+        -- when they are TOWNS four kilometres apart: on a generated
+        -- techno_lands scenario, two of the map's three districts had emptied
+        -- themselves into the third within four minutes of sim.
+        local world, routines = freshWorld()
+        world.setUnit(1, 1000, 1000)
+        world.setUnit(2, 5000, 5000)            -- another town, far away
+        world.setRegionAt(1000, 1000, 'home_town')
+        world.setRegionAt(5000, 5000, 'far_town')
+        local civ = {
+            gaiaTeam = 99,
+            population = {
+                [1] = { role = 'ambient', homePos = { x = 1000, z = 1000 } },
+                [2] = { role = 'ambient', site = 'far_town' },
+            },
+        }
+
+        math.random = function() return 0.1 end
+
+        routines.tick(civ, 150)
+
+        assert.are.equal(1, #world.moveOrders)
+        local p = world.moveOrders[1].params
+        local dx, dz = p[1] - 1000, p[3] - 1000
+        local dist = math.sqrt(dx * dx + dz * dz)
+        assert.is_true(dist < 200,
+            'wandered ' .. math.floor(dist) .. ' elmos from home — that is a commute')
+    end)
+
+    it("still walks a civilian with no home toward another site", function()
+        -- The old behaviour is the fallback, not a casualty: map-authored
+        -- population that records no home keeps the between-sites walk.
+        local world, routines = freshWorld()
+        world.setUnit(1, 0, 0)
+        world.setUnit(2, 500, 0)
+        world.setRegionAt(0, 0, 'wilds')
+        world.setRegionAt(500, 0, 'wilds')
+        local civ = {
+            gaiaTeam = 99,
+            population = {
+                [1] = { role = 'ambient' },
+                [2] = { role = 'ambient', site = 'other_site' },
+            },
+        }
+
+        math.random = function() return 0.1 end
+
+        routines.tick(civ, 150)
+
+        assert.are.equal(1, #world.moveOrders)
+        local p = world.moveOrders[1].params
+        assert.is_true(math.abs(p[1] - 500) < 200, 'did not head for the other site')
+    end)
+
+    it("never moves a `garrison` civilian at all", function()
+        -- The militia a planned town posts on its gateways. `ambient` is the
+        -- only role this module manages, and a guard that strolls off the
+        -- gateway it was posted to is not a guard.
+        local world, routines = freshWorld()
+        world.setUnit(1, 1000, 1000)
+        world.setRegionAt(1000, 1000, 'home_town')
+        local civ = {
+            gaiaTeam = 99,
+            population = {
+                [1] = { role = 'garrison', homePos = { x = 1000, z = 1000 } },
+            },
+        }
+
+        math.random = function() return 0.1 end
+
+        routines.tick(civ, 150)
+
+        assert.are.equal(0, #world.moveOrders)
+    end)
+end)

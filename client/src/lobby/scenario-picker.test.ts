@@ -96,6 +96,69 @@ describe('parseScenarioList', () => {
         expect(parseScenarioList([{ displayName: 'nameless' }])).toEqual([]);
     });
 
+    it('reads an authored briefing off an entry', () => {
+        const [s] = parseScenarioList([{
+            id: 'crossing_standoff', displayName: 'The Standoff', terminal: true,
+            briefing: {
+                title: 'The Standoff', subtitle: 'Scorched Crossing',
+                story: 'A\n\nB', tips: ['one', 'two'],
+                image: 'scenarios/img/a.jpg', parTimeSec: 900,
+            },
+        }]);
+        expect(s.briefing).toEqual({
+            title: 'The Standoff', subtitle: 'Scorched Crossing',
+            story: 'A\n\nB', tips: ['one', 'two'],
+            image: 'scenarios/img/a.jpg', parTimeSec: 900,
+        });
+    });
+
+    it('reports no briefing when the entry ships none', () => {
+        // The ABSENCE is the signal the client's mount decision reads, so it
+        // has to survive the parser as undefined rather than as an empty shell.
+        expect(parseScenarioList([{ id: 'a' }])[0].briefing).toBeUndefined();
+    });
+
+    it('ignores a briefing that is not an object', () => {
+        // BAR's campaign format puts a text blob at this key. An imported
+        // entry must keep its scenario and simply lose the splash.
+        for (const bad of ['a wall of text', 42, [], null]) {
+            const [s] = parseScenarioList([{ id: 'a', displayName: 'A', briefing: bad }]);
+            expect(s.id).toBe('a');
+            expect(s.briefing).toBeUndefined();
+        }
+    });
+
+    it('ignores a briefing with chrome but no reading matter', () => {
+        // Mirrors the server's `present` rule: a title alone would mount an
+        // empty overlay in front of the loading screen.
+        const [s] = parseScenarioList([{
+            id: 'a', briefing: { title: 'Titled but mute', parTimeSec: 60 },
+        }]);
+        expect(s.briefing).toBeUndefined();
+    });
+
+    it('accepts tips alone as a briefing and drops non-string entries', () => {
+        const [s] = parseScenarioList([{
+            id: 'a', briefing: { tips: ['keep', 42, null, '', 'this'] },
+        }]);
+        expect(s.briefing?.tips).toEqual(['keep', 'this']);
+        expect(s.briefing?.story).toBeUndefined();
+    });
+
+    it('drops a par time that is not a positive number', () => {
+        // "Par time -1:-5" is worse than no par-time row.
+        for (const bad of [-5, 0, NaN, Infinity, '900']) {
+            const [s] = parseScenarioList([{
+                id: 'a', briefing: { story: 'x', parTimeSec: bad },
+            }]);
+            expect(s.briefing?.parTimeSec).toBeUndefined();
+        }
+        const [ok] = parseScenarioList([{
+            id: 'a', briefing: { story: 'x', parTimeSec: 615.6 },
+        }]);
+        expect(ok.briefing?.parTimeSec).toBe(616);
+    });
+
     it('falls back to the id when the display name is missing', () => {
         expect(parseScenarioList([{ id: 'gen_a_bbbb' }])[0].displayName)
             .toBe('gen_a_bbbb');

@@ -342,7 +342,8 @@ end
 
 --- Parley board + trust ledger (interaction §1/§2). Read-only here; the
 -- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
--- the actuator responds (Actuators:respondProposal, engine ask I1).
+-- the actuator responds (Actuators:respondProposal — an unimplemented runtime
+-- verb, not an engine ask; see actuators.lua:173).
 --
 -- rulesParam names match game_parley.lua's publish() exactly
 -- (parley_count high-water + parley_<id>_* fields, GAME-scoped/public — a

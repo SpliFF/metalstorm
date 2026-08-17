@@ -235,7 +235,10 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 10);  // + gameRules (task 1d-b), + envResources (the wind)
+    // + gameRules (task 1d-b), + envResources (the wind),
+    // + defNames (PLAN-def-reconciliation task 1),
+    // + defScalars (PLAN-def-reconciliation task 3)
+    CHECK(implemented == 12);
     CHECK(h == expect);
 }
 
@@ -1428,8 +1431,10 @@ UnitState loudUnit()
 
     WeaponState w0; w0.reloadStatus = 4000; w0.salvoLeft = 2; w0.nextSalvo = 4010;
                     w0.numStockpiled = 3; w0.numStockpileQued = 1;
+                    w0.weaponDefName = "glaive_cannon";
     WeaponState w1; w1.reloadStatus = 4100; w1.salvoLeft = 0; w1.nextSalvo = 0;
                     w1.numStockpiled = 0; w1.numStockpileQued = 7;
+                    w1.weaponDefName = "raven_rocket";
     s.weapons = {w0, w1};
     s.modParams = loudRulesParams();
     s.activeIndex = 37;
@@ -1455,7 +1460,8 @@ bool sameUnit(const UnitState& a, const UnitState& b)
         const auto& y = b.weapons[i];
         if (x.reloadStatus != y.reloadStatus || x.salvoLeft != y.salvoLeft ||
             x.nextSalvo != y.nextSalvo || x.numStockpiled != y.numStockpiled ||
-            x.numStockpileQued != y.numStockpileQued)
+            x.numStockpileQued != y.numStockpileQued ||
+            x.weaponDefName != y.weaponDefName)
             return false;
     }
     if (!sameRulesParams(a.modParams, b.modParams)) return false;
@@ -1584,7 +1590,7 @@ TEST_CASE("task 1c: the field censuses are armed") {
     CHECK(census::RulesParam(RulesParamState{}) == 6);
     CHECK(census::Stats(TeamStatsState{}) == 20);
     CHECK(census::Cmd(CommandState{}) == 6);
-    CHECK(census::Weapon(WeaponState{}) == 5);
+    CHECK(census::Weapon(WeaponState{}) == 6);
     CHECK(census::Team(TeamState{}) == 26);
     CHECK(census::Unit(UnitState{}) == 115);
 
@@ -1603,6 +1609,12 @@ TEST_CASE("task 1c: the field censuses are armed") {
     // CR_REG_METADATA list: 11 creg members, four of them float3s the state
     // struct flattens into three scalars each.
     CHECK(census::EnvResource(envressnapshot::EnvResourceState{}) == 19);
+
+    // Task 3's two. These are the def-scalar audit in code: a scalar added to
+    // UnitDefScalars must be captured off the def, encoded, and given a
+    // disposition in ReconcileScalars, and this is where forgetting shows up.
+    CHECK(census::UnitDefScalars_(UnitDefScalars{}) == 26);
+    CHECK(census::FeatureDefScalars_(FeatureDefScalars{}) == 4);
 }
 
 TEST_CASE("option A: every move-type class round-trips its own arm") {
@@ -2472,6 +2484,83 @@ TEST_CASE("CompareUnits: a payload with no units section is NOT MEASURED") {
           std::string::npos);
 }
 
+// ───────── DescribeRulesParamsDivergence (the static fixture's diagnosis) ─────────
+//
+// On `roundtrip_static` there are no moving units to blame, so a strict
+// round-trip failure lands in the gadgets' own state — and "the gameRules
+// section differs" over ~80 keys is not a diagnosis. These cover the three
+// shapes a rules-params disagreement comes in, because they route to different
+// investigations: a changed VALUE is a gadget that computed something else, a
+// key present on one side only is a gadget that published (or lost) an entry.
+
+namespace {
+
+std::vector<uint8_t> gameRulesPayload(const std::vector<RulesParamState>& p)
+{
+    std::vector<uint8_t> body;
+    EncodeGameRules(p, body);
+    return framePayload({{static_cast<uint16_t>(SectionId::GameRules), body}});
+}
+
+RulesParamState numParam(const std::string& key, float v)
+{
+    RulesParamState p;
+    p.key = key; p.los = 0; p.type = 1; p.f = v;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("DescribeRulesParamsDivergence: identical param maps disagree in nothing") {
+    const auto p = gameRulesPayload({numParam("warlog_seq", 3.0f)});
+    const std::string d = DescribeRulesParamsDivergence(p, p, SectionId::GameRules);
+    CHECK(d.find("1 vs 1 params") != std::string::npos);
+    CHECK(d.find("0 differ in value") != std::string::npos);
+    CHECK(d.find("0 only in arm A") != std::string::npos);
+    CHECK(d.find("0 only in arm B") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: names the key and both values") {
+    const auto a = gameRulesPayload({numParam("warlog_seq", 3.0f)});
+    const auto b = gameRulesPayload({numParam("warlog_seq", 5.0f)});
+    const std::string d = DescribeRulesParamsDivergence(a, b, SectionId::GameRules);
+    CHECK(d.find("1 differ in value") != std::string::npos);
+    CHECK(d.find("warlog_seq") != std::string::npos);
+    CHECK(d.find("3.000000 vs 5.000000") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: a key is matched by NAME, not by position") {
+    // The live finding this exists for: after a restore the same entries came
+    // back under a differently spelled key (`warlog_1_kind` published as
+    // `warlog_1.0_kind`), so the two maps held the same information and
+    // disagreed on every row. Position-keyed, that reads as "everything
+    // changed"; name-keyed, it reads as what it is — a key one side does not
+    // have. The two maps here are also different SIZES, which a comparison
+    // that walked them in step would run off the end of.
+    const auto a = gameRulesPayload({numParam("warlog_1_kind", 1.0f),
+                                     numParam("warlog_seq", 2.0f)});
+    const auto b = gameRulesPayload({numParam("warlog_1.0_kind", 1.0f),
+                                     numParam("warlog_seq", 2.0f),
+                                     numParam("objective_3.0_state", 1.0f)});
+    const std::string d = DescribeRulesParamsDivergence(a, b, SectionId::GameRules);
+    CHECK(d.find("2 vs 3 params") != std::string::npos);
+    CHECK(d.find("0 differ in value") != std::string::npos);
+    CHECK(d.find("1 only in arm A") != std::string::npos);
+    CHECK(d.find("2 only in arm B") != std::string::npos);
+    CHECK(d.find("only A: warlog_1_kind") != std::string::npos);
+    CHECK(d.find("objective_3.0_state") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: an undecodable side describes nothing") {
+    // Same rule as CompareUnits: "could not compare" must never be spelled the
+    // same way as "compared and agreed", so the caller can stay silent instead
+    // of printing a clean bill of health for a section it never read.
+    const auto good = gameRulesPayload({numParam("warlog_seq", 1.0f)});
+    const auto none = framePayload({{1, std::vector<uint8_t>(21, 0)}});
+    CHECK(DescribeRulesParamsDivergence(good, none, SectionId::GameRules).empty());
+    CHECK(DescribeRulesParamsDivergence(none, good, SectionId::GameRules).empty());
+}
+
 // ───────────── The wind (EnvResourceHandler, the envResources section) ─────────────
 //
 // Wind is synced state on a 450-frame cycle: the frame where windDirTimer == 0
@@ -2688,4 +2777,1261 @@ TEST_CASE("the wind: the envResources section is required, not optional") {
     REQUIRE(it != secs.end());
     CHECK(it->implemented);
     CHECK(std::string(it->name) == "envResources");
+}
+
+// ──── The def name tables (PLAN-def-reconciliation task 1) ────
+//
+// These are pure: CompareDefNames takes two tables, so the cases that matter —
+// a def removed, a def renamed away, a def that kept its name and changed id —
+// are testable without standing up two different def loads of one game, which
+// no doctest in this tree can do.
+
+namespace {
+
+std::vector<uint8_t> defBytes(const DefNameTables& t)
+{
+    std::vector<uint8_t> out;
+    EncodeDefNames(t, out);
+    return out;
+}
+
+DefNameTables sampleDefs()
+{
+    DefNameTables t;
+    t.units    = {{1, "glaive"}, {2, "raven"}, {3, "bastion"}};
+    t.weapons  = {{0, "nodefweapon"}, {1, "glaive_cannon"}, {2, "raven_rocket"}};
+    t.features = {{1, "wreck_glaive"}};
+    return t;
+}
+
+}  // namespace
+
+TEST_CASE("defNames: the section round-trips all three tables") {
+    const DefNameTables in = sampleDefs();
+    const auto bytes = defBytes(in);
+
+    DefNameTables out;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    REQUIRE(out.units.size() == 3);
+    REQUIRE(out.weapons.size() == 3);
+    REQUIRE(out.features.size() == 1);
+    CHECK(out.units[0].id == 1);
+    CHECK(out.units[0].name == "glaive");
+    CHECK(out.units[2].name == "bastion");
+    // Weapon id 0 is a real def (CWeaponDefHandler says so, unlike the unit and
+    // feature handlers) — dropping it would shift every weapon index by one,
+    // which is the exact corruption class this table exists to prevent.
+    CHECK(out.weapons[0].id == 0);
+    CHECK(out.weapons[0].name == "nodefweapon");
+    CHECK(out.features[0].name == "wreck_glaive");
+}
+
+TEST_CASE("defNames: an empty def table round-trips as empty, not as absent") {
+    const DefNameTables in;
+    const auto bytes = defBytes(in);
+    DefNameTables out;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(out.units.empty());
+    CHECK(out.weapons.empty());
+    CHECK(out.features.empty());
+}
+
+TEST_CASE("defNames: a truncated section is a refusal at every cut point") {
+    const auto full = defBytes(sampleDefs());
+    for (size_t cut = 0; cut < full.size(); ++cut) {
+        DefNameTables out;
+        std::string err;
+        CHECK_FALSE(DecodeDefNames(full.data(), cut, out, err));
+        CHECK_FALSE(err.empty());
+    }
+}
+
+TEST_CASE("defNames: trailing bytes inside the section are a refusal") {
+    auto bytes = defBytes(sampleDefs());
+    bytes.push_back(0);
+    DefNameTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("defNames: an absurd def count is refused before it is allocated") {
+    auto bytes = defBytes(sampleDefs());
+    for (int i = 0; i < 4; ++i) bytes[i] = 0xFF;   // the unit table's count
+    DefNameTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("unit defs") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: identical tables are unchanged") {
+    const auto t = sampleDefs();
+    const DefDelta d = CompareDefNames(t.weapons, t.weapons);
+    CHECK_FALSE(d.Changed());
+    CHECK(d.unchanged == 3);
+    CHECK(d.renumbered == 0);
+    CHECK(d.removed == 0);
+    CHECK(d.added == 0);
+    CHECK(d.Describe() == "unchanged");
+}
+
+TEST_CASE("CompareDefNames: a RENUMBERED def is the finding, not a removal plus an add") {
+    // The whole reason the comparison is keyed by name. A def that kept its
+    // name and moved id is what silently retargets a positional weapon index
+    // (§1's "index-shift corruption, the worst class"); an id-keyed diff would
+    // report it as "1 removed, 1 added", which is a different — and
+    // reassuringly symmetrical — diagnosis of a much more dangerous event.
+    const std::vector<DefNameEntry> captured = {
+        {0, "nodefweapon"}, {1, "glaive_cannon"}, {2, "raven_rocket"}};
+    const std::vector<DefNameEntry> live = {
+        {0, "nodefweapon"}, {1, "raven_rocket"}, {2, "glaive_cannon"}};
+
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.Changed());
+    CHECK(d.renumbered == 2);
+    CHECK(d.unchanged == 1);
+    CHECK(d.removed == 0);
+    CHECK(d.added == 0);
+    CHECK(d.Describe().find("2 renumbered") != std::string::npos);
+    CHECK(d.Describe().find("glaive_cannon") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: removals and additions are counted from opposite sides") {
+    const std::vector<DefNameEntry> captured = {
+        {1, "glaive"}, {2, "raven"}, {3, "old_bastion"}};
+    const std::vector<DefNameEntry> live = {
+        {1, "glaive"}, {2, "raven"}, {3, "new_bastion"}, {4, "wyvern"}};
+
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.unchanged == 2);
+    CHECK(d.removed == 1);
+    // REQUIRE, not CHECK: the index below is what reads it, and a neutralised
+    // build (an id-keyed comparison) leaves this empty — a CHECK there turns a
+    // reported failure into a SIGSEGV, which is a worse report of the same fact.
+    REQUIRE(d.removedNames.size() == 1);
+    CHECK(d.removedNames[0] == "old_bastion");
+    CHECK(d.added == 2);          // new_bastion AND wyvern
+    CHECK(d.renumbered == 0);
+    CHECK(d.Describe().find("1 removed (old_bastion)") != std::string::npos);
+    CHECK(d.Describe().find("2 added") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: a large delta names a few examples and says there are more") {
+    std::vector<DefNameEntry> captured, live;
+    for (int i = 1; i <= 40; ++i) {
+        captured.push_back({i, "def_" + std::to_string(i)});
+        live.push_back({41 - i, "def_" + std::to_string(i)});   // every id moved
+    }
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.renumbered == 40);
+    // Capped, or a balance patch produces a 40-name log line nobody reads.
+    CHECK(d.renumberedNames.size() == 5);
+    CHECK(d.Describe().find("40 renumbered") != std::string::npos);
+    CHECK(d.Describe().find("…") != std::string::npos);
+}
+
+TEST_CASE("defNames: the section is required, not optional") {
+    // A payload without it can still be restored — it just cannot be told
+    // which def vocabulary it was written against, which is the whole input to
+    // PLAN-def-reconciliation's remap.
+    const auto& secs = Sections();
+    const auto it = std::find_if(secs.begin(), secs.end(), [](const SectionSpec& s) {
+        return s.id == SectionId::DefNames;
+    });
+    REQUIRE(it != secs.end());
+    CHECK(it->implemented);
+    CHECK(std::string(it->name) == "defNames");
+}
+
+TEST_CASE("defNames: capture with no def handlers is empty tables, not a crash") {
+    // spring-tests loads no game, so the three handlers are null here. That is
+    // not a contrivance: the store is constructed before boot parses a def, and
+    // a Serialize() in that window must produce a payload, not a segfault.
+    //
+    // ⚠ NAMED GAP: this is also why CaptureDefNames's *contents* are not
+    // covered off-engine. The three loops do not share a start index — weapon
+    // id 0 is a real def and unit/feature id 0 is not — and no doctest in this
+    // tree can stand up a def load to check it. The codec and the comparison
+    // above are fully covered; the capture's start indices are covered only by
+    // a live server (PLAN-def-reconciliation task 1's field note).
+    DefNameTables t;
+    CaptureDefNames(t);
+    std::vector<uint8_t> bytes;
+    EncodeDefNames(t, bytes);
+    DefNameTables back;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), back, err));
+    CHECK(back.units.size() == t.units.size());
+    CHECK(back.weapons.size() == t.weapons.size());
+    CHECK(back.features.size() == t.features.size());
+}
+
+// ──── The remap pass (PLAN-def-reconciliation task 2, §6's matrix) ────
+//
+// Pure, all of it: BuildDefRemap takes two vocabularies and a rename table,
+// RemapPayload takes decoded structs, MatchWeaponSlots takes two name lists.
+// That is the reason the seam is where it is — the dangerous half of this
+// milestone is which id becomes which, and none of it needs a def load.
+
+namespace {
+
+/// The same vocabulary as sampleDefs(), after a balance patch that inserted a
+/// unit def in the middle (so everything after it renumbers), renamed one,
+/// removed another and added a weapon.
+DefNameTables patchedDefs()
+{
+    DefNameTables t;
+    t.units    = {{1, "glaive"}, {2, "hoplite"}, {3, "raven_mk2"}};
+    t.weapons  = {{0, "nodefweapon"}, {1, "raven_rocket"}, {2, "glaive_cannon"},
+                  {3, "hoplite_spear"}};
+    t.features = {{1, "wreck_glaive"}};
+    return t;
+}
+
+UnitState remapUnit(int32_t id, const std::string& def)
+{
+    UnitState u;
+    u.id = id;
+    u.unitDefName = def;
+    return u;
+}
+
+CommandState buildCmd(int32_t unitDefId)
+{
+    CommandState c;
+    c.cmdID = -unitDefId;   // the build-order encoding
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("task 2: a tuning-only patch remaps nothing") {
+    // §3's fast path, and the case that must stay free: same names, same ids,
+    // so steps 1-2 have no work and the payload is not touched.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), sampleDefs(), DefAliases{}, m, err));
+    CHECK(m.Identity());
+    CHECK(m.units.Map(2) == 2);
+
+    std::vector<UnitState> units{remapUnit(7, "raven")};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+    CHECK_FALSE(rep.Changed());
+    CHECK(rep.Describe() == "nothing to remap");
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].unitDefName == "raven");
+}
+
+TEST_CASE("task 2: an unrecorded vocabulary changes nothing (it does NOT read as removal)") {
+    // The load-bearing negative. A snapshot taken before task 1 shipped the
+    // defNames section decodes with empty tables, and reading that as "every
+    // def was removed" would delete the entire world on resume - the one bug in
+    // this pass that is worse than not having the pass.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(DefNameTables{}, patchedDefs(), DefAliases{}, m, err));
+    CHECK(m.units.unknown);
+    CHECK(m.Identity());
+    CHECK(m.units.Map(3) == 3);
+    CHECK_FALSE(m.units.Gone("raven"));
+
+    std::vector<UnitState> units{remapUnit(1, "raven"), remapUnit(2, "bastion")};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+    CHECK(units.size() == 2);
+    CHECK(rep.unitsDropped == 0);
+
+    // And the same the other way round: a live table this process has not
+    // parsed yet (a headless run with no game) is equally unknown.
+    DefRemap m2;
+    REQUIRE(BuildDefRemap(sampleDefs(), DefNameTables{}, DefAliases{}, m2, err));
+    CHECK(m2.units.unknown);
+    CHECK(m2.Identity());
+}
+
+TEST_CASE("task 2: a renumbering is remapped, not reported as remove+add") {
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    // glaive kept id 1; glaive_cannon moved 1 -> 2, raven_rocket 2 -> 1. That
+    // swap is §1's worst class: both ids stay valid and each names the other's
+    // weapon.
+    CHECK(m.weapons.Map(0) == 0);
+    CHECK(m.weapons.Map(1) == 2);
+    CHECK(m.weapons.Map(2) == 1);
+    // raven and bastion are gone (raven_mk2 is a different name - see the alias
+    // case below for the same patch WITH a migrations entry).
+    CHECK(m.units.Gone("raven"));
+    CHECK(m.units.Gone("bastion"));
+    CHECK(m.units.Map(2) == -1);
+    CHECK_FALSE(m.units.Gone("glaive"));
+
+    // A unit's delayed wreck is a raw feature def id and remaps through the
+    // feature map; the units' own defs are names and are handled by removal.
+    std::vector<UnitState> units{remapUnit(4, "glaive")};
+    units[0].featureDefID = 1;
+    units[0].commands = {buildCmd(1), buildCmd(3)};   // glaive, bastion
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].featureDefID == 1);        // wreck_glaive kept its id
+    // The build order for a def that is gone LEAVES the queue: -3 is still a
+    // valid command id, it just builds whatever holds id 3 now.
+    REQUIRE(units[0].commands.size() == 1);
+    CHECK(units[0].commands[0].cmdID == -1);
+    CHECK(rep.buildCmdsDropped == 1);
+    CHECK(rep.buildCmdsRemapped == 0);
+}
+
+TEST_CASE("task 2: migrations.lua turns a removal into a rename") {
+    DefAliases a;
+    a.units["raven"] = "raven_mk2";
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+
+    // raven is no longer gone - it IS raven_mk2, and its id moved 2 -> 3.
+    CHECK_FALSE(m.units.Gone("raven"));
+    CHECK(m.units.Map(2) == 3);
+    REQUIRE(m.unitRenames.count("raven") == 1);
+    CHECK(m.unitRenames.at("raven") == "raven_mk2");
+
+    std::vector<UnitState> units{remapUnit(9, "raven"), remapUnit(10, "bastion")};
+    units[0].commands = {buildCmd(2)};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    // The renamed unit survives with the new name; bastion, which the game did
+    // not alias, does not come back at all.
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].id == 9);
+    CHECK(units[0].unitDefName == "raven_mk2");
+    CHECK(rep.unitsRenamed == 1);
+    CHECK(rep.unitsDropped == 1);
+    REQUIRE(rep.droppedUnitNames.size() == 1);
+    CHECK(rep.droppedUnitNames[0] == "bastion");
+    // Its own build order for a raven follows the rename.
+    REQUIRE(units[0].commands.size() == 1);
+    CHECK(units[0].commands[0].cmdID == -3);
+    CHECK(rep.buildCmdsRemapped == 1);
+}
+
+TEST_CASE("task 2: E1 refuses an ambiguous rename") {
+    std::string err;
+    DefRemap m;
+
+    SUBCASE("the alias source still exists") {
+        // `glaive = "hoplite"` while this game defines both: the author renamed
+        // something that did not go away, so there is no answer to what the old
+        // glaives are now.
+        DefAliases a;
+        a.units["glaive"] = "hoplite";
+        CHECK_FALSE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(err.find("both") != std::string::npos);
+        CHECK(err.find("glaive") != std::string::npos);
+    }
+
+    SUBCASE("two defs aliased onto one") {
+        DefAliases a;
+        a.units["raven"] = "hoplite";
+        a.units["bastion"] = "hoplite";
+        CHECK_FALSE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(err.find("hoplite") != std::string::npos);
+    }
+
+    SUBCASE("an alias to a def this game does not have is a plain removal") {
+        // Not an authoring bug the engine can prove: the target may have been
+        // dropped from a later patch. The units go, loudly, by the removal path.
+        DefAliases a;
+        a.units["raven"] = "nothing_at_all";
+        REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(m.units.Gone("raven"));
+    }
+}
+
+TEST_CASE("task 2: a def-id FILTER that empties deactivates its order") {
+    // The sharp edge of "remove what cannot be remapped":
+    // StandingOrderConditions::squadTypes is a whitelist whose EMPTY state means
+    // "any squad". Dropping its last entry would widen a recruiting order to a
+    // wildcard - the opposite of what removing a def should do.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders(2);
+    orders[0].type = StandingOrderType::DefendArea;
+    orders[0].conditions.squadTypes = {2, 3};        // raven, bastion: both gone
+    orders[1].type = StandingOrderType::DefendArea;
+    orders[1].conditions.squadTypes = {1, 3};        // glaive survives
+    std::vector<Directive> dirs(1);
+    dirs[0].type = DirectiveType::BuildBase;
+    dirs[0].params = {100.0f, 0.0f, 200.0f, 1.0f, 3.0f};   // x, y, z, glaive, bastion
+    dirs[0].conditions.squadTypes = {1};
+
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    CHECK(orders[0].conditions.squadTypes.empty());
+    CHECK_FALSE(orders[0].active);
+    CHECK(rep.ordersDeactivated == 1);
+
+    REQUIRE(orders[1].conditions.squadTypes.size() == 1);
+    CHECK(orders[1].conditions.squadTypes[0] == 1);
+    CHECK(orders[1].active);
+
+    // BuildBase geometry is never a def; the def list starts at param 3.
+    REQUIRE(dirs[0].params.size() == 4);
+    CHECK(dirs[0].params[0] == doctest::Approx(100.0f));
+    CHECK(dirs[0].params[2] == doctest::Approx(200.0f));
+    CHECK(dirs[0].params[3] == doctest::Approx(1.0f));
+    CHECK(dirs[0].active);
+    // Two filter entries in orders[0], one in orders[1], one BuildBase param.
+    CHECK(rep.orderDefsDropped == 4);
+}
+
+TEST_CASE("task 2: a dropped unit does not stay in a transport graph") {
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    std::vector<UnitState> units{remapUnit(1, "glaive"), remapUnit(2, "raven")};
+    units[0].transportees = {{2, 0}, {3, 1}};
+    units[1].transporterId = 1;
+    std::vector<UnitState> alsoCarried{remapUnit(3, "glaive")};
+    units.push_back(alsoCarried[0]);
+    units[2].transporterId = 2;   // carried by the unit that is about to vanish
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    REQUIRE(units.size() == 2);          // the raven is gone
+    CHECK(rep.unitsDropped == 1);
+    // Its slot in the transport's cargo list goes with it, and the unit IT was
+    // carrying is no longer attached to a unit that will never be created.
+    REQUIRE(units[0].transportees.size() == 1);
+    CHECK(units[0].transportees[0].first == 3);
+    CHECK(units[1].transporterId == -1);
+}
+
+TEST_CASE("task 2: features and resurrect targets follow their defs") {
+    DefAliases a;
+    a.features["wreck_glaive"] = "wreck_glaive_v2";
+    DefNameTables live = patchedDefs();
+    live.features = {{4, "wreck_glaive_v2"}};
+    // The captured vocabulary has to CONTAIN the def a captured object names -
+    // it was read off the same def load. A payload naming a def that its own
+    // vocabulary never had is a corrupt payload, and ResolveFeatureDefs refuses
+    // it; that is not this pass's case.
+    DefNameTables captured = sampleDefs();
+    captured.features.push_back({2, "wreck_of_nothing"});
+
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(captured, live, a, m, err));
+    CHECK(m.features.Map(1) == 4);
+
+    std::vector<UnitState> units{remapUnit(1, "glaive")};
+    units[0].featureDefID = 1;
+    std::vector<FeatureState> features(2);
+    features[0].id = 100;
+    features[0].featureDefName = "wreck_glaive";
+    features[0].resurrectUnitDefName = "raven";       // a def that is gone
+    features[1].id = 101;
+    features[1].featureDefName = "wreck_of_nothing";  // a def that is gone
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    CHECK(units[0].featureDefID == 4);
+    CHECK(rep.wreckRemapped == 1);
+    REQUIRE(features.size() == 1);
+    CHECK(features[0].featureDefName == "wreck_glaive_v2");
+    CHECK(rep.featuresRenamed == 1);
+    CHECK(rep.featuresDropped == 1);
+    // "Not resurrectable" is a real state; a resurrect target pointing at a
+    // def that is gone would resurrect whatever holds that id now.
+    CHECK(features[0].resurrectUnitDefName.empty());
+    CHECK(rep.resurrectCleared == 1);
+}
+
+TEST_CASE("task 2: weapon slots pair by name, not by position") {
+    // The reorder case, which is the one a positional match gets wrong while
+    // looking right: a def whose two weapons swapped order would hand the
+    // stockpiled nuke's count to the machine gun.
+    std::vector<WeaponState> captured(2);
+    captured[0].weaponDefName = "machine_gun";
+    captured[0].numStockpiled = 0;
+    captured[1].weaponDefName = "nuke";
+    captured[1].numStockpiled = 4;
+
+    SUBCASE("reordered") {
+        const auto from = MatchWeaponSlots(captured, {"nuke", "machine_gun"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 1);
+        CHECK(from[1] == 0);
+    }
+
+    SUBCASE("E4: a weapon added to the def starts fresh") {
+        const auto from = MatchWeaponSlots(captured,
+                                           {"machine_gun", "nuke", "laser"});
+        REQUIRE(from.size() == 3);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+        CHECK(from[2] == -1);
+    }
+
+    SUBCASE("a weapon removed from the def drops its captured slot") {
+        const auto from = MatchWeaponSlots(captured, {"nuke"});
+        REQUIRE(from.size() == 1);
+        CHECK(from[0] == 1);
+    }
+
+    SUBCASE("two slots sharing one def keep their order") {
+        std::vector<WeaponState> twin(2);
+        twin[0].weaponDefName = "launcher"; twin[0].numStockpiled = 1;
+        twin[1].weaponDefName = "launcher"; twin[1].numStockpiled = 9;
+        const auto from = MatchWeaponSlots(twin, {"launcher", "launcher"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+    }
+
+    SUBCASE("a payload with no names at all matches positionally") {
+        // A pre-task-2 units section, or any fixture that never set a name.
+        // Matching those by name would pair every empty name with every other.
+        std::vector<WeaponState> unnamed(3);
+        const auto from = MatchWeaponSlots(unnamed, {"a", "b"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+    }
+}
+
+// ─ The scalar pass (PLAN-def-reconciliation task 3, §2 steps 3-4 + §6) ─
+//
+// Pure for the same reason task 2's is: the dangerous half is which number wins
+// when a def and a gadget disagree, and deciding that needs two scalar tables
+// and a decoded payload, not a def load.
+
+namespace {
+
+/// One unit def's newborn values, as the snapshot recorded them.
+UnitDefScalars bornScalars()
+{
+    UnitDefScalars s;
+    s.maxHealth = 1000.0f;
+    s.power = 100.0f;
+    s.mass = 50.0f;
+    s.buildTime = 300.0f;
+    s.cost = {120.0f, 80.0f};
+    s.armoredMultiple = 0.5f;
+    s.armorType = 3;
+    s.category = 4;
+    s.maxRange = 700.0f;
+    s.losRadius = 600;
+    s.airLosRadius = 600;
+    s.radarRadius = 0;
+    s.decloakDistance = 75.0f;
+    return s;
+}
+
+DefScalarTables bornTables()
+{
+    DefScalarTables t;
+    t.units.emplace("raven", bornScalars());
+    FeatureDefScalars f;
+    f.maxHealth = 400.0f;
+    f.mass = 200.0f;
+    f.reclaimTime = 100.0f;
+    f.defResources = {60.0f, 0.0f};
+    t.features.emplace("wreck_raven", f);
+    return t;
+}
+
+/// A unit of that def, captured with everything at its newborn value and half
+/// its health gone.
+UnitState bornUnit()
+{
+    UnitState u;
+    u.id = 7;
+    u.unitDefName = "raven";
+    const UnitDefScalars s = bornScalars();
+    u.maxHealth = s.maxHealth;
+    u.health = s.maxHealth * 0.5f;
+    u.power = s.power;
+    u.mass = s.mass;
+    u.buildTime = s.buildTime;
+    u.cost = s.cost;
+    u.armoredMultiple = s.armoredMultiple;
+    u.curArmorMultiple = 1.0f;   // not armoredState
+    u.armorType = s.armorType;
+    u.category = s.category;
+    u.maxRange = s.maxRange;
+    u.losRadius = u.realLosRadius = s.losRadius;
+    u.airLosRadius = u.realAirLosRadius = s.airLosRadius;
+    u.decloakDistance = s.decloakDistance;
+    u.reloadSpeed = 1.0f;
+    return u;
+}
+
+}  // namespace
+
+TEST_CASE("task 3: a retuned def re-derives, and health keeps its FRACTION") {
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;    // nerfed to half
+    live.units.at("raven").buildTime = 600.0f;
+    live.units.at("raven").maxRange = 900.0f;     // an up-gunned weapon
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.ran);
+    CHECK(rep.unitDefsRetuned == 1);
+    CHECK(rep.unitsTouched == 1);
+    CHECK(rep.unitFieldsReDerived == 3);
+    CHECK(rep.unitFieldsAuthored == 0);
+    CHECK(rep.unitsHealthScaled == 1);
+    // The whole point of "proportional, not clamp-only" (§3): the unit was at
+    // 50 %, and it still is. A clamp would have left it at 500/500 — healed by
+    // a nerf — and a straight copy at 500/500 too.
+    CHECK(units[0].maxHealth == doctest::Approx(500.0f));
+    CHECK(units[0].health == doctest::Approx(250.0f));
+    CHECK(units[0].buildTime == doctest::Approx(600.0f));
+    CHECK(units[0].maxRange == doctest::Approx(900.0f));
+    CHECK(rep.Describe().find("1 unit health fractions preserved") !=
+          std::string::npos);
+}
+
+TEST_CASE("task 3: a BUFF raises absolute health without healing the unit") {
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 2000.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].maxHealth == doctest::Approx(2000.0f));
+    CHECK(units[0].health == doctest::Approx(1000.0f));
+    // Still exactly as wounded as it was, which is §3's stated interaction with
+    // the no-heal invariant.
+    CHECK(units[0].health / units[0].maxHealth == doctest::Approx(0.5f));
+}
+
+TEST_CASE("task 3: an AUTHORED value survives the patch that would overwrite it") {
+    // The load-bearing negative of this whole pass. Almost every audited field
+    // is both a def cache and a Lua setter's target, so a value that does NOT
+    // match the def it was born from belongs to a gadget and reconciling it
+    // would silently revert Spring.SetUnitMaxHealth.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;
+    live.units.at("raven").cost = {200.0f, 200.0f};
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].maxHealth = 3000.0f;         // a gadget's boss unit
+    units[0].health = 1500.0f;
+    units[0].cost = {1.0f, 1.0f};         // and a gadget's price
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.unitFieldsAuthored == 2);
+    CHECK(units[0].maxHealth == doctest::Approx(3000.0f));
+    CHECK(units[0].health == doctest::Approx(1500.0f));   // no fraction to scale
+    CHECK(rep.unitsHealthScaled == 0);
+    CHECK(units[0].cost.metal == doctest::Approx(1.0f));
+}
+
+TEST_CASE("task 3: a VETERAN is not read as authored") {
+    // maxHealth and power are functions of the def AND experience, so comparing
+    // a veteran's values against the raw def value reads every veteran in the
+    // world as authored — and then the units that matter most keep their stale
+    // maxHealth. The expected-newborn value therefore folds the SNAPSHOT's own
+    // experience curve, which is why the curve travels in the section.
+    DefScalarTables born = bornTables();
+    born.expHealthScale = 1.0f;
+    born.expPowerScale = 1.0f;
+    DefScalarTables live = born;
+    live.units.at("raven").maxHealth = 500.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].experience = 1.0f;           // limExperience 0.5
+    units[0].maxHealth = 1500.0f;         // 1000 × (1 + 0.5)
+    units[0].health = 750.0f;
+    units[0].power = 150.0f;
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(born, live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.unitFieldsAuthored == 0);
+    CHECK(units[0].maxHealth == doctest::Approx(750.0f));   // 500 × 1.5
+    CHECK(units[0].health == doctest::Approx(375.0f));      // still 50 %
+    CHECK(rep.unitsHealthScaled == 1);
+}
+
+TEST_CASE("task 3: armorType is re-derived, which is the index no remap could reach") {
+    // Task 2's named gap. armorType is an index into the armor-type list, which
+    // no section carries and no name-keyed map can rewrite — but it also has no
+    // Lua setter and nothing mutates it after PreInit, so the fix is not a
+    // fourth name table: it is not restoring a stale index at all.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").armorType = 9;   // the armor list was reordered
+    live.units.at("raven").category = 12;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].armorType == 9);
+    CHECK(units[0].category == 12u);
+    CHECK(rep.unitFieldsReDerived == 2);
+}
+
+TEST_CASE("task 3: an unrecorded scalar table changes NOTHING") {
+    // The same one-directional guard as task 2's unknown vocabulary, and the
+    // same reason: a pre-task-3 snapshot has no scalars, and reading that as
+    // "every def was retuned to the live numbers" would overwrite every
+    // authored scalar in the world in one pass.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(DefScalarTables{}, live, DefRemap{}, units, features, rep);
+    CHECK_FALSE(rep.ran);
+    CHECK_FALSE(rep.Changed());
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+    CHECK(rep.Describe() == "no def scalars recorded in this snapshot");
+
+    // And the other direction: a process that has parsed no def yet.
+    ScalarReport rep2;
+    ReconcileScalars(bornTables(), DefScalarTables{}, DefRemap{}, units, features, rep2);
+    CHECK_FALSE(rep2.ran);
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+}
+
+TEST_CASE("task 3: a tuning-only patch that tunes nothing touches nothing") {
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), bornTables(), DefRemap{}, units, features, rep);
+    CHECK(rep.ran);
+    CHECK_FALSE(rep.Changed());
+    CHECK(rep.Describe() == "no def scalar moved");
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+    CHECK(rep.unitFieldsReDerived == 0);
+    CHECK(rep.unitFieldsAuthored == 0);
+}
+
+TEST_CASE("task 3: a RENAMED def finds its own captured scalars") {
+    // The pass runs after RemapPayload, so the payload carries live names while
+    // the captured table is keyed by the snapshot's. Without the inverse rename
+    // a renamed def's units would all report unknownDef and keep stale numbers.
+    DefScalarTables live;
+    live.units.emplace("raven_mk2", bornScalars());
+    live.units.at("raven_mk2").maxHealth = 500.0f;
+
+    DefRemap map;
+    map.unitRenames.emplace("raven", "raven_mk2");
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].unitDefName = "raven_mk2";   // RemapPayload already did this
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, map, units, features, rep);
+
+    CHECK(rep.unitsUnknownDef == 0);
+    CHECK(rep.unitDefsRetuned == 1);
+    CHECK(units[0].maxHealth == doctest::Approx(500.0f));
+    CHECK(units[0].health == doctest::Approx(250.0f));
+}
+
+TEST_CASE("task 3: a def with no recorded scalars is left alone, not refused") {
+    std::vector<UnitState> units{bornUnit()};
+    units[0].unitDefName = "something_else";
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), bornTables(), DefRemap{}, units, features, rep);
+    CHECK(rep.unitsUnknownDef == 1);
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+}
+
+TEST_CASE("task 3: mass is skipped where it is not a def cache") {
+    // mass is the audit's one accumulator: it stays at its constructor value
+    // while a unit is beingBuilt (Unit.cpp:268) and a transport ADDS its cargo's
+    // mass into its own (Unit.cpp:2686). Re-deriving either would write a number
+    // the def cannot know.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").mass = 75.0f;
+
+    std::vector<UnitState> units{bornUnit(), bornUnit(), bornUnit()};
+    units[1].beingBuilt = true;
+    units[2].transportees.push_back({99, 0});
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].mass == doctest::Approx(75.0f));   // an ordinary unit follows
+    CHECK(units[1].mass == doctest::Approx(50.0f));
+    CHECK(units[2].mass == doctest::Approx(50.0f));
+    CHECK(rep.unitFieldsReDerived == 1);
+}
+
+TEST_CASE("task 3: a re-costed wreck keeps its reclaim FRACTION") {
+    // The feature half of fraction preservation, and it needs its own rule:
+    // `resources` is what is left to reclaim and CFeature caps it at
+    // defResources, using the ratio as the reclaimed fraction. A cheapened def
+    // would otherwise leave a half-reclaimed wreck holding more than the def
+    // says it ever had.
+    DefScalarTables live = bornTables();
+    live.features.at("wreck_raven").defResources = {30.0f, 0.0f};
+    live.features.at("wreck_raven").maxHealth = 200.0f;
+
+    FeatureState f;
+    f.featureDefName = "wreck_raven";
+    f.maxHealth = 400.0f;
+    f.health = 100.0f;            // a quarter
+    f.mass = 200.0f;
+    f.reclaimTime = 100.0f;
+    f.defResources = {60.0f, 0.0f};
+    f.resources = {30.0f, 0.0f};  // half reclaimed
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features{f};
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.featureDefsRetuned == 1);
+    CHECK(rep.featuresTouched == 1);
+    CHECK(rep.featuresHealthScaled == 1);
+    CHECK(rep.featuresResourcesScaled == 1);
+    CHECK(features[0].maxHealth == doctest::Approx(200.0f));
+    CHECK(features[0].health == doctest::Approx(50.0f));
+    CHECK(features[0].defResources.metal == doctest::Approx(30.0f));
+    CHECK(features[0].resources.metal == doctest::Approx(15.0f));
+}
+
+TEST_CASE("defScalars: the section round-trips every field of both tables") {
+    DefScalarTables t = bornTables();
+    t.expPowerScale = 0.25f;
+    t.expHealthScale = 0.5f;
+    t.expReloadScale = 0.125f;
+    t.units.emplace("bastion", UnitDefScalars{});
+    UnitDefScalars& b = t.units.at("bastion");
+    b.stealth = true;
+    b.sonarStealth = true;
+    b.sonarJamRadius = 42;
+    b.harvestStorage = {7.0f, 8.0f};
+    b.storage = {9.0f, 10.0f};
+    b.flankingBonusMode = 2;
+    b.flankingBonusMobilityAdd = 1.0f;
+    b.flankingBonusAvgDamage = 1.1f;
+    b.flankingBonusDifDamage = 0.2f;
+    b.seismicSignature = 3.5f;
+    b.seismicRadius = 11;
+
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(t, bytes);
+    DefScalarTables out;
+    std::string err;
+    REQUIRE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.empty());
+    CHECK(out.expPowerScale == doctest::Approx(0.25f));
+    CHECK(out.expHealthScale == doctest::Approx(0.5f));
+    CHECK(out.expReloadScale == doctest::Approx(0.125f));
+    REQUIRE(out.units.size() == 2);
+    REQUIRE(out.features.size() == 1);
+    CHECK(out.units.at("raven").armorType == 3);
+    CHECK(out.units.at("raven").maxRange == doctest::Approx(700.0f));
+    CHECK(out.units.at("bastion").stealth);
+    CHECK(out.units.at("bastion").sonarStealth);
+    CHECK(out.units.at("bastion").sonarJamRadius == 42);
+    CHECK(out.units.at("bastion").storage.energy == doctest::Approx(10.0f));
+    CHECK(out.units.at("bastion").harvestStorage.metal == doctest::Approx(7.0f));
+    CHECK(out.units.at("bastion").flankingBonusMobilityAdd == doctest::Approx(1.0f));
+    CHECK(out.units.at("bastion").flankingBonusDifDamage == doctest::Approx(0.2f));
+    CHECK(out.units.at("bastion").seismicSignature == doctest::Approx(3.5f));
+    CHECK(out.features.at("wreck_raven").reclaimTime == doctest::Approx(100.0f));
+    CHECK(out.features.at("wreck_raven").defResources.metal == doctest::Approx(60.0f));
+
+    // Two encodes of the same tables are byte-identical: the section is written
+    // in sorted name order, not in hash-bucket order, or the §8 re-capture bar
+    // would compare a payload against a permutation of itself.
+    std::vector<uint8_t> again;
+    EncodeDefScalars(out, again);
+    CHECK(again == bytes);
+}
+
+TEST_CASE("defScalars: a truncated section is a refusal at every cut point") {
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(bornTables(), bytes);
+    for (size_t cut = 0; cut < bytes.size(); ++cut) {
+        DefScalarTables out;
+        std::string err;
+        CAPTURE(cut);
+        CHECK_FALSE(DecodeDefScalars(bytes.data(), cut, out, err));
+        CHECK_FALSE(err.empty());
+    }
+}
+
+TEST_CASE("defScalars: trailing bytes inside the section are a refusal") {
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(bornTables(), bytes);
+    bytes.push_back(0);
+    DefScalarTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("defScalars: an absurd def count is refused before it is allocated") {
+    std::vector<uint8_t> bytes(3 * 4, 0);      // the three scales
+    bytes.push_back(0xff); bytes.push_back(0xff);
+    bytes.push_back(0xff); bytes.push_back(0x0f);
+    DefScalarTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("claims") != std::string::npos);
+}
+
+TEST_CASE("defScalars: capture with no def handlers is empty tables, not a crash") {
+    // Same shape as defNames': the store is built ~400 lines before the first
+    // def is parsed, so this is a real state rather than a defensive check.
+    DefScalarTables t;
+    CaptureDefScalars(t);
+    CHECK(t.Empty());
+}
+
+TEST_CASE("defScalars: the section is required, not optional") {
+    const auto& secs = Sections();
+    const auto it = std::find_if(secs.begin(), secs.end(), [](const SectionSpec& s) {
+        return s.id == SectionId::DefScalars;
+    });
+    REQUIRE(it != secs.end());
+    CHECK(it->implemented);
+    CHECK(std::string(it->name) == "defScalars");
+    CHECK(it->version == 1);
+}
+
+TEST_CASE("task 2: the pending-volley ring is declared uncaptured, not remapped") {
+    // §E5 asks task 2 to remap the statistical-combat ring's weaponDefId. There
+    // is no ring in the payload: it is dropped on the same argument as an
+    // in-flight projectile. That is a declared omission rather than a silent
+    // one, and this is the assertion that keeps it declared.
+    const auto& omitted = DerivedNotCaptured();
+    const bool named = std::any_of(omitted.begin(), omitted.end(),
+        [](const DerivedOmission& o) {
+            return std::string(o.what).find("statistical-combat") != std::string::npos;
+        });
+    CHECK(named);
+}
+
+// ───── PLAN-def-reconciliation task 4: the DefsReconciled delta (§2 step 5) ─────
+//
+// The engine's three passes reconcile what the engine owns. This is what the
+// GAME is told so it can repair its own half, and every case below is about one
+// distinction: a count is for a human reading a log line, a LIST is read by
+// synced Lua and has to be complete and ordered.
+
+namespace {
+
+/// Walk the delta table for a string key. The delta is a luasnapshot::Value, so
+/// this is the same lookup a gadget does with `delta.x`.
+const luasnapshot::Value* Sub(const luasnapshot::Value& v, const char* key)
+{
+    return v.Field(key);
+}
+
+int64_t CountOf(const luasnapshot::Value& delta, const char* key)
+{
+    const luasnapshot::Value* counts = Sub(delta, "counts");
+    REQUIRE(counts != nullptr);
+    const luasnapshot::Value* c = counts->Field(key);
+    REQUIRE(c != nullptr);
+    return c->i;
+}
+
+/// A 1..n array as a plain vector, which also asserts the keys really are
+/// 1..n integers — a gadget iterates these with ipairs, and a table keyed
+/// 1.0, 2.0 (Q-P6's float keys) or keyed out of order is not one.
+std::vector<std::string> ArrayStrings(const luasnapshot::Value& v)
+{
+    std::vector<std::string> out;
+    int64_t expect = 0;
+    for (const auto& [k, val] : v.table) {
+        CHECK(k.type == luasnapshot::Value::Type::Integer);
+        CHECK(k.i == ++expect);
+        CHECK(val.type == luasnapshot::Value::Type::String);
+        out.push_back(val.str);
+    }
+    return out;
+}
+
+std::vector<int64_t> ArrayInts(const luasnapshot::Value& v)
+{
+    std::vector<int64_t> out;
+    int64_t expect = 0;
+    for (const auto& [k, val] : v.table) {
+        CHECK(k.type == luasnapshot::Value::Type::Integer);
+        CHECK(k.i == ++expect);
+        CHECK(val.type == luasnapshot::Value::Type::Integer);
+        out.push_back(val.i);
+    }
+    return out;
+}
+
+/// The three reports a real restore would produce for `patchedDefs()` over a
+/// world holding one of each def.
+struct ReconcileFixture {
+    DefRemap     remap;
+    RemapReport  remapRep;
+    ScalarReport scalarRep;
+    DefDelta     units, weapons, features;
+
+    ReconcileFixture()
+    {
+        std::string err;
+        REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, remap, err));
+        units    = CompareDefNames(sampleDefs().units, patchedDefs().units);
+        weapons  = CompareDefNames(sampleDefs().weapons, patchedDefs().weapons);
+        features = CompareDefNames(sampleDefs().features, patchedDefs().features);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("task 4: nothing moved means NO call-in, not an empty table") {
+    // The ordinary resume. A gadget must never have to work out from eleven
+    // counters that it has nothing to do, and the §8 round-trip's byte-identical
+    // re-capture depends on no gadget being run here.
+    const auto delta = BuildDefsReconciledDelta(DefDelta{}, DefDelta{}, DefDelta{},
+                                                DefRemap{}, RemapReport{}, ScalarReport{});
+    CHECK(delta.IsNil());
+}
+
+TEST_CASE("task 4: a pure def ADDITION still fires") {
+    // §3 says additions need nothing from the ENGINE. They can need something
+    // from the game (a gadget caching what a factory can build), and the engine
+    // cannot know which gadgets those are.
+    DefDelta added;
+    added.added = 1;
+    const auto delta = BuildDefsReconciledDelta(added, DefDelta{}, DefDelta{},
+                                                DefRemap{}, RemapReport{}, ScalarReport{});
+    REQUIRE(delta.IsTable());
+    CHECK(CountOf(delta, "unitDefsAdded") == 1);
+}
+
+TEST_CASE("task 4: the dropped-unit list is COMPLETE, where the log line is capped") {
+    // The finding this milestone turns on. RemapReport::droppedUnitNames is five
+    // examples for one WARNING; the ids are what a gadget cleans up against, and
+    // a capped list of ids is a gadget that repairs the first five references and
+    // leaves the sixth pointing at nothing.
+    ReconcileFixture f;
+    std::vector<UnitState> units;
+    // bastion is the def patchedDefs() removes. Eight of them, so the count is
+    // past kDefDeltaExamples — and in DESCENDING id order, so the sortedness
+    // assertion below is about the builder rather than about the fixture.
+    for (int32_t i = 7; i >= 0; --i) units.push_back(remapUnit(100 + i, "bastion"));
+    units.push_back(remapUnit(200, "glaive"));
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapPayload(f.remap, units, features, orders, dirs, f.remapRep);
+
+    REQUIRE(f.remapRep.unitsDropped == 8);
+    CHECK(f.remapRep.droppedUnitNames.size() == kDefDeltaExamples);   // the log's five
+    REQUIRE(f.remapRep.droppedUnitIds.size() == 8);                   // the gadget's eight
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* droppedUnits = Sub(delta, "droppedUnits");
+    REQUIRE(droppedUnits != nullptr);
+    const auto ids = ArrayInts(*droppedUnits);
+    REQUIRE(ids.size() == 8);
+    CHECK(ids.front() == 100);
+    CHECK(ids.back() == 107);
+    // Sorted, because a gadget iterating this is running synced code and the
+    // payload's own order is capture order rather than a promise.
+    CHECK(std::is_sorted(ids.begin(), ids.end()));
+    CHECK(CountOf(delta, "unitsDropped") == 8);
+}
+
+TEST_CASE("task 4: a dropped feature reports its id too") {
+    ReconcileFixture f;
+    // A feature def the patched vocabulary keeps and one it does not: only
+    // wreck_glaive survives patchedDefs(), so invent a removal by aliasing
+    // nothing — use a captured table with an extra feature def.
+    DefNameTables captured = sampleDefs();
+    captured.features.push_back({2, "wreck_bastion"});
+    DefRemap remap;
+    std::string err;
+    REQUIRE(BuildDefRemap(captured, patchedDefs(), DefAliases{}, remap, err));
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features(2);
+    features[0].id = 40;
+    features[0].featureDefName = "wreck_bastion";
+    features[1].id = 41;
+    features[1].featureDefName = "wreck_glaive";
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(remap, units, features, orders, dirs, rep);
+
+    REQUIRE(rep.featuresDropped == 1);
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                remap, rep, ScalarReport{});
+    REQUIRE(delta.IsTable());
+    const auto ids = ArrayInts(*Sub(delta, "droppedFeatures"));
+    REQUIRE(ids.size() == 1);
+    CHECK(ids[0] == 40);
+}
+
+TEST_CASE("task 4: removals, renames and retunes reach the game BY NAME") {
+    ReconcileFixture f;
+    DefAliases aliases;
+    aliases.units["raven"] = "raven_mk2";
+    DefRemap remap;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), aliases, remap, err));
+
+    ScalarReport srep;
+    srep.ran = true;
+    srep.unitDefsRetuned = 2;
+    srep.retunedUnitDefs = {"raven_mk2", "glaive"};
+    srep.featureDefsRetuned = 1;
+    srep.retunedFeatureDefs = {"wreck_glaive"};
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                remap, RemapReport{}, srep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* unitTable = Sub(delta, "units");
+    REQUIRE(unitTable != nullptr);
+
+    // bastion is gone; raven is not — the game declared it a rename, so it must
+    // NOT appear as a removal (that is the whole point of migrations.lua).
+    const auto removed = ArrayStrings(*unitTable->Field("removed"));
+    REQUIRE(removed.size() == 1);
+    CHECK(removed[0] == "bastion");
+
+    // The rename map is keyed by the CAPTURED name: a gadget's own saved state
+    // was written with that name and it cannot look the old one up any more.
+    const luasnapshot::Value* renamed = unitTable->Field("renamed");
+    REQUIRE(renamed != nullptr);
+    REQUIRE(renamed->table.size() == 1);
+    CHECK(renamed->table[0].first.str == "raven");
+    CHECK(renamed->table[0].second.str == "raven_mk2");
+
+    // Retunes arrive sorted and complete, in LIVE names — what the restored
+    // world and the game's own UnitDefNames lookup use.
+    const auto retuned = ArrayStrings(*unitTable->Field("retuned"));
+    REQUIRE(retuned.size() == 2);
+    CHECK(retuned[0] == "glaive");
+    CHECK(retuned[1] == "raven_mk2");
+    CHECK(ArrayStrings(*Sub(delta, "features")->Field("retuned")).size() == 1);
+    CHECK(CountOf(delta, "unitDefsRetuned") == 2);
+
+    // Weapons carry removals and NO rename half, structurally: nothing a gadget
+    // saves references a weapon def by name, so there is no pairing to hand over.
+    const luasnapshot::Value* weaponTable = Sub(delta, "weapons");
+    REQUIRE(weaponTable != nullptr);
+    CHECK(weaponTable->Field("renamed") == nullptr);
+    CHECK(weaponTable->Field("removed") != nullptr);
+}
+
+TEST_CASE("task 4: a pre-task-3 snapshot says its retunes are UNKNOWN") {
+    // An empty retune list has two meanings with opposite dispositions: nothing
+    // moved, or nothing was ever recorded. A gadget deciding whether to re-derive
+    // its own def-derived caches needs to tell them apart — the same
+    // one-directional guard the vocabulary and scalar passes apply to themselves.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 1;
+    f.remapRep.droppedUnitIds = {5};
+
+    ScalarReport notRun;                  // ran = false: no defScalars section
+    const auto blind = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, notRun);
+    REQUIRE(blind.IsTable());
+    REQUIRE(blind.Field("retunesKnown") != nullptr);
+    CHECK(blind.Field("retunesKnown")->b == false);
+    CHECK(ArrayStrings(*Sub(blind, "units")->Field("retuned")).empty());
+
+    ScalarReport ran;
+    ran.ran = true;
+    const auto seen = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                               f.remap, f.remapRep, ran);
+    CHECK(seen.Field("retunesKnown")->b == true);
+}
+
+TEST_CASE("task 4: the digest string is the two passes' own wording") {
+    // §2 step 6's digest line, composed once. A second wording of the same
+    // counts in Lua would be a second wording to keep in step.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 3;
+    f.remapRep.droppedUnitNames = {"bastion"};
+    f.remapRep.droppedUnitIds = {1, 2, 3};
+    f.scalarRep.ran = true;
+    f.scalarRep.unitDefsRetuned = 1;
+    f.scalarRep.retunedNames = {"glaive"};
+    f.scalarRep.unitsTouched = 4;
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* digest = delta.Field("digest");
+    REQUIRE(digest != nullptr);
+    CHECK(digest->str == f.remapRep.Describe() + " | " + f.scalarRep.Describe());
+    CHECK(digest->str.find("bastion") != std::string::npos);
+    CHECK(digest->str.find("glaive") != std::string::npos);
+}
+
+TEST_CASE("task 4: the delta is pushable into a Lua state") {
+    // The delta is handed to synced Lua through luasnapshot::Push, which refuses
+    // a malformed tree (a nil or NaN key, depth past kMaxDepth). Building it out
+    // of Value::Int keys rather than Number ones is Q-P6's finding one layer up:
+    // a float key spells `1.0` and ipairs never sees it.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 1;
+    f.remapRep.droppedUnitIds = {11};
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    // Nesting is two deep by construction (delta.units.removed[1]) — well inside
+    // the codec's limit, and asserted so a future field cannot quietly deepen it
+    // past what a gadget's own Save is allowed to hold.
+    const auto depthOf = [](const luasnapshot::Value& v, auto&& self) -> int {
+        int deepest = 0;
+        for (const auto& [k, val] : v.table)
+            if (val.IsTable()) deepest = std::max(deepest, self(val, self));
+        return deepest + 1;
+    };
+    CHECK(depthOf(delta, depthOf) <= 3);
+    CHECK(delta.Nodes() > 0);
 }

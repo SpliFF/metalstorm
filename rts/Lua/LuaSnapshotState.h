@@ -47,19 +47,31 @@ inline constexpr int kMaxDepth = 32;
 /// A Lua value restricted to what can be reproduced in another process.
 /// Deliberately not a variant: the codec needs a stable numeric discriminator
 /// on the wire, and a variant's index is an artefact of the type list's order.
+///
+/// INTEGER IS A SEPARATE TYPE BECAUSE LUA 5.4 HAS TWO NUMBER SUBTYPES
+/// -----------------------------------------------------------------
+/// `Number` alone captured a gadget's counters as doubles and restored them
+/// with `lua_pushnumber`, so a restored `seq = 1` came back as a float and
+/// `'warlog_' .. seq .. '_kind'` spelled `warlog_1.0_kind` — a resumed war
+/// re-published every numbered rules param under a key nothing reads
+/// (PLAN-persistence Q-P6, decision A3). Carrying the subtype is the only
+/// option that also keeps a deliberate float 3.0 a float.
 struct Value {
     enum class Type : uint8_t {
-        Nil    = 0,
-        Bool   = 1,
-        Number = 2,
-        String = 3,
-        Table  = 4,
+        Nil     = 0,
+        Bool    = 1,
+        Number  = 2,
+        String  = 3,
+        Table   = 4,
+        Integer = 5,
     };
 
     Type   type = Type::Nil;
     bool   b    = false;
     double num  = 0.0;   ///< double, not float: Lua numbers are doubles and a
                          ///< frame stamp past 2^24 must not be rounded.
+    int64_t i   = 0;     ///< Lua 5.4's integer subtype, held separately from
+                         ///< `num` so a 2^53+ integer survives verbatim.
     std::string str;
     /// Canonically ordered key/value pairs. A vector, not a map: the order IS
     /// the contract and a map would re-impose its own comparator.
@@ -68,11 +80,20 @@ struct Value {
     static Value Nil()               { return {}; }
     static Value Boolean(bool v)     { Value x; x.type = Type::Bool;   x.b = v;   return x; }
     static Value Number(double v)    { Value x; x.type = Type::Number; x.num = v; return x; }
+    static Value Int(int64_t v)      { Value x; x.type = Type::Integer; x.i = v;  return x; }
     static Value Str(std::string v)  { Value x; x.type = Type::String; x.str = std::move(v); return x; }
     static Value Table()             { Value x; x.type = Type::Table;  return x; }
 
     bool IsNil()   const { return type == Type::Nil; }
     bool IsTable() const { return type == Type::Table; }
+    /// True for both number subtypes — the callers that only care "is this a
+    /// number" (key ordering, the table's array/hash sizing) must not have to
+    /// know there are two.
+    bool IsNumeric() const { return type == Type::Number || type == Type::Integer; }
+    /// The numeric value as a double, whichever subtype it is. For ordering and
+    /// error paths only: an integer past 2^53 loses precision here, which is why
+    /// the wire format does not go through it.
+    double AsDouble() const { return (type == Type::Integer) ? static_cast<double>(i) : num; }
 
     /// Lookup by string key. Returns nullptr when absent (or not a table), so
     /// a caller reading an optional field does not need to walk `table`.

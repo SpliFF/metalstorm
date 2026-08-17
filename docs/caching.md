@@ -61,6 +61,13 @@ fetch(stampUrl('/api/maps/data/foo/bar.glb'))
 | Feature .glb models | In-game feature renderer | `feature-renderer.ts` |
 | Game UI templates | Game start | `ui/game/loader.ts` |
 | Lobby UI templates | Login | `ui/lobby/loader.ts` |
+| Game `resources.json` | Decals, projectile textures | `decal-renderer.ts`, `projectile-texture-resolver.ts` |
+
+**Not stamped** (deliberate, and why the tier below is request-conditional):
+`metadata.json` is fetched bare by `core/map-data.ts` (`fetchMapDataHttp`) and
+by the game-processor's viewport sizing. A map's metadata changes when the map
+package is regenerated, which is not the same event as a rebuild, so the build
+stamp is the wrong key for it — those callers get revalidation instead.
 
 ## Cache Policies
 
@@ -70,9 +77,37 @@ Three tiers of caching, all controlled by `CacheControl.h`:
 |------|--------|----------|--------|
 | **Static assets** | 1 year, immutable | Maps, models, textures, thumbnails | `public, max-age=31536000, immutable` |
 | **Metadata** | 5 minutes | Map list, game list, manifest | `public, max-age=300` |
+| **Versioned** | static if stamped, else metadata | Composed JSON under a stable URL (`metadata.json`, `resources.json`) | either of the two above, per request |
 | **Dynamic** | Never cached | API responses, exec, auth, version | `no-store` |
 
 Static assets use immutable caching because the `?v=` parameter makes each build's URLs unique. The browser caches them forever and never revalidates — it simply never requests the old URL again.
+
+### The immutable tier is earned per request, not assumed
+
+`immutable` (RFC 8246) does not mean "cache for a year", it means **never
+revalidate — including on an explicit reload**. So the `?v=` stamp is not an
+optimisation on top of the immutable tier, it is the entire safety argument
+for it, and a response answered `immutable` under a URL the caller did *not*
+stamp has no client-side remedy at all: not a reload, not the schema-mismatch
+recovery path (PLAN-protocol-guard), only "clear your site data".
+
+Two lobby endpoints are **composed per request** rather than read from a file
+whose name contains its own hash — `/api/maps/data/<id>/metadata.json` (from
+the maps DB) and `/api/games/<id>/resources.json` (parsed from the game's
+files) — and two of their three client callers fetch them bare. They therefore
+answer `CacheControl::VersionedAssetHeader(NetworkServer::CurrentQueryString())`:
+immutable when the request actually carried `?v=`, the 5-minute metadata tier
+when it did not. Use that helper, not `StaticAssetHeader()`, for anything whose
+URL is stable across builds.
+
+The client bundle's own assets are the other shape and are fine: Vite puts a
+content hash *in the filename*, so `/assets/main-<hash>.js` may be immutable
+with no query stamp — but the **entry document must be `no-cache`**, since it
+is what names those filenames. No server in this repo serves it (dev: `vite
+dev`; local prod stand-in: `vite preview`; production: an external static
+server, docs/deployment.md §3). Both Vite paths were measured answering
+`Cache-Control: no-cache` on `/` — the production config is the one place this
+can go wrong.
 
 ### Server-side usage
 

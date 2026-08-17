@@ -18,6 +18,10 @@ CALLIN_LIST = {
 	-- Save/Load
 	"Save",
 	"Load",
+	-- fired after Load when the DEFS moved under the snapshot being restored
+	-- (PLAN-def-reconciliation task 4). Not an upstream Recoil call-in: a
+	-- savegame there is only ever loaded by the build that wrote it.
+	"DefsReconciled",
 
 	"Pong",
 

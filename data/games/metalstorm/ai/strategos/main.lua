@@ -24,11 +24,15 @@
 --           AI.getMapData / AI.getDefExport (AI4)
 --   writes: AI.createGroup · AI.issueDirective · AI.setPosture (AI2 — the
 --           directive-shaped write surface; routed through the SAME engine
---           managers + charge callins as a human player's commands).
+--           managers + charge callins as a human player's commands) ·
+--           AI.sendMessage (I1/SG1 — an opaque string delivered to
+--           gadget:RecvLuaMsg with this AI's playerID, the one write into
+--           synced game Lua; the actuator uses it for the `ai.intent` tag).
 --   infra:  AI.log(msg) (server-log channel — a headless AI has no chat/HUD,
 --           §5.1) · AI.nowMs() (monotonic clock for self-timing the §6 tick).
 -- Still assumed-but-absent (each module feature-detects + degrades): squad
--- views, LOD, chat/stake/parley (I1). See README "Engine asks".
+-- views, LOD, chat/stake/parley verbs — none of them blocked on an engine ask now
+-- that I1 has landed, just not on the surface. See README "Engine asks".
 
 --=============================================================================
 -- Module loading.  See README "Engine ask AI0-loader".
@@ -312,22 +316,29 @@ local function strategicTick(frame)
             computeMs > 2.0 and ' OVER_BUDGET' or '')
     end
     local econ = picture.economy or {}
+    -- The human's vetoes, named — the AI's own report that it consulted them.
+    -- Absent from an ordinary tick, so the line stays the same width it was.
+    local vetoTag = ''
+    if plan.vetoed and #plan.vetoed > 0 then
+        vetoTag = ' vetoed=' .. table.concat(plan.vetoed, ',')
+    end
     self.actuators:chat(string.format(
         "[strategos] tick f=%d role=%s lod=%d%s goals=%d directives=%d "
         .. "regions(own/neu/enemy)=%d/%d/%d obj(active/done)=%d/%d ownStr=%d "
-        .. "pool(own/team)=%d/%d budget=%d spent=%d%s",
+        .. "pool(own/team)=%d/%d budget=%d spent=%d%s%s",
         frame, role.id, self.lodTier,
         picture.script and (' script=' .. table.concat(picture.script.kinds or {}, '+')) or '',
         nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
         math.floor(ownStrength), math.floor(econ.ownPool or 0),
         math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
-        math.floor(plan.spent or 0), budgetTag))
+        math.floor(plan.spent or 0), budgetTag, vetoTag))
 
     -- 5. PARLEY — evaluate proposals addressed to us and respond
     -- (interaction §6.2). The decision is computed unconditionally (pure,
-    -- testable now); only the actual respond CALL is gated on engine ask I1
-    -- (Actuators:respondProposal degrades to a no-op false until then, same
-    -- as every other AI2-class verb in actuators.lua).
+    -- testable now); only the actual respond CALL is missing a runtime verb
+    -- (Actuators:respondProposal degrades to a no-op false, same as every other
+    -- AI2-class verb in actuators.lua — see its comment: I1 has landed, so this
+    -- is unimplemented, not blocked).
     for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
         self.actuators:respondProposal(r.id, r.decision)
     end

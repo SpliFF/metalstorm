@@ -21,6 +21,8 @@ import { stampUrl } from '../../config.js';
 import { injectStyle } from '../ui.js';
 import { clientSettings } from '../../core/client-settings.js';
 import { parseRevealPredicate } from './reveal-predicate.js';
+import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
+import { uiActionRegistry } from './ui-action-registry.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -79,6 +81,18 @@ export interface WidgetDescriptor {
     /** Start collapsed the first time this player sees the panel. Use for the
      *  heavy, occasionally-used panels so the HUD opens quiet. */
     collapsed?: boolean;
+    /**
+     * Extra names a player may call this panel by, for the natural-language
+     * command layer (PLAN-metalstorm-command-language.md §6.3 — "open the
+     * diplomacy panel" for `parley-panel`).
+     *
+     * They live in the MANIFEST, next to the `title` the player reads, because
+     * the alternative is a second table in the client that has to be kept in
+     * step with a game's panel list — the same drift `class-vocabulary.json`
+     * exists to prevent. The widget id and the title are always accepted, so
+     * this is only for the phrasings neither of those covers.
+     */
+    nlAliases?: string[];
 }
 
 export interface WidgetContext {
@@ -131,6 +145,10 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // @ts-ignore — command-composer.js is untyped JS (same as the game-dir
     // widgets); it exports a default { id, init, dispose } matching Widget.
     'command-composer': () => import('../../native-widgets/command-composer.js'),
+    // @ts-ignore — same shape; the NL command console (PLAN-metalstorm-
+    // command-language.md §4) needs the bundled console-exchange + accelerator
+    // + class-vocabulary modules.
+    'command-console': () => import('../../native-widgets/command-console.js'),
 };
 
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */
@@ -161,6 +179,10 @@ export class WidgetLoader {
     private progressiveDisclosure = true;
     /** Unsubscribe fns for widgets still waiting on their `revealOn`. */
     private pendingReveals = new Map<string, () => void>();
+    /** ui-action-registry removals, one per mounted titled panel. Dropped on
+     *  dispose so the registry never answers "opened" for a panel that has been
+     *  taken out of the DOM. */
+    private panelUnregisters = new Map<string, () => void>();
     /** Keeps the left rail docked below whatever occupies the top-left mount. */
     private topLeftObserver: ResizeObserver | null = null;
     /**
@@ -231,7 +253,16 @@ export class WidgetLoader {
         const baseUrl = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
 
         // Game skin goes in after the design system so it can override tokens.
-        await this.injectGameStyles(manifest.styles ?? [], baseUrl);
+        // The class vocabulary (PLAN-metalstorm-command-language.md §2) is a
+        // sibling of the manifest in the same ui/ dir and is fetched with the
+        // styles rather than after them — widgets that parse sentences read it
+        // from the shared holder at mount, and a missing/failed vocabulary is
+        // never fatal (an empty one costs keyword coverage, nothing else).
+        classVocabulary.reset();
+        await Promise.all([
+            this.injectGameStyles(manifest.styles ?? [], baseUrl),
+            loadClassVocabulary(gameId, httpBase),
+        ]);
         if (stale()) return;
 
         // Load and mount each widget
@@ -463,7 +494,15 @@ export class WidgetLoader {
     private createPanelFrame(
         descriptor: WidgetDescriptor,
         parent: HTMLElement,
-    ): { body: HTMLElement; frame: HTMLElement; setBadge: (t: string | number | null) => void } {
+    ): {
+        body: HTMLElement;
+        frame: HTMLElement;
+        setBadge: (t: string | number | null) => void;
+        /** Collapse/expand programmatically (the NL registry's open/close).
+         *  No-op for a non-collapsible panel — see `setCollapsed` below. */
+        setCollapsed: (collapsed: boolean) => void;
+        isCollapsed: () => boolean;
+    } {
         const collapsible = descriptor.collapsible !== false;
         const label = descriptor.title ?? descriptor.id;
         const bodyId = `nui-panel-body-${descriptor.id}`;
@@ -500,6 +539,20 @@ export class WidgetLoader {
         frame.appendChild(body);
         parent.appendChild(frame);
 
+        /**
+         * Programmatic collapse. Goes through the same class + aria + settings
+         * write the header click does, so "open the diplomacy panel" and clicking
+         * its header leave the HUD in an identical state — including the sticky
+         * preference, which is what makes a spoken "close the scoreboard" persist
+         * the way a click does.
+         *
+         * A non-collapsible panel (no chrome toggle) reports itself permanently
+         * open rather than pretending to close: the NL registry then echoes the
+         * truth instead of "closed" for a panel still on screen.
+         */
+        let setCollapsed = (_collapsed: boolean): void => {};
+        let isCollapsed = (): boolean => false;
+
         if (collapsible) {
             (head as HTMLButtonElement).type = 'button';
             head.setAttribute('aria-controls', bodyId);
@@ -515,11 +568,16 @@ export class WidgetLoader {
             if (collapsed) frame.classList.add('is-collapsed');
             setExpanded(collapsed);
 
-            head.addEventListener('click', () => {
-                const nowCollapsed = frame.classList.toggle('is-collapsed');
+            const apply = (nowCollapsed: boolean) => {
+                frame.classList.toggle('is-collapsed', nowCollapsed);
                 setExpanded(nowCollapsed);
                 clientSettings.set(key, nowCollapsed);
-            });
+            };
+
+            head.addEventListener('click', () => apply(!frame.classList.contains('is-collapsed')));
+
+            setCollapsed = apply;
+            isCollapsed = () => frame.classList.contains('is-collapsed');
         }
 
         return {
@@ -528,6 +586,8 @@ export class WidgetLoader {
             setBadge: (t) => {
                 badge.textContent = t === null || t === undefined ? '' : String(t);
             },
+            setCollapsed,
+            isCollapsed,
         };
     }
 
@@ -599,6 +659,7 @@ export class WidgetLoader {
         try {
             widget.init(context);
             this.widgets.set(descriptor.id, { widget, context });
+            if (panel) this.registerPanelActions(descriptor, panel);
             console.log(`[widget-loader] Mounted widget ${descriptor.id} at ${descriptor.mount}`);
         } catch (e) {
             console.error(`[widget-loader] Widget ${descriptor.id} init() failed:`, e);
@@ -611,6 +672,39 @@ export class WidgetLoader {
                 widget.dispose();   // it may have registered subscriptions before throwing
             } catch { /* already failing; don't mask the original error */ }
         }
+    }
+
+    /**
+     * Make a mounted panel addressable by name for the command language
+     * (PLAN-metalstorm-command-language.md §6.3).
+     *
+     * The loader does this, not the widgets, for the same reason it owns the
+     * chrome: collapse state IS open/closed for a manifest panel, and the loader
+     * is what holds it. A widget registering itself would have to reach back
+     * into chrome it doesn't own, and every game-authored widget would have to
+     * remember to do it — so the panels a game ships would be addressable only
+     * as often as their authors remembered.
+     *
+     * `fullscreen` is deliberately NOT provided: a rail panel has no such mode,
+     * and the registry refuses "full screen" by name rather than quietly opening
+     * it at rail width. The minimap, which does have one, registers from
+     * `main.ts` where its overlay lives.
+     */
+    private registerPanelActions(
+        descriptor: WidgetDescriptor,
+        panel: { setCollapsed: (c: boolean) => void; isCollapsed: () => boolean },
+    ): void {
+        this.panelUnregisters.get(descriptor.id)?.();
+        const unregister = uiActionRegistry.register({
+            id: descriptor.id,
+            label: descriptor.title ?? descriptor.id,
+            aliases: descriptor.nlAliases ?? [],
+            open: () => panel.setCollapsed(false),
+            close: () => panel.setCollapsed(true),
+            toggle: () => panel.setCollapsed(!panel.isCollapsed()),
+            isOpen: () => !panel.isCollapsed(),
+        });
+        this.panelUnregisters.set(descriptor.id, unregister);
     }
 
     /**
@@ -682,6 +776,11 @@ export class WidgetLoader {
             try { unsubscribe(); } catch { /* nothing useful to do */ }
         }
         this.pendingReveals.clear();
+
+        for (const unregister of this.panelUnregisters.values()) {
+            try { unregister(); } catch { /* nothing useful to do */ }
+        }
+        this.panelUnregisters.clear();
 
         for (const [id, { widget }] of this.widgets.entries()) {
             try {

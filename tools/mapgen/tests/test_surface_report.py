@@ -216,10 +216,26 @@ class GenerateOrderTest(unittest.TestCase):
         self.assertEqual(labels,
                          ["report_surface:eroded", "report_surface:shipped"])
 
+    # The road step's terrain mover was renamed by roads R2: archipelago now
+    # calls `rd.flatten_network` (one pass over a per-class field) instead of
+    # `rd.flatten_under_roads`. This guard names its movers by CALLEE, so the
+    # rename made it fail — which is the guard working: a renamed mover is
+    # exactly the change that could silently move terrain after the report.
+    # Both spellings are accepted because `flatten_under_roads` is still the
+    # single-class entry point and a generator may legitimately use either.
+    ROAD_MOVERS = ("rd.flatten_network", "rd.flatten_under_roads")
+
+    def _road_mover(self):
+        for name in self.ROAD_MOVERS:
+            if name in self.at:
+                return name
+        self.fail(f"no road terrain-mover in generate (looked for "
+                  f"{self.ROAD_MOVERS}) — re-check that the shipped report "
+                  f"is still last")
+
     def test_the_shipped_report_runs_after_every_pass_that_moves_terrain(self):
         shipped = self.at["report_surface:shipped"]
-        for mover in ("rd.flatten_under_roads", "riv.build",
-                      "pas.connect_starts"):
+        for mover in (self._road_mover(), "riv.build", "pas.connect_starts"):
             self.assertIn(mover, self.at,
                           f"{mover} vanished from generate — re-check that "
                           f"the shipped report is still last")
@@ -229,7 +245,7 @@ class GenerateOrderTest(unittest.TestCase):
 
     def test_the_eroded_report_runs_before_them(self):
         eroded = self.at["report_surface:eroded"]
-        self.assertLess(eroded, self.at["rd.flatten_under_roads"])
+        self.assertLess(eroded, self.at[self._road_mover()])
         self.assertLess(eroded, self.at["report_surface:shipped"])
 
     def test_nothing_moves_the_heightmap_after_the_shipped_report(self):

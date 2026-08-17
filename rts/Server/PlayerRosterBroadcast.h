@@ -52,6 +52,16 @@ inline std::vector<PlayerRosterRow> CollectPlayerRoster(GameServerContext& ctx) 
         const CPlayer* p = playerHandler.Player(i);
         if (p == nullptr)
             continue;
+        // A war's pre-allocated seats are places, not people
+        // (PLAN-metalstorm-wars.md §8.1): the block exists from frame 0 so a
+        // dynamic joiner has somewhere to land, and broadcasting the empty
+        // ones would put Σ slotCap nameless rows on every scoreboard and
+        // player list before anybody joined. Claimed slots carry a name and
+        // broadcast normally; AddPlayer's own gap stubs are named "unknown"
+        // and still do, because those are holes in the numbering rather than
+        // seats somebody is expected to take.
+        if (playerHandler.IsUnclaimedSlot(i))
+            continue;
         PlayerRosterRow row;
         row.playerNum = i;
         row.name      = p->name;

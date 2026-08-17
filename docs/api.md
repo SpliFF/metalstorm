@@ -158,6 +158,102 @@ A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tool
 | `GET /api/vfs/game/{gameId}/*` | Game source files (Lua, images, JSON) | 5 min |
 | `GET /api/games/data/{gameId}/*` | Preprocessed game assets (unit .glb models) | immutable |
 
+#### GET /api/games/{gameId}/scenarios
+
+Public. Every scenario the game ships under `scenarios/*.lua`, plus any
+generated ones materialised there. This is what the Create Game dialog's War
+row, the room screen's "War:" label, and the client's briefing splash all read.
+
+```json
+[
+  {
+    "id": "crossing_standoff",
+    "displayName": "Scorched Crossing — The Standoff",
+    "map": "scorched_crossing_v2.4",
+    "tutorial": false,
+    "retired": false,
+    "terminal": true,
+    "sides": [ {"faction": "compact", "team": 0, "staged": true},
+               {"faction": "union",   "team": 1, "staged": true} ],
+    "briefing": {
+      "title": "The Standoff",
+      "subtitle": "Scorched Crossing",
+      "story": "The armistice died at dawn…\n\nBetween them lies Raven Basin…",
+      "tips": ["Hold the middle.", "Artillery outranges tanks."],
+      "image": "scenarios/img/crossing_standoff.jpg",
+      "parTimeSec": 900
+    }
+  }
+]
+```
+
+- `terminal` is whether any objective carries `victory = true`. A war without
+  one can never end — surfaced here rather than discovered 40 minutes in.
+- `retired` wars are listed but never offered; the room screen still needs to
+  resolve their names.
+- `briefing` is **display-only** splash content and the whole key is **absent**
+  when the scenario ships none (clients test `"briefing" in entry`). Every
+  field inside it is optional too. Authoring format and traps:
+  [javascript.md](javascript.md#scenario-briefings). `image` is relative to the
+  game root — serve it from `GET /api/games/data/{gameId}/{image}`; paths
+  containing `..` or starting with `/` are dropped server-side.
+- The list is a **startup snapshot**: a new or edited `scenarios/*.lua` needs
+  `POST /api/admin/scenarios/resync` (or a lobby restart) to appear here.
+  `POST /api/admin/scenarios/list` (admin) mirrors the same `briefing` object
+  for stored/generated scenarios.
+
+The file format itself — every key, the two parsers that read it, and the
+offline validator — is [scenarios.md](scenarios.md).
+
+#### Admin scenario routes
+
+All four require the **admin** role. The MCP tools `generate_scenario`,
+`list_scenarios` and `write_scenario` wrap them (see
+[debugging-tools.md](debugging-tools.md)).
+
+**POST /api/admin/scenarios/generate**
+
+```jsonc
+{ "gameId": "metalstorm", "mapId": "meridian_basin",
+  "seed": 1234,                                   // optional
+  "sides": 2, "towns": 6, "outposts": 4, "bases": 2, "mines": 3,
+  "sites": 3, "relics": 1, "wrecks": 5, "bridges": 1,
+  "hostility": "…", "roster": "…" }               // generator enums
+```
+
+Runs `tools/mapgen/scenariogen.py`, stores the result in the scenario DB,
+materialises it to `scenarios/gen_*.lua` and re-discovers it. Responds `200`
+with `{ok, created, scenario}` where `scenario` is the picker view plus
+provenance.
+
+- **`seed` defaults to `sum(ord(c) for c in mapId)`**, not to a clock — a
+  generated war is reproducible from `(map, seed, version)` or it is not
+  reproducible at all. So re-running with no seed is an **idempotent upsert**
+  (`created: false` the second time), not a new war.
+- Integer knobs are **range-clamped and silently dropped** when out of range:
+  `sides` 2-8, every other int 0-32. String knobs are allowlisted.
+  `sites`/`relics`/`wrecks`/`bridges` — the prop and landmark layer — were
+  CLI-only before this route forwarded them.
+- **`422`** with `{ok: false, error, exitCode}` when the generator rejects the
+  map; `error` is the generator's own `REJECTED` line, which names the violated
+  invariant (and, for the reachability gate, which components the armies were
+  stranded in). Not a `500`: the map is the problem, not the server.
+
+**POST /api/admin/scenarios/list** `{gameId?}` → `{ok, scenarios[]}` — the
+stored rows with provenance (`seed`, `params`, `generatorVersion`, `createdBy`,
+`createdAt`, `bytes`) *and* the discovered view of each (`discovered`,
+`terminal`, `sides`, `briefing`). The two halves come from different places on
+purpose: a materialised file that failed to parse reads `discovered: false`
+instead of echoing the row back and looking healthy.
+
+**POST /api/admin/scenarios/resync** `{gameId?}` → `{ok, games[{gameId, written,
+orphansRemoved, failed}]}` — rebuilds every generated `.lua` from its row,
+sweeps orphans, and re-Discovers the whole directory. This is the de-facto hot
+reload: **authored** files appear in the picker without a lobby restart, and the
+sweep only ever touches `gen_*`, so it is safe to run after hand-writing a file.
+
+**POST /api/admin/scenarios/delete** `{id}` → drops the row **and** the file.
+
 ### Factions
 
 #### GET /api/factions/{gameId}
@@ -237,6 +333,45 @@ it causes exactly as it classifies an idle hibernation, a fraction of a second l
 
 **Errors:** 401 (no/invalid token), 403 (not an admin)
 
+#### POST /api/admin/rooms/end
+
+**Admin only.** `/api/admin/drain` specialized to **one** room: SIGTERM that room's game
+server, wait for the exit checkpoint, verify it against the snapshot store, and return the
+same per-room drain report. Audited as `room_end`. This is an operator / test-harness verb
+("this room is wedged", "tear this test room down cleanly") — it is *not* a revival of the
+removed player-facing `/api/rooms/end`: player room lifecycle stays entirely
+`/api/rooms/leave`-driven.
+
+```bash
+curl -X POST http://localhost:8011/api/admin/rooms/end \
+  -H "Authorization: Bearer <token>" -d '{"roomId":7,"timeout_ms":10000,"escalate":true}'
+```
+
+`roomId` is required and must be a positive integer. `timeout_ms` (default 10000) is clamped
+to **[100, 30000]** — a tighter ceiling than drain's 120 s on purpose: this is a routine
+per-test teardown, and like drain it blocks the lobby's HTTP thread while it waits.
+`escalate` (default true) SIGKILLs a server that has not exited by then.
+
+```json
+{"ok":true,"roomId":7,"pid":55703,"kind":"persistent_war","exited":true,"escalated":false,
+ "waitedMs":117,"outcome":"checkpointed","frame":9238,"label":"hibernate:signal",
+ "lossy":false,"resume_eligibility":"resumable","engine_hash":"88499c90ffab2e37",
+ "describe":"war room 7: checkpointed at frame 9238 (hibernate:signal) and exited after 117 ms"}
+```
+
+`outcome`, `lossy`, `resume_eligibility` and `engine_hash` mean exactly what they mean in the
+drain report above. A **known room whose process is already gone** is a 200 with
+`outcome:"not_running"`, not an error — the caller wanted it stopped and it is.
+
+Room states are **not** changed by this route either: the room flips to ended asynchronously,
+when the health loop observes the exit. Poll `/api/rooms` (or the MCP `probe_game`) if you
+need to see it.
+
+**Errors:** 400 `{"error":"roomId (positive integer) is required"}`, 401 (no/invalid token),
+403 (not an admin), 404 `{"error":"unknown roomId"}` (the lobby has no such room). Note the
+404 body: a *route-level* 404 (a lobby binary predating this endpoint) has no JSON body, which
+is how the MCP `end_game` tool decides whether to fall back to a local SIGTERM.
+
 #### Resume states on a war's room card
 
 A war's room JSON carries `war.state` — `live` / `resuming` / `hibernated` / `crashed` /
@@ -270,12 +405,19 @@ All room endpoints require authentication.
 | `/api/rooms/team` | POST | `{team: 0-N}` | Set team |
 | `/api/rooms/startpos` | POST | `{pos: 0-N, target_player_id?}` | Set start position |
 | `/api/rooms/kick` | POST | `{target_player_id}` | Kick player (host only) |
-| `/api/rooms/close` | POST | | Close room (host only) |
 | `/api/rooms/ai/add` | POST | `{ai_id, name?, team?, profile?}` | Add AI slot |
 | `/api/rooms/ai/remove` | POST | `{slot_index}` | Remove AI slot |
 | `/api/rooms/ai/team` | POST | `{slot_index, team}` | Set AI slot's team (host only) |
 | `/api/rooms/ai/profile` | POST | `{slot_index, profile}` | Set (or, with `profile:""`, clear) an AI slot's personality/difficulty profile — host only. `profile` is opaque, game-specific text (e.g. Metalstorm strategos's `"aggressive"`/`"caretaker"`); see PLAN-metalstorm-ai.md §10 task 6. |
 | `/api/rooms/start` | POST | | Start game (spawns server) |
+
+**Room lifecycle is leave-only.** There is no player-facing end/close endpoint —
+`/api/rooms/end` and `/api/rooms/close` were removed; when the last member leaves,
+the lobby deletes the room and reaps its game server. The admin single-room stop is
+[`POST /api/admin/rooms/end`](#post-apiadminroomsend).
+
+Room `state` values (`ERoomState`, `rts/Server/RoomManager.h`) are listed under
+[Room states](#room-states) below — `docs/javascript.md` cites this table.
 
 **Room object:**
 ```json
@@ -294,7 +436,13 @@ All room endpoints require authentication.
 }
 ```
 
-Room states: 0=Configuring, 1=Filling, 2=ReadyCheck, 3=Loading, 4=Active, 5=Ended.
+#### Room states
+
+`ERoomState` (`rts/Server/RoomManager.h`): 0=Configuring, 1=Filling,
+2=ReadyCheck, 3=Loading, 4=Active, 5=Ended. This is the single source for the
+enum — `docs/javascript.md` cites it rather than repeating it. Note an *in-game*
+client has left the lobby's SSE feed, so its cached `state` never reaches
+`4` — never poll it for "the game is up".
 
 ### Direct start (dev/test only)
 
@@ -323,8 +471,9 @@ Request — a manifest describing everything the three lobby screens collect:
 
 - `players[0]` becomes the room host. A declared username with no existing account is created on the fly and flagged `is_dev` — it gets an unusable random password (never logs in via `/api/auth/login`), only the session token minted here. A username already in a different room is force-left first.
 - Re-POSTing the same `name` (or restarting the lobby with `--direct <manifest.json>` pointing at an unchanged manifest) tears down the old room and recreates it — idempotent, not additive.
+- `idleStartupGraceSeconds` / `idleExitSeconds` (optional, non-negative integers) tune the spawned `spring-server`'s self-termination timers, forwarded as `--idle-startup-grace-seconds` / `--idle-exit-seconds`. Absent or `0` leaves the server's own defaults alone (startup grace **120 s**); a non-integer or negative value is a `400`, so a typo cannot silently keep the default. **Why it matters:** a server exits when no client has connected within the startup grace, so an exec-driven test that never opens a browser dies ~120 s in — for a skirmish that is at **frame −1**, because `GameStart` waits for the rostered humans. Raise the grace (or roster AI-only / `sessionKind: "persistent"`) for browserless runs. These fields exist on this dev route only; player-created rooms cannot reach the knob. Precedence in the server is flag > env > default, so the manifest field overrides a lobby-wide `SPRING_IDLE_STARTUP_GRACE_SECONDS` for that room. On a lobby binary predating this field the keys are ignored **without error** — the fallback there is to put `SPRING_IDLE_STARTUP_GRACE_SECONDS` in the lobby's environment, which every room it spawns then inherits (so pair it with teardown, or abandoned dev servers linger).
 - `autoStart` (default `true`) drives the room through the same path `/api/rooms/start` uses, including its solo-team Null AI safety net. Set `false` to stop at a bound-but-unstarted room.
-- `scenario` (optional) names a `scenarios/<name>.lua` world file (PLAN-persistence.md §5) for the game's `game_scenario.lua` gadget to stage at `GameStart` — pre-set units, region ownership, civilians, and objectives instead of the game's default start force. Threaded through as an ordinary modoption (`scenario`), so it's equally settable via `"modoptions": {"scenario": "..."}` directly.
+- `scenario` (optional) names a `scenarios/<name>.lua` world file (PLAN-persistence.md §5) for the game's `game_scenario.lua` gadget to stage at `GameStart` — pre-set units, region ownership, civilians, and objectives instead of the game's default start force. It must be this **top-level** manifest field. It is routed through the same default-resolution the Create Game dialog uses (`applyRoomScenario`), which runs *after* the manifest's `modoptions` are applied — so a `"modoptions": {"scenario": "..."}` entry on its own is silently **overwritten by the map's default scenario**. The room's final choice lands in the response `modoptions`, so a mismatch is visible there.
 
 Response — the same room object `/api/rooms/start` already returns, plus a `sessions` map:
 
@@ -374,7 +523,8 @@ SQL mutations (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE) are rejected.
 [{"room_id":1,"port":9101,"pid":12345,"state":"running","map":"content/maps/...","game":"content/games/..."}]
 ```
 
-States: `starting`, `running`, `ended`, `crashed`.
+States: `starting`, `running`, `ended`, `crashed`, `hibernated`
+(`GameServerInstance::State`, emitted at `rts/lobby_main.cpp:1915-1931`).
 
 ### Version
 
@@ -464,7 +614,7 @@ The lobby spawns a game server per room. Port is in the `RoomStateUpdate` messag
 |----------|-------------|
 | `GET /api/map/info` | `{mapx, mapy, squareSize, widthElmos, heightElmos}` |
 | `GET /api/map/heightmap` | Binary: u32 width, u32 height, float32[w*h] |
-| `GET /api/metrics` | Performance stats JSON |
+| `GET /api/metrics` | Performance stats JSON. Public, cheap to poll. Besides the PerfMetrics fields and `simFrame` (the sim-phase breakdown, zeroed unless `server sim profile on`), it carries `identity: {stamp, engineHash, pid}` — the build actually serving this room. `engineHash` is the same 16-hex value `spring-server --print-engine-hash` prints for a binary on disk, so a running server can be compared against the one you just built (the MCP's `list_stack` does exactly this and reports `stale-binary-running`). Present under `SPRING_PROD` too: `stamp` is already public via the lobby's `/api/version` and the hash is a pure function of it |
 
 ### Command Execution
 
@@ -506,6 +656,93 @@ curl -X POST http://localhost:<game-port>/api/exec \
 | `step` / `s` | Step one Lua line |
 | `step_over` / `n` | Step over |
 | `step_out` / `o` | Step out |
+
+**Structured output — the `json ` prefix.** Prefixing a `server` command with
+`json ` makes the *converted* verbs (`frame`, `state`, `units [team]`,
+`unit_state <id>`, `combat_summary`, `log status`, `los status`,
+`cheats status`, `spawn`) answer a serialized JSON object instead of free
+text, carried as a string in the usual `output` field:
+
+```bash
+curl -X POST http://localhost:<game-port>/api/exec \
+  -d '{"scope":"server","code":"json state"}'
+# → {"success":true,"output":"{\"frame\":798,\"paused\":false,\"speed\":1.0,
+#      \"teams\":3,\"units\":100,\"luaHeapKb\":3692}"}
+```
+
+Legacy output is byte-identical without the prefix; an unconverted verb runs
+normally and still answers text; a converted verb's own errors come back as
+`{"error":"..."}` with `success:true` (the flag only keys off a leading
+`unknown command:`); and a game server predating the prefix answers
+`unknown command: json <verb>`, which is the intended capability probe. Full
+per-verb shapes: [debugging-tools.md § Structured server verbs](debugging-tools.md#structured-server-verbs-json-prefix).
+
+### Browser-Eval Relay
+
+**POST /api/client/eval** (localhost, or admin token from off-box)
+
+Runs code inside a **connected browser client** and returns the result — the
+server side of the MCP's `client_eval` / `client_ready` / `client_screenshot`
+tools, and what makes `browser_test` / `evaluate_widget_lua` /
+`spawn_at_camera` answer instead of printing a snippet to paste.
+
+Compiled out under `SPRING_PROD`, exactly like `/api/exec` above and for the
+same reason: it is an arbitrary-code-execution channel, differing only in the
+victim (the client rather than the sim). A production binary returns 404, which
+callers should read as "fall back to pasting a snippet".
+
+```bash
+curl -X POST http://localhost:<game-port>/api/client/eval \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"worker","code":"globalThis.__entityRenderer ? \"up\" : \"down\""}'
+# → {"success":true,"clientId":1,"output":"up"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `code` | Required. JavaScript, or Lua when `target` is `widgets`. |
+| `target` | `js` (main thread global scope) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (the in-worker LuaUI runtime, via `window.widgets.eval`) · `test` (an expression with the `window.test` harness's members in scope, e.g. `readyState()`). Default `js`. |
+| `clientId` | Address one connected client. It must still be a live admin session. Default: the highest-id live admin session — newest-wins, because a reloaded tab arrives as a new client id beside the old one's corpse. |
+| `timeoutMs` | How long the HTTP call waits, clamped to 500–60000. Default 10000. |
+
+`output` is always a string on the wire; `test` and `worker` targets JSON-stringify
+their result, so callers usually `JSON.parse` it.
+
+**Three stacked gates**, all of which must pass:
+
+1. **HTTP** — `LocalhostOrAdmin`, plus the `SPRING_PROD` compile-out above.
+2. **Targeting** — only an **admin-role** session is ever addressed. Note the
+   trap: a `/api/rooms/direct` dev account is role `player`, so a browser booted
+   that way is never eligible. `launch_scenario`'s default player *is* `admin`.
+3. **Client acceptance** — the browser honours the request only in a DEV build
+   or when the page was booted with **`?allowClientEval=1`**. A production
+   bundle without the param answers
+   `{"success":false,"output":"client eval disabled in this build"}`.
+
+Every refusal is HTTP 200 with `success:false` so a caller can branch on
+`output`; 400 is reserved for a malformed request (bad JSON, missing `code`,
+unknown `target`).
+
+| `output` on `success:false` | Meaning |
+|---|---|
+| `no connected admin client` | No live admin session — see gate 2. |
+| `client eval disabled in this build` | Gate 3 refused. |
+| `timeout: client did not answer in <n>ms` | The waiter expired. |
+| `timeout: main thread did not answer in 8s` | The worker relayed to main and main never replied — see the deadlock note below. |
+| `<target> eval error: <message>` | The code threw. |
+
+> **The code you relay must not call back into this game server's HTTP API.**
+> The game server serves HTTP on a single thread, and that thread is parked
+> inside `/api/client/eval` waiting for the very browser whose request it would
+> have to answer. Relaying `window.test.spawn(...)` (or anything else that
+> posts to `/api/exec`) deadlocks until the timeout — while it is parked,
+> `/api/metrics` on the same server does not respond either. Use the server-side
+> MCP tools (`spawn_unit`, `exec_lua`, `get_game_state`, …) for anything the
+> server can do without a browser; the MCP's `browser_test` refuses the
+> server-bound harness methods by name and points at the tool to use instead.
+
+The response can be large — a 640px `captureFrame` is ~600 KB — but must stay
+under the 4 MB control-message cap. `client_screenshot` clamps `maxDim` to 2048.
 
 ### WebTransport Endpoint Discovery
 

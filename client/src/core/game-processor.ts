@@ -15,7 +15,14 @@
  * Extracted from lua-widget-worker.ts as part of PLAN-refactor-p3.md WP2c.
  */
 
-import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial,
+    RenderTargetTexture } from '@babylonjs/core';
+// P5: high-res RTT screenshot. Imported from its module path (not the barrel)
+// so the DumpTools side-effects it needs come along in a tree-shaken build.
+import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
+import { luminanceStats } from './frame-stats.js';
+import { CLIENT_EVAL_DISABLED, clientEvalAllowed, clientEvalRunsOnMain, isClientEvalTarget }
+    from './client-eval-gate.js';
 import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
     GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
@@ -54,7 +61,7 @@ import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort, setMemberModelMemo } from './entity-renderer.js';
 import {
     SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
-    setPoolCompaction, setPoolCompactionGate,
+    setPoolCompaction, setPoolCompactionGate, setLegacyFullUpload,
 } from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
@@ -117,6 +124,7 @@ import { ClipAutoPolicy, nominalSpeedFor, isStaticFor } from './clip-auto-policy
 import { TurretAimController } from './turret-aim-controller.js';
 import { WheelSpinDriver, wheelRadiusFor } from './wheel-spin-driver.js';
 import { WorkerSelection } from './worker-selection.js';
+import { IdRecycleGuard } from './id-recycle-guard.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
 import { DirectiveShapeCapture, type ArmedDirective } from './directive-shape-capture.js';
@@ -322,10 +330,23 @@ let gpTrackingCamera = false;
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// P5: in-flight `captureFrame` task. A capture owns one rendered frame; a
+/// second call while one is pending awaits the SAME promise (both callers get
+/// that frame) instead of racing a second render into the same buffer.
+let gpCaptureInFlight: Promise<unknown> | null = null;
 /// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
 /// `gp:resync` can re-open the game connection with the same creds/map without
 /// a fresh boot. Null until gpConnect runs.
 let gpInitMsg: GpInitToWorker | null = null;
+
+/// PLAN-test-automation P7 gate 3: `?allowClientEval=1` on the page URL,
+/// passed in by main (the worker has no page URL). A DEV build relays evals
+/// regardless; this is the only way to open the relay in a prod bundle.
+let gpAllowClientEval = false;
+/// In-flight relayed evals forwarded to main, keyed by the server's
+/// request_id → the 8s giveup timer. Cleared on teardown so a worker recycle
+/// mid-eval leaks no timers (the server's 10s waiter then times out cleanly).
+const gpPendingClientEvals = new Map<number, ReturnType<typeof setTimeout>>();
 /// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
 /// against a double detach and lets diagnostics see the parked state.
 let gpParked = false;
@@ -475,6 +496,10 @@ interface SquadSystemHandle {
     /// budget. Optional because data/games/*/client is runtime-served and can
     /// be older than this bundle; gpTickSquads warns once if it is missing.
     setViewPos?(x: number, y: number, z: number): void;
+    /// PLAN-metalstorm-squad-performance.md §12c: backend-flush cost for the
+    /// frame-time governor's sample. Optional for the same runtime-served
+    /// reason as setViewPos — an older module just measures a smaller cost.
+    recordFlush?(ms: number): void;
     update(dt: number): void;
 }
 /// One-time warn latch for a squad module with no M20 `setViewPos`.
@@ -502,6 +527,11 @@ let gpClipPlayer: ClipPlayer | null = null;
 /// gpClipPlayer for every native whose model ships a `walk` clip. Harness
 /// playClip marks a unit manual so the F8 buttons still win.
 let gpClipPolicy: ClipAutoPolicy | null = null;
+/// PLAN-long-uptime S5 task 6: latches the server's unit-id recycle
+/// announcement and fires the id-keyed-state flush on the first full snapshot
+/// after it. Lives for the whole worker — a recycle is a property of the world
+/// stream, not of any one renderer.
+const gpIdRecycleGuard = new IdRecycleGuard();
 /// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
 /// Fired events (native models with a `turret` piece that the sim isn't
 /// already piece-driving) and ticked from the render loop for smooth slew.
@@ -984,18 +1014,21 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
     // the centre to [half, mapDim-half] exactly like an RTS camera clamps at a
     // map edge. On maps larger than VP_SIZE the box still tracks the camera
     // (a tighter frustum-derived box + zoom LOD is the later optimisation noted
-    // at GW4-c5b). Rotation 0 / zoom 1 remain placeholders until the LOD path lands.
+    // at GW4-c5b). Rotation stays 0 (unused by the server); zoom is now the live
+    // camera height normalised to [0,1] against RTSCamera.zoomMaxHeight, for the
+    // server-side zoom-LOD work at GW4-c5b (server ignores it today).
     const clampCenter = (c: number, mapDim: number): number =>
         VP_SIZE >= mapDim ? mapDim / 2 : Math.min(Math.max(c, VP_HALF), mapDim - VP_HALF);
 
     const send = () => {
         const cam = gpViewCameras.get(0);
         const t = cam?.target;
+        const zoom = cam ? Math.min(1, Math.max(0, cam.position.y / cam.zoomMaxHeight)) : 1;
         gpCtx.connection?.sendViewportUpdate(
             0,
             clampCenter(t ? t.x : centerX, mapW),
             clampCenter(t ? t.z : centerZ, mapH),
-            VP_SIZE, VP_SIZE, 0, 1);
+            VP_SIZE, VP_SIZE, 0, zoom);
     };
     send();
     if (gpViewportTimer) clearInterval(gpViewportTimer);
@@ -1016,8 +1049,9 @@ function domButtonToSpring(b: number): number {
 
 /** KeyboardEvent.code → Spring/SDL keysym. Named keys are mapped; letters,
  *  digits and numpad digits fall back to the ASCII code of the character they
- *  produce (matching the lua-widget-manager springKeyCode table on main, which
- *  worked off `.key` — here we derive the same numbers from `.code`). */
+ *  produce (matching the springKeyCode table the retired lua-widget-manager
+ *  used to carry, which worked off `.key` — here we derive the same numbers
+ *  from `.code`). */
 function codeToSpringKeysym(code: string): number {
     const m: Record<string, number> = {
         Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, Escape: 27, Space: 32,
@@ -1128,6 +1162,46 @@ function gpConnect(msg: GpInitToWorker): void {
     gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
+        // PLAN-test-automation P7: the server relayed an eval request. Every
+        // path here MUST answer — an HTTP caller is parked on a waiter.
+        onClientEvalRequest: (requestId, target, code) => {
+            const answer = (ok: boolean, out: string) =>
+                gpCtx.connection?.sendClientEvalResponse(requestId, ok, out);
+            // GATE 3. Deliberately not URL-param-only: a DEV build must work
+            // with no param at all.
+            if (!clientEvalAllowed(import.meta.env.DEV, gpAllowClientEval)) {
+                answer(false, CLIENT_EVAL_DISABLED);
+                return;
+            }
+            if (!isClientEvalTarget(target)) {
+                answer(false, `unknown eval target: ${target}`);
+                return;
+            }
+            if (!clientEvalRunsOnMain(target)) {
+                // Same indirect-eval + clone-safe path as the `evalJs` test op.
+                void (async () => {
+                    try {
+                        const v = (0, eval)(code);  // eslint-disable-line no-eval
+                        const r = v && typeof (v as { then?: unknown }).then === 'function'
+                            ? await (v as Promise<unknown>) : v;
+                        const safe = gpCloneSafe(r);
+                        answer(true, typeof safe === 'string' ? safe
+                            : (JSON.stringify(safe) ?? 'undefined'));
+                    } catch (e) {
+                        answer(false, `worker eval error: ${(e as Error).message}`);
+                    }
+                })();
+                return;
+            }
+            // 'js' | 'widgets' | 'test' run on main; the reply rides back
+            // through this worker (main has no socket of its own). 8s, so the
+            // server's 10s waiter always gets a structured answer.
+            gpPendingClientEvals.set(requestId, setTimeout(() => {
+                gpPendingClientEvals.delete(requestId);
+                answer(false, 'timeout: main thread did not answer in 8s');
+            }, 8000));
+            postToMain({ type: 'gp:clientEval', requestId, target, code });
+        },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
@@ -1203,6 +1277,15 @@ function gpConnect(msg: GpInitToWorker): void {
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
+        // PLAN-protocol-guard task 4: a wire-schema refusal. Recorded in
+        // `gpAuthFailed` too so `window.test`'s readiness probe still reports
+        // a reason rather than a blind timeout, and handed to main, which owns
+        // the reload/loop-guard decision (no sessionStorage in a worker).
+        onVersionMismatch: (m) => {
+            gpAuthFailed = m;
+            postLog(4, `[gp] wire schema refused: ${m}`);
+            postToMain({ type: 'gp:schemaMismatch', message: m });
+        },
         onServerError: (code, m) => {
             postLog(4, `[gp] server error ${code}: ${m}`);
             // PLAN-replay task 4b: a refused playback control comes back as a
@@ -1218,6 +1301,21 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
+            // PLAN-long-uptime S5 task 6: the sim has handed a used unit id
+            // back out, so every association we hold keyed on an id now names
+            // whatever took the slot. Drop them BEFORE applying the snapshot —
+            // this only ever fires on a full snapshot, which repopulates the
+            // world in the same call, so there is no blank frame.
+            if (gpIdRecycleGuard.observe(snapshot.fieldMask, isDelta)) {
+                postLog(1, '[gp] unit-id recycle announced — flushing id-keyed state');
+                gpCtx.entityRenderer?.resetForResync();
+                gpCombatFX?.reset();
+                gpClipPolicy?.reset();
+                gpResetSquads();
+                // The renderer's own mirror is cleared by resetForResync; this
+                // is the authoritative selection, the one that issues orders.
+                gpCtx.selection?.setSelectionExternal([]);
+            }
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             // PLAN-metalstorm-squads.md §6: route squad-def units (squad_size > 1)
             // into the fan-out. Runs after the renderer's update so entityMeta +
@@ -1475,6 +1573,19 @@ function gpConnect(msg: GpInitToWorker): void {
         onVolleyOutcomes: (events) => {
             gpCombatFX?.onVolleyOutcome(events,
                 (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            // §B (PLAN-metalstorm-combat-fixes): statistical weapons spawn no
+            // projectile, so VolleyOutcome is the only per-shot event that
+            // can engage cosmetic turret aim for them — mirrors the
+            // onProjectileFired engage call above (§16c). NOTE this is a
+            // different family from onFireOutcomes' engage: that one is
+            // Tier-C foreknowledge for BALLISTIC weapons, which do spawn a
+            // projectile. Both are "outcome" events; only this one is
+            // statistical, and only this one reaches MS MGs/ACs/mortars.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onVolley(e, now);
+            }
             for (const e of events) {
                 if (e.revealAttacker)
                     postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
@@ -1868,6 +1979,11 @@ function gpConnect(msg: GpInitToWorker): void {
             } }
         },
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
+    }, {
+        // PLAN-protocol-guard task 4 (dev harness): claim a different wire
+        // schema so the server's refusal can be driven from a browser.
+        // Absent ⇒ this build's own SCHEMA_HASH.
+        schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
     // PLAN-latency L4.1: register every command that goes on the wire, in the
@@ -1980,7 +2096,9 @@ export function gpSoftRecover(): boolean {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     // (3) Reconnect the SAME Connection for a fresh full snapshot (its
     // onAuthenticated re-seeds identity + re-registers the viewport pump). The
     // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
@@ -2133,7 +2251,15 @@ function gpTickSquads(dt: number): void {
         }
     }
     gpSquadSystem.update(dt);
-    gpSquadBackend?.flush();
+    // PLAN-metalstorm-squad-performance.md §12c: the frame-time governor's cost
+    // sample is update() + the backend flush, and the flush is owned out here —
+    // update() cannot time it. Without this the ladder still works, it just
+    // under-reads its own cost and escalates later than it should.
+    if (gpSquadBackend) {
+        const t0 = performance.now();
+        gpSquadBackend.flush();
+        gpSquadSystem.recordFlush?.(performance.now() - t0);
+    }
 }
 
 /// Build the passability sampler from the client heightmap and install it, so
@@ -2185,6 +2311,10 @@ export function gpInit(msg: GpInitToWorker): void {
     // worker's asset URLs match main's (no stale-cache skew on a new deploy, and
     // a shared same-origin HTTP cache hit instead of two distinct URLs).
     if (msg.buildStamp) CONFIG.buildStamp = msg.buildStamp;
+
+    // PLAN-test-automation P7 gate 3: main read `?allowClientEval=1` off the
+    // page URL for us. Not the whole gate — a DEV build relays regardless.
+    gpAllowClientEval = msg.allowClientEval === true;
 
     // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
     // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
@@ -2458,6 +2588,14 @@ export function gpInit(msg: GpInitToWorker): void {
          *  already compacted, so an off-arm has to be re-grown by churn.
          *  `squadPoolCompactGate(fraction, minDead)` moves the trigger;
          *  `__squadBackend.poolOccupancy()` reads drawn/live/dead per pool. */
+        /** S5: A/B the squad backend's dirty-range upload. `squadFullUpload(true)`
+         *  restores the pre-S5 shape — every flush uploads the whole live prefix
+         *  and a sprite pool re-billboards every live slot even with a still
+         *  camera; `false` is the shipped default (upload the tracked range,
+         *  recompose only the slots whose pose moved). Takes effect on the next
+         *  flush. It does not restore the per-member Babylon matrix compose,
+         *  which S5 replaced with §13b's inline write under test. */
+        squadFullUpload: (on: boolean): boolean => setLegacyFullUpload(on),
         squadPoolCompact: (on: boolean): boolean => setPoolCompaction(on),
         squadPoolCompactGate: (fraction: number, minDead?: number) =>
             setPoolCompactionGate(fraction, minDead),
@@ -3592,7 +3730,9 @@ export function gpResync(token?: string): void {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     gpParked = false;
     gpRenderPaused = false;
     gpLastFrameTime = performance.now();
@@ -3951,6 +4091,15 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'perfReset':
             gpFrameProfiler.reset();
             return null;
+        // — P5 item 4: the squad perf counters live inside the runtime-served
+        //   squad module, which is free not to expose them. These cases existed
+        //   nowhere before, so window.test.squadPerf() threw `unknown test
+        //   method` on EVERY build; null is the honest answer. —
+        case 'squadPerf':
+            return (gpSquadSystem as { perf?: () => unknown } | null)?.perf?.() ?? null;
+        case 'squadPerfReset':
+            (gpSquadSystem as { resetPerf?: () => void } | null)?.resetPerf?.();
+            return null;
         // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
         //   most-expensive-first, same shape/convention as uiProfileDump. —
         case 'entityFxFenceDump':
@@ -4161,6 +4310,9 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const d = (gpDefCache?.getAllUnitDefs() ?? []).find((x) => x.name === name);
             return d ? gpCloneSafe(d) : null;
         }
+        // — PLAN-metalstorm-command-language.md §6.4 (M3): the NL query engine's
+        //   census. See gpNlCensus for why this op exists at all. —
+        case 'nlCensus': return gpNlCensus();
         // — Worker game-connection readiness (see gpAuthFailed / gpFirstStateReceived).
         //   Lets the scenario runner gate spawns on a live connection and the
         //   model-viewer report the real cause of a non-streaming entity. —
@@ -4227,17 +4379,197 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                 ? gpClipPlayer?.state()
                 : gpClipPlayer?.state(num(0))) ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
+        //   Reads whenever the message happens to be processed, so it can catch
+        //   a between-render moment. Prefer 'captureFrame' below.
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
             if (!canvas) throw new Error('no rendering canvas');
             const blob = await canvas.convertToBlob({ type: 'image/png' });
-            const bytes = new Uint8Array(await blob.arrayBuffer());
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return `data:image/png;base64,${btoa(binary)}`;
+            return gpBlobToDataUrl(blob, 'image/png');
+        }
+        // — P5 item 1: deterministic capture — render and read pixels in ONE
+        //   worker task. The canvas is created with preserveDrawingBuffer
+        //   (gp:init), so historical black captures were *timing* (a read with
+        //   no render behind it), which this closes by construction. —
+        case 'captureFrame': {
+            if (gpCaptureInFlight) return gpCaptureInFlight;
+            const opts = obj<{
+                format?: 'png' | 'jpeg'; quality?: number; maxDim?: number;
+                region?: { x: number; y: number; width: number; height: number };
+                stats?: boolean; render?: boolean;
+            }>(0, {});
+            const scene = gpScene, engine = gpEngine;
+            if (!scene || !engine) throw new Error('no scene — worker not initialised');
+            gpCaptureInFlight = (async () => {
+                // 1. Own the frame. Paused → the render loop early-returns, so
+                //    we render explicitly (a paused capture still reflects the
+                //    CURRENT camera/state — pause+focusOn+capture is a real
+                //    workflow — which is why a paused capture advances frameId).
+                //    Running → hook the frame the loop renders. The 2 s fallback
+                //    covers a pause that raced the observer registration, and a
+                //    wedged loop (R2).
+                //    `render: false` reads the preserved drawing buffer with no
+                //    render at all: byte-identical on repeat, and the only way
+                //    to compare two captures of ONE frame. It is only honest
+                //    while paused — a running loop overwrites the buffer.
+                if (opts.render === false) {
+                    /* read the preserved buffer as-is */
+                } else if (gpRenderPaused) {
+                    scene.render();
+                } else {
+                    await new Promise<void>((resolve) => {
+                        let done = false;
+                        const finish = (renderOurselves: boolean): void => {
+                            if (done) return;
+                            done = true;
+                            if (renderOurselves) {
+                                scene.onAfterRenderObservable.remove(obs);
+                                scene.render();
+                            }
+                            resolve();
+                        };
+                        const t = setTimeout(() => finish(true), 2000);
+                        const obs = scene.onAfterRenderObservable.addOnce(() => {
+                            clearTimeout(t);
+                            finish(false);
+                        });
+                    });
+                }
+                // 2. Downsample + encode in the same task. Nothing else renders
+                //    in between (the worker is single-threaded and every await
+                //    below is on our own canvas ops), and the preserved drawing
+                //    buffer keeps the frame stable regardless.
+                const src = engine.getRenderingCanvas() as unknown as OffscreenCanvas;
+                const r = opts.region ?? { x: 0, y: 0, width: src.width, height: src.height };
+                const maxDim = opts.maxDim ?? 1280;
+                const scale = Math.min(1, maxDim / Math.max(1, Math.max(r.width, r.height)));
+                const w = Math.max(1, Math.round(r.width * scale));
+                const h = Math.max(1, Math.round(r.height * scale));
+                const out = new OffscreenCanvas(w, h);
+                const ctx = out.getContext('2d', { willReadFrequently: true });
+                if (!ctx) throw new Error('no 2d context for the capture downsample');
+                ctx.drawImage(src as unknown as CanvasImageSource,
+                    r.x, r.y, r.width, r.height, 0, 0, w, h);
+                let stats: { min: number; max: number; mean: number } | undefined;
+                if (opts.stats) stats = luminanceStats(ctx.getImageData(0, 0, w, h).data);
+                const type = opts.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+                const blob = await out.convertToBlob({ type, quality: opts.quality });
+                return {
+                    dataUrl: await gpBlobToDataUrl(blob, type),
+                    width: w, height: h,
+                    // scene.getFrameId() counts RENDERS of this scene, so it
+                    // identifies the captured pixels. engine.frameId counts
+                    // render-LOOP ticks, which keep advancing while paused (the
+                    // loop returns early) and so cannot identify a frame.
+                    frameId: scene.getFrameId(),
+                    gameFrame: liveState.gameFrame,
+                    ...(stats ? { stats } : {}),
+                };
+            })().finally(() => { gpCaptureInFlight = null; });
+            return gpCaptureInFlight;
+        }
+        // — P5 item 1: honest high-res capture. The engine + camera are
+        //   worker-resident (the GW8 deferral's blocker), so Babylon's RTT
+        //   screenshot helper works here. It routes through DumpTools, which
+        //   needs an OffscreenCanvas-capable environment — if that path throws
+        //   in this worker we fall back to a manual RTT read (R3). —
+        case 'highResScreenshot': {
+            const scene = gpScene, engine = gpEngine, camera = gpCamera;
+            if (!scene || !engine || !camera) throw new Error('no scene — worker not initialised');
+            const width = num(0, 1920), height = num(1, 1080);
+            try {
+                return await CreateScreenshotUsingRenderTargetAsync(
+                    engine, camera, { width, height });
+            } catch (e) {
+                postLog(3, `[gp] screenshot tools unavailable (${String(e)}) — manual RTT`);
+                return await gpManualRttScreenshot(scene, camera, width, height);
+            }
+        }
+        // — P5 item 2: one-round-trip readiness probe (connection + render
+        //   census). Zero HTTP. The terrain regex is textually identical to
+        //   render-sanity.ts's SCENE_CENSUS_EXPR — keep them in step. —
+        case 'readyProbe': {
+            let meshCount = 0, terrainMeshCount = 0;
+            if (gpScene) {
+                meshCount = gpScene.meshes.length;
+                for (const m of gpScene.meshes) {
+                    if (/^terrain(_|Lod\d+_)/.test(m.name)) terrainMeshCount++;
+                }
+            }
+            return {
+                authenticated: gpCtx.connection?.authenticated ?? false,
+                authFailed: gpAuthFailed,
+                receivedState: gpFirstStateReceived,
+                frameId: gpEngine?.frameId ?? -1,
+                meshCount,
+                terrainMeshCount,
+            };
+        }
+        // — P5 item 5: test input lock + transition-settle await. —
+        case 'lockInput':
+            cam?.setInputLocked(args[0] !== false);
+            return cam?.isInputLocked ?? false;
+        case 'cameraSettle': {
+            if (!cam) return false;
+            await Promise.race([
+                cam.waitForSettle(),
+                new Promise<void>((res) => setTimeout(res, num(0, 10000))),
+            ]);
+            return true;
+        }
+        // — P5 item 6: LuaUI widget list / toggle over gp:test. The legacy
+        //   fire-and-forget widget messages carry no correlation id, so main
+        //   could never read a reply; these are request/response. —
+        case 'widgetList':
+            return getWidgetList();          // '' until the LuaUI runtime boots
+        case 'setWidget': {
+            const name = String(args[0] ?? '');
+            if (args[1] === false) disableWidget(name);
+            else await enableWidget(name);   // async: re-fetches the source
+            return getWidgetList();
         }
         default:
             throw new Error(`unknown test method '${method}'`);
+    }
+}
+
+/// Blob → data URL, worker-side (there is no FileReader in a worker). Chunked
+/// so a multi-MB PNG doesn't blow the argument limit of String.fromCharCode.
+async function gpBlobToDataUrl(blob: Blob, type: string): Promise<string> {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return `data:${type};base64,${btoa(binary)}`;
+}
+
+/// R3 fallback for `highResScreenshot` when Babylon's DumpTools-backed helper
+/// is unusable in this worker: render the scene once into an offscreen RTT,
+/// read it back, Y-flip (GL origin is bottom-left), and encode.
+async function gpManualRttScreenshot(
+    scene: Scene, camera: FreeCamera, width: number, height: number,
+): Promise<string> {
+    const rtt = new RenderTargetTexture('hiRes', { width, height }, scene, false);
+    try {
+        rtt.renderList = scene.meshes.slice();
+        rtt.activeCamera = camera;
+        rtt.render();
+        const raw = await rtt.readPixels();
+        if (!raw) throw new Error('RTT readPixels returned nothing');
+        const src = new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.byteLength);
+        const flipped = new Uint8ClampedArray(src.length);
+        const stride = width * 4;
+        for (let y = 0; y < height; y++) {
+            flipped.set(src.subarray((height - 1 - y) * stride, (height - y) * stride), y * stride);
+        }
+        const out = new OffscreenCanvas(width, height);
+        const ctx = out.getContext('2d');
+        if (!ctx) throw new Error('no 2d context for the RTT readback');
+        ctx.putImageData(new ImageData(flipped, width, height), 0, 0);
+        return await gpBlobToDataUrl(await out.convertToBlob({ type: 'image/png' }), 'image/png');
+    } finally {
+        rtt.dispose();
     }
 }
 
@@ -4287,6 +4619,66 @@ function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
         }
     }
     return null;
+}
+
+/// PLAN-metalstorm-command-language.md §6.4 (M3) — the natural-language query
+/// engine's view of the world, and the ONLY one it gets.
+///
+/// Every entry comes from `liveState.units`: the client's own unit mirror, which
+/// the server already filtered to this player's LOS before sending. It is the
+/// same map `Spring.GetTeamUnitsSorted` and friends answer from, so this op adds
+/// no visibility that Lua widgets don't already have — it exists because the
+/// `ms_class`/`ms_scale` join needs the def cache, which lives HERE (main has no
+/// defs mirror), and because main should not have to build Lua source strings and
+/// parse prose back out of `window.widgets.eval` to ask a question.
+///
+/// `side` is resolved here rather than on main so the ally-team lookup uses
+/// `liveState.teams` — the roster the sim actually seeded — instead of main's
+/// identity guess (`gp:authenticated` reports a team, and myAllyTeam is set equal
+/// to it at auth time, which is only right for 1-team-per-ally games).
+///
+/// NOTHING outside this map is read. There is no "all units" collection on the
+/// client to accidentally reach for, which is what makes LOS honesty a property
+/// of the data path rather than of a filter someone has to remember.
+function gpNlCensus(): {
+    frame: number;
+    myTeam: number;
+    units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }>;
+} {
+    const myTeam = liveState.identity.myTeam;
+    const myAlly = liveState.teams.get(myTeam)?.allyTeam ?? liveState.identity.myAllyTeam;
+
+    const sideOf = (team: number): 'own' | 'ally' | 'enemy' => {
+        if (team === myTeam) return 'own';
+        const ally = liveState.teams.get(team)?.allyTeam;
+        return ally !== undefined && ally === myAlly ? 'ally' : 'enemy';
+    };
+
+    const units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }> = [];
+
+    for (const [unitId, u] of liveState.units) {
+        const cp = unitDefMap.get(u.defId)?.customParams;
+        const className = cp?.ms_class;
+        const scaleRaw = cp?.ms_scale;
+        const scale = scaleRaw !== undefined ? Number(scaleRaw) : undefined;
+        units.push({
+            unitId,
+            team: u.team,
+            side: sideOf(u.team),
+            ...(className ? { className } : {}),
+            ...(scale !== undefined && Number.isFinite(scale) ? { scale } : {}),
+            x: u.x,
+            z: u.z,
+        });
+    }
+
+    return { frame: liveState.gameFrame, myTeam, units };
 }
 
 /// Force the worker camera to a fixed height above its look-at target (ports the
@@ -4588,6 +4980,25 @@ export function gpHandleLuaRulesMsg(data: Uint8Array | string): void {
 
 export function gpHandleConsoleCommand(scope: string, command: string): void {
     gpCtx.connection?.sendConsoleCommand(scope, command);
+}
+
+/// PLAN-test-automation P7: main finished a `js`/`widgets`/`test` eval.
+/// Forward it to the server unless our 8s timer already answered for it.
+export function gpHandleClientEvalResult(
+    requestId: number, success: boolean, output: string): void {
+    const t = gpPendingClientEvals.get(requestId);
+    if (t === undefined) return;   // already timed out; the server has its answer
+    clearTimeout(t);
+    gpPendingClientEvals.delete(requestId);
+    gpCtx.connection?.sendClientEvalResponse(requestId, success, output);
+}
+
+/// Drop every in-flight relayed eval (worker teardown / recycle). The server
+/// waiter times out at 10s rather than hanging, and no timer outlives the
+/// connection it would have answered on.
+export function gpClearPendingClientEvals(): void {
+    for (const t of gpPendingClientEvals.values()) clearTimeout(t);
+    gpPendingClientEvals.clear();
 }
 
 export function gpHandlePlayerCommand(commandId: number, unitIds: number[], params: number[], options: number): void {

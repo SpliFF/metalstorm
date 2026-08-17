@@ -227,18 +227,50 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ktx)
 
-# Generate C++ headers from .fbs schemas
 set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
 
+# === Wire schema: the committed bindings are authoritative, and a build-time
+# === guard proves they match schemas/protocol.fbs (PLAN-protocol-guard task 2).
+#
+# There used to be a second producer here: an add_custom_command writing
+# protocol_generated.h into ${GENERATED_DIR}, with four targets depending on it.
+# It was dead. Every target lists ${CMAKE_SOURCE_DIR}/rts AHEAD of
+# ${GENERATED_DIR}, so `#include "protocol_generated.h"` always resolved to the
+# committed copy (confirmed from `ninja -t deps`) and the generated one was
+# written and ignored — which is how the committed header sat five days stale
+# behind an fbs edit while every build "regenerated" it. Include order had
+# already elected the committed copy, so that is now the single source; the
+# generator is gone rather than the include order reshuffled, which would have
+# made the committed bindings dead files that git still diffs.
+#
+# scripts/regen-protocol.sh writes all four derived artefacts (C++ bindings, TS
+# bindings, and the two schema-hash files); this guard fails the build if the
+# schema moved without it. flatc is still built — the guard depends on it, and
+# the regen script finds it in any configured build dir.
+file(REMOVE ${GENERATED_DIR}/protocol_generated.h)  # sweep the dead copy out of existing build dirs
 add_custom_command(
-    OUTPUT ${GENERATED_DIR}/protocol_generated.h
-    COMMAND flatc --cpp --gen-object-api -o ${GENERATED_DIR} ${SCHEMA_DIR}/protocol.fbs
-    DEPENDS ${SCHEMA_DIR}/protocol.fbs flatc
-    COMMENT "Generating FlatBuffers C++ headers from protocol.fbs"
+    OUTPUT ${GENERATED_DIR}/protocol-schema-hash.stamp
+    COMMAND ${CMAKE_COMMAND}
+        -DFLATC=$<TARGET_FILE:flatc>
+        -DSCHEMA=${SCHEMA_DIR}/protocol.fbs
+        -DCPP_HEADER=${CMAKE_SOURCE_DIR}/rts/Server/ProtocolSchemaHash.h
+        -DTS_FILE=${CMAKE_SOURCE_DIR}/client/src/protocol/schema-hash.ts
+        -DWORK_DIR=${GENERATED_DIR}
+        -DSTAMP=${GENERATED_DIR}/protocol-schema-hash.stamp
+        -P ${CMAKE_SOURCE_DIR}/cmake/CheckProtocolSchemaHash.cmake
+    BYPRODUCTS ${GENERATED_DIR}/protocol.bfbs
+    DEPENDS
+        ${SCHEMA_DIR}/protocol.fbs
+        ${CMAKE_SOURCE_DIR}/rts/Server/ProtocolSchemaHash.h
+        ${CMAKE_SOURCE_DIR}/client/src/protocol/schema-hash.ts
+        ${CMAKE_SOURCE_DIR}/cmake/CheckProtocolSchemaHash.cmake
+        flatc
+    COMMENT "Checking protocol.fbs against the committed schema hash"
+    VERBATIM
 )
-add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
+add_custom_target(check_protocol_schema DEPENDS ${GENERATED_DIR}/protocol-schema-hash.stamp)
 
 # === Build stamp header (git short hash + build timestamp) ===
 # Runs the git rev-parse + header write at BUILD time via a custom target
@@ -375,7 +407,7 @@ add_executable(spring-server
     ${SERVER_SOURCES}
 )
 
-add_dependencies(spring-server generate_flatbuffers generate_build_stamp)
+add_dependencies(spring-server check_protocol_schema generate_build_stamp)
 target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -385,7 +417,18 @@ target_include_directories(spring-server PRIVATE
     ${GENERATED_DIR}
 )
 find_package(ZLIB REQUIRED)
-target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon)
+# libcurl — the ONLY outbound HTTP client in this tree (rts/Server/NlProxy.cpp,
+# PLAN-metalstorm-command-language.md M4). Resolved from the macOS SDK with no
+# install step (`libcurl.tbd`, 8.7.1), which is what made it the cheaper half of
+# the M4 transport decision: the alternative was a Node sidecar to manage, and
+# macOS is the only platform that can configure this project today (the
+# docker-build-v2 images are upstream RecoilEngine tooling whose apt list has
+# none of the QUIC stack spring-server hard-requires, and .github/workflows/
+# security-prod-gate.yml runs on macos-14 for exactly that reason). On Linux
+# this is `libcurl4-openssl-dev`, a one-line apt addition whenever that build
+# becomes real. Not gated on SPRING_PROD: the NL route ships.
+find_package(CURL REQUIRED)
+target_link_libraries(spring-server PRIVATE lua smmalloc nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite quic_deps nlohmann_json::nlohmann_json brotlienc brotlicommon CURL::libcurl)
 
 # Link platform libraries
 if(UNIX AND NOT APPLE)
@@ -410,6 +453,31 @@ set(LOBBY_SERVER_SOURCES
     # table (and the faction override deletes from it); the game server writes
     # it. Pure sqlite, no sim — same shape as GameServersDb below.
     rts/Server/WarPlayerBindings.cpp
+    # PLAN-metalstorm-wars.md §9 task 1: the War Director — the `wars` /
+    # `war_sides` tables and the seed→boot-call planner. LOBBY ONLY, and that
+    # is the point: it decides which wars exist and never touches sim state,
+    # so the game server has no reason to link it.
+    rts/Server/WarDirector.cpp
+    # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
+    # the side-sizing / underdog maintenance pass. The reservation table is
+    # read by the GAME server's seating path in spirit but written only here —
+    # the lock it relies on is SQLite's, so linking it into one process is
+    # enough for the race it resolves.
+    rts/Server/WarSlotReservation.cpp
+    rts/Server/WarSideMaintenance.cpp
+    # PLAN-metalstorm-wars.md task 4: the durable record of how a war
+    # ended, and the sweep that drives the §7 meta-state machine.
+    rts/Server/WarOutcome.cpp
+    rts/Server/WarLifecycleSweep.cpp
+    # PLAN-metalstorm-lobby.md §8 task 9a: the friends graph. LOBBY ONLY —
+    # unlike the bindings above, the game server neither reads nor writes it,
+    # so it is deliberately not in the shared set.
+    rts/Server/Friends.cpp
+    # PLAN-lobby.md §3 task 9b: the chat service. In the SHARED set rather
+    # than the lobby's own, unlike Friends above, because RoomManager.cpp
+    # calls Chat::DeleteRoom — a room's channels die with the room, and the
+    # room-deletion chokepoint is linked into both binaries.
+    rts/Server/Chat.cpp
     # PLAN-metalstorm-lobby.md task 8a: rotating refresh tokens + per-war
     # reconnect tokens. The LOBBY mints both and the GAME server validates the
     # war half, so it belongs to the shared server sources, not to either one.
@@ -432,6 +500,11 @@ set(LOBBY_SERVER_SOURCES
     # arithmetic beside it and has no sim in it either.
     rts/Server/GameEventsDb.cpp
     rts/Server/WarLog.cpp
+    # PLAN-metalstorm-ai task 4(b): the AI seats a war takes on while RUNNING.
+    # The game server writes and restores them; the lobby is in this list only
+    # because RoomManager's delete chokepoint drops them with the room (room
+    # ids are reused).
+    rts/Server/RuntimeAIRoster.cpp
     # PLAN-persistence task 3b: resume-on-join. Pure policy plus one read-only
     # SELECT against `game_snapshots` — the lobby decides whether a war comes
     # back on its stored world, and needs no part of the sim to do it.
@@ -481,7 +554,7 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers generate_build_stamp modelimporter mapconverter)
+add_dependencies(spring-lobby check_protocol_schema generate_build_stamp modelimporter mapconverter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -542,6 +615,28 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
+        # PLAN-metalstorm-wars.md task 1: the War Director. Its whole output is
+        # DB rows and one JSON boot call, so test_war_director.cpp drives the
+        # real store against an in-memory db — no lobby, no sim, no server.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarDirector.cpp
+        # task 2: the slot reservation (test_war_slot_reservation.cpp drives
+        # the real transaction from N threads against a real file) and the
+        # side-sizing / incentive maintenance pass.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarSlotReservation.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarSideMaintenance.cpp
+        # task 4: the war meta-state machine's durable halves. The RULE
+        # (WarTermination.h) and the theatre pool (WarTheatrePool.h) are pure
+        # headers; these two are the store and the sweep that applies it, both
+        # plain sqlite with no sim, so test_war_termination.cpp drives them
+        # against an in-memory db.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarOutcome.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarLifecycleSweep.cpp
+        # task 9a — test_friends.cpp drives the real store against an
+        # in-memory db, and the two policy headers beside it are pure.
+        ${CMAKE_SOURCE_DIR}/rts/Server/Friends.cpp
+        # task 9b — test_chat.cpp drives the real store the same way, and
+        # RoomManager.cpp above needs Chat::DeleteRoom to link at all.
+        ${CMAKE_SOURCE_DIR}/rts/Server/Chat.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Totp.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GuestAccounts.cpp
@@ -560,6 +655,9 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
+        # M4 NL proxy: the token bucket, the request gate and the prompt
+        # assembly are all reachable without a network or a key (test_nl_proxy.cpp).
+        ${CMAKE_SOURCE_DIR}/rts/Server/NlProxy.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/FactionData.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
@@ -567,6 +665,11 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GrowthCounters.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameStateStore.cpp
+        # PLAN-long-uptime S5 task 6: the entity-state header is where the
+        # id-recycle flag rides, so the serializer has to be linked for the
+        # test that checks a flagged mask reaches the header without changing
+        # the payload. Only needs LosHandler + the unit types, already here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/EntityStateSerializer.cpp
         # PLAN-persistence task 1b: the ISimSerializer walk. Needs the sim
         # globals (gs/gsRNG) and the two order managers, all of which
         # spring-tests already links, so its round-trip is a plain doctest.
@@ -595,10 +698,24 @@ if(TEST_SOURCES)
         # (test_war_log.cpp).
         ${CMAKE_SOURCE_DIR}/rts/Server/GameEventsDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarLog.cpp
+        # PLAN-metalstorm-ai task 4(b)'s durability half: the table plus the
+        # pure restore policy (test_runtime_ai_roster.cpp). The two halves that
+        # need a sim live in AISpawnService.cpp, which does not link here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/RuntimeAIRoster.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandQueue.cpp
+        # I1/SG1: the AI-command journal codec, split out of StateStreamer.cpp
+        # so its round-trip (kind byte + text payload) is a plain doctest —
+        # StateStreamer.cpp itself is not linkable here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandCodec.cpp
+        # task 4(b): the mid-game AI spawn hook's decidable half — the relay,
+        # the spawn policy and the plugin resolver (test_ai_spawn.cpp). The
+        # half that needs playerHandler/teamHandler lives in AISpawnService.cpp
+        # and is deliberately NOT here; it is verified on the running stack.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AISpawn.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIDiscovery.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
@@ -612,8 +729,8 @@ if(TEST_SOURCES)
     # includes protocol_generated.h to walk EnumValuesClientPayload(), which is
     # how the synced-input classifier is proved exhaustive against the real wire
     # schema instead of against a copy of it (PLAN-replay task 1).
-    add_dependencies(spring-tests generate_flatbuffers generate_build_stamp)
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
+    add_dependencies(spring-tests check_protocol_schema generate_build_stamp)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers CURL::libcurl)
     # Absolute path to the source tree so tests can open checked-in fixtures
     # (e.g. the strategos AI plugin) regardless of the ctest working dir.
     target_compile_definitions(spring-tests PRIVATE SPRING_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -698,7 +815,7 @@ add_executable(spring-logserver
     rts/logserver_main.cpp
     rts/Server/NetworkServer.cpp
 )
-add_dependencies(spring-logserver generate_flatbuffers generate_build_stamp)
+add_dependencies(spring-logserver check_protocol_schema generate_build_stamp)
 target_include_directories(spring-logserver PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${GENERATED_DIR}

@@ -642,6 +642,41 @@ bool CSyncedLuaHandle::SnapshotLoad(const luasnapshot::Value& in, std::string& e
 }
 
 
+// PLAN-def-reconciliation task 4, §2 step 5. Same dispatch shape as Load: a
+// global the gadget handler installs, one table argument, no return value.
+//
+// A gadget that raises here is reported and the restore CONTINUES. This runs
+// past the point of no return (the world is rebuilt and the gadgets' own Load
+// has already succeeded), and a game whose reconcile handler is broken still
+// has to come up — refusing would turn a repairable half-reconciled war into no
+// war at all, which is the opposite of what §3's "reconcile is not optional"
+// asks for.
+bool CSyncedLuaHandle::DefsReconciled(const luasnapshot::Value& delta, std::string& err)
+{
+	LUA_CALL_IN_CHECK(L, false);
+	luaL_checkstack(L, 4, __func__);
+
+	static const LuaHashString cmdStr("DefsReconciled");
+	if (!cmdStr.GetGlobalFunc(L)) {
+		// No gadget wants to know. Legitimate: a game with no def-keyed state of
+		// its own needs nothing here, and the engine half has already reconciled
+		// everything it owns.
+		lua_pop(L, 1);
+		return true;
+	}
+
+	if (!luasnapshot::Push(L, delta, err)) {
+		lua_pop(L, 1);        // the call-in function
+		return false;
+	}
+	if (!RunCallIn(L, cmdStr, 1, 0)) {
+		err = "the synced Lua DefsReconciled call-in raised an error";
+		return false;
+	}
+	return true;
+}
+
+
 bool CSyncedLuaHandle::SnapshotCoverage(std::vector<std::string>& covered,
                                        std::vector<std::string>& stateless,
                                        std::vector<std::string>& gaps,

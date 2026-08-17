@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -547,12 +548,40 @@ public:
     int PurgeOrphanedWarRows();
 
 private:
+    /// Run `body` as one `BEGIN IMMEDIATE … COMMIT` on `db`, retried as a
+    /// whole when a competing writer outlasts the busy timeout (D35's
+    /// residual; see `SqliteThreading.h` for the policy constants).
+    ///
+    /// Two properties the old hand-rolled `BEGIN`/`COMMIT` pairs did not have:
+    ///
+    ///  - **It joins an open transaction instead of starting a second one.**
+    ///    `PersistRoomLocked` calls all three `Persist*Locked` helpers, and
+    ///    every one of them used to open its own transaction — so persisting
+    ///    one room took the shared DB's single write lock *four* times, gave
+    ///    a reader four windows to observe a half-written room, and gave the
+    ///    contention four independent chances to drop a different piece of it.
+    ///    Nested calls now run inline and commit with the outermost one.
+    ///  - **It checks every return code.** A failed `COMMIT` used to leave the
+    ///    transaction open on a handle shared with the rest of the lobby, so
+    ///    the *next* writer's `BEGIN` failed with "cannot start a transaction
+    ///    within a transaction" — one lost write cascading into all of them.
+    ///
+    /// `body` returns an sqlite result code: `SQLITE_OK` to commit, a busy
+    /// code to have the whole transaction retried, anything else to roll back
+    /// and give up. `what` names the write in the failure log.
+    bool WriteTransactionLocked(const char* what,
+                               const std::function<int()>& body);
+
     // --- SQLite write-through helpers (no-op when db is null) ---
+    // The Persist*Locked helpers return an sqlite result code (SQLITE_OK on
+    // success) so they can compose inside one transaction; the many call
+    // sites that persist one table on its own ignore it, exactly as before.
     void PersistRoomLocked(const GameRoom& room);
+    int  PersistRoomRowLocked(const GameRoom& room);
     void DeleteRoomFromDb(uint32_t roomId);
-    void PersistMembersLocked(const GameRoom& room);
-    void PersistAISlotsLocked(const GameRoom& room);
-    void PersistModOptionsLocked(const GameRoom& room);
+    int  PersistMembersLocked(const GameRoom& room);
+    int  PersistAISlotsLocked(const GameRoom& room);
+    int  PersistModOptionsLocked(const GameRoom& room);
 
     std::recursive_mutex mutex;
     std::unordered_map<uint32_t, GameRoom> rooms;

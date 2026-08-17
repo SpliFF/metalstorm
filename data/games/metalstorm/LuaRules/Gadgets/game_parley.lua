@@ -28,10 +28,11 @@
 -- the proof) — exactly where the ROE order-veto (§2) needs to run: after
 -- squad.lua's own vetoes, strictly before any authority charge.
 --
--- Engine ask I1 (AI-side sendGameMessage) is NOT needed for this gadget
--- itself — humans call the same GG.Parley API via RecvLuaMsg that this file
--- parses below; I1 only gates the AI VM's own ability to originate the same
--- calls (interaction §7/§9), tracked in ai/strategos/actuators.lua.
+-- Engine ask I1 was never needed for this gadget itself — humans call the same
+-- GG.Parley API via RecvLuaMsg that this file parses below — and it has since
+-- landed (`AI.sendMessage`, 2026-08-14), so an AI can now reach these very
+-- handlers on the same channel. What is still missing is the plugin's own
+-- parley verbs (interaction §7/§9), tracked in ai/strategos/actuators.lua.
 
 function gadget:GetInfo()
     return {
@@ -468,7 +469,11 @@ local function applyAcceptTribute(p, frame)
     -- Not pre-escrowed (a 'to'-direction demand, or a system-originated
     -- 'pay' offer with no player to stake it): charge the payer's team pool
     -- directly at accept time.
-    if not GG.Authority.ChargeOrder(nil, payerTeam, nil, t.amount) then
+    -- 'tribute' (D62), not the order class ChargeOrder would infer from a nil
+    -- cmdID: this is the payer half of the pool-to-pool transfer whose payee
+    -- half is Awarded as 'tribute' on the next line, so it is a `move` on the
+    -- payer team and nothing is burned.
+    if not GG.Authority.ChargeOrder(nil, payerTeam, nil, t.amount, nil, 'tribute') then
         return false, 'insufficient_authority'
     end
     GG.Authority.Award({ team = payeeTeam }, t.amount, 'tribute')
@@ -579,7 +584,11 @@ function GG.Parley.Propose(fromTeam, fromPlayer, toTeam, kind, terms)
     -- game_authority.lua:276 — so nil is a legitimate call here, not a
     -- unit-order charge; "the free-list logic inverted" — proposing would
     -- otherwise be free like any non-order action, this imposes a cost).
-    if not GG.Authority.ChargeOrder(nil, fromTeam, fromPlayer, PROPOSE_FEE) then
+    -- 'proposal_fee' (D62): a fee genuinely leaves the economy, so this one IS
+    -- a burn — but it is not an order, and filing it under an order class both
+    -- mis-names it and left `proposal_fee` a dead entry in the taxonomy that
+    -- names it.
+    if not GG.Authority.ChargeOrder(nil, fromTeam, fromPlayer, PROPOSE_FEE, nil, 'proposal_fee') then
         return nil, 'insufficient_authority'
     end
 
@@ -882,7 +891,9 @@ function gadget:GameFrame(frame)
                     resolveTerminal(p, 'fulfilled', nil)
                 elseif p.data and p.data.nextPayFrame and frame >= p.data.nextPayFrame then
                     -- Recurring tribute payment tick.
-                    if GG.Authority.ChargeOrder(nil, p.data.payerTeam, nil, p.terms.amount) then
+                    -- 'tribute' (D62) — the payer half of the recurring
+                    -- transfer, same argument as the one-shot site above.
+                    if GG.Authority.ChargeOrder(nil, p.data.payerTeam, nil, p.terms.amount, nil, 'tribute') then
                         GG.Authority.Award({ team = p.data.payeeTeam }, p.terms.amount, 'tribute')
                         p.data.nextPayFrame = frame + TRIBUTE_PAY_PERIOD_FRAMES
                     else

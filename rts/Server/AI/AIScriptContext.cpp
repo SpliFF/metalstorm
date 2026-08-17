@@ -359,6 +359,10 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_setPosture);
     lua_setfield(L, -2, "setPosture");
 
+    // I1/SG1: the AI's only write into synced game Lua.
+    lua_pushcfunction(L, l_sendMessage);
+    lua_setfield(L, -2, "sendMessage");
+
     lua_setglobal(L, "AI");
 }
 
@@ -590,6 +594,43 @@ int AIScriptContext::l_setPosture(lua_State* L) {
     ReadGroupHandle(L, 1, cmd);
     size_t len = 0;
     const char* s = luaL_checklstring(L, 2, &len);
+    cmd.text.assign(s, len);
+    aiCommandQueue.Push(cmd);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// AI.sendMessage(msg) -> bool. I1/SG1: the AI's only write into synced game
+// Lua. The payload is opaque here — it drains a tick or two later into
+// `luaRules->RecvLuaMsg(msg, playerId)`, the SAME gadget entry point a human's
+// LuaRulesMsg lands on (PLAN-ai-synced-write §2.3 option A), so the guidance
+// gadget's existing validated-writer check works unchanged and `isAI` is what
+// discriminates the sender.
+//
+// Returns FALSE rather than raising when the size clamp rejects: a throttled
+// planner should degrade, not crash its tick (§2.4).
+int AIScriptContext::l_sendMessage(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    size_t len = 0;
+    const char* s = luaL_checklstring(L, 1, &len);
+
+    if (len > kAILuaMsgMaxBytes) {
+        // Rate-limited: a planner that overflows once usually overflows every
+        // tick, and this is the log a flooding AI would otherwise drown.
+        static uint32_t rejected = 0;
+        if ((rejected++ % 100) == 0) {
+            SLOG(SPRING_LOG_WARNING,
+                 "[ai] sendMessage rejected: team=%d player=%d bytes=%zu > %zu (reject #%u)",
+                 ctx->teamId, ctx->playerId, len, kAILuaMsgMaxBytes, rejected);
+        }
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    AICommand cmd;
+    cmd.kind     = AICommandKind::LuaMsg;
+    cmd.teamId   = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: the message attributes to the AI's own player
     cmd.text.assign(s, len);
     aiCommandQueue.Push(cmd);
     lua_pushboolean(L, 1);

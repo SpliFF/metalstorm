@@ -765,3 +765,60 @@ describe("the terminal objective is not pinned to a stale package (fire 24)", fu
             packageFor(plan(marchedFixture(1), pinnedToHome()), 'obj:1'))
     end)
 end)
+
+describe("a human's veto is excluded AND reported (PLAN-ai-synced-write task 5)", function()
+    -- Two goals the planner would otherwise both pursue, and one package. The
+    -- veto is on the one it prefers, so the observable is not just "the other
+    -- one won" — it is that the plan NAMES the vetoed goal, which is what
+    -- `make test-ai-veto-loop` reads off the tick line.
+    local function vetoFixture(vetoed)
+        local role = fullSideRole()
+        local veto = {}
+        if vetoed then veto[vetoed] = true end
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'plains', 'ridge' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+                ridge  = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            ledger  = { home = { strength = 10 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            guidance = { regionPaint = {}, assetLocks = {}, delegated = {}, veto = veto },
+        })
+    end
+
+    local function ids(list)
+        local out = {}
+        for _, v in ipairs(list or {}) do out[#out + 1] = v end
+        table.sort(out)
+        return out
+    end
+
+    it("NULL CONTROL: with no veto, nothing is reported and the goal is live", function()
+        local out = plan(vetoFixture(nil))
+        assert.are.same({}, ids(out.vetoed))
+        local sawPlains = false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then sawPlains = true end
+        end
+        assert.is_true(sawPlains)
+    end)
+
+    it("the vetoed goal is dropped from the directives and named in the plan", function()
+        local out = plan(vetoFixture('exp:plains'))
+        assert.are.same({ 'exp:plains' }, ids(out.vetoed))
+        for _, d in ipairs(out.directives) do
+            assert.are_not.equal('exp:plains', d.goalId)
+        end
+    end)
+
+    it("the report comes from the exclusion, not from the veto list", function()
+        -- The distinction the live gate depends on: a veto naming a goal that is
+        -- not on this tick's slate must NOT be reported, because nothing was
+        -- excluded. A report recomputed from `guidance.veto` would name it, and
+        -- would then keep naming it for a planner that had stopped acting.
+        local out = plan(vetoFixture('exp:nowhere'))
+        assert.are.same({}, ids(out.vetoed))
+    end)
+end)

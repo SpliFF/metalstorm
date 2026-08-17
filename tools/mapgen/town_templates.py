@@ -546,6 +546,129 @@ LANDMARK_MAX = 2
 
 
 # --------------------------------------------------------------------------
+# Populace — who is actually out on the streets
+# --------------------------------------------------------------------------
+# The one table in this file whose content ALL SHIPS. Unlike the wall kit and
+# four of the five prop kinds, every def named below exists in
+# data/games/metalstorm/units/ today (civilians.lua, civvehicles.lua), so a town
+# populated from this table is visible in the client right now, on any map, with
+# nothing gated behind model-integration.
+#
+# A populace entry is a KIND, not a def, for the same reason a lot carries a
+# role: `residents` is "the people who live on this row", and whether that is a
+# civilian group, a family or an ox-cart is the content's call. `resolve_populace`
+# filters to what ships, exactly as `resolve_roles`/`resolve_props` do.
+#
+# THE FIVE KINDS AND WHERE EACH ONE GOES. The brief asks for "civilian units,
+# vehicles ... civilians in streets/market, vehicles parked or on roads", and
+# `where` below is that sentence made mechanical. Each value is a siting rule
+# implemented in town_populace.py:
+#
+#   frontage     on the strip between a lot's frontage line and the carriageway
+#                — the shoulder. Walked OUTWARD toward the road until the point
+#                clears the building's real rectangle (see town_populace's
+#                header: on a diagonal street the frontage line is INSIDE the
+#                axis-aligned footprint, so a fixed offset does not exist).
+#   yard         behind the building, in the depth the frontage rule leaves over
+#                — the same ground `LANDMARKS['where'] = 'yard'` uses.
+#   carriageway  ON the road, on its centreline. The one kind that WANTS the
+#                carriageway every other placement rule in this toolchain
+#                refuses.
+#   gateway      at a hole in the wall, stepped in toward the town centre.
+#
+# `registry_role` is the role `GG.Civilians.Register` records, and it is the
+# difference between population and guards. `ambient` is what
+# civilians/routines.lua wanders and what estate.lua counts as a district's
+# population; `garrison` is skipped by both, so militia hold their post at the
+# gate instead of strolling off it. The role is a free string in the registry
+# (game_civilians.lua), so `garrison` needs no gadget change to be honoured —
+# only for the two consumers to keep filtering on `ambient`, which they do.
+
+POPULACE = {
+    "residents": {
+        "label": "Residents",
+        "where": "frontage",
+        # Every role except `defense`: a watchtower has no doorstep.
+        "lot_roles": ["bulk", "unique", "utility"],
+        "odds": 0.55,              # seeded keep-rate per eligible lot
+        "registry_role": "ambient",
+        "defs": [("ms_civilians", 1.0)],
+    },
+    "market": {
+        "label": "Market crowd",
+        "where": "frontage",
+        "lot_roles": ["poi"],
+        "odds": 1.0,               # a market with nobody at it is not a market
+        # Extra groups on the SAME frontage, spread along it — the one place in
+        # a town where people are meant to be shoulder to shoulder.
+        "extra": (1, 2),
+        "registry_role": "ambient",
+        "defs": [("ms_civilians", 1.0)],
+    },
+    "parked": {
+        "label": "Parked vehicles",
+        # The yard behind the building if this lot has one, the kerb beside it
+        # if not. MEASURED: on this content the yard usually does NOT exist —
+        # `lot_size` above is derived from the footprint the lot has to hold, so
+        # a 192-elmo habitat in a 190-deep parcel leaves no back yard at all,
+        # and a diagonal street costs the parcel depth at both ends. A rule with
+        # a 100% failure rate is not a rule, so `parking` is the pair.
+        "where": "parking",
+        # Where a town's work traffic actually stands: the depot yard, the
+        # market's back lot, the silo. Not outside a house.
+        "lot_roles": ["poi", "utility"],
+        "odds": 0.7,
+        "registry_role": "ambient",
+        "defs": [("ms_civtruck", 3.0), ("ms_civbus", 1.0)],
+    },
+    "traffic": {
+        "label": "Road traffic",
+        "where": "carriageway",
+        # Through routes only, and the same two kinds a GATEWAY is cut for
+        # (PERIMETER['gate_kinds']): a lorry parked across a back lane or a
+        # plaza is not traffic, it is an obstruction.
+        "street_kinds": ["main", "street"],
+        "odds": 0.5,               # per eligible street
+        "max": 3,
+        "registry_role": "ambient",
+        "defs": [("ms_civtruck", 2.0), ("ms_civbus", 1.0)],
+    },
+    "militia": {
+        "label": "Militia",
+        "where": "gateway",
+        # Only a town that built a wall mans it. An open hamlet's defence is
+        # that nobody has come for it yet.
+        "tiers": ["stockade", "fortified"],
+        "odds": 1.0,               # per gateway
+        "max": 4,
+        # NOT `ambient`: routines.lua would walk them off the gate they were
+        # posted to, and estate.lua would count armed volunteers as the
+        # population a protect-objective is about.
+        "registry_role": "garrison",
+        "defs": [("ms_militia", 1.0)],
+    },
+}
+
+# Drawn in this order, so the kinds with the fewest legal positions claim their
+# ground before the ones that can go anywhere. Iterated as a list because dict
+# order must never reach output (RULES OF DETERMINISM, scenariogen.py).
+POPULACE_ORDER = ["militia", "market", "parked", "traffic", "residents"]
+
+assert sorted(POPULACE_ORDER) == sorted(POPULACE), (
+    "every POPULACE kind must appear in POPULACE_ORDER: " +
+    repr(sorted(POPULACE)))
+
+# A HARD CEILING on civilians per town, applied after every kind has drawn.
+# `ms_civilians` carries `squad_size = 12`, so one placement is twelve rendered
+# bodies: a 24-lot town drawing residents at 0.55 is thirteen groups, i.e. ~156
+# people, before the market. Three towns of that size is a bigger crowd than
+# either army. The cap is on PLACEMENTS, and it drops the last kinds drawn
+# (`residents` — the most numerous and the least individually meaningful),
+# reporting what it dropped rather than quietly thinning the town.
+MAX_POPULACE = 16
+
+
+# --------------------------------------------------------------------------
 # Naming
 # --------------------------------------------------------------------------
 # Deliberately the same register as regions_from_map.name_for's output, which
@@ -638,6 +761,23 @@ def resolve_props(available) -> dict[str, str]:
             if defname in available:
                 out[kind] = defname
                 break
+    return out
+
+
+def populace_options(available) -> dict[str, list[tuple[str, float]]]:
+    """kind -> the weighted defs it may draw from, filtered to `available`.
+
+    Same contract as `role_options`, and the same reason: a town whose two
+    parked vehicles are both cargo trucks reads as a depot, not as a town.
+    A kind with nothing available is OMITTED rather than substituted, so the
+    caller can report by name that this game cannot express it — which today is
+    no kind at all, since every def POPULACE names ships.
+    """
+    out: dict[str, list[tuple[str, float]]] = {}
+    for kind in POPULACE_ORDER:
+        picks = [(d, w) for d, w in POPULACE[kind]["defs"] if d in available]
+        if picks:
+            out[kind] = picks
     return out
 
 

@@ -94,6 +94,34 @@ public:
 	 */
 	void AddPlayer(const CPlayer& player);
 
+	/**
+	 * @brief Pre-allocate `count` player slots for a war's Σ slotCap
+	 * @param count      total slots the process was spawned for
+	 * @param teamOfSlot the side each slot belongs to (index = playerNum, -1 =
+	 *                   no side); short or absent leaves the rest on team 0
+	 *
+	 * PLAN-metalstorm-wars.md §8.1. The War Director knows every side's
+	 * `slotCap` when it seeds a war, so the server is sized for the WAR rather
+	 * than for the roster it booted with: the block exists from frame 0 and a
+	 * dynamic joiner is seated into a slot that was already there, instead of
+	 * competing for a player number with every spectator who came to watch.
+	 *
+	 * Grows only, and the slots it adds are nameless inactive spectators — the
+	 * shape AddPlayer's own gap stubs already have, so nothing downstream meets
+	 * a row it has not seen before. See Server/PlayerSlotReservation.h for the
+	 * layout rule and Server/ClientMessageHandler.cpp for the claim.
+	 */
+	void ReserveSlots(int count, const std::vector<int>& teamOfSlot);
+
+	/**
+	 * @brief is this player number a reserved slot nobody has taken yet?
+	 *
+	 * Nameless + inactive + not an AI. The claim path asks it to find a free
+	 * seat on a side, and the roster broadcast asks it to leave empty seats off
+	 * the wire — an unclaimed slot is a place, not a person.
+	 */
+	bool IsUnclaimedSlot(int id) const;
+
 private:
 	/**
 	 * @brief players

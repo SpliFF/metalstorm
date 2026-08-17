@@ -34,12 +34,26 @@ export function arrive(px, pz, tx, tz, maxSpeed, arrivalRadius, out) {
  * (PLAN-perf M10). Omit it and any iterable works, which is what the tests and
  * the legacy generator path do.
  *
+ * `sameSquadOnly` (optional) drops every neighbour that is not a member of the
+ * asking squad, which is governor ladder L1 (PLAN-metalstorm-squad-
+ * performance.md §12c: "separation stage skips other-squad/pseudo neighbours
+ * (grid still built)"). Pseudo-members carry no `squadId`, so they are dropped
+ * with the foreign members — big-unit hulls keep applying because they come
+ * through _groundStep's own bow-wave term, not through this one. A distinct
+ * PARAMETER rather than `otherWeight: 0` because a caller that zeroed the
+ * weight would still pay the distance test and the divide for every foreign
+ * member in the 3x3 neighbourhood, which is the cost L1 exists to shed.
+ * NOTE the argument order: the S2 lane's own copy of this function put this
+ * flag where `count` now sits, so re-applying that patch verbatim passes a
+ * boolean as the fill count — `len = true` makes the loop run zero iterations
+ * and silently disables ALL separation. Keep the flag last.
+ *
  * ORCA seam (§3 — decision recorded, NOT implemented): a future velocity-
  * obstacle avoidance term would query neighbours through the same
  * SquadManager neighbour query and replace only this function's body, so it
  * can drop in without touching call sites.
  */
-export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out, count) {
+export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out, count, sameSquadOnly = false) {
   out.x = 0; out.z = 0;
   let list = neighbours, len = count;
   if (len === undefined) {
@@ -49,6 +63,7 @@ export function separate(px, pz, selfSquadId, neighbours, separationRadius, same
   let n = 0;
   for (let i = 0; i < len; i++) {
     const nb = list[i];
+    if (sameSquadOnly && nb.squadId !== selfSquadId) continue;
     const dx = px - nb.x, dz = pz - nb.z;
     const d2 = dx * dx + dz * dz;
     const r = nb.radius ?? separationRadius;

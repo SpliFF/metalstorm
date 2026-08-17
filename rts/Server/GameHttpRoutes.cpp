@@ -3,10 +3,16 @@
 
 #include "NetworkServer.h"
 #include "ContentServer.h"
+#include "CacheControl.h"
 #include "Database.h"
+#include "EngineIdentity.h"
 #include "FactionData.h"
 #include "LuaExecEngine.h"
+#include "ClientEvalBroker.h"
+#include "ClientSession.h"
+#include "Protocol.h"
 #include "HttpAuth.h"
+#include "NlProxy.h"
 #include "PathTraversal.h"
 #include "PerfMetrics.h"
 #include "SimFrameProfiler.h"
@@ -21,8 +27,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <iterator>
+#include <set>
 #include <unordered_map>
+#include <unistd.h>   // getpid() for /api/metrics identity
 
 #define LOG_SECTION "server"
 
@@ -237,6 +246,24 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         }
         j["simFrame"] = simFrame;
 
+        // Binary identity for stale-binary detection (PLAN-test-automation P8):
+        // which build is actually serving this room, comparable against
+        // `spring-server --print-engine-hash` of the on-disk binary. The MCP's
+        // list_stack flags `stale-binary-running` when the two disagree — the
+        // "you rebuilt, but the process you are testing is the old one" trap.
+        //
+        // Prod-safe, deliberately NOT compiled out under SPRING_PROD: `stamp`
+        // is already public via the lobby's /api/version, `engineHash` is a
+        // pure function of it (EngineIdentity.h), and the pid of a localhost
+        // dev server is not sensitive. The stamp comes via CacheControl so the
+        // `#if __has_include("BuildStamp.h")` guard lives in exactly one place.
+        const char* stamp = CacheControl::BuildStamp();
+        j["identity"] = {
+            {"stamp",      stamp},
+            {"engineHash", engineid::HashHex(engineid::StampHash(stamp))},
+            {"pid",        static_cast<int>(getpid())},
+        };
+
         std::string json = j.dump();
         std::vector<uint8_t> body(json.begin(), json.end());
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
@@ -261,6 +288,43 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         return reg;
     }();
     HttpAuth::RegisterEndpoints(net, ctx.db, factionRegistry);
+
+    // --- Natural-language command proxy ---
+    // PLAN-metalstorm-command-language.md §3 (M4). POST, not GET: this
+    // codebase's GET handlers never receive headers, so a non-Public GET is
+    // enforced loopback-only (see NetworkServer.h) and could not carry a
+    // player's session token at all. TokenRequired is checked by DispatchPost
+    // before the handler runs; the handler re-resolves the user because the
+    // token bucket is per-user and needs an identity, not just a yes.
+    //
+    // `static` for the same reason factionRegistry above is: the handler
+    // outlives this function. Init is a no-op that leaves it disabled when
+    // SPRING_NL_API_KEY / ANTHROPIC_API_KEY is unset, which is the normal
+    // state of a dev box and of every build that has no business talking to
+    // an external API. NOT compiled out under SPRING_PROD — unlike /api/exec
+    // this is a player-facing feature, and it ships.
+    static NlProxy::Proxy nlProxy;
+    nlProxy.Init(contentRoots.empty() ? std::string{} : contentRoots[0]);
+
+    // DEFERRED (§7/M8), and the only route in this process that is. A Claude
+    // parse takes 1–3 s and NetworkServer dispatches handlers inline on its
+    // single network thread — the same thread that flushes the SSE channels
+    // carrying game state to every client in the match. Answering inline meant
+    // one player's sentence froze everyone's world for the length of the call
+    // (measured: an unrelated GET +307 ms, an SSE frame +295 ms late, for a
+    // park of only 400 ms). The handler now hands the call to a worker and
+    // returns nullopt; the event loop writes the answer when it lands.
+    // Everything cheap — no key, bad body, rate-limited, busy — still answers
+    // inline, because a refusal should not be slower than a success.
+    net.AddHttpPostDeferred("/api/nl/command", RouteAuth::TokenRequired,
+                    [&ctx](const std::string&, const std::string& body,
+                           const HttpRequestHeaders& headers,
+                           const DeferredResponse& defer) -> std::optional<HttpResponse> {
+        const int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
+        if (userId <= 0)
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        return nlProxy.HandleDeferred(userId, body, defer);
+    });
 
     // Restart-in-place: re-exec this binary with the same argv.
     // Clients get a GameRestarting message before the connection drops.
@@ -331,6 +395,100 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
 
         std::string json = "{\"success\":" + std::string(result.success ? "true" : "false")
             + ",\"output\":\"" + HttpAuth::JsonEscape(result.output) + "\"}";
+        return HttpAuth::JsonResponse(200, json);
+    });
+
+    // PLAN-test-automation P7: browser-eval relay. Runs arbitrary code in a
+    // CONNECTED browser and returns the result — same threat class as
+    // /api/exec above (arbitrary code; a different victim, the client rather
+    // than the sim), so it lives inside the same `#ifndef SPRING_PROD` block
+    // and inherits the same loopback-or-admin argument: trusting a loopback
+    // caller is safe precisely because the route cannot exist in a production
+    // binary. The client-side DEV gate is policy in a bundle the server
+    // cannot verify, so it is a third gate, not the only one.
+    //
+    // Three stacked gates: (1) this route's auth + prod compile-out,
+    // (2) only an admin-role session is ever addressed, (3) the browser
+    // itself refuses unless it is a DEV build or booted ?allowClientEval=1.
+    //
+    // All refusals answer 200 with success:false so a caller can branch on
+    // `output`; 400 is reserved for a malformed request, and a 404 (route
+    // absent) means a prod binary — the MCP falls back to printing snippets.
+    net.AddHttpPost("/api/client/eval", RouteAuth::LocalhostOrAdmin, [&ctx](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        // Auth preamble mirrors /api/exec exactly (see its comment above).
+        int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
+        std::string execUsername = headers.remoteIsLoopback ? "localhost" : "";
+        if (userId > 0) {
+            auto execUser = ctx.db.FindUserById(userId);
+            if (!headers.remoteIsLoopback && (!execUser || execUser->role != "admin")) {
+                return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
+            }
+            if (execUser) execUsername = execUser->username;
+        } else if (!headers.remoteIsLoopback) {
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
+        }
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        const std::string target = j.value("target", "js");
+        const std::string code   = j.value("code", "");
+        const uint32_t requestedClient = j.value("clientId", 0u);
+        const int timeoutMs = std::max(500, std::min(60000, j.value("timeoutMs", 10000)));
+
+        static const std::set<std::string> kTargets{"js", "worker", "widgets", "test"};
+        if (code.empty() || !kTargets.count(target)) {
+            return HttpAuth::JsonResponse(400,
+                R"({"success":false,"output":"need code + target js|worker|widgets|test"})");
+        }
+
+        ctx.db.LogAudit(userId, execUsername, "client_eval", target, code.substr(0, 200));
+
+        // Gate 2: resolve the addressed session. An explicit clientId must
+        // ALSO be a live admin session; otherwise take the HIGHEST-id live
+        // admin. Role is per-session, the same check ConsoleCommand enforces.
+        //
+        // Two traps are encoded here. `s.disconnected` sessions linger in the
+        // map so a reload can reclaim its player slot — addressing one sends
+        // the request into a transport that no longer exists and the caller
+        // eats the full timeout with no clue why. And the tiebreak is
+        // newest-wins rather than lowest-id: a reload of the same tab arrives
+        // as a NEW client id beside the corpse of the old one, so "lowest"
+        // reliably picks the tab that just went away. NOTE the documented
+        // role trap: a /api/rooms/direct dev account is role "player", so a
+        // browser booted that way is never eligible and gets
+        // "no connected admin client".
+        uint32_t chosen = 0;
+        ctx.sessions.ForEachSession([&](ClientID id, ClientSession& s) {
+            if (s.role != "admin" || s.disconnected) return;
+            if (requestedClient != 0) {
+                if (id == requestedClient) chosen = id;
+            } else if (id > chosen) {
+                chosen = id;
+            }
+        });
+        if (chosen == 0) {
+            return HttpAuth::JsonResponse(200,
+                R"({"success":false,"output":"no connected admin client"})");
+        }
+
+        const uint32_t reqId = ctx.evalBroker.Begin(chosen);
+        auto msg = Protocol::BuildClientEvalRequest(reqId, target, code);
+        // SendReliable only locks txMutex and queues, so calling it from the
+        // HTTP thread is safe — no sim-thread bounce needed (unlike anything
+        // that touches sim state).
+        ctx.rtcServer.SendReliable(chosen, msg.data(), msg.size());
+
+        bool success = false;
+        std::string output;
+        if (!ctx.evalBroker.Wait(reqId, timeoutMs, success, output)) {
+            return HttpAuth::JsonResponse(200,
+                std::string(R"({"success":false,"clientId":)") + std::to_string(chosen)
+                + R"(,"output":"timeout: client did not answer in )"
+                + std::to_string(timeoutMs) + R"(ms"})");
+        }
+        std::string json = "{\"success\":" + std::string(success ? "true" : "false")
+            + ",\"clientId\":" + std::to_string(chosen)
+            + ",\"output\":\"" + HttpAuth::JsonEscape(output) + "\"}";
         return HttpAuth::JsonResponse(200, json);
     });
 #endif // !SPRING_PROD

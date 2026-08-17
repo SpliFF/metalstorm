@@ -33,6 +33,31 @@
 -- change and the models/footprints below need no revision.
 --
 -- ============================================================================
+-- THE DECK GAP IS A MODEL CONSTANT, NOT A TERRAIN ONE (roads R3c, 2026-08-15)
+-- ============================================================================
+-- Every span in this file is authored with its ORIGIN AT THE PIER BASE: the
+-- shipped glTF runs y = 0.00 .. 4.52 (road) and 0.00 .. 4.15 (rail), measured
+-- off the mesh, so the trafficable surface sits `deck_top` ABOVE the model's
+-- own y = 0. And `CFeature::UpdatePosition` ends every tick with
+--
+--   Move(UpVector * (max(CGround::GetHeightReal(x, z), pos.y) - pos.y))
+--   (Feature.cpp:570)
+--
+-- — a feature's y is clamped UP to the ground and can never be pushed down.
+-- So a unit driving at the terrain height under a span is ALWAYS exactly
+-- `deck_top` below the deck it should be driving on, and **raising the terrain
+-- raises the span with it**: the gap is invariant under every earthwork a map
+-- generator can do. It is closed by moving the model origin to the deck
+-- surface, or by the `deckHeight` engine ask above — never by terrain alone.
+-- PLAN-maps.md §2j has the options; the note below in `span()` about "terrain
+-- shaped to carry it" was written before this was measured and is wrong.
+--
+-- `deck_top` is published PER DEF (not in the shared `span()` posture) because
+-- the two spans do not agree: the road deck is a slab at 1.50 and the rail
+-- deck is 3.80 with the rail head at 4.15. A single shared number would be
+-- wrong for one of them, silently.
+--
+-- ============================================================================
 -- CHAINING — the acceptance criterion, and why 24.0 exactly is safe
 -- ============================================================================
 -- Both spans are authored as tileable segments on their local Z (RH, -Z
@@ -90,10 +115,11 @@ local function span(t)
     -- scorched_crossing is the natural first map").
     --
     -- What it does NOT fix: a span over a DRY ravine still falls to the
-    -- riverbed, because the ground clamp is unconditional. A level deck over
-    -- dry ground needs either terrain shaped to carry it (a scenariogen/map
-    -- job) or the same deck-height engine work the blocking note above asks
-    -- for. Recorded in .tasks/notes/model-integration.md; not worked around here.
+    -- riverbed, because the ground clamp is unconditional. Nor does terrain
+    -- shaping fix it — see the deck-gap header above: the clamp raises the span
+    -- with the ground, so an earthwork moves the deck and the road surface by
+    -- the same amount and the gap never closes. Recorded in
+    -- .tasks/notes/model-integration.md; not worked around here.
     t.floating       = true
     t.smokeTime      = 0
     t.metal          = 0
@@ -117,6 +143,12 @@ return {
         footprintx  = 4, footprintz = 12,     -- 8 x 24 m
         health      = 6000,                   -- inert while indestructible; sized for the flip
         mass        = 9000,
+        customparams = {
+            -- Roadway slab surface above the model's y = 0, measured off the
+            -- shipped mesh (28 verts at y = 1.500 spanning x -4.35..+4.35,
+            -- kerb tops at 1.72 outboard of it). See the deck-gap header.
+            deck_top = '1.5',
+        },
     },
 
     -- 4.4 m wide, 4.2 m tall, 24.0 m per segment (rail heads to 24.08). Deck
@@ -128,5 +160,10 @@ return {
         footprintx  = 2, footprintz = 12,     -- 4 x 24 m
         health      = 5000,
         mass        = 7000,
+        customparams = {
+            -- Deck slab top, NOT the rail head (4.15): the deck is what a
+            -- vehicle would stand on and what an abutment has to meet.
+            deck_top = '3.8',
+        },
     },
 }

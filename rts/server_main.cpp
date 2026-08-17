@@ -10,6 +10,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/ProtocolSchemaHash.h"  // SCHEMA_HASH, stamped into the replay header
 #include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
@@ -24,6 +25,7 @@
 #include "Server/SnapshotRoundTrip.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
+#include "Server/ClientEvalBroker.h"
 #include "Server/EntityStateSerializer.h"
 #include "Server/ProjectileStateSerializer.h"
 #include "Server/PieceStateSerializer.h"
@@ -48,12 +50,17 @@
 #include "Server/ReplayPlayer.h"
 #include "Server/ReplayControlDeck.h"
 #include "Server/ReplayStateBroadcast.h"
+#include "Server/AI/AICommandQueue.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
+#include "Server/AI/AISpawn.h"
+#include "Server/AI/AISpawnService.h"
 #include "Server/PerfMetrics.h"
+#include "Server/PlayerSlotReservation.h"
 #include "Server/RoomManager.h"
 #include "Server/AuthTokens.h"
 #include "Server/GameEventsDb.h"
+#include "Server/RuntimeAIRoster.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarStateSim.h"
 #include "Server/PlayerOnboarding.h"
@@ -231,6 +238,14 @@ int main(int argc, char* argv[])
     // purpose — per-side capacity, war seeding and queue-when-full are task 7;
     // this exists so the join path ships a capacity check that is real.
     unsigned warSideCapacity = WAR_SIDE_CAPACITY_DEFAULT;
+    // PLAN-metalstorm-wars.md §8.1 task 5: Σ slotCap — the number of human
+    // player slots this process is being spawned FOR, decided by the War
+    // Director at seed time and recorded as `wars.spawned_slot_cap`. The slots
+    // are materialised during set-up so a dynamic joiner (§2.1) is seated into
+    // a place that already exists rather than one it has to win from the
+    // spectators. 0 (the default, and what every non-war launcher gets) means
+    // "not sized" — the player list grows on demand exactly as before.
+    unsigned playerSlotCap = 0;
     // PLAN-security-hardening.md task 5 (G3): prod cert for the QUIC/WebTransport
     // endpoint. Both paths must be given together, or neither — see
     // WebTransportServer::Start(). Empty (the default) runs the endpoint in
@@ -268,6 +283,11 @@ int main(int argc, char* argv[])
     // (gameId, roomId) is already `--game` + `--room`; see Hibernation.h for
     // why §3's `--resume <gameId>` sketch is not what landed.
     bool resumeRequested = false;
+    /// Set once a resume has actually APPLIED a stored world, which is a
+    /// stricter fact than `resumeRequested` and the only one the runtime-AI
+    /// restore may act on: re-seating a caretaker over a freshly staged world
+    /// would put a brain on a side whose pool and orders were never restored.
+    bool resumedWorld = false;
     // `--no-hibernate`: exit without leaving a resumable world behind. The
     // escape hatch for a box being torn down for good, and the off switch a
     // bisect needs.
@@ -339,6 +359,11 @@ int main(int argc, char* argv[])
 
     // Console command execution queue (pushed by WS thread, drained by sim)
     LuaExecEngine luaExecEngine;
+
+    // PLAN-test-automation P7: browser-eval relay waiters. Registered by the
+    // HTTP thread in POST /api/client/eval, resolved by the sim thread when
+    // the addressed browser answers with a ClientEvalResponse.
+    ClientEvalBroker evalBroker;
 
     // Parse a "field1:field2:field3" spec used by --player and --ai.
     // Returns {field1, field2, field3}; missing trailing fields are
@@ -417,6 +442,8 @@ int main(int argc, char* argv[])
     // --replay-export PATH / --replay-export-codec none|deflate (repack the
     //   file given by --replay into a shareable .msr and exit),
     // --player username:team:pos (repeatable),
+    // --player-slots N (PLAN-metalstorm-wars.md §8.1: pre-allocate N human
+    //   player slots for a war's Σ slotCap; 0 = size on demand),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -461,6 +488,22 @@ int main(int argc, char* argv[])
                 return 1;
             }
             warSideCapacity = static_cast<unsigned>(std::strtoul(
+                spec.c_str(), nullptr, 10));
+        } else if (arg == "--player-slots" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            // Refused rather than defaulted, exactly like --war-side-capacity
+            // above: a typo here sizes the war's player arrays wrong, and the
+            // symptom (a joiner the lobby already promised a seat being seated
+            // as a spectator instead) surfaces hours later at somebody else's
+            // keyboard. `0` legitimately means "not sized".
+            if (spec.empty() ||
+                spec.find_first_not_of("0123456789") != std::string::npos) {
+                fprintf(stderr, "invalid --player-slots '%s' "
+                        "(expected a non-negative integer; 0 = not sized)\n",
+                        spec.c_str());
+                return 1;
+            }
+            playerSlotCap = static_cast<unsigned>(std::strtoul(
                 spec.c_str(), nullptr, 10));
         } else if (arg == "--wt-cert" && i + 1 < argc) {
             wtCertPath = argv[++i];
@@ -1000,6 +1043,18 @@ int main(int argc, char* argv[])
     // both-processes rule as the bindings table above, and the same durability
     // rule — it is the only copy of what happened in a war.
     GameEventsDb::EnsureTable(db.Handle());
+    // war_outcome — the durable record of how this war ended (wars §7, task
+    // 4). Created here beside game_events for the same reason: both are
+    // written by THIS process and read by the lobby, and both must exist
+    // before the first write rather than on the lobby's schedule.
+    WarOutcomeDb::EnsureTable(db.Handle());
+    // room_runtime_ai — the AI seats this war takes on WHILE running (task
+    // 4(b)'s open thread, RuntimeAIRoster.h). Written and read here; the lobby
+    // only deletes it with the room. Created unconditionally for the same
+    // reason as the two above: a scenario/direct boot may be the first process
+    // to touch this database, and the seat happens mid-war, long after any
+    // point where a failed prepare could still be noticed.
+    RuntimeAIRoster::EnsureTable(db.Handle());
     // Task 8a, and for the same reason: the game server VALIDATES per-war
     // reconnect tokens (the lobby mints them), so it must find the table even
     // on a machine where no lobby has ever run — a scenario/direct boot brings
@@ -1086,6 +1141,12 @@ int main(int argc, char* argv[])
     // it only ever holds numbers minted from `nextPlayerNum`.
     std::unordered_map<int64_t, int> playerNumByAccount;
 
+    // PLAN-metalstorm-wars.md §8.1: which side each pre-allocated player slot
+    // belongs to. Empty until the `--player-slots` block below fills it (and
+    // permanently empty for every session that was not sized), so "is this a
+    // reserved number" and "reserve nothing" are the same question.
+    playerslots::ReservedPlayerSlots reservedSlots;
+
     // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
     // (sent just before disconnect), consumed once when the disconnect drains.
     std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
@@ -1117,12 +1178,13 @@ int main(int argc, char* argv[])
     // bake below.
     GameServerContext ctx{
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
+        evalBroker,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
         clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,
         connectedRosterPlayers,
         rosterPlayersNeeded, waitsForRoster, sessionKind, warSideCapacity,
-        handshakedClients,
+        handshakedClients, reservedSlots,
     };
 
     GameStartCoordinator gameStart(ctx);
@@ -1229,6 +1291,13 @@ int main(int argc, char* argv[])
                 o["phase"]    = syncedinput::TickPhaseName(r.phase);
                 o["kind"]     = syncedinput::InputKindName(r.kind);
                 o["subKind"]  = r.subKind;
+                // The AI verb, spelled out. `subKind` alone made every AI
+                // record indistinguishable on this route, which is the one
+                // place a live run's cause stream is readable — and the
+                // ai.intent-before-its-directive ordering (SG1 §2.5) is a
+                // property of the stream, not of any single record.
+                if (r.kind == syncedinput::InputKind::AICommand)
+                    o["verb"] = AICommandKindName(static_cast<AICommandKind>(r.subKind));
                 o["playerId"] = r.playerId;
                 o["bytes"]    = r.payload.size();
                 return o;
@@ -1563,6 +1632,21 @@ int main(int argc, char* argv[])
         }
     }
 
+    // PLAN-def-reconciliation task 1: the snapshot store can only stamp the
+    // defs it is told about, and this is the first moment in boot where that
+    // fact exists — the store was constructed ~400 lines above, before
+    // sim.Init() had parsed a single def. Empty (a failed bake) stamps 0,
+    // "not recorded", which is exactly what it is.
+    gmSnapshotStore.SetDefsHash(defsCacheKey);
+    // Logged, because otherwise the only surface this wiring has is a column
+    // in a row that a headless run never writes: `hibernate: no exit
+    // checkpoint (headless-run)`. A stamp of 0 here is the honest report that
+    // the bake failed and every snapshot this process takes will say
+    // "vocabulary not recorded".
+    SLOG(SPRING_LOG_NOTICE, "snapshots: defs vocabulary key=%s -> defsHash %016llx",
+         defsCacheKey.empty() ? "(none)" : defsCacheKey.c_str(),
+         (unsigned long long)gmSnapshotStore.DefsHash());
+
     // (playerTeamByUsername / clientPlayerNum / nextPlayerNum /
     // connectedRosterPlayers / rosterPlayersNeeded were declared above, ahead
     // of the GameServerContext that binds them; deferred-GameStart logic now
@@ -1589,6 +1673,12 @@ int main(int argc, char* argv[])
         // prevents a wrong replay from being trusted.
         rhdr.engineHash   = "proto" + std::to_string(Protocol::CURRENT_PROTOCOL_VERSION) +
                             "-" + std::string(__DATE__ " " __TIME__);
+        // The one identity field in this header that is EXACT and enforced
+        // (PLAN-protocol-guard task 7). engineHash above is a stand-in nobody
+        // acts on; this is the sha256 of the binary wire schema the records
+        // below are encoded against, and `Player::Load` refuses a file whose
+        // stamp does not match the replaying build — see ReplayCompatPolicy.h.
+        rhdr.schemaHash   = Protocol::SCHEMA_HASH;
         rhdr.gameId       = gameId;
         rhdr.gameVersion  = gameVersion;
         rhdr.mapId        = mapId;
@@ -1650,11 +1740,14 @@ int main(int argc, char* argv[])
     // being skipped. A short replay that says why is a usable artefact; a
     // complete-looking replay that quietly dropped an input is the failure this
     // whole subsystem exists to make impossible.
+    // The wire frame carries an envelope byte ahead of the FlatBuffer, and this
+    // peek used to verify the buffer WITH it attached — so it read NONE for
+    // every valid message and the replay gate below refused nothing (found
+    // 2026-08-14 by pointing the scripted wire client at a replay server: a
+    // spectator's PlayerCommand reached HandleMessage and was journaled). One
+    // decoder now, `Protocol::PeekClientPayloadType`, shared with the handler.
     auto PeekClientPayloadType = [](const InboundMessage& m) -> uint8_t {
-        flatbuffers::Verifier v(m.data.data(), m.data.size());
-        if (!SpringWeb::VerifyClientMessageBuffer(v)) return 0;
-        const auto* cm = SpringWeb::GetClientMessage(m.data.data());
-        return cm == nullptr ? 0 : static_cast<uint8_t>(cm->payload_type());
+        return wireframe::PeekClientPayloadType(m.data.data(), m.data.size());
     };
 
     auto FeedReplayRecord = [&](const syncedinput::Record& r) {
@@ -1771,6 +1864,99 @@ int main(int argc, char* argv[])
             }
         }
     };
+
+    // --- Player-slot pre-allocation (PLAN-metalstorm-wars.md §8.1, task 5) ---
+    //
+    // The war was sized by the War Director before this process existed: Σ
+    // slotCap arrived as `--player-slots`, and `wars.spawned_slot_cap` records
+    // the same number so a dynamic joiner can be told what the running server
+    // was sized FOR (task 2's field note: the live per-side caps may be raised
+    // after boot, and a raise past this block is a promise nobody can keep).
+    // Materialising the block here means the arrays are sized for the WAR, not
+    // for the roster this process happened to boot with — the assertion §10's
+    // integration row makes.
+    //
+    // Placed immediately BEFORE the AI virtual players, and that ordering is
+    // the point: every player number minted after this — AI, spectator,
+    // off-side roster player — is numbered ABOVE the block, so the war's own
+    // seats can never be spent by somebody who came to watch.
+    {
+        const auto& opts = CGameSetup::GetModOptions();
+        const auto wsIt = opts.find("war_sides");
+        const WarSides sides =
+            (wsIt != opts.end()) ? ParseWarSides(wsIt->second) : WarSides{};
+        const auto wcIt = opts.find("war_side_capacities");
+        const WarSideCapacities caps =
+            (wcIt != opts.end()) ? ParseWarSideCapacities(wcIt->second)
+                                 : WarSideCapacities{};
+
+        // No `--player-slots`, but the modoptions describe a war with finite
+        // sides: size it from those. The lobby computes the flag from exactly
+        // these two modoptions, so the derived number is the same number — and
+        // deriving it means the sizing survives every launcher that does not
+        // pass the flag. Two of those matter:
+        //   * a REPLAY, which is re-executed with map/game/modoptions/roster
+        //     out of its own header and no world-describing arguments at all
+        //     (see spawnGameServer). Without the block the re-execution would
+        //     allocate a war's first joiner off the top of the list and stop on
+        //     the player-number divergence check, which is to say every war
+        //     recording containing a join would be unplayable.
+        //   * a bare `spring-server --game … --map …` self-test, and any
+        //     direct-start manifest that declares sides.
+        // An explicit flag still wins: it is what the process was SPAWNED with
+        // (`wars.spawned_slot_cap`), and after task 2's maintenance pass raises
+        // a side the two deliberately stop agreeing.
+        if (playerSlotCap == 0) {
+            playerSlotCap =
+                playerslots::TotalSlotCap(sides, caps, warSideCapacity);
+            if (playerSlotCap > 0)
+                SLOG(SPRING_LOG_NOTICE,
+                     "no --player-slots given; sizing from the war's own sides "
+                     "(Σ slotCap %u)", playerSlotCap);
+        }
+
+        // 0 = not sized — a skirmish, a legacy room, or a war with an unlimited
+        // side. The player list grows on demand exactly as it always has, and
+        // `ctx.reservedSlots` stays empty, which every reader treats as
+        // "there is no block; allocate the next free number".
+        if (playerSlotCap > 0) {
+            unsigned slots = playerSlotCap;
+            // MAX_PLAYERS is a hard ceiling on the vector whose own header
+            // forbids reallocating it, so an over-large request is clamped
+            // here — loudly. Refusing to boot instead would strand a war the
+            // lobby has already written rows for; clamping seats as many as
+            // the engine can hold and says exactly how many it could not.
+            if (slots > static_cast<unsigned>(MAX_PLAYERS)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "player-slot cap %u exceeds MAX_PLAYERS (%d) — reserving "
+                     "%d; %u advertised seat(s) have no player number",
+                     slots, MAX_PLAYERS, MAX_PLAYERS,
+                     slots - static_cast<unsigned>(MAX_PLAYERS));
+                slots = static_cast<unsigned>(MAX_PLAYERS);
+            }
+
+            reservedSlots = playerslots::PlanReservedSlots(slots, sides, caps,
+                                                           warSideCapacity);
+            playerHandler.ReserveSlots(static_cast<int>(slots),
+                                       reservedSlots.teamOfSlot);
+            nextPlayerNum = static_cast<int>(slots);
+
+            std::string layout;
+            for (const auto& [faction, team] : sides) {
+                if (!layout.empty()) layout += ", ";
+                layout += faction + "→team " + std::to_string(team) + " ×" +
+                          std::to_string(reservedSlots.CountFor(
+                              static_cast<int>(team)));
+            }
+            if (layout.empty())
+                layout = "no sides declared — every slot unassigned";
+            SLOG(SPRING_LOG_NOTICE,
+                 "pre-allocated %u player slot(s) for this war's Σ slotCap "
+                 "(%s); player numbers from %d up are AI, spectators and "
+                 "off-side seats",
+                 slots, layout.c_str(), nextPlayerNum);
+        }
+    }
 
     // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
     //
@@ -1953,6 +2139,9 @@ int main(int argc, char* argv[])
         springlog_set_frame(sim.GetFrameNum());
         SLOG(SPRING_LOG_NOTICE, "room %u %s", roomId,
              hibernate::FormatResume(ro).c_str());
+        // The world is back. Its AI seats are not — see the restore call below,
+        // which has to wait for ctx.aiSpawnEnv (the plugin roots) to be filled.
+        resumedWorld = true;
     }
 
     // --- AI slot resolution ---
@@ -1969,19 +2158,38 @@ int main(int argc, char* argv[])
     // A failed resolution is a soft error: log it, move on. One bad
     // AI entry shouldn't stop the game from starting for the rest
     // of the roster.
-    if (!requestedAIs.empty()) {
-        const std::string enginePath = "content/engine";
-        const auto discovered = AIDiscovery::Discover(enginePath, gamePath);
+    // The roots BOTH staging paths read: this block, and the mid-game
+    // caretaker spawn (task 4(b), AISpawn.h). Filled unconditionally — a game
+    // that starts with no AI slot at all is exactly the game the caretaker
+    // hook exists for, so the env must not be gated on `requestedAIs`.
+    ctx.aiSpawnEnv.enginePath = "content/engine";
+    ctx.aiSpawnEnv.gamePath   = gamePath;
+    ctx.aiSpawnEnv.mapDataDir = mapPath;
+    ctx.aiSpawnEnv.defExportDir = defsCacheKey.empty()
+        ? std::string()
+        : DefsCache::CacheDir(gameId, defsCacheKey);
 
+    // A resumed war brings back the AI seats it acquired while it was running
+    // (RuntimeAIRoster.h, PLAN-metalstorm-ai task 4(b)'s open thread). Here and
+    // not in the resume block above: the restore resolves plugins through the
+    // same roots the two other staging paths use, and those roots are the four
+    // lines directly above. Before the `--ai` loop so the operator log reads in
+    // seating order — the pre-freeze seats, then this launch's slots.
+    if (resumedWorld)
+        RestoreRuntimeAISeats(ctx);
+
+    if (!requestedAIs.empty()) {
         for (const auto& rq : requestedAIs) {
-            const AIDiscovery::AIInfo* match = nullptr;
-            for (const auto& ai : discovered) {
-                if (ai.id == rq.id) { match = &ai; break; }
-            }
-            if (!match) {
-                SLOG(SPRING_LOG_WARNING,
-                    "--ai %s:%d: no matching plugin found, skipping",
-                    rq.id.c_str(), rq.team);
+            // Same resolver the runtime spawn uses (AISpawn.h): one set of
+            // rules for "which plugin is this id", so an AI the lobby can seat
+            // at frame 0 is an AI the caretaker hook can seat at frame N.
+            ResolvedAIPlugin plugin;
+            std::string resolveErr;
+            if (!ResolveAIPlugin(ctx.aiSpawnEnv.enginePath,
+                                 ctx.aiSpawnEnv.gamePath, rq.id, plugin,
+                                 resolveErr)) {
+                SLOG(SPRING_LOG_WARNING, "--ai %s:%d: %s, skipping",
+                    rq.id.c_str(), rq.team, resolveErr.c_str());
                 continue;
             }
 
@@ -1991,22 +2199,14 @@ int main(int argc, char* argv[])
             // `Spring.GetTeamLuaAI(teamId)`. The roster entry pushed
             // earlier already populates that map, so there's nothing
             // for AIRuntimePool to do.
-            if (match->isLuaAI) {
+            if (plugin.isLuaAI) {
                 SLOG(SPRING_LOG_NOTICE,
                     "registered LuaAI '%s' on team %d (handled by game gadgets)",
-                    match->displayName.c_str(), rq.team);
+                    plugin.displayName.c_str(), rq.team);
                 continue;
             }
 
-            std::ifstream mainFile(match->entryPath);
-            if (!mainFile.is_open()) {
-                SLOG(SPRING_LOG_ERROR,
-                    "--ai %s:%d: failed to open entry '%s'",
-                    rq.id.c_str(), rq.team, match->entryPath.c_str());
-                continue;
-            }
-            const std::string code((std::istreambuf_iterator<char>(mainFile)),
-                                    std::istreambuf_iterator<char>());
+            const std::string& code = plugin.code;
 
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
@@ -2023,18 +2223,16 @@ int main(int argc, char* argv[])
             //
             // rq.playerNum was allocated by the AI virtual-player block above
             // (AI3): strategos keys its authority charge identity by this id.
-            const std::string aiDefExportDir = defsCacheKey.empty()
-                ? std::string()
-                : DefsCache::CacheDir(gameId, defsCacheKey);
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
-                             mapPath, aiDefExportDir, rq.playerNum)) {
+            if (aiPool.AddAI(plugin.id, rq.team, allyTeam, code,
+                             plugin.folderPath, ctx.aiSpawnEnv.mapDataDir,
+                             ctx.aiSpawnEnv.defExportDir, rq.playerNum)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
-                    match->displayName.c_str(), match->id.c_str(), rq.team);
+                    plugin.displayName.c_str(), plugin.id.c_str(), rq.team);
             } else {
                 SLOG(SPRING_LOG_ERROR,
                     "failed to init AI '%s' on team %d",
-                    match->id.c_str(), rq.team);
+                    plugin.id.c_str(), rq.team);
             }
         }
     } else {
@@ -2209,7 +2407,26 @@ int main(int argc, char* argv[])
             std::chrono::steady_clock::now() - serverStartTime).count();
         const std::string json = EncodeWarSummary(BuildWarSummary(
             sides, GatherWarSummaryPlayers(), GatherWarSummaryRegions(),
-            sim.GetFrameNum(), upSec));
+            sim.GetFrameNum(), upSec, GatherWarFootholds(sides),
+            GatherWarStakes()));
+
+        // The war's ENDING (PLAN-metalstorm-wars.md §7, task 4) — a separate,
+        // DURABLE row, not a field on this one. `war_summary` is deliberately
+        // perishable (the lobby drops it after kWarSummaryStaleSec so a killed
+        // server stops claiming players are online), and this process EXITS a
+        // few minutes after declaring the result by design (§7.2's
+        // --postgame-exit-seconds). Carried here, the fact that the war was
+        // won would evaporate half a minute later.
+        //
+        // Written on every heartbeat while the war is over rather than once at
+        // the declaration: `Record` replaces on room_id, and a one-shot would
+        // be lost by any failure between the declaration and the commit — of
+        // which the process's own scheduled exit is one.
+        if (WarOutcomeRecord outcome; GatherWarOutcome(sides, outcome)) {
+            outcome.roomId = roomId;
+            outcome.recordedAt = static_cast<int64_t>(std::time(nullptr));
+            WarOutcomeDb::Record(db.Handle(), outcome);
+        }
         sqlite3_stmt* st = nullptr;
         if (sqlite3_prepare_v2(statusDb,
                 "INSERT OR REPLACE INTO war_summary"
@@ -2416,6 +2633,10 @@ int main(int argc, char* argv[])
     // atomic), so Signal is the default and the residue. The exit-checkpoint
     // decision below is a pure function of this plus the world's state.
     hibernate::ExitReason exitReason = hibernate::ExitReason::Signal;
+    /// One-shot latch for the "idle, but the war is still settling" line
+    /// (wars task 4, D1). The condition holds for every pass of the wind-down,
+    /// and the log is where an operator looks for the resolve it precedes.
+    bool hibernateDeferLogged = false;
 
     while (keepRunning.load()) {
         // --- Pacing ---
@@ -2559,19 +2780,47 @@ int main(int argc, char* argv[])
             // than lost — but only when the operator has switched the window
             // on, because a room that exits is unjoinable until the lobby
             // learns to respawn it with --resume (task 3b). Default 0 = off.
-            if (roomPersistent && hibernationEnabled && hibernateIdleSeconds > 0 &&
-                !headlessCfg.enabled && !replay::IsReplaying()) {
-                const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
+            //
+            // The decision itself is `hibernate::DecideIdleHibernate` — pure,
+            // and it carries one input this loop cannot see from its own
+            // timers: the WAR's state. A declared war spends 300 frames
+            // settling, and only this process can run that settlement, so an
+            // idle deadline that lands inside the grace truncates it
+            // permanently (D1 — observed live: exit 269 frames before the
+            // resolve, nothing settled, no escrow disposed).
+            {
+                hibernate::IdleHibernateContext hc;
+                hc.persistentRoom = roomPersistent;
+                hc.hibernationEnabled = hibernationEnabled;
+                hc.idleSeconds = hibernateIdleSeconds;
+                hc.headlessRun = headlessCfg.enabled;
+                hc.replaying = replay::IsReplaying();
+                hc.sinceStartSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - serverStartTime).count();
-                const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
+                hc.startupGraceSec = kStartupGraceSec;
+                hc.idleForSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - lastClientTime).count();
-                if (sinceStart > kStartupGraceSec && idleFor > hibernateIdleSeconds) {
+                hc.warSimState = GatherWarSimState();
+                const hibernate::IdleHibernateDecision hd =
+                    hibernate::DecideIdleHibernate(hc);
+                if (hd.hibernate) {
                     SLOG(SPRING_LOG_NOTICE,
                         "no connected clients for %llds — hibernating persistent "
                         "room %u at frame %d",
-                        static_cast<long long>(idleFor), roomId, sim.GetFrameNum());
+                        static_cast<long long>(hc.idleForSec), roomId,
+                        sim.GetFrameNum());
                     exitReason = hibernate::ExitReason::Idle;
                     keepRunning.store(false);
+                } else if (hd.deferredForWarEnding && !hibernateDeferLogged) {
+                    // Once per process. A war that is ending is idle on every
+                    // subsequent pass too, and a line per 5 s would bury the
+                    // resolve it is waiting for.
+                    hibernateDeferLogged = true;
+                    SLOG(SPRING_LOG_NOTICE,
+                         "no connected clients for %llds, but room %u is NOT "
+                         "hibernating at frame %d: %s",
+                         static_cast<long long>(hc.idleForSec), roomId,
+                         sim.GetFrameNum(), hd.reason.c_str());
                 }
             }
             // Post-game exit: a finished war has nothing left to serve, so the
@@ -3153,13 +3402,25 @@ int main(int argc, char* argv[])
                         "snapshot round-trip: sections that disagree at frame %lld: %s",
                         (long long)rr.endFrame, names.c_str());
                     for (const auto& d : diffs) {
-                        if (d != "units") continue;
-                        // "units differ" covers a dropped kill and a unit
-                        // standing a millimetre further along its path. Those
-                        // are opposite diagnoses, so say which.
-                        SLOG(sev, "snapshot round-trip: units — %s",
-                             simsnapshot::DescribeUnitsDivergence(
-                                 ta, roundTrip.TerminalB()).c_str());
+                        if (d == "units") {
+                            // "units differ" covers a dropped kill and a unit
+                            // standing a millimetre further along its path.
+                            // Those are opposite diagnoses, so say which.
+                            SLOG(sev, "snapshot round-trip: units — %s",
+                                 simsnapshot::DescribeUnitsDivergence(
+                                     ta, roundTrip.TerminalB()).c_str());
+                        } else if (d == "gameRules") {
+                            // On a static fixture (roundtrip_static) there are
+                            // no moving units to blame, so a failure lands in
+                            // the gadgets' own state — name the key.
+                            const std::string keys =
+                                simsnapshot::DescribeRulesParamsDivergence(
+                                    ta, roundTrip.TerminalB(),
+                                    simsnapshot::SectionId::GameRules);
+                            if (!keys.empty())
+                                SLOG(sev, "snapshot round-trip: gameRules — %s",
+                                     keys.c_str());
+                        }
                     }
                 }
                 if (!rr.pass) roundTripExitCode = 1;
@@ -3172,11 +3433,14 @@ int main(int argc, char* argv[])
         // Only reached under --headless-run, so a normal game never enters this
         // block (regression bar). Evaluated after the tick + streamer, so the
         // game-over relay and frame count reflect this frame. The synced-Lua
-        // predicate is polled every 30 game-seconds (§1) and its result latched.
+        // predicate is polled once per game-second and its result latched.
+        // (It was every 30 game-seconds, first poll at frame 900 — so any run
+        // whose frame limit fired earlier exited having never evaluated its
+        // luaCondition even once, with zero output to say so. FU1.)
         if (headlessCfg.enabled) {
             if (headlessCfg.stopAt.luaCondition && !headlessLuaMet &&
-                !headlessLuaErrored && frame > 0 &&
-                (frame % (GAME_SPEED * 30)) == 0) {
+                !headlessLuaErrored &&
+                headless::LuaConditionPollDue(frame, GAME_SPEED)) {
                 std::string perr;
                 const auto pr = EvalSyncedPredicate(
                     *headlessCfg.stopAt.luaCondition, perr);

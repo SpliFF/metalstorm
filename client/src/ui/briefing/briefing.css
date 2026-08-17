@@ -1,0 +1,176 @@
+/*
+ * Scenario briefing splash — the story, the field advice and the Begin gate
+ * shown over the loading canvas while a scenario war boots.
+ *
+ * Z-INDEX IS LOAD-BEARING. 190 sits above the HUD shell (#ui-root, 100) and
+ * below BOTH #game-over-overlay and #recovery-error-overlay (200) — a boot
+ * failure must never end up hidden behind a story. The debug console (10000)
+ * stays on top of everything, as it must.
+ *
+ * Palette cribbed from game-over.css / native-ui.css rather than invented, so
+ * the splash reads as the same product as the screen it covers.
+ */
+
+#briefing-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 190;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+    background: rgba(8, 10, 14, 0.9);
+    font-family: system-ui, sans-serif;
+    color: #e6e8ec;
+}
+
+#briefing-overlay .briefing-panel {
+    display: flex;
+    flex-direction: column;
+    width: min(40rem, 100%);
+    /* A long story scrolls INSIDE the panel; the page never does. */
+    max-height: 100%;
+    overflow: hidden;
+    background: #161a22;
+    border: 1px solid #2a3140;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+}
+
+/* 3:1 banner, BAR's authoring guidance for campaign art. The map thumbnail
+   fallback is not 3:1, hence object-fit: cover rather than contain. */
+#briefing-overlay .briefing-banner {
+    aspect-ratio: 3 / 1;
+    overflow: hidden;
+    background: #0d1017;
+    flex: none;
+}
+
+#briefing-overlay .briefing-banner img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+/* Set by briefing.ts when there is no image, or when the one there is fails
+   to load. A missing thumbnail must cost the banner, never the splash. */
+#briefing-overlay .briefing-banner.briefing-hidden {
+    display: none;
+}
+
+#briefing-overlay .briefing-body {
+    padding: 1.5rem 1.75rem 0.5rem;
+    overflow-y: auto;
+}
+
+#briefing-overlay h1 {
+    margin: 0;
+    font-size: 1.6rem;
+    letter-spacing: 0.01em;
+    color: #f5f7fa;
+}
+
+#briefing-overlay h2 {
+    margin: 0.25rem 0 1rem;
+    font-size: 0.95rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #7d8ba0;
+}
+
+#briefing-overlay h2:empty {
+    display: none;
+}
+
+#briefing-overlay #briefing-story p {
+    margin: 0 0 0.85rem;
+    line-height: 1.6;
+    color: #c6ccd6;
+}
+
+#briefing-overlay #briefing-tips-wrap h3 {
+    margin: 1.25rem 0 0.5rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #7d8ba0;
+}
+
+#briefing-overlay #briefing-tips {
+    margin: 0;
+    padding-left: 1.1rem;
+}
+
+#briefing-overlay #briefing-tips li {
+    margin: 0 0 0.5rem;
+    line-height: 1.5;
+    color: #aab2c0;
+}
+
+#briefing-overlay #briefing-partime {
+    margin: 1rem 0 0.5rem;
+    font-size: 0.85rem;
+    color: #6f7a8c;
+}
+
+/* Empty sections collapse instead of leaving a labelled void — every briefing
+   field is optional, so this is the common case, not the edge case. */
+#briefing-overlay .briefing-hidden {
+    display: none;
+}
+
+#briefing-overlay #briefing-begin-btn {
+    flex: none;
+    margin: 0.75rem 1.75rem 1.5rem;
+    padding: 0.75rem 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    font: inherit;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #6f7a8c;
+    background: #1d2430;
+    border: 1px solid #2a3140;
+    border-radius: 8px;
+    cursor: default;
+}
+
+#briefing-overlay.briefing-ready #briefing-begin-btn {
+    color: #0b0e13;
+    background: #7fd1a8;
+    border-color: #7fd1a8;
+    cursor: pointer;
+}
+
+#briefing-overlay.briefing-ready #briefing-begin-btn:hover {
+    background: #96dcb8;
+}
+
+#briefing-overlay .briefing-spinner {
+    width: 0.9rem;
+    height: 0.9rem;
+    border: 2px solid #3a4356;
+    border-top-color: #7d8ba0;
+    border-radius: 50%;
+    animation: briefing-spin 0.9s linear infinite;
+}
+
+/* The spinner is the honest "still loading" signal. Once ready it goes away
+   rather than freezing — a stopped spinner reads as a hang. */
+#briefing-overlay.briefing-ready .briefing-spinner {
+    display: none;
+}
+
+@keyframes briefing-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #briefing-overlay .briefing-spinner {
+        animation: none;
+    }
+}

@@ -8,6 +8,7 @@ import { AIListRequest, AIListRequestT } from '../spring-web/ailist-request.js';
 import { Ack, AckT } from '../spring-web/ack.js';
 import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
 import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
+import { ClientEvalResponse, ClientEvalResponseT } from '../spring-web/client-eval-response.js';
 import { ClientPayload, unionToClientPayload, unionListToClientPayload } from '../spring-web/client-payload.js';
 import { ConsoleCommand, ConsoleCommandT } from '../spring-web/console-command.js';
 import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
@@ -137,7 +138,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|GroupDirectiveRemoveT|GroupDirectiveT|GroupPostureT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|LuaUIMsgT|OrgGroupCreateT|OrgGroupDisbandT|OrgGroupUpdateT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|PlayerLeaveIntentT|ReconnectRequestT|ReplayControlT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomEnlistT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|StandingOrderCreateT|StandingOrderRemoveT|StandingOrderUpdateT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ClientEvalResponseT|ConsoleCommandT|GameListRequestT|GroupDirectiveRemoveT|GroupDirectiveT|GroupPostureT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|LuaUIMsgT|OrgGroupCreateT|OrgGroupDisbandT|OrgGroupUpdateT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|PlayerLeaveIntentT|ReconnectRequestT|ReplayControlT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomEnlistT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|StandingOrderCreateT|StandingOrderRemoveT|StandingOrderUpdateT|ViewportUpdateT|null = null
 ){}
 
 

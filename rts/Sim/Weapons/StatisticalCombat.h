@@ -55,6 +55,12 @@ struct Tuning {
       0.0f; // skip-fire below this strengthFraction (E6); 0 = never skip
   int targetingCadence =
       0; // frames a squad must hold a target between switches (0 = one reload)
+  // Hold-fire floor (PLAN-metalstorm-combat-fixes.md §A): a weapon whose
+  // computed hit chance is below this does not fire AT ALL — no volley, no
+  // sound, no reload cycle, no resource spend. Kills the max-range plinking
+  // stalemate where both sides volley forever at p(hit) ~ 0. 0 disables the
+  // gate for a def (leaves the door open for deliberate suppression fire).
+  float minFireChance = 0.05f;
 };
 
 // Parse the reconciled resolution enum. Accepts both the new `resolution`
@@ -75,6 +81,28 @@ Tuning ParseTuning(
 // side-effect free so it is directly unit-testable.
 float HitProbability(const Tuning &t, float dist, float range,
                      bool attackerMoving, float heightDelta);
+
+// The hit chance a weapon would resolve with RIGHT NOW against `targetPos`:
+// gathers the live synced inputs (aim-from position, distance, ground-sampled
+// height delta, attacker movement) and feeds HitProbability. Pure with respect
+// to synced state — no mutation, and crucially NO `gsRNG` draw, so the
+// hold-fire gate can consult it every fire tick without perturbing the RNG
+// stream that replays and snapshots depend on. Both the gate
+// (CWeapon::UpdateFire) and EnqueueVolley call this so they can never disagree
+// about whether a shot was worth taking. Returns 0 for a null/def-less weapon.
+float ComputeHitChance(const CWeapon *w, const float3 &targetPos);
+
+// The hold-fire gate itself (PLAN-metalstorm-combat-fixes.md §A3). True =>
+// the weapon holds: it keeps its target and aim, spends nothing, and emits
+// nothing. Split out pure so the threshold algebra is directly testable.
+bool HoldsFire(const Tuning &t, float hitChance);
+
+// The E6 skip-fire check (a squad below `skipFireStrength` holds fire rather
+// than trickling damage in a death spiral). Split out pure alongside HoldsFire
+// so the ORDER of the two gates is pinnable; note this one is still evaluated
+// inside EnqueueVolley — i.e. AFTER the fire sound — while HoldsFire runs
+// before any observable effect. See the ordering note in §A3.
+bool SkipsFire(const Tuning &t, float strengthFraction);
 
 // Aggregate volley damage: def damage scaled by the firing squad's strength
 // fraction, floored at minVolleyDamage on a hit (E6). A miss deals 0.

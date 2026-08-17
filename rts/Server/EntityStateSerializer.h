@@ -22,7 +22,8 @@
  *                            channel sequence number for reorder/loss
  *                            detection — no separate seq field needed.)
  *     u16 entity_count
- *     u16 field_mask        (which fields are present)
+ *     u16 field_mask        (which fields are present; bit 15 is a payload-
+ *                            less FLAG — see FLAG_ID_RECYCLED below)
  *
  *   Per-field arrays (contiguous, only present if bit set):
  *     Bit 0: entity_ids    → u32[count]
@@ -92,6 +93,15 @@ constexpr uint16_t FIELD_ROLL        = 1 << 12;
 
 // All fields — used for full state snapshots
 constexpr uint16_t FIELD_ALL = 0x1FFF;
+
+/// Bit 15 is a FLAG, not a field: it carries no per-entity array and adds
+/// nothing to the payload. Set when the sim has recycled one or more unit ids
+/// since the last flagged message, i.e. an id the client may still be holding
+/// can now name a different unit (PLAN-long-uptime S5 task 6).
+///
+/// A parser that does not know the bit skips it for free, because every field
+/// is read under its own bit and this one has no array to mis-read.
+constexpr uint16_t FLAG_ID_RECYCLED = 1 << 15;
 
 /// Serialize all active units into the Tier 2 binary format.
 /// Returns a buffer ready to be sent (without envelope byte).

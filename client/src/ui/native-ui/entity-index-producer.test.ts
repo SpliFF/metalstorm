@@ -85,6 +85,79 @@ describe('rebuildEntityIndex', () => {
         const targets = index.search('north', ['region', 'objective', 'landmark']);
         expect(targets.map((t) => t.type).sort()).toEqual(['objective', 'region']);
     });
+
+    /**
+     * Grid-provider maps (PLAN-metalstorm-command-language.md §5, M2). The
+     * gadget now derives a name and a centre for every grid cell and publishes
+     * them through the SAME shape the graph provider always used, which is why
+     * nothing in this module changed. This asserts the consumer end of that:
+     * "defend Sector B3" needs a searchable place, not just a rulesParam.
+     */
+    it('finds grid sector names — the shape game_regions.lua publishes for a grid map', () => {
+        const store = new UIStore();
+        const index = new NamedEntityIndex();
+
+        // Keys carry a colon ("col:row"); the region parser's greedy id capture
+        // has to survive that as readily as it survives underscores.
+        store.updateGameRulesParams({
+            'region_0:0_name': 'Sector A1',
+            'region_0:0_x': 1024,
+            'region_0:0_z': 1024,
+            'region_1:2_name': 'Sector B3',
+            'region_1:2_x': 3072,
+            'region_1:2_z': 5120,
+        });
+
+        rebuildEntityIndex(store, index);
+
+        expect(index.get('region', '1:2')?.name).toBe('Sector B3');
+        const hit = index.search('sector b3', ['region'])[0];
+        expect(hit?.id).toBe('1:2');
+        expect(hit?.x).toBe(3072);
+        // Two sectors, two names — the grid contributes real places now.
+        expect(index.search('sector', ['region']).length).toBe(2);
+    });
+
+    /**
+     * Landmarks have no publisher yet (scenario-gen lane). Both halves of that
+     * matter: absence must cost nothing, and arrival must need no code change.
+     */
+    it('tolerates the absence of landmark params without disturbing anything else', () => {
+        const store = new UIStore();
+        const index = new NamedEntityIndex();
+
+        store.updateGameRulesParams({
+            region_alpha_name: 'Alpha', region_alpha_x: 1, region_alpha_z: 2,
+        });
+        rebuildEntityIndex(store, index);
+
+        expect(index.search('', ['landmark'])).toEqual([]);
+        expect(index.get('region', 'alpha')?.name).toBe('Alpha');
+    });
+
+    it('surfaces a landmark the moment landmark_* params exist', () => {
+        const store = new UIStore();
+        const index = new NamedEntityIndex();
+
+        store.updateGameRulesParams({
+            region_alpha_name: 'Alpha', region_alpha_x: 1, region_alpha_z: 2,
+            // What a scenario-gen publisher would write.
+            landmark_grain_silo_x: 1200,
+            landmark_grain_silo_z: 1800,
+            landmark_grain_silo_name: 'Grain Silo',
+            // Named from its key alone — the publisher may omit _name.
+            landmark_west_scarp_relay_x: 4000,
+            landmark_west_scarp_relay_z: 500,
+        });
+        rebuildEntityIndex(store, index);
+
+        const silo = index.search('grain silo', ['landmark'])[0];
+        expect(silo?.name).toBe('Grain Silo');
+        expect(silo?.x).toBe(1200);
+        expect(index.search('west scarp relay', ['landmark'])[0]?.name).toBe('West Scarp Relay');
+        // The region is still there — landmarks are additive, not a replacement.
+        expect(index.get('region', 'alpha')?.name).toBe('Alpha');
+    });
 });
 
 describe('startEntityIndexProducer', () => {

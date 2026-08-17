@@ -26,10 +26,11 @@
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appendFile, mkdir, rm, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { expandMatrix } from './lib/matrix.mjs';
 import { loadJson, writeJson } from './lib/config.mjs';
 import { runHeadless } from './lib/run-server.mjs';
+import { armPaths, staleArtifacts } from './lib/run-paths.mjs';
 
 const DEFAULT_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -81,10 +82,14 @@ async function main() {
             if (i >= rows.length) return;
             const row = rows[i];
 
-            const configPath = path.join(outDir, 'configs', `run-${i}.json`);
-            const dumpPath = path.join(outDir, 'dumps', `run-${i}.json`);
-            const dbPath = path.join(outDir, 'db', `run-${i}.sqlite`);
+            const { configPath, dumpPath, dbPath, logPath } = armPaths(outDir, i);
             const port = basePort + i;
+
+            // A re-run into an existing --out-dir must not inherit the previous
+            // run's database or dump — see lib/run-paths.mjs for why (db_bytes
+            // is fitted on these files' size, and a stale dump would be read
+            // back as this arm's result).
+            for (const stale of staleArtifacts(outDir, i)) await rm(stale, { force: true });
 
             const config = structuredClone(row.config);
             config.headless = config.headless ?? {};
@@ -98,6 +103,16 @@ async function main() {
             const result = await runHeadless({ serverBin, configPath, port, dbPath, maxWallMin, cwd: repoRoot });
             const ok = result.exitCode === 0;
             if (!ok) failures++;
+
+            // Persist every arm's server output, passing runs included. A dump
+            // records counters, not warnings, and the warnings are where an
+            // arm says it staged nothing: three of the four fixture defects in
+            // PLAN-long-uptime §11.1 (no scenario, AI slots on an empty team,
+            // a war that ends) announce themselves in the log and in no
+            // counter. Keeping only a failed run's stderr tail meant the whole
+            // ladder was green and silent while measuring an empty world.
+            await mkdir(path.dirname(logPath), { recursive: true });
+            await writeFile(logPath, `${result.stdout}\n--- stderr ---\n${result.stderr}`);
 
             let dump = null;
             try {

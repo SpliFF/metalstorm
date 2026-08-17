@@ -11,6 +11,7 @@
 -- (candidates in cont/base/springcontent/LuaGadgets/Gadgets/: unit_script,
 -- unit_dead, player_disconnect, game_spawn, game_end — none pulled in yet).
 GADGET_ALLOWLIST = {
+	['game_ai_caretaker.lua']     = true,
 	['game_ai_guidance.lua']      = true,
 	['game_authority.lua']        = true,
 	['game_authority_charge.lua'] = true,

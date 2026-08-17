@@ -11,6 +11,7 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "ClientEvalBroker.h"
 #include "RoomWatchIntent.h"
 #include "AuthTokens.h"
 #include "WarPlayerBindings.h"
@@ -24,6 +25,7 @@
 #include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
+#include "PreAuthPolicy.h"
 #include "PlayerRosterBroadcast.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
@@ -47,6 +49,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define LOG_SECTION "server"
@@ -132,6 +135,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         return;
     }
 
+    // ── Pre-auth gate (PLAN-protocol-guard task 6). ────────────────────────
+    // The allow-list is exactly three verbs — Handshake, AuthRequest, Ping —
+    // and the reasoning for each (plus the one named limit: a connection with
+    // no session has no rate budget at all) lives in PreAuthPolicy.h, which is
+    // also where a newly added union member is forced to declare itself.
+    //
+    // Every other case below ALSO checks its own session, and those checks are
+    // kept: several combine it with a team or role test, and their per-verb
+    // reply text is more useful than this one. This is the by-construction
+    // half — the audit found the hand-written checks complete, but complete as
+    // a property of 40-odd separate lines rather than of the design.
+    //
+    // Placed after the journal record for the same reason the post-game gate
+    // is: a verb refused live must be refused identically on replay.
+    if (preauth::RequiresSession(
+            static_cast<uint8_t>(clientMsg->payload_type())) &&
+        sessions.GetSession(msg.clientId) == nullptr) {
+        SLOG(SPRING_LOG_DEBUG,
+            "refusing verb type=%d from client %u — no session",
+            (int)clientMsg->payload_type(), msg.clientId);
+        auto err = Protocol::BuildServerError(401, "Not authenticated");
+        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+        return;
+    }
+
     switch (clientMsg->payload_type()) {
         case SpringWeb::ClientPayload_Ping: {
             auto* ping = clientMsg->payload_as_Ping();
@@ -144,22 +172,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         case SpringWeb::ClientPayload_Handshake: {
             auto* hs = clientMsg->payload_as_Handshake();
             const uint16_t clientVer = hs->protocol_version();
-            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s",
+            const std::string_view clientSchemaHash =
+                hs->schema_hash() ? std::string_view(hs->schema_hash()->c_str())
+                                  : std::string_view();
+            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s schema %s",
                 msg.clientId,
                 clientVer,
-                hs->client_version() ? hs->client_version()->c_str() : "unknown");
-            // C1: enforce the protocol version. A mismatch (typically a stale
-            // cached JS bundle against a changed schema) is rejected with a
-            // VersionMismatch AuthResponse; the client closes on auth failure.
-            // We deliberately do NOT record the client as handshaked, so even
-            // if it ignores the response its AuthRequest is refused below.
-            if (clientVer != Protocol::CURRENT_PROTOCOL_VERSION) {
+                hs->client_version() ? hs->client_version()->c_str() : "unknown",
+                Protocol::ShortSchemaHash(clientSchemaHash).c_str());
+            // C1 + PLAN-protocol-guard task 3: enforce the epoch AND the wire
+            // schema hash. A mismatch (typically a stale cached JS bundle
+            // against a changed schema) is rejected with a VersionMismatch
+            // AuthResponse; the client closes on auth failure. We deliberately
+            // do NOT record the client as handshaked, so even if it ignores
+            // the response its AuthRequest is refused below.
+            const auto verdict =
+                Protocol::CheckHandshake(clientVer, clientSchemaHash);
+            if (!verdict.accepted) {
                 SLOG(SPRING_LOG_WARNING,
-                    "client %u protocol mismatch: client v%d, server v%d — rejecting",
-                    msg.clientId, clientVer, Protocol::CURRENT_PROTOCOL_VERSION);
+                    "client %u handshake rejected — %s",
+                    msg.clientId, verdict.logDetail.c_str());
                 auto resp = Protocol::BuildAuthResponse(
                     SpringWeb::AuthStatus_VersionMismatch, "", 0,
-                    "Protocol version mismatch — reload the client");
+                    verdict.message.c_str());
                 rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                 break;
             }
@@ -428,9 +463,49 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // The lookup itself lives on CPlayerHandler, next to the invariant
             // it protects. Here it only has to grow a default: a username with
             // no row yet gets the next free number.
-            auto playerNumForUsername = [&](const std::string& name) -> int {
+            //
+            // ── And the war's pre-allocated block comes first (§8.1, task 5)
+            // A war was spawned sized for Σ slotCap: `--player-slots` reserved
+            // one player number per advertised seat, laid out per side, before
+            // anybody connected. A new arrival taking a *playing* seat is
+            // exactly who that block exists for, so they claim a slot of their
+            // own side rather than minting a number above it. This is what
+            // makes the lobby's advertised seat real: without it the seat is
+            // handed out on a first-come basis against every spectator who
+            // came to watch (see PlayerSlotReservation.h for why that is a
+            // ceiling and not a slope).
+            //
+            // A spectator never claims one — they hold no seat by definition
+            // (§3) — and neither does a seat on a team the war declares no
+            // side for; both fall through to `nextPlayerNum`, which the
+            // pre-allocation already advanced past the block.
+            auto playerNumForUsername = [&](const std::string& name, int team,
+                                            bool spectator) -> int {
                 const int existing = playerHandler.HumanPlayer(name);
-                return (existing >= 0) ? existing : nextPlayerNum;
+                if (existing >= 0)
+                    return existing;
+                if (!spectator && team >= 0 && !ctx.reservedSlots.Empty()) {
+                    const int slot = playerslots::ClaimReservedSlot(
+                        ctx.reservedSlots, team, [&](int n) {
+                            return playerHandler.IsUnclaimedSlot(n);
+                        });
+                    if (slot >= 0) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "'%s' seated on pre-allocated slot %d (reserved "
+                            "for team %d at spawn)",
+                            name.c_str(), slot, ctx.reservedSlots.TeamOf(slot));
+                        return slot;
+                    }
+                    // Not an error: the block can be full while the side is
+                    // not (a war whose caps were raised past what this process
+                    // was sized for — task 2's ceiling note). Falling through
+                    // still seats them; it just costs a number above the block.
+                    SLOG(SPRING_LOG_WARNING,
+                        "'%s' takes team %d with no pre-allocated slot left — "
+                        "this process was sized for %u",
+                        name.c_str(), team, ctx.reservedSlots.Size());
+                }
+                return nextPlayerNum;
             };
 
             // Install (or re-install) the sim-side player row at `pNum` and
@@ -539,7 +614,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         msg.clientId, name.c_str(), specNum);
                     return specNum;
                 }
-                const int pNum = playerNumForUsername(name);
+                const int pNum = playerNumForUsername(name, team, spectator);
                 bindPlayer(name, team, spectator, pNum);
                 return pNum;
             };
@@ -783,7 +858,16 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // RECONNECT re-derives the number it had rather than the next
                 // free one. Deriving it any other way would make every
                 // recording that contains a reconnect stop here.
-                const int derivedNum = playerNumForUsername(rid->username);
+                //
+                // The recorded team and spectator flag are passed for the same
+                // reason (§8.1): a war's seats come out of the pre-allocated
+                // block, so a re-execution that allocated from the top of the
+                // list instead would diverge on the first join. The block is
+                // reconstructed during a replay's set-up from the header's own
+                // `war_sides`/`war_side_capacities` modoptions — the same
+                // inputs the lobby sized the original process from.
+                const int derivedNum = playerNumForUsername(
+                    rid->username, rid->team, rid->spectator);
                 if (derivedNum != rid->playerNum) {
                     SLOG(SPRING_LOG_ERROR,
                         "replay: player-number divergence authenticating '%s' — "
@@ -1734,6 +1818,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 d.setSeek ? d.seekTarget : -1, sim.GetFrameNum());
             // Shared state changed, so every watcher's bar does.
             Protocol::BroadcastReplayState(ctx);
+            break;
+        }
+        // ── Browser-eval relay reply (PLAN-test-automation P7) ───────────
+        // Classified `Ignored` in SyncedInputJournal.cpp with the same
+        // reasoning as ReplayControl above: an eval RESULT is not an input to
+        // the simulation, so it is never journaled and a replay can never
+        // re-execute an eval. The matching REQUEST cannot be journaled at all
+        // — it is a ServerPayload, and the journal only classifies client
+        // payloads.
+        //
+        // Only the client the broker addressed may resolve the waiter;
+        // anything else is stray (already timed out) or spoofed, and is
+        // dropped with a log line rather than answering someone else's HTTP
+        // request.
+        case SpringWeb::ClientPayload_ClientEvalResponse: {
+            auto* ev = clientMsg->payload_as_ClientEvalResponse();
+            if (!ev) break;
+            if (!ctx.evalBroker.Deliver(ev->request_id(), msg.clientId,
+                                        ev->success(),
+                                        ev->output() ? ev->output()->str() : "")) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "dropped ClientEvalResponse req=%u from client=%u "
+                    "(no waiter, or not the addressed client)",
+                    ev->request_id(), msg.clientId);
+            }
             break;
         }
         case SpringWeb::ClientPayload_PathRequest: {

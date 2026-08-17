@@ -292,6 +292,44 @@ local function validate(scn, knownDefs, knownFeatureDefs)
         checkDef(c.def, 'civilians.units[' .. i .. ']')
     end
 
+    -- Towns (town-planner T4). Validated hard for the same reason the AI slate
+    -- is: every one of these mistakes produces a town that loads cleanly and is
+    -- then quietly not a place. A civilian whose `town` names no declared town
+    -- gets no district, so the estate never counts it and a protect objective
+    -- over that district finds nobody; a hall whose def is misspelt resolves to
+    -- no unit, and the town negotiates exactly as if its hall had been
+    -- destroyed. Neither says anything at load time on its own.
+    local declaredTowns = {}
+    for i, t in ipairs(scn.towns or {}) do
+        local ctx = 'towns[' .. i .. ']'
+        if type(t.key) ~= 'string' or t.key == '' then
+            errors[#errors + 1] = ctx .. ': needs a string "key"'
+        elseif declaredTowns[t.key] then
+            errors[#errors + 1] = ctx .. ': duplicate town key "' .. t.key .. '"'
+        else
+            declaredTowns[t.key] = true
+        end
+        if t.x ~= nil and type(t.x) ~= 'number' then
+            errors[#errors + 1] = ctx .. ': "x" must be a number'
+        end
+        if t.hall ~= nil then
+            if type(t.hall) ~= 'table' then
+                errors[#errors + 1] = ctx .. ': "hall" must be a table'
+            else
+                checkDef(t.hall.def, ctx .. '.hall')
+                if type(t.hall.x) ~= 'number' or type(t.hall.z) ~= 'number' then
+                    errors[#errors + 1] = ctx .. '.hall: needs numeric "x"/"z"'
+                end
+            end
+        end
+    end
+    for i, c in ipairs((scn.civilians or {}).units or {}) do
+        if c.town ~= nil and not declaredTowns[c.town] then
+            errors[#errors + 1] = 'civilians.units[' .. i .. ']: "town" names ' ..
+                '"' .. tostring(c.town) .. '", which no `towns` entry declares'
+        end
+    end
+
     for i, r in ipairs((scn.world or {}).regions or {}) do
         if r.key == nil and (r.x == nil or r.z == nil) then
             errors[#errors + 1] = 'world.regions[' .. i .. ']: needs either "key" or "x"/"z"'
@@ -381,6 +419,52 @@ local function validate(scn, knownDefs, knownFeatureDefs)
         end
     end
 
+    -- Objective chaining (§4.7). Checked hard for the same reason the AI slate
+    -- is: every wrong shape here fails SILENTLY. A `phases` value that isn't an
+    -- array of arrays is skipped by GG.Objectives.Create's `#def.phases > 0`
+    -- guard and the parent becomes an ordinary objective with no chain; a
+    -- non-numeric parentId names no parent and the child never reports home.
+    for i, o in ipairs(scn.objectives or {}) do
+        local ctx = 'objectives[' .. i .. ']'
+        if o.phases ~= nil then
+            if type(o.phases) ~= 'table' or #o.phases == 0 then
+                errors[#errors + 1] = ctx .. ': "phases" must be a non-empty array of phases'
+            else
+                for pi, children in ipairs(o.phases) do
+                    local pctx = ctx .. '.phases[' .. pi .. ']'
+                    if type(children) ~= 'table' or #children == 0 then
+                        errors[#errors + 1] = pctx ..
+                            ': each phase must be a non-empty array of child objectives'
+                    else
+                        for ci, c in ipairs(children) do
+                            local cctx = pctx .. '[' .. ci .. ']'
+                            if type(c) ~= 'table' then
+                                errors[#errors + 1] = cctx .. ': child must be a table'
+                            else
+                                if type(c.type) ~= 'string' then
+                                    errors[#errors + 1] = cctx .. ': child needs a string "type"'
+                                end
+                                if c.phases ~= nil then
+                                    errors[#errors + 1] = cctx ..
+                                        ': nested phases are not supported (one level of chaining only)'
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        for _, field in ipairs({ 'parentId', 'linkedId' }) do
+            if o[field] ~= nil and type(o[field]) ~= 'number' then
+                errors[#errors + 1] = ctx .. ': "' .. field ..
+                    '" must be a numeric runtime objective id'
+            end
+        end
+        if o.phase ~= nil and type(o.phase) ~= 'number' then
+            errors[#errors + 1] = ctx .. ': "phase" must be a number'
+        end
+    end
+
     return errors
 end
 
@@ -392,9 +476,26 @@ end
 local function stageRegions(regions)
     for _, r in ipairs(regions or {}) do
         local key = r.key or GG.Regions.KeyAt(r.x, r.z)
-        local team = r.team
-        if team == 'contested' or team == 'neutral' then team = nil end
-        GG.Regions.SetControllingTeam(key, team)
+        -- A NAME-ONLY entry sets no ownership. A generated scenario emits one
+        -- per region it planted a town in (tools/mapgen/scenariogen.py), to
+        -- rename the region after the settlement and move its published centre
+        -- onto it — `region_<key>_name/_x/_z` is the path the client's
+        -- named-entity index reads, so this is what makes a town addressable by
+        -- name in a typed or spoken order.
+        --
+        -- Guarded on `r.team ~= nil` rather than run unconditionally, because
+        -- SetControllingTeam(key, nil) is not a no-op: it CLEARS the region to
+        -- uncontrolled and publishes team = -1. A scenario that named a region
+        -- an earlier entry had already given to a side would silently take it
+        -- back off them.
+        if type(r.name) == 'string' and GG.Regions.SetName then
+            GG.Regions.SetName(key, r.name, r.x, r.z)
+        end
+        if r.team ~= nil or r.name == nil then
+            local team = r.team
+            if team == 'contested' or team == 'neutral' then team = nil end
+            GG.Regions.SetControllingTeam(key, team)
+        end
     end
 end
 
@@ -475,6 +576,31 @@ local function stageFeatures(features, knownFeatureDefs, landmarks)
         end
     end
     return created
+end
+
+--- Hand the scenario's `towns` to the civilian gadget's registry (GG.Towns,
+--- civilians/town.lua). Called BEFORE stageUnits: registration is bookkeeping,
+--- and the hall each town declares is resolved to a live unitID later, by
+--- civilians/town.lua's own GameStart — this gadget is layer -90 and that one
+--- is -40, so the buildings exist by then and not before.
+---
+--- Skipped with one line rather than erroring when GG.Towns is absent: a game
+--- built without the civilians gadget is a game with no estate to negotiate
+--- with, which is a smaller scenario, not a broken one.
+local function stageTowns(towns)
+    if not towns or #towns == 0 then return end
+    if not (GG.Towns and GG.Towns.Register) then
+        Spring.Echo('[game_scenario] WARNING: scenario declares ' .. #towns ..
+                    ' town(s) but GG.Towns is absent (no civilians gadget) — ' ..
+                    'their buildings still stage, but nothing names them, ' ..
+                    'binds their population to a district, or holds a parley ' ..
+                    'at their meeting hall')
+        return
+    end
+    for _, t in ipairs(towns) do
+        GG.Towns.Register(t)
+    end
+    Spring.Echo('[game_scenario] registered ' .. #towns .. ' town(s)')
 end
 
 --- teamID -> true for every team this game actually has. A scenario may declare
@@ -757,10 +883,32 @@ local function payStipends(frame)
     end
 end
 
+--- Spawn the scenario's civilians and bind each one to its district.
+---
+--- `c.town` is the town-planner's addition to this block and it is what makes
+--- the estate's district machinery live: civilians/estate.lua groups the
+--- population by `info.districtId` to answer
+--- game_objectives.lua's civilianDistrictsUnderThreat, and before towns existed
+--- NO spawn path in this game ever set one — so that function has always
+--- returned an empty list from a mechanism that was otherwise complete
+--- (estate.lua's own header says exactly this).
+---
+--- `homePos` is derived here rather than authored, and it is the civilian's OWN
+--- placed position rather than the town's centre. routines.lua both wanders and
+--- flees toward it, so it has to mean "where this person lives" — a whole
+--- district homed on one point would mill about the town square and leave every
+--- street it was carefully placed on empty.
 local function stageCivilians(civilians)
+    local staged, unregistered = 0, 0
     for _, c in ipairs((civilians or {}).units or {}) do
         local unitID = GG.Civilians.Spawn(c.def, c.x, c.z, c.facing or 'south')
-        if unitID then
+        if unitID == nil then
+            -- Same silent refusal stageUnits guards: the engine answers "that
+            -- ground is taken" by returning nil and logging nothing, and the
+            -- district is then quietly smaller than the file that describes it.
+            unregistered = unregistered + 1
+        else
+            staged = staged + 1
             -- Same reasoning as the `team = 'neutral'` set dressing in
             -- stageUnits (endtoend D53): ambient population standing beside a
             -- settlement is scenery, and an army that walks past must not stop
@@ -768,10 +916,21 @@ local function stageCivilians(civilians)
             -- — convoy payloads keep spawning hostile-to-the-other-side, which
             -- is what makes an escort objective a real risk.
             Spring.SetUnitNeutral(unitID, true)
+            if c.role or c.town then
+                GG.Civilians.Register(unitID, c.role, {
+                    town = c.town,
+                    homePos = { x = c.x, z = c.z },
+                })
+            end
         end
-        if unitID and c.role then
-            GG.Civilians.Register(unitID, c.role)
-        end
+    end
+    if staged > 0 or unregistered > 0 then
+        Spring.Echo('[game_scenario] staged ' .. staged .. ' civilian(s)')
+    end
+    if unregistered > 0 then
+        Spring.Echo('[game_scenario] WARNING: the engine refused to create ' ..
+                    unregistered .. ' civilian(s) — the ground was already ' ..
+                    'occupied')
     end
 end
 
@@ -816,17 +975,79 @@ local function populateCiviliansInArea(x, z, r, role)
     return result
 end
 
+--- Fold an objective's authoring-convenience flat fields (region,
+--- targetUnitID, duration, notBefore, and the control hold default) into the
+--- `params` sub-table GG.Objectives.Create's evaluators actually read, and
+--- return it. Returns a COPY: the caller decides whether to write it back, so
+--- the same def can be folded twice (phase children are folded here and again
+--- by nothing else) without accumulating.
+---
+--- NOTE: 'region' folds into params.regionKey — that's the field name
+--- objectives/control.lua's validateParams/init/positionHint read (params.region
+--- was a dead alias nothing consumed).
+local function foldParams(o)
+    local params = {}
+    for k, v in pairs(o.params or {}) do params[k] = v end
+    if o.region and params.regionKey == nil then params.regionKey = o.region end
+    if o.targetUnitID and params.targetUnitID == nil then params.targetUnitID = o.targetUnitID end
+    if o.duration and params.duration == nil then params.duration = o.duration end
+    if o.type == 'control' and params.holdFrames == nil then
+        params.holdFrames = o.holdFrames or
+            (o.victory and DEFAULT_VICTORY_HOLD_FRAMES or DEFAULT_CONTROL_HOLD_FRAMES)
+    end
+    -- wars §7.5a: the open-race delay. Authored flat on the objective for
+    -- the same reason `region`/`duration` are — the scenario states when
+    -- its prize becomes winnable, the evaluator reads it out of `params`.
+    if o.notBefore and params.notBefore == nil then params.notBefore = o.notBefore end
+    return params
+end
+
+--- Deep-copy a `phases` array-of-arrays of child defs, applying the same flat
+--- field folding top-level objectives get — phase children are authored in the
+--- same dialect as their parent (§4.7). Nested `phases` inside a child are
+--- dropped here and rejected by validate(); one level of chaining is the whole
+--- supported shape.
+local function foldPhases(phases)
+    if phases == nil then return nil end
+    local out = {}
+    for pi, children in ipairs(phases) do
+        local phase = {}
+        for ci, c in ipairs(children) do
+            local child = {}
+            for k, v in pairs(c) do child[k] = v end
+            child.params = foldParams(c)
+            child.phases = nil
+            phase[ci] = child
+        end
+        out[pi] = phase
+    end
+    return out
+end
+
 --- Build the GG.Objectives.Create def + fire it, echoing the outcome. Shared
 --- by the frame-30 civilian sweep and the convoy-spawn event path below.
+---
+--- Keep the def shape here in lockstep with stageObjectives' immediate-create
+--- call: these are the TWO create sites, and a chaining field added to only
+--- one of them is silently dropped on the other path (which is how `bounty`
+--- came to work on immediate objectives and nowhere else).
 local function createPopulatedObjective(o, params, label)
     local def = {
         type = o.type,
         scope = o.scope,
         forTeam = o.forTeam,
         reward = o.reward,
+        bounty = o.bounty,
         expiresAtFrame = o.expiresAtFrame,
         victory = o.victory,
         params = params,
+        -- chaining (§4.7) — see stageObjectives. A deferred parent's children
+        -- are all minted at frame 30, so they can never reference a frame-0
+        -- objective's runtime id.
+        phases = foldPhases(o.phases),
+        parentId = o.parentId,
+        phase = o.phase,
+        linkedId = o.linkedId,
     }
     local id = GG.Objectives.Create(def)
     if id then
@@ -914,24 +1135,14 @@ local function stageObjectives(objectives)
             end
             goto continue
         end
-        -- Authoring convenience: flat type-specific fields (region,
-        -- targetUnitID, duration) fold into GG.Objectives.Create's `params`
-        -- sub-table — the shape game_objectives.lua's evaluators read.
-        -- NOTE: 'region' folds into params.regionKey — that's the field name
-        -- objectives/control.lua's validateParams/init/positionHint actually
-        -- read (params.region was a dead alias nothing consumed).
-        local params = o.params or {}
-        if o.region and params.regionKey == nil then params.regionKey = o.region end
-        if o.targetUnitID and params.targetUnitID == nil then params.targetUnitID = o.targetUnitID end
-        if o.duration and params.duration == nil then params.duration = o.duration end
-        if o.type == 'control' and params.holdFrames == nil then
-            params.holdFrames = o.holdFrames or
-                (o.victory and DEFAULT_VICTORY_HOLD_FRAMES or DEFAULT_CONTROL_HOLD_FRAMES)
-        end
-        -- wars §7.5a: the open-race delay. Authored flat on the objective for
-        -- the same reason `region`/`duration` are — the scenario states when
-        -- its prize becomes winnable, the evaluator reads it out of `params`.
-        if o.notBefore and params.notBefore == nil then params.notBefore = o.notBefore end
+        -- Authoring convenience: flat type-specific fields fold into
+        -- GG.Objectives.Create's `params` sub-table — the shape
+        -- game_objectives.lua's evaluators read. Written back onto the def so
+        -- the DEFERRED path (which re-reads o.params at frame 30) inherits the
+        -- same folding; without the write-back an objective authored with flat
+        -- fields and no `params` table lost them the moment it was deferred.
+        local params = foldParams(o)
+        o.params = params
 
         -- Check if this objective needs runtime unit population
         -- (empty targetUnitIDs/payloadUnitIDs + a _populateFrom marker)
@@ -958,6 +1169,16 @@ local function stageObjectives(objectives)
                 type = o.type, scope = o.scope, forTeam = o.forTeam,
                 reward = o.reward, bounty = o.bounty, params = params,
                 expiresAtFrame = o.expiresAtFrame,
+                -- Chaining (§4.7). `phases` is the authorable chain: the
+                -- parent is a real objective whose progress is its children,
+                -- so it must itself be valid for its declared type.
+                -- `parentId`/`linkedId` are RUNTIME ids — meaningful only to
+                -- programmatic callers re-staging through this helper, since a
+                -- scenario file cannot know an id that Create has not minted
+                -- yet. `phase` is a published label; the phase machinery
+                -- overwrites it on parents as phases advance.
+                phases = foldPhases(o.phases),
+                parentId = o.parentId, phase = o.phase, linkedId = o.linkedId,
                 -- wars §7.1: the scenario's terminal objective (game_gameover.lua).
                 victory = o.victory,
             })
@@ -1014,6 +1235,11 @@ function gadget:GameStart()
     local landmarks = {}
     GG.Scenario.features = stageFeatures((scn.world or {}).features,
                                          knownFeatureDefs, landmarks)
+    -- Towns before units, and units before civilians: a town must be
+    -- registered before its residents ask GG.Towns for their home, and its
+    -- buildings must be on the ground before civilians/town.lua (at its own,
+    -- later GameStart) can resolve a meeting hall to a live unit.
+    stageTowns(scn.towns)
     stageUnits(scn.units, landmarks)
     stageCivilians(scn.civilians)
     stageObjectives(scn.objectives)

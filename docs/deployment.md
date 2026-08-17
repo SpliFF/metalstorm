@@ -79,6 +79,30 @@ Re-audit this whenever a new route is added with `LocalhostOrAdmin` — the
 route-table snapshot (`NetworkServer::GetRegisteredRoutes()`, exercised by
 `tests/test_route_auth.cpp`) lists every route's classification.
 
+**⚠ Cache headers for the client bundle — the entry document must be
+`no-cache`.** Nothing in this repo serves `index.html` or `dist/assets/*`:
+`vite dev` serves them in development and `vite preview` in the local
+production stand-in (both answer `Cache-Control: no-cache` — measured, see
+docs/caching.md), so this is the one link in the chain that only exists in
+the deployment's own config. The rule the external static server must
+implement:
+
+- **`index.html` (and every HTML entry): `Cache-Control: no-cache`.** Not
+  `immutable`, not a long `max-age`. Everything else about a deploy is
+  discovered *through* this document — the bundle URLs, and with them the
+  wire-schema hash the game server enforces (PLAN-protocol-guard).
+- **`/assets/*` (Vite's content-hashed filenames): `public,
+  max-age=31536000, immutable` is correct** — the hash is in the filename.
+- Do **not** serve `dist/assets/*.map` publicly: the build emits `hidden`
+  sourcemaps deliberately (no `sourceMappingURL` comment), so shipping the
+  maps to the CDN hands out what the comment was omitted to withhold.
+
+A cacheable entry document breaks the schema-mismatch recovery path
+specifically: a client refused for a stale schema reloads, is answered from
+cache with the same stale bundle, and gives up with an error card. Under
+`immutable` even a manual reload cannot rescue it (RFC 8246 — `immutable`
+suppresses revalidation, it does not merely postpone it).
+
 **`/api/metrics` is public by design** (unauthenticated `GET`, present in
 prod builds): it exposes sim tick timings, entity/client counts, and — once
 an admin enables the SimFrame profiler — per-phase sim cost breakdowns.
@@ -229,6 +253,9 @@ touch the content-loading paths an operator's deployment exposes:
       proxy connects over loopback and would make the gate public (§3);
       proxy only the public route set, or split admin routes onto a
       non-proxied port/socket
+- [ ] Static server serves the entry HTML `no-cache` and only the
+      content-hashed `/assets/*` as `immutable`; `dist/assets/*.map` not
+      served publicly (§3)
 - [ ] Decided whether `/api/metrics` (public, unauthenticated — tick times,
       entity/client counts) stays exposed, and blocked it at the proxy if not
       (§3)

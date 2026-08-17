@@ -64,6 +64,43 @@ CheckpointDecision DecideExitCheckpoint(const ExitContext& c) {
     return d;
 }
 
+IdleHibernateDecision DecideIdleHibernate(const IdleHibernateContext& c) {
+    IdleHibernateDecision d;
+    if (!c.persistentRoom) {
+        d.reason = "not a persistent war — the idle-exit path applies instead";
+        return d;
+    }
+    if (!c.hibernationEnabled || c.idleSeconds <= 0) {
+        d.reason = "the hibernation window is switched off for this process";
+        return d;
+    }
+    if (c.headlessRun || c.replaying) {
+        d.reason = "a harness or replay run owns its own exit";
+        return d;
+    }
+    if (c.sinceStartSec <= c.startupGraceSec) {
+        d.reason = "still inside the startup grace";
+        return d;
+    }
+    if (c.idleForSec <= c.idleSeconds) {
+        d.reason = "a client has been connected within the idle window";
+        return d;
+    }
+    // Eligible on every count except the war's own state. See the header: the
+    // settlement is 300 frames of synced Lua that only this process can run,
+    // and the room is empty exactly because the war was won.
+    if (!c.warSimState.empty() && c.warSimState != "active") {
+        d.reason = "the war has declared its ending (war_state=" + c.warSimState +
+                   ") and is settling — hibernating now would truncate the "
+                   "wind-down and lose the settlement";
+        d.deferredForWarEnding = true;
+        return d;
+    }
+    d.hibernate = true;
+    d.reason = "no connected clients for the idle window";
+    return d;
+}
+
 ResumeOutcome DoResume(IResumeSource& src, uint32_t roomId, const ResumeRequest& req) {
     ResumeOutcome o;
     if (!req.requested) {

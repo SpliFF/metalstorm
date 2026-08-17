@@ -60,6 +60,8 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace simsnapshot {
@@ -78,6 +80,8 @@ enum class SectionId : uint16_t {
     Features       = 8,  ///< wrecks/map features — task 1e
     GameRules      = 9,  ///< CSplitLuaHandle::gameParams — task 1d-b
     EnvResources   = 10, ///< EnvResourceHandler: the wind cycle + tidal strength
+    DefNames       = 11, ///< the def vocabulary this snapshot was taken under
+    DefScalars     = 12, ///< ... and the NUMBERS that vocabulary held
 };
 
 /// One entry per part of the synced state the walk must cover. `implemented`
@@ -143,6 +147,16 @@ UnitsDivergence CompareUnits(const std::vector<uint8_t>& a,
 /// its path, and those are opposite diagnoses.
 std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
                                     const std::vector<uint8_t>& b);
+
+/// The same service for a rules-params section (`gameRules` id 9, `teamRules`,
+/// `unitRules` — anything encoded by EncodeGameRules' layout): which KEYS
+/// disagree, and which side each one is missing from. Gadget state is where a
+/// static-world round-trip failure lands (there are no moving units to blame),
+/// and "the gameRules section differs" over ~200 keys is not a diagnosis —
+/// naming the key is. Returns "" if either side cannot be decoded as one.
+std::string DescribeRulesParamsDivergence(const std::vector<uint8_t>& a,
+                                          const std::vector<uint8_t>& b,
+                                          SectionId section);
 
 /// Synced state that is deliberately NOT in the payload because the sim
 /// rebuilds it, paired with what rebuilds it. Reported at boot alongside
@@ -253,6 +267,15 @@ struct WeaponState {
     int32_t nextSalvo = 0;
     int32_t numStockpiled = 0;
     int32_t numStockpileQued = 0;
+    /// Which weapon this slot WAS (PLAN-def-reconciliation task 2). A unit's
+    /// weapon array is positional and the slots are created from the live def,
+    /// so without this the only thing relating captured slot i to live slot i
+    /// is the integer i — and a def that gains, loses or reorders a weapon
+    /// makes that relation wrong while leaving it plausible: a full stockpile
+    /// lands on the wrong launcher, a mid-reload nuke comes back ready. This is
+    /// §1's index-shift class at the one place it can actually bite, and
+    /// MatchWeaponSlots is what pairs the two arrays by name instead.
+    std::string weaponDefName;
 };
 
 struct UnitState {
@@ -552,6 +575,414 @@ bool DecodeEnvResources(const uint8_t* data, size_t size,
 void CaptureEnvResources(envressnapshot::EnvResourceState& out);
 void ApplyEnvResources(const envressnapshot::EnvResourceState& in);
 
+// ─────── The def name tables (PLAN-def-reconciliation task 1) ───────
+//
+// Every other section stores def *ids*: a unit's weapon slots, a feature's
+// resurrect target, a statistical volley's pending ring. An id is only an
+// identity while the def load that produced it is the one being restored into,
+// and a balance patch that adds, removes or reorders a def rewrites that
+// mapping wholesale — silently, because an id remains a perfectly valid id
+// after it starts naming a different def. That is §1's index-shift corruption,
+// and this section is the input that makes it detectable: what each id MEANT
+// when the snapshot was taken.
+//
+// Task 1 records and reports; it does not remap. Remapping is task 2, and it
+// cannot be written until the thing it remaps against is in the payload.
+
+struct DefNameEntry {
+    int32_t     id = 0;
+    std::string name;
+};
+
+/// The three def families that carry ids into a snapshot. Kept as parallel
+/// tables rather than one namespaced map because the id spaces are separate —
+/// and they do not even start at the same index: weapon id 0 is a real def
+/// (`nodefweapon`), unit and feature id 0 are not.
+struct DefNameTables {
+    std::vector<DefNameEntry> units;
+    std::vector<DefNameEntry> weapons;
+    std::vector<DefNameEntry> features;
+};
+
+/// How a captured def table differs from the live one, keyed BY NAME. The
+/// keying is the whole design: an id-keyed diff reports a renumbering as one
+/// removal plus one addition, which is a reassuringly symmetrical description
+/// of the single most dangerous thing that can happen to a snapshot.
+struct DefDelta {
+    size_t unchanged  = 0;   ///< same name, same id — nothing to do
+    size_t renumbered = 0;   ///< same name, different id — task 2's work
+    size_t removed    = 0;   ///< captured, not live — the units go (§2 step 2)
+    size_t added      = 0;   ///< live, not captured — needs nothing (§3)
+    /// Examples for the log line, capped: a balance patch can move hundreds of
+    /// defs, and a log line nobody reads reports nothing.
+    std::vector<std::string> renumberedNames;
+    std::vector<std::string> removedNames;
+
+    bool Changed() const { return renumbered != 0 || removed != 0 || added != 0; }
+    /// One human-readable line, "unchanged" when nothing moved.
+    std::string Describe() const;
+};
+
+/// Cap on how many names Describe()/the delta keep as examples.
+inline constexpr size_t kDefDeltaExamples = 5;
+
+void EncodeDefNames(const DefNameTables& in, std::vector<uint8_t>& out);
+bool DecodeDefNames(const uint8_t* data, size_t size, DefNameTables& out, std::string& err);
+
+/// Read the three live def handlers. Safe with any of them null (the store is
+/// constructed before boot parses a def), which is also how the doctests see
+/// it — see the named coverage gap in tests/test_sim_snapshot.cpp.
+void CaptureDefNames(DefNameTables& out);
+
+/// Compare one family's captured table against the live one. Pure, so the
+/// cases that matter are testable without standing up two def loads.
+DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
+                         const std::vector<DefNameEntry>& live);
+
+// ─────── The remap pass (PLAN-def-reconciliation task 2, §2 steps 1-2) ───────
+//
+// Task 1 made a defs change DETECTABLE. This is the pass that acts on it, and
+// it runs over the DECODED payload, before anything is resolved against a live
+// def and long before the live world is torn down: the whole staging discipline
+// (§2's "refuse loudly, never half-load") depends on the payload being a plain
+// value at this point.
+//
+// Two rules decide everything here:
+//
+//   * A NAME is the identity; an id is a load-order artefact. So every id in
+//     the payload is rewritten through old-id → name → new-id, and every name
+//     is first rewritten through the game's own renames (migrations.lua).
+//   * A reference that cannot be remapped is REMOVED, never left pointing
+//     somewhere. An id that survives a def removal is still a valid id — it
+//     just names a different def now — so "leave it alone" is the one
+//     disposition that produces a plausible wrong world.
+//
+// The second rule has a sharp edge, and it is why this pass counts what it
+// drops: `StandingOrderConditions::squadTypes` is a def-id FILTER whose empty
+// state means "any squad". Dropping its last surviving entry would widen the
+// filter to a wildcard — a recruiting order that wanted three heavy tanks
+// quietly taking anything that idles. Emptying that list therefore deactivates
+// the order instead (see RemapReport::ordersDeactivated).
+
+/// The renames a game declares between two def loads: `old_name = "new_name"`,
+/// per family, from `gamedata/migrations.lua`. The game owns its own renames
+/// (persistence §5's philosophy) — the engine only owns what to do with them.
+struct DefAliases {
+    std::unordered_map<std::string, std::string> units;
+    std::unordered_map<std::string, std::string> weapons;
+    std::unordered_map<std::string, std::string> features;
+
+    bool Empty() const { return units.empty() && weapons.empty() && features.empty(); }
+};
+
+/// Read `gamedata/migrations.lua` through the VFS, if the game ships one. A
+/// missing file is not an error (the common case is a game with no renames);
+/// a malformed one is, and it refuses the resume rather than silently applying
+/// half a rename table. Not doctestable for the same reason CaptureDefNames is
+/// not — it needs the mod VFS.
+bool LoadDefAliases(DefAliases& out, std::string& err);
+
+/// One family's old→new id map. `to` holds only the ids that MOVED (a table
+/// where nothing was renumbered stays empty, which is also the fast path §3
+/// asks for); `gone` holds captured ids whose def is not in this game any more.
+struct DefIdMap {
+    std::unordered_map<int32_t, int32_t> to;
+    std::unordered_set<int32_t>          gone;
+    /// The same removals keyed by their CAPTURED name, which is what the two
+    /// families that travel by name (a unit's def, a feature's def and its
+    /// resurrect target) have to be tested against. Complete, unlike goneNames.
+    std::unordered_set<std::string> goneByName;
+    /// Names, for the log: a count says how bad, a name says what. Capped.
+    std::vector<std::string> goneNames;
+    /// True when the captured vocabulary was not recorded (an empty table on
+    /// either side). NOT the same as "nothing changed": with no vocabulary
+    /// there is nothing to compare, so every reference passes through
+    /// untouched, and treating an unrecorded table as "everything was removed"
+    /// would delete the world on the first pre-task-1 snapshot it met.
+    bool unknown = false;
+
+    bool Identity() const { return to.empty() && gone.empty(); }
+    /// old id → new id, or -1 if the def is gone. Ids not in either table are
+    /// unchanged (and an `unknown` map changes nothing at all).
+    int32_t Map(int32_t oldId) const;
+    /// Is this captured def name absent from the live game? Always false for an
+    /// `unknown` map — see the field.
+    bool Gone(const std::string& capturedName) const {
+        return goneByName.count(capturedName) != 0;
+    }
+};
+
+/// The three families' maps plus what the aliasing did.
+struct DefRemap {
+    DefIdMap units, weapons, features;
+    /// Names rewritten by migrations.lua, per family: captured name → live name.
+    std::unordered_map<std::string, std::string> unitRenames, featureRenames;
+
+    bool Identity() const {
+        return units.Identity() && weapons.Identity() && features.Identity() &&
+               unitRenames.empty() && featureRenames.empty();
+    }
+};
+
+/// Build the three maps. `err` is set (and false returned) only for E1: an
+/// alias whose target is ambiguous — migrations.lua says `a = "b"` while this
+/// game defines BOTH, or two captured names alias onto one live name. Both are
+/// authoring bugs with no correct disposition, and §4 E1 says refuse loudly.
+bool BuildDefRemap(const DefNameTables& captured, const DefNameTables& live,
+                   const DefAliases& aliases, DefRemap& out, std::string& err);
+
+/// What the remap did to a payload. Every field is a count of something that
+/// silently would not have happened before task 2, which is why the log line
+/// this builds is worth as much as the pass itself.
+struct RemapReport {
+    size_t unitsRenamed = 0;        ///< unitDefName rewritten by an alias
+    size_t unitsDropped = 0;        ///< def gone: the unit does not come back (§2 step 2)
+    size_t featuresRenamed = 0;
+    size_t featuresDropped = 0;
+    size_t resurrectCleared = 0;    ///< resurrect target's def gone
+    size_t wreckRemapped = 0;       ///< UnitState::featureDefID renumbered
+    size_t wreckCleared = 0;        ///< ... or gone, so no delayed wreck
+    size_t buildCmdsRemapped = 0;   ///< cmdID = -unitDefID, the build-order encoding
+    size_t buildCmdsDropped = 0;
+    size_t orderDefsRemapped = 0;   ///< BuildBase params + squadTypes filters
+    size_t orderDefsDropped = 0;
+    size_t ordersDeactivated = 0;   ///< a squadTypes filter emptied — see above
+    /// Which unit defs took the world's units with them, capped.
+    std::vector<std::string> droppedUnitNames;
+    /// The object ids that left the world here — COMPLETE and sorted, unlike
+    /// every other name list on this report, and the difference is not a style
+    /// choice. Those lists are display examples for one log line; these are
+    /// read by the game's own gadgets through DefsReconciled, and a capped list
+    /// of ids is a gadget that cleans up the first five references and keeps
+    /// the sixth. It is also the ONLY way a gadget can learn about these
+    /// objects: they left during a restore, so no UnitDestroyed/FeatureDestroyed
+    /// ever fired for them, and every gadget in the game holds unit ids.
+    std::vector<int32_t> droppedUnitIds;
+    std::vector<int32_t> droppedFeatureIds;
+
+    bool Changed() const;
+    /// One line, or "nothing to remap".
+    std::string Describe() const;
+};
+
+/// Rewrite every def reference in a decoded payload. Pure — no def handler, no
+/// live world — so the whole §6 matrix is a doctest.
+///
+/// `units` and `features` may SHRINK (a def that vanished takes its objects
+/// with it). Anything else that referenced a dropped object by *unit id* is
+/// left alone deliberately: an id reference to a unit that no longer exists is
+/// already a case the restore path and CCommandAI handle (a target that cannot
+/// be found is dropped on the next update), while inventing a substitute
+/// target is not.
+void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
+                  std::vector<FeatureState>& features,
+                  std::vector<StandingOrder>& orders,
+                  std::vector<Directive>& dirs, RemapReport& out);
+
+/// Which captured weapon slot supplies each LIVE slot's durable state, matched
+/// by weapon def name in occurrence order (two slots can share one def, so the
+/// occurrence index is part of the key). `-1` means "no captured slot" — E4's
+/// weapon added to an existing def, which starts fresh and fully reloaded.
+///
+/// Occurrence order rather than a map because it degrades correctly: a payload
+/// with no names at all (pre-task-2 units section) matches positionally, which
+/// is exactly what the old code did.
+std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
+                                      const std::vector<std::string>& liveDefNames);
+
+// ─── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ───
+//
+// Task 2 reconciled every def *reference*. This reconciles every def-derived
+// *number*: the balance-patch case §3 calls the common one, where not a single
+// name or id moved and every unit in the payload is carrying a copy of numbers
+// the new defs no longer agree with — a nerfed tank restored at its old max
+// health, an up-gunned one restored with the old weapon range cached on the
+// unit, a re-costed one restored with the old build time.
+//
+// THE ONE THING THE PAYLOAD CANNOT TELL BY ITSELF
+// ----------------------------------------------
+// Almost every one of these fields is BOTH a def cache and a value the game's
+// Lua can author (Spring.SetUnitMaxHealth, SetUnitCosts, SetUnitSensorRadius,
+// SetUnitArmored, SetUnitStealth, SetUnitMaxRange, SetUnitHarvestStorage,
+// SetUnitFlanking — the audit is §5 task 3's, and those setters ARE it). So
+// "the captured value disagrees with the live def" has two causes with opposite
+// dispositions: a stale cache, which must be re-derived, and a gadget's
+// deliberate override, which must survive a resume like any other synced state.
+// Nothing in the object distinguishes them.
+//
+// What distinguishes them is the def the object was BORN from, which is why
+// this section exists: it records, per def, the values a newborn object of that
+// def held when the snapshot was taken. A captured field equal to its newborn
+// value was never authored (nobody had touched it), so it re-derives; a field
+// that differs was authored by somebody, and is kept. The snapshot carries the
+// numbers, not just the names, and that is the whole task.
+//
+// EXPERIENCE IS PART OF "NEWBORN"
+// ------------------------------
+// maxHealth, power and reloadSpeed are functions of the def AND the unit's
+// experience (CUnit::AddExperience re-derives all three off unitDef whenever
+// experience moves), and the three scale factors come from modInfo rather than
+// from any def — so a defsHash that never moved is no evidence they did not.
+// They travel here too, and the expected-newborn value is computed with the
+// SNAPSHOT's curve while the re-derived one uses the live curve. Without that
+// every veteran in the payload reads as authored and keeps its stale maxHealth,
+// i.e. the units the fraction preservation matters most for.
+
+/// What a NEWBORN object of one unit def holds. Deliberately the values a fresh
+/// CUnit would carry — after PreInit's clamps (the sensor radii) and its
+/// derived combinations (the flanking-bonus pair is (max±min)/2, the mobility
+/// build-up is mobilityAdd×1000) — rather than the raw UnitDef fields, so the
+/// comparison in ReconcileScalars is plain field equality and PreInit's
+/// arithmetic lives in exactly one place (CaptureDefScalars, which mirrors it).
+///
+/// Field names match UnitState's on purpose: this struct is the subset of
+/// UnitState that a def owns, and the pairing is read off the two names being
+/// the same.
+struct UnitDefScalars {
+    float maxHealth = 0.0f, power = 0.0f, mass = 0.0f, buildTime = 0.0f;
+    ResPair cost, storage, harvestStorage;
+    float   armoredMultiple = 1.0f;
+    int32_t armorType = 0;
+    uint32_t category = 0;
+    float   maxRange = 0.0f;
+    int32_t losRadius = 0, airLosRadius = 0, radarRadius = 0, sonarRadius = 0;
+    int32_t jammerRadius = 0, sonarJamRadius = 0, seismicRadius = 0;
+    float   seismicSignature = 0.0f, decloakDistance = 0.0f;
+    bool    stealth = false, sonarStealth = false;
+    int32_t flankingBonusMode = 0;
+    float   flankingBonusMobilityAdd = 0.0f;
+    float   flankingBonusAvgDamage = 0.0f, flankingBonusDifDamage = 0.0f;
+};
+
+/// TWO FIELDS THIS STRUCT DELIBERATELY DOES NOT HOLD, because they look like def
+/// caches and are accumulators — both found by the live authored-count tripwire
+/// below rather than by reading CUnit:
+///
+///   * `flankingBonusMobility` is seeded from the def (mobilityAdd × 1000) and
+///     then `+= flankingBonusMobilityAdd` on EVERY SlowUpdate, and resets to 0
+///     each time the bonus direction re-aims. So it equals its newborn value
+///     only on the frame the unit was born, and asking whether it was "authored"
+///     is meaningless. Its rate (`flankingBonusMobilityAdd`) IS a def cache and
+///     is reconciled.
+///   * `mass` stays at its constructor value while a unit is beingBuilt and a
+///     transport ACCUMULATES its cargo's mass into its own, so it is a def cache
+///     only for a finished, untransported, empty unit — which is the carve-out
+///     ReconcileScalars applies rather than a field this struct omits.
+
+/// The same for a feature def. Shorter for a real reason rather than for
+/// brevity: a feature's geometry (radius, height, relMidPos, relAimPos) is
+/// MODEL-derived, not def-scalar-derived, so a model change is not a retune and
+/// this pass has no business re-deriving it. Declared here so the absence is
+/// not read as an oversight.
+struct FeatureDefScalars {
+    float maxHealth = 0.0f, mass = 0.0f, reclaimTime = 1.0f;
+    ResPair defResources;
+};
+
+struct DefScalarTables {
+    std::unordered_map<std::string, UnitDefScalars>    units;
+    std::unordered_map<std::string, FeatureDefScalars> features;
+    /// CUnit's experience curve (modInfo, not a def) — see the header comment.
+    float expPowerScale = 0.0f, expHealthScale = 0.0f, expReloadScale = 0.0f;
+
+    bool Empty() const { return units.empty() && features.empty(); }
+};
+
+/// Read the live def handlers. Safe with any of them null, exactly like
+/// CaptureDefNames, and covered off-engine only for the arithmetic it shares
+/// with CUnit::PreInit (the same named gap as CaptureDefNames' start indices).
+void CaptureDefScalars(DefScalarTables& out);
+
+void EncodeDefScalars(const DefScalarTables& in, std::vector<uint8_t>& out);
+bool DecodeDefScalars(const uint8_t* data, size_t size, DefScalarTables& out,
+                      std::string& err);
+
+/// What the scalar pass did. Split re-derived/authored per family because the
+/// two numbers answer different questions: re-derived is how much of the world
+/// the balance patch reached, authored is how much of it a gadget owns and the
+/// patch therefore could NOT reach — and a surprisingly large `authored` is how
+/// an author finds out their game overrides something they thought it tuned.
+struct ScalarReport {
+    bool   ran = false;             ///< false = no captured scalars (pre-task-3 snapshot)
+    size_t unitDefsRetuned = 0;     ///< unit defs whose newborn values moved
+    size_t featureDefsRetuned = 0;
+    size_t unitsTouched = 0;        ///< units with at least one field re-derived
+    size_t unitFieldsReDerived = 0;
+    size_t unitFieldsAuthored = 0;  ///< kept: the captured value was not the def's
+    size_t unitsHealthScaled = 0;   ///< §2 step 3's fraction preservation
+    size_t unitsUnknownDef = 0;     ///< no captured scalars for this def: left alone
+    size_t featuresTouched = 0;
+    size_t featureFieldsReDerived = 0;
+    size_t featureFieldsAuthored = 0;
+    size_t featuresHealthScaled = 0;
+    size_t featuresResourcesScaled = 0;  ///< a reclaim pool is a fraction of defResources
+    size_t featuresUnknownDef = 0;
+    /// Which defs were retuned, capped like DefDelta's examples.
+    std::vector<std::string> retunedNames;
+    /// The same, COMPLETE and sorted, per family — see RemapReport's dropped-id
+    /// lists for why the two are separate: `retunedNames` is five names for a
+    /// human reading one line, these are what a gadget reconciles its own
+    /// def-derived caches against, and a capped list there is a cache that is
+    /// half repaired. Live names (post-rename), because that is what the
+    /// restored world and the game's own UnitDefNames lookup use.
+    std::vector<std::string> retunedUnitDefs;
+    std::vector<std::string> retunedFeatureDefs;
+
+    bool Changed() const;
+    /// One line, or "no def scalar moved".
+    std::string Describe() const;
+};
+
+/// Rewrite every def-derived scalar in a decoded payload to what the LIVE defs
+/// say, wherever the captured value shows the field was never authored. Pure —
+/// no def handler, no live world — so the whole §6 matrix is a doctest; the
+/// live values arrive as a second DefScalarTables (CaptureDefScalars).
+///
+/// Runs AFTER RemapPayload, so `units`/`features` already carry live def names;
+/// `map`'s rename tables are how a renamed def finds its captured scalars.
+/// An empty captured table means the snapshot predates this section, and then
+/// the pass does nothing at all — the same one-directional guard as task 2's
+/// `unknown` vocabulary, and for the same reason: "no record" must never read
+/// as "everything changed".
+void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
+                      const DefRemap& map, std::vector<UnitState>& units,
+                      std::vector<FeatureState>& features, ScalarReport& out);
+
+// ─── The game's turn: DefsReconciled (task 4, §2 step 5) ───
+//
+// Tasks 1-3 reconcile everything the ENGINE owns. What they cannot reach is the
+// game's own state, and a Metalstorm war keeps a great deal of it: an objective
+// naming a unit, a train consist's aggregate max HP, a cost spec the clients
+// mirror. §2 step 5 hands the game the change so it can repair its own half.
+//
+// TWO THINGS THIS DELTA IS FOR, AND THE SECOND ONE IS THE LOAD-BEARING ONE
+// -----------------------------------------------------------------------
+//   * the def vocabulary that moved — removed / renamed / retuned defs, so a
+//     gadget can drop or re-derive whatever it keyed on a def.
+//   * the OBJECT IDS THAT LEFT. A unit whose def was removed is dropped from
+//     the payload during staging, which means it never existed in the restored
+//     world and no UnitDestroyed ever fired for it. Every gadget in the game
+//     holds unit ids; without this list none of them can find out, and a
+//     kill objective would wait forever on a target that cannot be killed
+//     because it is not there.
+//
+// The counts are carried too, but only the game's digest reads them: a count
+// answers "how bad", and a gadget repairing state needs "which".
+
+/// Build the table `gadget:DefsReconciled(delta)` receives. Pure — it reads the
+/// three reports and the remap, touches no world and no Lua state, so the whole
+/// shape is a doctest.
+///
+/// Returns Nil (not an empty table) when nothing moved at all: the call-in must
+/// not fire on an ordinary resume, and "did anything change" is one question
+/// with one answer rather than a truth test spread over eleven counters.
+luasnapshot::Value BuildDefsReconciledDelta(const DefDelta& unitDelta,
+                                            const DefDelta& weaponDelta,
+                                            const DefDelta& featureDelta,
+                                            const DefRemap& remap,
+                                            const RemapReport& remapRep,
+                                            const ScalarReport& scalarRep);
+
 // ──────────────────── The field-census tripwire ────────────────────
 //
 // Q-P1 constraint 4: "ship a completeness tripwire in the same milestone as
@@ -575,6 +1006,10 @@ int RulesParam(const RulesParamState& p);
 int Stats(const TeamStatsState& s);
 int Res(const ResPair& r);
 int LuaValue(const luasnapshot::Value& v);
+/// Task 3's two. A def scalar added to UnitDefScalars without being captured,
+/// encoded and reconciled is the failure this counts against.
+int UnitDefScalars_(const UnitDefScalars& s);
+int FeatureDefScalars_(const FeatureDefScalars& s);
 /// Option A's six structs. Split per class rather than one count for the
 /// tagged whole, so a field added to (say) CStrafeAirMoveType names the arm it
 /// belongs to in the failure instead of moving one aggregate number.

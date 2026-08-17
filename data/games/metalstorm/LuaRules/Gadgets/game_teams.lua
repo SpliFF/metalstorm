@@ -445,7 +445,12 @@ function gadget:GameStart()
     -- joiner takes (mirrors game_authority.lua's own GameStart loop) — sets
     -- initial tenure + leader + starter suggestion for every starting player,
     -- not just drop-ins.
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    --
+    -- ACTIVE only, for the reason game_authority.lua's twin loop spells out: a
+    -- war boots with Σ slotCap EMPTY player slots pre-allocated for the people
+    -- who have not arrived yet (PLAN-metalstorm-wars.md §8.1), and giving them
+    -- tenure would age a seat rather than a player.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
     -- Establish the initial co-commander / caretaker split once the whole

@@ -22,6 +22,19 @@ import {
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
 import {
+    friendActions, friendFactionLabel, friendJoinNeedsConfirm, friendStatusLine,
+    friendWarRooms,
+    formatFriendJoin, formatFriendsHere, pendingRequestCount, sortFriends,
+    type FriendJoinResult, type FriendRow,
+} from './friends';
+import {
+    ChatModel, CHAT_STREAM_MAX_ATTEMPTS, CHAT_TICKET_TTL_SEC,
+    actionBody, chatTime, hasMention, isActionLine, linkSegments, moderationActive,
+    moderationNoticeText, muteRowLine, parseChatInput, pmOther, shouldNotify,
+    streamRecovery, tabKey,
+    type ChatModerationEvent, type ChatMuteRow,
+} from './chat';
+import {
     classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
     type TotpStatus,
 } from './totp';
@@ -217,7 +230,7 @@ export class LobbyUI {
     /// would otherwise double-fire. Reset on the state>=5 (Ended) branch
     /// below so a later restart of the *same* persistent room re-arms it.
     private gameStartedForRoomId: number | null = null;
-    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
+    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void;
     /// PLAN-quickstart.md Part B: true while a detached game session is
     /// parked (worker alive, `currentRoom` still points at that game). Guards
     /// `updateCurrentRoomFromJson`'s gameRunning branch — while detached, a
@@ -287,6 +300,11 @@ export class LobbyUI {
     /// fighting" — and is remembered for the session, not persisted: it is a
     /// view, and a player who comes back tomorrow is asking it fresh.
     private warFilter: WarFilter = 'my-faction';
+    /// The friends list (§8, task 9a), or null on a lobby whose friends routes
+    /// do not answer. Null and empty are different states and the panel reads
+    /// them differently: null hides the whole feature, `[]` says "no friends
+    /// yet" and offers the add box.
+    private friends: FriendRow[] | null = null;
     /// Tracks the room state at last full render so patchRoom() can
     /// detect when the action buttons need to change (state bracket
     /// shift) and fall back to a full re-render.
@@ -376,7 +394,7 @@ export class LobbyUI {
     private suppressed = false;
 
     constructor(
-        onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void,
+        onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void,
         templates?: LobbyTemplates,
         suppressed = false,
     ) {
@@ -651,6 +669,10 @@ export class LobbyUI {
             this.roomEventSource.close();
             this.roomEventSource = null;
         }
+        // Chat rides the same session: a logged-out browser must not keep a
+        // stream open against a ticket the server has just revoked, retrying
+        // it every few seconds for the life of the page.
+        this.stopChat();
     }
 
     private applyRoomList(rooms: any[]): void {
@@ -778,7 +800,7 @@ export class LobbyUI {
                         CONFIG.httpUrl, this.authToken, this.currentRoom.id,
                         browserTokenStore);
                 }
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
                 return;
             case 'refresh-room-game-gone':
                 // E4: the game ended while a session was parked — dispose the
@@ -1632,7 +1654,9 @@ export class LobbyUI {
         this.renderGameOptions();
         this.renderRoomList();
         this.wireReplayPanel();
+        this.wireFriendsPanel();
         this.wireDeployButton();
+        this.wireChatDock();
     }
 
     /// Deploy — §6/task 7's one-click "which war should I fight in".
@@ -1672,6 +1696,735 @@ export class LobbyUI {
             } finally {
                 btn.disabled = false;
             }
+        };
+    }
+
+    // ============== FRIENDS (PLAN-metalstorm-lobby §8, task 9a) ==============
+    //
+    // The server half answers four routes and this is everything that reads
+    // them: the panel, the add box, and the "Friends here" war filter, whose
+    // only input is `friendWarRooms(this.friends)`.
+    //
+    // Polled with the room list rather than streamed. Presence here is derived
+    // from three sources with 120–150 s freshness windows (FriendPresence.h),
+    // so a per-event push would carry no fact the next poll does not, and the
+    // lobby deliberately has no presence heartbeat to hang one on.
+
+    private wireFriendsPanel(): void {
+        const btn = document.getElementById('show-friends-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('friends-panel');
+        if (!btn || !panel) return;
+        btn.onclick = () => {
+            const showing = panel.style.display !== 'none';
+            panel.style.display = showing ? 'none' : 'block';
+            if (!showing) void this.refreshFriends();
+        };
+
+        const form = document.getElementById('friend-add-form') as HTMLFormElement | null;
+        const input = document.getElementById('friend-add-name') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const name = input.value.trim();
+                if (!name) return;
+                input.value = '';
+                void this.friendRequest('/api/friends/add', name);
+            };
+        }
+
+        // Probed once per browser render, exactly like the replay panel: the
+        // button only appears on a lobby that actually has the routes.
+        void this.refreshFriends().then(() => {
+            if (this.friends === null) return;
+            btn.style.display = '';
+        });
+    }
+
+    /// Fetch the friends list. Leaves `this.friends` null — and the whole
+    /// feature invisible — when the route does not answer.
+    private async refreshFriends(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/friends/list');
+            this.friends = Array.isArray(resp) ? resp as FriendRow[] : null;
+        } catch {
+            this.friends = null;
+        }
+        this.renderFriendsList();
+        // The war browser reads the same list: a friend who just went into a
+        // war changes which rows "Friends here" keeps.
+        if (this.friends !== null) this.renderWarList();
+    }
+
+    /// add / remove, and the two words that are the same two routes: accept is
+    /// `add` from the other end, decline and cancel are both `remove`
+    /// (Friends.h). One helper, because the panel must not grow a route the
+    /// server does not have.
+    private async friendRequest(path: string, username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        try {
+            const r = await this.lobbyPost(path, { username });
+            if (msg) {
+                // `edge` is what actually happened, which is not always what
+                // was asked for: adding somebody who already added you
+                // completes the friendship rather than sending a request, and
+                // saying "request sent" there would be wrong on the one click
+                // the player most wants confirmed.
+                const text = r?.error
+                    ? String(r.error)
+                    : r?.edge === 'mutual'
+                        ? `You and ${username} are now friends.`
+                        : r?.edge === 'outgoing'
+                            ? `Friend request sent to ${username}.`
+                            : r?.removed !== undefined
+                                ? `${username} removed.`
+                                : 'Done.';
+                msg.textContent = text;
+                msg.className = r?.error ? 'friend-msg friend-msg-error' : 'friend-msg';
+                msg.style.display = '';
+            }
+        } catch {
+            if (msg) {
+                msg.textContent = 'The lobby did not answer.';
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+        }
+        await this.refreshFriends();
+    }
+
+    /// "Take me to where my friend is fighting" (§8).
+    ///
+    /// Two steps on purpose: `/api/friends/join` ANSWERS — it names the war
+    /// and the side — and the ordinary `/api/rooms/join` does the seating, so
+    /// this path cannot skip the fork brakes, the resume decision or the audit
+    /// row that path owns. The sentence is shown before the join either way,
+    /// because on a cross-faction friend the successful click seats the player
+    /// OPPOSITE them and that is not something to discover on the map.
+    private async joinFriend(username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        const r = await this.lobbyPost('/api/friends/join', { username }) as FriendJoinResult;
+        if (!r || !r.outcome) {
+            if (msg) {
+                msg.textContent = `Could not join ${username}.`;
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+            return;
+        }
+        const { text, seats } = formatFriendJoin(r);
+        const confirm = seats && friendJoinNeedsConfirm(r.outcome);
+        if (msg) {
+            msg.textContent = text;
+            msg.className = confirm
+                ? 'friend-msg friend-msg-warn'
+                : seats ? 'friend-msg' : 'friend-msg friend-msg-error';
+            msg.style.display = '';
+        }
+        if (!seats || !r.room_id) return;
+        if (!confirm) { this.joinRoom(r.room_id, /*asSpectator=*/false); return; }
+        // The warning needs somewhere to stand. Seating immediately writes the
+        // sentence and replaces it with the room screen in the same tick —
+        // verified in the browser, where it was on screen for a frame — so the
+        // surprising outcome, and only that one, costs a second click.
+        const roomId = r.room_id;
+        const go = document.createElement('button');
+        go.className = 'friend-confirm-btn';
+        go.textContent = `Join anyway — fight against ${r.friend}`;
+        go.onclick = () => this.joinRoom(roomId, /*asSpectator=*/false);
+        msg?.appendChild(document.createElement('br'));
+        msg?.appendChild(go);
+    }
+
+    private renderFriendsList(): void {
+        const panel = document.getElementById('friends-panel');
+        const el = document.getElementById('friends-list');
+        const btn = document.getElementById('show-friends-btn');
+        if (!panel || !el) return;
+        if (this.friends === null) { panel.style.display = 'none'; return; }
+
+        // The pending count rides on the closed button: an incoming request is
+        // the only thing here that asks the player a question.
+        if (btn) {
+            const pending = pendingRequestCount(this.friends);
+            btn.textContent = pending > 0 ? `Friends (${pending})` : 'Friends';
+            btn.className = pending > 0 ? 'friends-btn-pending' : '';
+        }
+
+        if (this.friends.length === 0) {
+            el.innerHTML = '<div class="empty-state">No friends yet — add one ' +
+                           'by username above.</div>';
+            return;
+        }
+
+        el.innerHTML = sortFriends(this.friends).map(f => {
+            const faction = friendFactionLabel(f);
+            const factionHtml = faction
+                ? `<span class="friend-faction">${this.esc(faction)}</span>` : '';
+            const actions = friendActions(f).map(a =>
+                `<button class="friend-action-btn${a.primary ? '' : ' secondary'}" ` +
+                `data-action="${a.kind}" data-name="${this.escAttr(f.username)}">` +
+                `${this.esc(a.label)}</button>`).join('');
+            return `<div class="friend-entry friend-${f.edge}">` +
+                   `<div class="friend-main"><span class="friend-name">` +
+                   `${this.esc(f.username)}</span>${factionHtml}` +
+                   `<span class="friend-presence friend-presence-${f.presence}">` +
+                   `${this.esc(friendStatusLine(f))}</span></div>` +
+                   `<div class="friend-actions">${actions}</div></div>`;
+        }).join('');
+
+        el.querySelectorAll('.friend-action-btn').forEach(b => {
+            (b as HTMLElement).onclick = () => {
+                const name = b.getAttribute('data-name')!;
+                switch (b.getAttribute('data-action')) {
+                    case 'accept': void this.friendRequest('/api/friends/add', name); break;
+                    // Decline and cancel are the same verb from the two ends:
+                    // "there is no edge between us any more".
+                    case 'decline':
+                    case 'cancel':
+                    case 'remove': void this.friendRequest('/api/friends/remove', name); break;
+                    case 'join': void this.joinFriend(name); break;
+                }
+            };
+        });
+    }
+
+    // ================= CHAT (PLAN-lobby.md §3, task 9b client) ================
+    //
+    // The service is `rts/Server/Chat.{h,cpp}` plus six `/api/chat/*` routes;
+    // every decision that is not a fetch lives in `chat.ts`. Two things about
+    // the transport shape the code here:
+    //
+    //   * The stream is IDENTIFIED, so it needs a credential, and an
+    //     `EventSource` cannot send a header — hence the ticket, minted with
+    //     the real token and spent in the url (SSETickets.h).
+    //   * `onerror` says nothing about WHY, so the recovery policy has to be a
+    //     rule rather than a reaction; `streamRecovery` is that rule, and this
+    //     file only carries out what it decides.
+    //
+    // The dock is rendered from `chat.ts`'s model into whichever screen is up
+    // — the browser and the room are two views of the same conversation list,
+    // which is §3's "one chat service" seen from the client end.
+
+    private chat = new ChatModel();
+    private chatStream: EventSource | null = null;
+    private chatTicketMintedAt = 0;
+    private chatTicketTtlSec = CHAT_TICKET_TTL_SEC;
+    private chatErrors = 0;
+    private chatRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /// Null until the first mint answers: null hides the dock (a lobby without
+    /// the routes must look exactly as it did), false means the routes refused
+    /// this account, true means chat is live.
+    private chatAvailable: boolean | null = null;
+    /// Two notice lines, deliberately not one. The stream's state
+    /// (reconnecting, disconnected) is a standing condition and clears itself
+    /// when the connection comes back; a refused command ("Unknown command
+    /// /whisper", a mute, a 404 on a typo'd name) is a reply to one action and
+    /// has to go away on the next one. Sharing a field left a refusal from
+    /// four actions ago sitting over a working panel — seen in the browser,
+    /// which is the only place it looked wrong.
+    private chatStreamNotice = '';
+    private chatCmdNotice = '';
+    /// The standing account-level mute, from the `moderation` SSE event
+    /// (task 9d). A THIRD notice and not a fourth use of the other two: it
+    /// outranks both — it is why sending fails — and unlike the stream's it
+    /// is about this account rather than this connection, so a reconnect must
+    /// not clear it and a command reply must not overwrite it.
+    private chatMod: ChatModerationEvent | null = null;
+    /// The operator's mute list, shown until dismissed. Null = not asked for.
+    private chatMuteList: ChatMuteRow[] | null = null;
+    /// §3.5's "optional notification sound" — optional, so it is a toggle, and
+    /// remembered, because a player who turns a sound off means it.
+    private chatSoundOn = localStorage.getItem('springrts-chat-sound') !== 'off';
+    private chatAudio: AudioContext | null = null;
+
+    /// Bring the chat panel up. Idempotent: both screens call it on render and
+    /// the stream survives the screen change.
+    private wireChatDock(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable === null && !this.chatStream) void this.startChat();
+        this.chat.myId = this.myPlayerId;
+        this.syncChatRoomTabs();
+        this.renderChat();
+    }
+
+    /// Mint a ticket and open the stream.
+    ///
+    /// Order matters and is the opposite of the obvious one: the STREAM opens
+    /// before any history is fetched, so a line said while the backfill is in
+    /// flight is delivered rather than lost. It arrives twice instead, which
+    /// `mergeMessages` is for.
+    private async startChat(): Promise<void> {
+        let ticket = '';
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            ticket = typeof r?.ticket === 'string' ? r.ticket : '';
+            if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+        } catch { /* no route, or no lobby */ }
+        if (!ticket) {
+            this.chatAvailable = false;
+            this.renderChat();
+            return;
+        }
+        this.chatAvailable = true;
+        this.chatTicketMintedAt = Date.now();
+        this.openChatStream(ticket);
+        void this.backfillActiveTab();
+    }
+
+    private openChatStream(ticket: string): void {
+        this.closeChatStream();
+        const es = new EventSource(
+            `${CONFIG.httpUrl}/api/chat/stream?ticket=${encodeURIComponent(ticket)}`);
+        this.chatStream = es;
+        es.addEventListener('open', () => {
+            // A connection that stands up clears the backoff: the next failure
+            // is a new failure, not the sixth of the old one.
+            this.chatErrors = 0;
+            if (this.chatStreamNotice) { this.chatStreamNotice = ''; this.renderChat(); }
+        });
+        es.addEventListener('chat', (e: MessageEvent) => {
+            let f: any;
+            try { f = JSON.parse(e.data); } catch { return; }
+            if (!f || typeof f.id !== 'number') return;
+            const frame = {
+                id: f.id, scope: f.scope, target: String(f.target ?? ''),
+                from: String(f.from ?? ''), fromId: Number(f.fromId ?? 0),
+                text: String(f.text ?? ''), ts: Number(f.ts ?? 0),
+                ...(f.system ? { system: true } : {}),
+            };
+            // The unread decision is `applyFrame`'s and reads the tab the
+            // frame lands in; the ping is decided on the FRAME, before it is
+            // filed, because a mention pings in the tab you are reading and
+            // that tab never counts an unread.
+            const landed = this.chat.applyFrame(frame);
+            if (landed) {
+                if (shouldNotify(frame, this.myPlayerId, this.myChatName(),
+                                 this.chat.activeKey)) this.chatPing();
+                this.renderChat();
+            }
+        });
+        // The moderation channel (task 9d). It carries exactly one thing —
+        // this account's own account-level mute — because a scoped mute is
+        // told to its channel as a system line instead. Both directions
+        // arrive: the mute, and the lift, without which an
+        // until-lifted banner would stand for the rest of the session.
+        es.addEventListener('moderation', (e: MessageEvent) => {
+            let ev: any;
+            try { ev = JSON.parse(e.data); } catch { return; }
+            if (!ev || typeof ev.muted !== 'boolean') return;
+            this.chatMod = {
+                muted: ev.muted, until: Number(ev.until ?? 0),
+                reason: String(ev.reason ?? ''), by: String(ev.by ?? ''),
+            };
+            this.renderChat();
+        });
+        es.onerror = () => this.onChatStreamError();
+    }
+
+    /// The one place that decides what a dead stream means.
+    private onChatStreamError(): void {
+        this.chatErrors++;
+        const ageSec = (Date.now() - this.chatTicketMintedAt) / 1000;
+        const r = streamRecovery(this.chatErrors, ageSec, this.chatTicketTtlSec);
+        if (r.notice !== this.chatStreamNotice) { this.chatStreamNotice = r.notice; this.renderChat(); }
+        if (r.action === 'wait') return;          // the browser retries on its own
+        this.closeChatStream();                    // stop the retry on a dead url
+        if (r.action === 'stop') return;           // the player asks for the next one
+        if (this.chatRetryTimer) clearTimeout(this.chatRetryTimer);
+        this.chatRetryTimer = setTimeout(() => {
+            this.chatRetryTimer = null;
+            void this.remintAndReopen();
+        }, r.delayMs);
+    }
+
+    /// Trade the (real, header-borne) token for a fresh ticket and reconnect.
+    private async remintAndReopen(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            if (typeof r?.ticket === 'string' && r.ticket) {
+                this.chatTicketMintedAt = Date.now();
+                if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+                this.openChatStream(r.ticket);
+                return;
+            }
+        } catch { /* fall through to the same backoff as a stream failure */ }
+        this.onChatStreamError();
+    }
+
+    private closeChatStream(): void {
+        if (!this.chatStream) return;
+        this.chatStream.close();
+        this.chatStream = null;
+    }
+
+    /// Shut chat down with the rest of the session (logout, or leaving the
+    /// lobby for the game surface). The ticket dies server-side with the
+    /// account's tokens; this stops the browser retrying against it.
+    private stopChat(): void {
+        this.closeChatStream();
+        if (this.chatRetryTimer) { clearTimeout(this.chatRetryTimer); this.chatRetryTimer = null; }
+        this.chatErrors = 0;
+        this.chatAvailable = null;
+        this.chatStreamNotice = '';
+        this.chatCmdNotice = '';
+        this.chatMod = null;
+        this.chatMuteList = null;
+    }
+
+    /// The name a mention has to match. Off the stored session rather than the
+    /// roster: chat runs on the browser screen too, where there is no room and
+    /// therefore no roster row to read a name out of.
+    private myChatName(): string {
+        return localStorage.getItem('springrts-username') ?? '';
+    }
+
+    /// §3.5's notification sound. Synthesised rather than fetched: the lobby
+    /// ships no audio assets and a two-tone blip needs none, so this cannot
+    /// 404 or wait on the network. Built lazily because a browser refuses an
+    /// `AudioContext` created before the first gesture.
+    private chatPing(): void {
+        if (!this.chatSoundOn) return;
+        try {
+            const Ctor = window.AudioContext ?? (window as any).webkitAudioContext;
+            if (!Ctor) return;
+            this.chatAudio ??= new Ctor();
+            const ctx = this.chatAudio!;
+            if (ctx.state === 'suspended') void ctx.resume();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.setValueAtTime(1174, ctx.currentTime + 0.07);
+            // Ramped, not switched: a square-edged gain on a sine is a click.
+            gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.2);
+        } catch { /* audio is a courtesy; a chat panel that throws over it is not */ }
+    }
+
+    /// Room tabs follow the seat, and the seat comes off the roster the room
+    /// screen already holds — never off anything the client chooses.
+    private syncChatRoomTabs(): void {
+        const r = this.currentRoom;
+        const me = r?.players.find(p => p.playerId === this.myPlayerId) ?? null;
+        const seat = r && me
+            ? { roomId: r.id, team: me.team, isSpectator: !!me.isSpectator }
+            : null;
+        if (this.chat.syncRoomTabs(seat, r?.name ?? '')) void this.backfillActiveTab();
+    }
+
+    /// §3.3's "backfills the UI on join". Once per tab: the store is
+    /// authoritative and a re-open must not re-page it.
+    private async backfillActiveTab(): Promise<void> {
+        const tab = this.chat.active();
+        if (!tab || tab.loaded || this.chatAvailable !== true) return;
+        try {
+            const r = await this.lobbyPost('/api/chat/history',
+                { scope: tab.scope, target: tab.sendTarget, limit: 50 });
+            if (Array.isArray(r?.messages)) {
+                this.chat.applyHistory(tab.key, r.messages);
+                this.renderChat();
+            }
+        } catch { /* an empty channel and an unreachable one look the same here */ }
+    }
+
+    /// One line typed in the composer.
+    private async submitChat(raw: string): Promise<void> {
+        // A reply belongs to one action, so the next action takes it away.
+        this.chatCmdNotice = '';
+        const cmd = parseChatInput(raw, this.chat.active());
+        switch (cmd.kind) {
+            case 'none':
+                return;
+            case 'error':
+                this.chatCmdNotice = cmd.message;
+                this.renderChat();
+                return;
+            case 'send': {
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: cmd.scope, target: cmd.target, text: cmd.text });
+                // The line comes back down the stream — the sender is in its
+                // own recipient list — so nothing is appended here. What the
+                // reply is for is the refusals: a mute, a flood drop, or a
+                // scope this client thinks it is in and the server does not.
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); }
+                return;
+            }
+            case 'pm': {
+                // Open the tab whatever happens, so a typed name that turns
+                // out to be nobody says so in the conversation it was aimed
+                // at rather than in the channel the player was reading.
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: 'pm', target: cmd.username, text: cmd.text || ' ' });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                // `target` in the reply is CANONICAL (`<lo>:<hi>`); the tab is
+                // keyed on it and addressed by the name that was typed.
+                const other = pmOther(String(r?.target ?? ''), this.myPlayerId);
+                if (other) {
+                    const tab = this.chat.ensurePmTab(other, cmd.username);
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                }
+                this.renderChat();
+                return;
+            }
+            case 'ignore': {
+                const r = await this.lobbyPost('/api/chat/ignore',
+                    { username: cmd.username, on: cmd.on });
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on ? `Ignoring ${cmd.username}.` : `No longer ignoring ${cmd.username}.`;
+                this.renderChat();
+                return;
+            }
+            case 'channel': {
+                const r = await this.lobbyPost('/api/chat/channel',
+                    { channel: cmd.channel, join: cmd.join });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                if (cmd.join) {
+                    const tab = this.chat.ensureTab({
+                        scope: 'channel', target: cmd.channel, sendTarget: cmd.channel,
+                        label: `#${cmd.channel}`, closable: true,
+                    });
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                } else {
+                    this.chat.close(tabKey('channel', cmd.channel));
+                }
+                this.chatCmdNotice = '';
+                this.renderChat();
+                return;
+            }
+            // ── The moderation verbs (task 9d) ─────────────────────────────
+            //
+            // Every one of them reports its REPLY, refusal or not. A
+            // moderation action whose only evidence is a system line in the
+            // channel looks like it worked to the one person who has to know
+            // whether it did — the moderator is not necessarily reading the
+            // scope they acted in (`/gmute` is told to nobody at all).
+            case 'mute': {
+                const body: Record<string, unknown> = {
+                    username: cmd.username, on: cmd.on,
+                };
+                if (cmd.scope) { body.scope = cmd.scope; body.target = cmd.target; }
+                if (cmd.on) {
+                    body.seconds = cmd.seconds;
+                    if (cmd.reason) body.reason = cmd.reason;
+                }
+                const r = await this.lobbyPost('/api/chat/mute', body);
+                const where = cmd.scope ? 'here' : 'everywhere';
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on
+                        ? `Muted ${cmd.username} ${where}` +
+                          (cmd.seconds > 0 ? ` for ${cmd.seconds}s.` : ' until lifted.')
+                        : `Unmuted ${cmd.username} ${where}.`;
+                // The list is stale the moment a mute changes, and a stale
+                // list of who is muted is worse than none.
+                if (!r?.error && this.chatMuteList) void this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
+            case 'kick': {
+                const body: Record<string, unknown> = {
+                    channel: cmd.channel, username: cmd.username,
+                };
+                if (cmd.seconds > 0) body.seconds = cmd.seconds;
+                if (cmd.reason) body.reason = cmd.reason;
+                const r = await this.lobbyPost('/api/chat/kick', body);
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Kicked ${cmd.username} from #${cmd.channel}.`;
+                this.renderChat();
+                return;
+            }
+            case 'broadcast': {
+                const r = await this.lobbyPost('/api/chat/broadcast', { text: cmd.text });
+                // The line itself arrives down the stream like any other
+                // `#main` line, so the reply's job is only the count.
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Broadcast to ${r?.delivered ?? 0} in #main.`;
+                this.renderChat();
+                return;
+            }
+            case 'mutes': {
+                await this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
+        }
+    }
+
+    /// `/api/chat/mute` with no `username` — "who is muted", which the service
+    /// answers to admins only (the list names accounts and reasons, which is
+    /// moderation record rather than chat).
+    private async refreshMuteList(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/mute', {});
+            if (Array.isArray(r)) { this.chatMuteList = r as ChatMuteRow[]; return; }
+            this.chatMuteList = null;
+            this.chatCmdNotice = String(r?.error ?? 'Could not read the mute list.');
+        } catch {
+            this.chatMuteList = null;
+            this.chatCmdNotice = 'Could not read the mute list.';
+        }
+    }
+
+    /// One message body, with §3.5's auto-detected links.
+    ///
+    /// The segmentation runs on the RAW text and each piece is escaped here,
+    /// which is the only order that is safe: a linkifier that runs over
+    /// already-escaped text sees `&amp;` as five characters and is one
+    /// mis-slice away from emitting markup. `rel="noopener noreferrer"` and no
+    /// embed of any kind — §3.5 says plain anchors.
+    private chatBody(text: string): string {
+        return linkSegments(text).map(s => s.href
+            ? `<a class="chat-link" href="${this.escAttr(s.href)}" target="_blank" ` +
+              `rel="noopener noreferrer">${this.esc(s.text)}</a>`
+            : this.esc(s.text)).join('');
+    }
+
+    private renderChat(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable !== true) { dock.style.display = 'none'; return; }
+        dock.style.display = '';
+
+        const active = this.chat.active();
+        const tabs = this.chat.list().map(t => {
+            const unread = t.unread > 0 ? `<span class="chat-unread">${t.unread}</span>` : '';
+            const close = t.closable
+                ? `<span class="chat-tab-close" data-close="${this.escAttr(t.key)}">×</span>` : '';
+            return `<button class="chat-tab${t.key === this.chat.activeKey ? ' chat-tab-active' : ''}" ` +
+                   `data-tab="${this.escAttr(t.key)}">${this.esc(t.label)}${unread}${close}</button>`;
+        }).join('');
+
+        const myName = this.myChatName();
+        const lines = (active?.messages ?? []).map(m => {
+            const time = `<span class="chat-time">${chatTime(m.ts)}</span>`;
+            if (m.system) {
+                // A server line has no name and no mention highlight: it is
+                // the room talking, and it says everybody's name.
+                return `<div class="chat-line chat-line-system">${time}` +
+                       `<span class="chat-text">${this.esc(m.text)}</span></div>`;
+            }
+            // §3.5's mention highlight. Never on my own line — I know I said
+            // my name — and computed on the raw text, before linkification
+            // splits it.
+            const mine = m.fromId === this.myPlayerId;
+            const mention = !mine && hasMention(m.text, myName) ? ' chat-line-mention' : '';
+            if (isActionLine(m.text)) {
+                // No colon, no name-then-text: an action reads as one
+                // sentence or it is not an action.
+                return `<div class="chat-line chat-line-action${mention}">${time}` +
+                       `<span class="chat-text">${this.esc(m.from)} ` +
+                       `${this.chatBody(actionBody(m.text))}</span></div>`;
+            }
+            return `<div class="chat-line${mine ? ' chat-line-mine' : ''}${mention}">${time}` +
+                   `<span class="chat-from">${this.esc(m.from)}</span>` +
+                   `<span class="chat-text">${this.chatBody(m.text)}</span></div>`;
+        }).join('');
+
+        const empty = !active || active.messages.length === 0
+            ? `<div class="empty-state">Nothing said here yet. ` +
+              `<code>/w player</code>, <code>/join #channel</code>, <code>/me</code>.</div>`
+            : '';
+        const stopped = this.chatErrors >= CHAT_STREAM_MAX_ATTEMPTS;
+        // Three notices, in the order they explain a failure. A standing mute
+        // outranks everything — it is *why* sending fails, and it is true of
+        // the account rather than of this connection — then the stream's state,
+        // then the reply to the last command ("chat is disconnected" explains
+        // a refusal that "unknown command" does not).
+        const muted = moderationActive(this.chatMod, Date.now() / 1000);
+        const modNotice = muted
+            ? `<div class="chat-notice chat-notice-mod">` +
+              `${this.esc(moderationNoticeText(this.chatMod!))}</div>`
+            : '';
+        const noticeText = this.chatStreamNotice || this.chatCmdNotice;
+        const notice = noticeText
+            ? `<div class="chat-notice">${this.esc(noticeText)}` +
+              (stopped ? ' <button id="chat-reconnect-btn" class="secondary">Reconnect</button>' : '') +
+              `</div>`
+            : '';
+        const muteList = this.chatMuteList
+            ? `<div class="chat-mutes"><div class="chat-mutes-head">` +
+              `${this.chatMuteList.length} mute(s) in force` +
+              `<button id="chat-mutes-close" class="chat-mutes-close">×</button></div>` +
+              (this.chatMuteList.length
+                  ? this.chatMuteList.map(m =>
+                        `<div class="chat-mutes-row">` +
+                        `${this.esc(muteRowLine(m, Date.now() / 1000))}</div>`).join('')
+                  : `<div class="chat-mutes-row">Nobody is muted.</div>`) +
+              `</div>`
+            : '';
+
+        // The sound toggle rides in the head rather than in a settings screen
+        // the lobby does not have: §3.5 makes the sound optional, and an
+        // option nobody can find is not one.
+        const sound = `<button id="chat-sound-btn" class="chat-sound-btn" ` +
+                      `title="Notification sound for mentions and PMs">` +
+                      `${this.chatSoundOn ? '🔔' : '🔕'}</button>`;
+
+        dock.innerHTML =
+            `<div class="chat-head"><h3>Chat</h3><div class="chat-tabs">${tabs}</div>` +
+            `${sound}</div>` +
+            modNotice + notice + muteList +
+            `<div id="chat-log" class="chat-log">${lines}${empty}</div>` +
+            `<form id="chat-form" class="chat-compose">` +
+            `<input type="text" id="chat-input" class="chat-input" autocomplete="off" ` +
+            `maxlength="500" placeholder="Message ${this.escAttr(active?.label ?? '')}">` +
+            `<button type="submit" class="chat-send-btn">Send</button></form>`;
+
+        // Newest line at the bottom, and the view pinned to it: a chat panel
+        // that opens scrolled to the oldest line looks empty.
+        const log = document.getElementById('chat-log');
+        if (log) log.scrollTop = log.scrollHeight;
+
+        const form = document.getElementById('chat-form') as HTMLFormElement | null;
+        const input = document.getElementById('chat-input') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const text = input.value;
+                input.value = '';
+                void this.submitChat(text);
+            };
+        }
+        dock.querySelectorAll('.chat-tab').forEach(b => {
+            (b as HTMLElement).onclick = (e) => {
+                const closeKey = (e.target as HTMLElement).getAttribute('data-close');
+                if (closeKey) { this.chat.close(closeKey); this.renderChat(); return; }
+                this.chat.setActive(b.getAttribute('data-tab')!);
+                this.chatCmdNotice = '';
+                this.renderChat();
+                void this.backfillActiveTab();
+            };
+        });
+        const again = document.getElementById('chat-reconnect-btn');
+        if (again) again.onclick = () => {
+            this.chatErrors = 0;
+            this.chatStreamNotice = '';
+            void this.remintAndReopen();
+        };
+        const soundBtn = document.getElementById('chat-sound-btn');
+        if (soundBtn) soundBtn.onclick = () => {
+            this.chatSoundOn = !this.chatSoundOn;
+            localStorage.setItem('springrts-chat-sound', this.chatSoundOn ? 'on' : 'off');
+            // Play the sound the toggle just turned on: a mute button whose
+            // effect is only audible the next time somebody else speaks is a
+            // control nobody can check.
+            if (this.chatSoundOn) this.chatPing();
+            this.renderChat();
+        };
+        const closeMutes = document.getElementById('chat-mutes-close');
+        if (closeMutes) closeMutes.onclick = () => {
+            this.chatMuteList = null;
+            this.renderChat();
         };
     }
 
@@ -2064,7 +2817,6 @@ export class LobbyUI {
                     id: r.id, name: r.name, mapId: r.mapId, state: r.state,
                     war: r.war!,
                     returning: p?.returning ?? false,
-                    watching: p?.watching ?? false,
                     // The durable half of "is this war mine" (task 4c). Left
                     // undefined when the lobby does not publish it, so
                     // `filterWars` falls back to `returning` rather than
@@ -2094,7 +2846,14 @@ export class LobbyUI {
         const deployBtn = document.getElementById('deploy-btn');
         if (deployBtn) deployBtn.style.display = this.myFaction ? '' : 'none';
 
-        filters.innerHTML = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+        // The friends chip only exists on a lobby whose friends routes answer.
+        // A chip that can only ever be empty advertises a feature this lobby
+        // does not have — the same call the Friends button itself makes.
+        if (this.friends === null && this.warFilter === 'friends-here')
+            this.warFilter = 'my-faction';
+        const filterKeys = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+            .filter(f => f !== 'friends-here' || this.friends !== null);
+        filters.innerHTML = filterKeys
             .map(f => `<button class="war-filter-chip${f === this.warFilter ? ' active' : ''}"` +
                       ` data-filter="${f}">${this.esc(WAR_FILTER_LABELS[f])}</button>`)
             .join('');
@@ -2105,7 +2864,9 @@ export class LobbyUI {
             };
         });
 
-        const shown = filterWars(wars, this.warFilter, this.myFaction);
+        const friends = this.friends ?? [];
+        const friendRooms = friendWarRooms(friends);
+        const shown = filterWars(wars, this.warFilter, this.myFaction, friendRooms);
         if (shown.length === 0) {
             // Named per filter: "no wars" and "none for your faction" send a
             // player to two different places, and the second one is the whole
@@ -2114,7 +2875,12 @@ export class LobbyUI {
                 ? 'No war is fielding your faction right now.'
                 : this.warFilter === 'my-wars'
                     ? 'You hold no seat in any war yet.'
-                    : 'No wars are running.';
+                    : this.warFilter === 'friends-here'
+                        // Says which fact is missing: presence, not friendship.
+                        // "You have no friends" would be wrong for a player
+                        // whose friends are simply not fighting right now.
+                        ? 'None of your friends are in a war right now.'
+                        : 'No wars are running.';
             list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
@@ -2169,6 +2935,14 @@ export class LobbyUI {
                 ? 'war-yours war-yours-lost' : 'war-yours';
             const yoursHtml = yours
                 ? `<div class="${yoursCls}">${this.esc(yours)}</div>` : '';
+            // Who of MINE is in this war (task 9a). Rendered in every filter,
+            // not only under "Friends here": the filter is a way of finding
+            // these rows and the line is the reason they were kept, and a
+            // marker that appears only inside its own filter cannot be
+            // discovered by anyone who has not already found it.
+            const friendsHere = formatFriendsHere(friends, row.id);
+            const friendsHtml = friendsHere
+                ? `<div class="war-friends">${this.esc(friendsHere)}</div>` : '';
             const badge = warStateBadge(row.war);
             const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
             const warStateIsKnown =
@@ -2198,6 +2972,7 @@ export class LobbyUI {
                 detail: this.esc(formatWarDetail(row, nowSec)),
                 detail_title: refusal,
                 control: this.esc(formatControl(row.war)),
+                friends_html: friendsHtml,
                 yours_html: yoursHtml,
                 preview_html: previewHtml,
                 digest_html: digestHtml,
@@ -2631,6 +3406,9 @@ export class LobbyUI {
 
         document.getElementById('leave-btn')!.onclick = () => this.leave();
         this.wireLogoutButton();
+        // The room screen hosts the same dock: the room and ally tabs only
+        // exist while a seat does, and this is where the seat is known.
+        this.wireChatDock();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
         document.getElementById('enlist-btn')?.addEventListener('click',
@@ -2653,7 +3431,7 @@ export class LobbyUI {
                 this.inGame = true;
                 this.gameStartedForRoomId = this.currentRoom.id;
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             }
         });
         // "End Game" and "Close Room" buttons removed — room lifecycle
@@ -3111,7 +3889,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             return;
         }
 

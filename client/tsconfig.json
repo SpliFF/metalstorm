@@ -19,6 +19,24 @@
     "erasableSyntaxOnly": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
-  "exclude": ["src/protocol", "src/**/*.test.ts"]
+  /* `wire` is the scripted wire client (client/wire/, PLAN-replay §7.11
+     T2-a-1). It is typechecked with the app on purpose: it speaks the same
+     generated protocol and the same control framing, so a schema or framing
+     change must break it here rather than in a live run. Its node-only entry
+     point is a `.mjs` file, which tsc does not read. */
+  "include": ["src", "wire"],
+  /* Test code is excluded because it imports node builtins (`node:fs` and
+     friends) and the project ships no `@types/node` — browser code must not get
+     node globals just so a fixture loader can read a file. `*.test-support.ts`
+     is the same category: a module imported ONLY by tests, which for that reason
+     may use the node surface too (see nl-fixtures/load-fixtures.test-support.ts).
+     Anything a test-support module shares with the app belongs in a normal
+     module instead — e.g. nl-fixtures/fixture-world.ts, which stays typechecked.
+     `*.bench.ts` is the same category one step further out: a vitest benchmark,
+     never bundled, and (like the squad suites) free to import the untyped
+     data/games JS squad tree the app reaches only through an interface. */
+  "exclude": [
+    "src/protocol", "src/**/*.test.ts", "src/**/*.test-support.ts",
+    "src/**/*.bench.ts"
+  ]
 }

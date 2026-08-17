@@ -2227,6 +2227,25 @@ function gadgetHandler:Load(state)
 end
 
 
+-- PLAN-def-reconciliation task 4 (§2 step 5). Fired ONCE, after Load, and only
+-- when the game's defs moved between the snapshot being restored and this def
+-- load — never on an ordinary resume.
+--
+-- `delta` is shared by every gadget rather than split per gadget the way Save's
+-- subtables are, and that is deliberate: it describes the WORLD's change, not
+-- one gadget's state, and the interesting handlers all read the same two lists
+-- (`delta.droppedUnits`, `delta.units.removed`). Read-only by contract — a
+-- gadget that mutates it corrupts what the gadgets after it are told, and the
+-- iteration order here is layer order.
+--
+-- The engine side is CSyncedLuaHandle::DefsReconciled.
+function gadgetHandler:DefsReconciled(delta)
+  for _,g in r_ipairs(self.DefsReconciledList) do
+    g:DefsReconciled(delta)
+  end
+end
+
+
 --  The snapshot coverage ledger (PLAN-persistence §7.1d decision 3).
 --
 --  Three states per loaded gadget, and the list comes from the live handler

@@ -119,6 +119,41 @@ describe("tribute escrow (§1)", function()
     end)
 end)
 
+-- endtoend D62. Parley is the caller that proved GG.Authority.ChargeOrder is a
+-- generic player-then-team pool debit rather than an order charge, and until it
+-- had a `reason` of its own it borrowed the COST-table key as the ACCOUNTING
+-- reason. Asserted on the argument parley passes, not on a ledger counter,
+-- because the reason is exactly what was missing from the wire between them.
+describe("ledger reasons on the charges parley makes (D62)", function()
+    local function reasonsIn(world)
+        local out = {}
+        for _, c in ipairs(world.chargeLog) do out[#out + 1] = c.reason end
+        return out
+    end
+
+    it("files the §1 spam-guard fee as 'proposal_fee', not an order class", function()
+        local world = newWorld()
+        assert.is_number(GG.Parley.Propose(10, 1, 20, 'ceasefire', { duration = 1800 }))
+        assert.are.same({ 'proposal_fee' }, reasonsIn(world))
+    end)
+
+    it("files a recurring tribute instalment as 'tribute' — a move, not a burn", function()
+        local world, gadgetObj = newWorld()
+        local id = GG.Parley.Propose(10, 1, 20, 'tribute',
+                                     { amount = 100, perMinute = true, duration = 36000 })
+        GG.Parley.Respond(id, 20, 2, 'accept')
+        assert.are.equal('active', world.rp('parley_' .. id .. '_state'))
+
+        world.frame = 1800
+        gadgetObj:GameFrame(world.frame)
+        assert.are.equal('active', world.rp('parley_' .. id .. '_state'))
+
+        -- The fee, then the instalment. The instalment's payee half is Awarded
+        -- as 'tribute' already; this is the payer half that used to file burn.
+        assert.are.same({ 'proposal_fee', 'tribute' }, reasonsIn(world))
+    end)
+end)
+
 describe("ceasefire order-veto matrix (§2)", function()
     it("vetoes an attack on a pact partner's unit, uncharged", function()
         local world, gadgetObj = newWorld()

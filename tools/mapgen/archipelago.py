@@ -46,6 +46,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from terragen import biomes as bio          # noqa: E402
+from terragen import bridges as brg         # noqa: E402
 from terragen import erosion as ero         # noqa: E402
 from terragen import hydrology as hyd       # noqa: E402
 from terragen import noise as tn            # noqa: E402
@@ -59,9 +60,13 @@ from terragen import settle as st           # noqa: E402
 from terragen import smf                    # noqa: E402
 from terragen import uplift as up           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
+from terragen import yards as yd            # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
+import ms_defs                              # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+GAME_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "data", "games",
+                                        "metalstorm"))
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260730
 N_STARTS = 8
@@ -944,7 +949,15 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # Pads do not need it: they are levelled over a 420-elmo disc above,
         # which is ~13 planning cells, so a pad makes its own cell buildable.
         unbuildable = rd.unbuildable_mask(h, 0.0, cell, rp)
-        polylines: list[np.ndarray] = []
+        # roads R2 — each island gets its own HIERARCHY, not just its own
+        # network. The role reading for an archipelago: a start pad is a portal
+        # (the trunk has to reach it), the island's best town is the highway's
+        # other end, and the remaining towns — `pick_sites` returns them in
+        # descending score order — are villages that join the trunk wherever it
+        # passes them. Giving every town portal status instead would make every
+        # road on the island a highway, which is the one answer a hierarchy is
+        # supposed to rule out.
+        network = rd.RoadNetwork()
         towns: list[tuple[float, float]] = []
         for l in big:
             area = sizes[l] * cell * cell
@@ -957,14 +970,66 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             # connect this island's towns + its start pads into one network
             isl_starts = [p for p in starts
                           if labels[int(p[1] / cell), int(p[0] / cell)] == l]
-            net = sites + isl_starts
-            if len(net) >= 2:
-                polylines += rd.plan_roads(h, 0.0, cell, net, rp)
-        road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+            eps = list(sites) + isl_starts
+            roles = ([rd.NODE_TOWN] + [rd.NODE_MINOR] * (len(sites) - 1)
+                     + [rd.NODE_EDGE] * len(isl_starts)) if sites else \
+                    [rd.NODE_EDGE] * len(isl_starts)
+            if len(eps) >= 2:
+                sub = rd.plan_network(h, 0.0, cell, eps, roles, rp)
+                network.links += sub.links
+                network.junctions += sub.junctions
+        polylines = network.polylines
+        raster = rd.rasterize_network(network, h.shape, cell, rp)
+        road_mask, road_dist = raster.mask, raster.dist
         rd.carve_plazas(road_mask, road_dist, towns, 85.0, cell, rp)
-        h = rd.flatten_under_roads(h, road_dist, cell, rp)
+        rd.carve_junction_aprons(raster, network.junctions, cell, rp)
+        # Roadside yard PADS (roads R4b) — prepared ground beside a link for the
+        # scenario layer's depots. Carved as ordinary deck and BEFORE the flatten,
+        # because a pad the grader never sees is a pad nothing levels; see
+        # terragen/yards.py. Assigned on every pad pass like `crossings` below,
+        # so the last pass's pads are the ones that ship.
+        yard_pads, yard_refusals = yd.plan_yard_pads(network, h, raster, cell,
+                                                     0.0)
+        yd.carve_yard_pads(raster, yard_pads, cell, rp)
+        # ONE flatten pass over the combined field — see roads.flatten_network
+        h = rd.flatten_network(h, raster, cell, rp)
+        # ...and the pads are PLATEAUED after it, not by it: the grader blends
+        # toward a blur, which does nothing to a uniform slope (terragen/yards.py
+        # measured 31.2 of 31.5 elmos surviving). A yard is cut into graded
+        # ground, in that order.
+        h = yd.level_yard_pads(h, yard_pads, cell)
+        _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
+                         for k, v in sorted(network.length_by_class().items())
+                         if v > 0)
         print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
-              f"{len(towns)} town plazas, {len(starts)} starts)")
+              f"{len(towns)} town plazas, {len(starts)} starts, "
+              f"{len(network.junctions)} junctions; length by class: {_mix})")
+        print(f"yard pads: {len(yard_pads)} prepared, "
+              f"{len(yard_refusals)} station(s) refused")
+        yd.report_pad_refusals(yard_refusals)
+        yd.report_pad_relief(h, yard_pads, cell)
+        # ...and the ramp INTO each pad, which the relief report cannot see:
+        # a plateau is flat by construction and can still sit above an
+        # unclimbable verge (roads R4d, yards.pad_ramps).
+        yd.report_pad_ramps(h, yard_pads, cell)
+        rd.report_delivered_grades(network, h, cell, rp)
+        # Water crossings (roads R3b) — an archipelago plans one network per
+        # island, so every crossing here is an INLAND ford: the sea between two
+        # islands is not something the planner ever routes across. Measured on
+        # the delivered surface, published in mapdata/roads.lua, nothing placed
+        # (see terragen/bridges.py).
+        cross_params = brg.CrossingParams(
+            pitch=ms_defs.feature_chain_pitch(GAME_DIR))
+        crossings, crossing_refusals = brg.find_crossings(
+            network, h, cell, 0.0, cross_params)
+        _fordable = [r for r in crossing_refusals if r.fordable]
+        print(f"crossings: {len(crossings)} bridgeable "
+              f"({sum(c.spans for c in crossings)} spans), "
+              f"{len(_fordable)} unbridged ford(s), "
+              f"{len(crossing_refusals) - len(_fordable)} wet stretches refused")
+        for r in crossing_refusals:
+            print(f"  crossing {'ford, unbridged' if r.fordable else 'REFUSED'}"
+                  f": {r.describe()}")
         aim_probe(h, f"pass {pad_pass}: +roads")
 
         # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
@@ -1101,6 +1166,26 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
     print(f"biomes done {time.time()-t0:.0f}s ({climate}, land): "
           f"{bio.format_biome_mix(b)}")
+
+    # 8a. road surface classes (roads R1) — needs moisture, so it runs after
+    # the biome step; `network`/`polylines`/`towns`/`rp` survive the pad-pass
+    # loop above.
+    # R2: sealing follows the hierarchy, so R1's length budget is not consulted
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell,
+                                 road_classes=network.road_classes)
+    _surf_raster = rd.rasterize_network(network, h.shape, cell, rp,
+                                        surfaces=road_cls)
+    road_class = _surf_raster.surf
+    rd.carve_plaza_classes(road_class, towns, 85.0, cell)
+    rd.carve_junction_aprons(_surf_raster, network.junctions, cell, rp)
+    # Both rasters get every carve (the apron note's reason): a pad that is deck
+    # in one and not the other is a hole in the typemap where the tarmac is.
+    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
+    _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
+    print("road surfaces (%d deck cells): %s" % (_deck, ", ".join(
+        "%s %.1f%%" % (rd.SURFACE_NAMES[k], 100.0 * int((road_class == k).sum()) / _deck)
+        for k in (rd.SURF_BITUMEN, rd.SURF_DIRT, rd.SURF_MUD))))
 
     # 9. placement — same layer set as Meridian (minus its layout regions)
     excl = road_mask.copy() | (h <= 2.0) | rivers
@@ -1254,7 +1339,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     if preview_only:
         os.makedirs(out_dir, exist_ok=True)
         baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                               stamps=stamps)
+                               stamps=stamps, road_class=road_class)
         Image.fromarray(bk.make_minimap(baker, bk.hillshade(h, cell))).save(
             os.path.join(out_dir, "preview.png"))
         print(f"PREVIEW ONLY — total {time.time()-t0:.0f}s")
@@ -1293,10 +1378,14 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
-        feature_files=feature_files, stamps=stamps,
+        roads_lua=pkg.emit_roads_lua(network, cell, rp, crossings=crossings,
+                                     yards=yard_pads,
+                                     refusals=crossing_refusals,
+                                     p_cross=cross_params),
+        feature_files=feature_files, stamps=stamps, road_class=road_class,
     )
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                           stamps=stamps)
+                           stamps=stamps, road_class=road_class)
     Image.fromarray(bk.make_minimap(baker, bk.hillshade(h, cell))).save(
         os.path.join(out_dir, "preview.png"))
     print(f"TOTAL {time.time()-t0:.0f}s")

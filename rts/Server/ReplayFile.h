@@ -136,6 +136,16 @@ struct Header {
     std::string gameVersion;
     std::string mapId;
     std::string defsCacheKey;    ///< the defs hash the recording ran against
+    /// sha256 of the binary wire schema the recording's messages were encoded
+    /// against (Protocol::SCHEMA_HASH, PLAN-protocol-guard task 7). Empty for a
+    /// file written before the stamp existed. Unlike engineHash — a stand-in
+    /// whose mismatch nobody acts on — this one is ENFORCED: `Player::Load`
+    /// refuses a file that does not match this build, because the record stream
+    /// holds undecoded wire frames and a moved field decodes as whatever now
+    /// occupies its slot. The rule lives in ReplayCompatPolicy.h; it is checked
+    /// at re-execution ingest only, never by `Load`/`LoadSummary` (packing and
+    /// listing decode no payload and stay possible for any recording).
+    std::string schemaHash;
     uint32_t    roomId    = 0;
     int32_t     startFrame = 0;  ///< frame the stream begins at (0 = from launch)
     uint64_t    seed      = 0;   ///< synced RNG state at record start, 0 if unknown

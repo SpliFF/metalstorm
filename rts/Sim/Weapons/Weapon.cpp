@@ -332,6 +332,30 @@ void CWeapon::UpdateWeaponVectors() {
   weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
   weaponDir = owner->GetObjectSpaceVec(weaponDir).SafeNormalize();
 
+  // Safety net for barrel-up rigs (PLAN-metalstorm-combat-fixes.md §C2, same
+  // philosophy as the FIDELITY-STANDIN in WeaponProjectile.cpp). The emit dir
+  // is the muzzle piece's local -Z through its model-space rest rotation. A
+  // rig whose rest rotation maps -Z onto +Y fires at the sky — muzzle flash,
+  // beam visuals, and the launch vectors of the sim/mixed railgun/howitzer
+  // families all read this vector — while the client, applying the same
+  // rotation to the mesh, still draws the barrel horizontally. A tank's
+  // muzzle is never legitimately vertical (a mortar that wants arc gets it
+  // from the ballistic solver, not from the emit dir), so substitute the
+  // owner's facing. Scoped to the name-convention fallback: a scripted unit
+  // that deliberately aims a silo straight up is the script's business.
+  //
+  // NOTE: no Metalstorm rig is actually in this state. §C1 diagnosed the
+  // "(0,1,0) on wz_tank" report and found no shipped model carries a rest
+  // rotation on any piece, so every muzzle emits an untouched, horizontal
+  // -Z; the (0,1,0) reading came from Spring.GetUnitWeaponVectors returning
+  // `wantedDir` (init UpVector, set only once the weapon has a target) rather
+  // than `weaponDir`. This branch is therefore dead against current content
+  // and exists to catch a future barrel-up re-export before it reaches the
+  // player. The authoring rule it backstops is DESIGN-MODEL-BUILDING.md
+  // §16c-i; tests/test_muzzle_emit_dir.cpp asserts the branch stays dead.
+  if (haveFallback && math::fabsf(weaponDir.dot(UpVector)) > 0.99f)
+    weaponDir = owner->frontdir;
+
   // Pop the aim/muzzle origins clear of the ground in two cases:
   //   (a) underground popup weapons, where the script has not yet
   //       extruded the muzzle piece — the original Spring behaviour
@@ -567,6 +591,23 @@ void CWeapon::UpdateFire() {
       statisticalCombatManager.RequestRetreat(owner, gs->frameNum);
     if (posture == StatCombat::MORALE_PANIC)
       return; // hold fire; retreat order already issued above
+
+    // Hold-fire floor (PLAN-metalstorm-combat-fixes.md §A3). A shot whose
+    // computed hit chance is below the floor is not worth taking: it produced
+    // the max-range plinking stalemate where two lines volley forever at
+    // p(hit) ~ 0 and nobody dies. Placed HERE — before TryTarget, the resource
+    // spend, reloadStatus, EmitFireSound and EnqueueVolley — so a held volley
+    // emits no SoundEvent and no VolleyOutcome (the client therefore invents
+    // no tracer/dust/shockwave: sim and visuals stay one thing), spends
+    // nothing, consumes no reload, and keeps its target and aim. Fire resumes
+    // by itself the moment the chance climbs back — the target walks closer,
+    // the attacker halts (movePenalty x0.5 can be the whole difference), or it
+    // gains height. ComputeHitChance draws no gsRNG, so holding is
+    // synced-deterministic and replay/snapshot-exact.
+    if (StatCombat::HoldsFire(weaponDef->statTuning,
+                              StatCombat::ComputeHitChance(this,
+                                                           currentTargetPos)))
+      return;
   }
 
   if (fastQueryPointUpdate) {

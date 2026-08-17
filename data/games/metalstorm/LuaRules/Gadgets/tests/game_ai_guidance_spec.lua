@@ -278,6 +278,111 @@ describe("veto blacklist (§6.3)", function()
     end)
 end)
 
+--=============================================================================
+-- AI intent correlation — PLAN-ai-synced-write.md §2.5 (SG1 task 2).
+--
+-- The AI (a virtual player, playerID 8 here) pushes an `ai.intent` LuaMsg
+-- naming the planner goal, then immediately issues the directive it describes;
+-- both drain in push order in the same frame, so the charge path's
+-- RecordIntent can attach the goalId. The intent line stays AUTHORITATIVE —
+-- it exists only for a directive that actually charged — and the tag is the
+-- annotation, which is why every test below asserts on the published
+-- intent_0_goal_id rather than on the tag store.
+--
+-- RecordIntent is called directly here because the caller lives in a
+-- different gadget (game_authority_charge.lua's AllowDirectiveCreate) and the
+-- mock loads exactly one gadget file per world; that call site's own contract
+-- — only on `allowed`, with the raw playerID — is covered in
+-- game_authority_charge_spec.lua.
+--=============================================================================
+describe("AI intent correlation (PLAN-ai-synced-write §2.5)", function()
+    local function aiWorld()
+        local world, gadgetObj = newWorld()
+        world.setAIPlayer(8, 10)     -- co-commander on team 10
+        world.setAIPlayer(9, 20)     -- an AI on a DIFFERENT team
+        return world, gadgetObj
+    end
+
+    local function tag(gadgetObj, playerID, goalId)
+        gadgetObj:RecvLuaMsg(Wire.encode('ai.intent', { goalId = goalId, dt = 9, region = 'basin_a' }), playerID)
+    end
+
+    it("attaches the planner goalId to the directive that follows it", function()
+        local world, gadgetObj = aiWorld()
+        tag(gadgetObj, 8, 'def:basin_a')
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 8)
+        assert.are.equal('def:basin_a', world.trp(10, 'guidance_10_intent_0_goal_id'))
+        assert.are.equal('Assault', world.trp(10, 'guidance_10_intent_0_goal'))
+    end)
+
+    it("rejects a tag from a HUMAN — intent lines are not injectable", function()
+        local world, gadgetObj = aiWorld()
+        tag(gadgetObj, 1, 'def:basin_a')          -- player 1 is a human on team 10
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 1)
+        -- The line still exists (the directive charged); it just carries no
+        -- goalId, so the panel renders no Veto button for it.
+        assert.are.equal(1, world.trp(10, 'guidance_10_intent_count'))
+        assert.are.equal('', world.trp(10, 'guidance_10_intent_0_goal_id'))
+    end)
+
+    it("rejects a tag from an AI on another team", function()
+        local world, gadgetObj = aiWorld()
+        tag(gadgetObj, 9, 'def:basin_a')          -- AI 9 is on team 20
+        -- Team 10 asks FIRST, so the tag is still there to be stolen: it must
+        -- not annotate team 10's directive even though the charge path handed
+        -- RecordIntent this player. (Asking team 20 first would consume the
+        -- tag and make this assertion pass for the wrong reason.)
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 9)
+        assert.are.equal('', world.trp(10, 'guidance_10_intent_0_goal_id'))
+        -- And the tag survives the refusal, for its own team's directive.
+        GG.AIGuidance.RecordIntent(20, 9, 3, 25, 9)
+        assert.are.equal('def:basin_a', world.trp(20, 'guidance_20_intent_0_goal_id'))
+    end)
+
+    it("consumes the tag EXACTLY once — the second directive is unannotated", function()
+        local world, gadgetObj = aiWorld()
+        tag(gadgetObj, 8, 'def:basin_a')
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 8)
+        GG.AIGuidance.RecordIntent(10, 1, 4, 10, 8)   -- same frame, no new tag
+        -- Newest-first: slot 0 is the second directive.
+        assert.are.equal('',            world.trp(10, 'guidance_10_intent_0_goal_id'))
+        assert.are.equal('def:basin_a', world.trp(10, 'guidance_10_intent_1_goal_id'))
+    end)
+
+    it("expires the tag at frame end, so a dropped directive leaves no phantom", function()
+        local world, gadgetObj = aiWorld()
+        world.frame = 100
+        tag(gadgetObj, 8, 'def:basin_a')
+        -- The directive this tag described was vetoed by authority / dropped by
+        -- the E6 clamp: RecordIntent is never reached, so there is no line...
+        assert.are.equal(nil, world.trp(10, 'guidance_10_intent_count'))
+        gadgetObj:GameFrame(100)
+        assert.are.equal(1, GG.AIGuidance.PendingCount())   -- still live this frame
+        world.frame = 101
+        gadgetObj:GameFrame(101)
+        -- ...the tag is dropped rather than accumulating for an AI whose
+        -- directives keep getting refused...
+        assert.are.equal(0, GG.AIGuidance.PendingCount())
+        -- ...and it must not annotate the NEXT frame's directive, which
+        -- belongs to a different goal.
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 8)
+        assert.are.equal('', world.trp(10, 'guidance_10_intent_0_goal_id'))
+    end)
+
+    it("closes the veto loop: a published goal_id is a valid veto key", function()
+        local world, gadgetObj = aiWorld()
+        tag(gadgetObj, 8, 'def:basin_a')
+        GG.AIGuidance.RecordIntent(10, 9, 3, 25, 8)
+        local published = world.trp(10, 'guidance_10_intent_0_goal_id')
+        -- This is exactly what ai-command-panel.js sends back from data-goal.
+        -- Wire.num() used to coerce it to nil and the write silently refused,
+        -- so the loop could only close for a synthetic numeric goal id.
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.veto', { goalId = published }), 1)
+        assert.is_number(GG.AIGuidance.Get(10).veto['def:basin_a'])
+        assert.are.equal('def:basin_a', world.trp(10, 'guidance_10_veto_keys'))
+    end)
+end)
+
 describe("privacy (§9 engine ask I2)", function()
     it("publishes with no losAccess override (default private scope)", function()
         -- The mock's SetTeamRulesParam signature only takes (teamID, key,

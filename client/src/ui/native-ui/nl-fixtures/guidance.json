@@ -1,0 +1,174 @@
+{
+  "_comment": "Golden fixtures: the human→AI guidance store (PLAN-metalstorm-command-language.md §6.1). Each `expect.sends[0].wire` is the EXACT string handed to sendCommand as a LuaRulesMsg — the same codec game_ai_guidance.lua parses today (parley/wire.lua). Field order is sorted because guidance-wire.ts sorts it; the gadget's decoder is order-insensitive either way.",
+  "_values": "Every `value` here is checked against the GADGET's own accepted sets (STANCES / PAINTS / ROES in game_ai_guidance.lua), not against this plan's prose. nl-envelope.test.ts greps those Lua tables and fails if the mirror in nl-envelope.ts drifts.",
+
+  "fixtures": [
+    {
+      "name": "stance",
+      "utterance": "play aggressively",
+      "context": "basin",
+      "expected": {
+        "say": "Switching the AI to an aggressive stance.",
+        "actions": [{ "kind": "guidance", "guidance": { "op": "stance", "value": "aggressive" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=aggressive" }],
+        "saysLike": ["AI stance is now aggressive"]
+      }
+    },
+
+    {
+      "name": "stance, defensive",
+      "utterance": "hunker down, let them come to us",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "guidance", "guidance": { "op": "stance", "value": "defensive" } }]
+      },
+      "expect": { "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=defensive" }] }
+    },
+
+    {
+      "name": "paint a region as priority — names in, keys out",
+      "utterance": "prioritise Northgate",
+      "context": "basin",
+      "note": "The acceptance case for the live guidance proof. `regionRef` is the display name; the wire carries the region KEY the gadget stores under.",
+      "expected": {
+        "say": "Northgate is now a priority for the AI.",
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "paint", "value": "priority", "regionRef": "Northgate" }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=north_gate_ridge&value=priority" }],
+        "saysLike": ["north_gate_ridge is now priority"]
+      }
+    },
+
+    {
+      "name": "paint a region as forbidden",
+      "utterance": "stay out of Slag Forge",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "paint", "value": "forbidden", "regionRef": "Slag Forge" }
+        }]
+      },
+      "expect": { "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=slag_forge&value=forbidden" }] }
+    },
+
+    {
+      "name": "paint 'normal' clears the override",
+      "utterance": "never mind about Osprey Fen",
+      "context": "basin",
+      "note": "The gadget treats 'normal' as a delete, not a third state (setPaint clears the key). The echo says 'cleared' so the player isn't told a priority was set.",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "paint", "value": "normal", "regionRef": "Osprey Fen" }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=osprey_fen&value=normal" }],
+        "saysLike": ["cleared the AI's priority"]
+      }
+    },
+
+    {
+      "name": "lock a squad away from the AI",
+      "utterance": "hands off Chimera Squad",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "lock", "value": "on", "groupRef": "Chimera Squad" }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=1&locked=1" }],
+        "saysLike": ["locked"]
+      }
+    },
+
+    {
+      "name": "release a locked squad",
+      "utterance": "Basilisk Squad is yours again",
+      "context": "basin",
+      "note": "'off' becomes locked=0, which is what the gadget's `fields.locked == '1'` test reads as a release.",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "lock", "value": "off", "groupRef": "Basilisk Squad" }
+        }]
+      },
+      "expect": { "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=2&locked=0" }] }
+    },
+
+    {
+      "name": "delegate an objective to the AI",
+      "utterance": "you take Fallow Gate",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "delegate", "value": "on", "objectiveRef": "Hold Fallow Gate" }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.delegate&delegated=1&objectiveId=1" }],
+        "saysLike": ["delegated to the AI"]
+      }
+    },
+
+    {
+      "name": "fund the AI with a one-shot amount",
+      "utterance": "give the AI 250 authority",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "guidance", "guidance": { "op": "fund", "amount": 250 } }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.fund&amount=250" }],
+        "saysLike": ["transferred 250 authority"]
+      }
+    },
+
+    {
+      "name": "cap the AI's spend rate",
+      "utterance": "don't let the AI spend more than 200 a minute",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "guidance", "guidance": { "op": "fund", "rateCap": 200 } }]
+      },
+      "expect": { "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.fund&rateCap=200" }] }
+    },
+
+    {
+      "name": "rules of engagement",
+      "utterance": "only shoot what you can see",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "guidance", "guidance": { "op": "roe", "value": "observed_only" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.roe&value=observed_only" }],
+        "saysLike": ["rules of engagement are now observed only"]
+      }
+    },
+
+    {
+      "name": "veto an AI goal",
+      "utterance": "no, drop that plan",
+      "context": "basin",
+      "note": "The one ref in the envelope that is legitimately a number in string clothing — goal ids come from the AI's own proposals, not from the name index.",
+      "expected": {
+        "actions": [{ "kind": "guidance", "guidance": { "op": "veto", "goalRef": "99" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.veto&goalId=99" }],
+        "saysLike": ["vetoed goal 99"]
+      }
+    }
+  ]
+}

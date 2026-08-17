@@ -14,13 +14,20 @@
 -- It also ORIGINATES protection contracts and reacts to credible threats
 -- with a real (if simple) evacuation move.
 --
--- SCOPE NOTE (matches objectives/generator.lua's own precedent comment):
--- civilians/spawn.lua's population seeding is still a stub (no map-authored
--- district placement — a separate, pre-existing civilians backlog item, not
--- this plan's scope) — so estate.threatenedDistricts() below is a REAL,
--- ready mechanism that currently sees no population and therefore yields
--- nothing. It is wired into objectives/generator.lua's districtRule the
--- moment population data exists; nothing here needs to change when it does.
+-- SCOPE NOTE, UPDATED (town-planner T4): estate.threatenedDistricts() below
+-- now SEES A POPULATION. It has always grouped the registry by
+-- `info.districtId`, and until towns existed nothing in this game ever set one
+-- — so it was a complete mechanism yielding nothing, exactly as the previous
+-- version of this note recorded. A generated scenario's `civilians.units`
+-- entries now carry a `town`, game_scenario.lua threads it into
+-- GG.Civilians.Register as the district id, and objectives/generator.lua's
+-- districtRule is fed. Nothing in this function changed; it was already right.
+--
+-- THE VENUE. A parley addressed to the estate about a district is heard at
+-- that district's MEETING HALL — the `unique` lot every planned town has
+-- exactly one of (town_templates.LOT_ROLES), resolved to a live unit by
+-- civilians/town.lua. See `venueFor` below: destroy the hall and the estate
+-- has nowhere to negotiate about that town.
 local estate = {}
 
 local CREDIBLE_THREAT_STRENGTH = 50    -- enemy HP-sum within THREAT_RADIUS to count as "credible" (§3)
@@ -198,12 +205,75 @@ local function evacuateDistrict(district, threatX, threatZ)
 end
 
 -- ============================================================
+-- The venue: a parley with the estate is held at a meeting hall (§3, and
+-- model-integration §M2/§T4 "meeting hall is the parley venue").
+-- ============================================================
+
+--- Where would THIS proposal be heard, and is that place still standing?
+--- Returns (ok, regionKey). `regionKey` is nil for an estate-wide proposal.
+---
+--- The rule in one sentence: a proposal ABOUT a district is heard at that
+--- district's meeting hall, and a proposal about the estate at large is heard
+--- at any hall the estate still has. So burning a town's hall does not merely
+--- destroy a building — it ends the estate's ability to negotiate over that
+--- town, which is the one mechanic that makes a hall worth defending or worth
+--- taking out.
+---
+--- THE NO-TOWNS CASE IS EXPLICITLY UNCHANGED. Every scenario written before
+--- towns existed — and every map with no planned town in it — has no
+--- `GG.Towns` entries, and this returns true without consulting anything. The
+--- estate answers exactly as it did; the venue is a constraint towns add, not
+--- one imposed on a game that has none.
+local function venueFor(civ, proposal)
+    if not (GG.Towns and GG.Towns.Keys) then return true end
+    local keys = GG.Towns.Keys()
+    if #keys == 0 then return true end
+
+    local terms = proposal.terms or {}
+    local regionKey = terms.regionKey
+        or (terms.innerTerms and terms.innerTerms.regionKey)
+
+    if regionKey then
+        -- A region with no town in it is not a district the estate holds
+        -- meetings about; the estate-wide rules below apply to it, and a
+        -- proposal naming it is not refused for want of a hall that was never
+        -- there. Only a region that HAS a town is bound to that town's hall.
+        if not GG.Towns.Get(regionKey) then return true end
+        return GG.Towns.Venue(regionKey) ~= nil, regionKey
+    end
+
+    for _, key in ipairs(keys) do
+        if GG.Towns.Venue(key) then return true end
+    end
+    return false, nil
+end
+
+-- ============================================================
 -- Rule-table evaluation (§3): one small, explicit rule per kind. Every
 -- branch ends in a real GG.Parley.Respond call — no silent "does nothing".
 -- ============================================================
 function estate.respond(civ, proposal)
     local kind = proposal.kind
     local trust = GG.Parley.Trust(proposal.fromTeam, civ.gaiaTeam)
+
+    -- No venue, no parley. Checked ahead of every rule below rather than
+    -- folded into them: this is a question about whether the estate can meet
+    -- at all, not about whether it likes the terms, and a rule table where one
+    -- branch could quietly skip it is the shape of a bug.
+    --
+    -- A `reject` and not a silent drop, for the same reason every other branch
+    -- ends in a real Respond: game_parley.lua's proposal would otherwise sit
+    -- offered until its TTL expired, which reads to the proposer as the estate
+    -- ignoring them rather than as having nowhere to meet.
+    local ok, where = venueFor(civ, proposal)
+    if not ok then
+        Spring.Log("Civilians", LOG.INFO, string.format(
+            "estate refuses parley %s: no meeting hall standing%s",
+            tostring(proposal.id),
+            where and (" in " .. where) or " anywhere in the estate"))
+        GG.Parley.Respond(proposal.id, civ.gaiaTeam, nil, 'reject')
+        return
+    end
 
     if kind == 'ceasefire' then
         -- Civilians always want peace (§3 civilian estate rules).

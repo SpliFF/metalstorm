@@ -80,6 +80,20 @@ describe('formatDigestLine', () => {
             .toBe('6 earlier event(s) were not recorded');
     });
 
+    it('says the war\'s own rules moved, and never blames a side for it', () => {
+        // PLAN-def-reconciliation §2 step 6. The one line a returning player
+        // cannot possibly derive: why their veterans have a different health bar
+        // and where the objective they left running went. `team` is -1 by
+        // construction at the emitter — nobody did this — and the wording must
+        // not acquire a "who" even if a team ever rides along.
+        expect(formatDigestLine(ev({ kind: 'patch', subject: '11 units retuned, 6 units lost',
+                                     detail: 'summary', team: -1 }), SIDES, 0))
+            .toBe('A balance patch reached this war: 11 units retuned, 6 units lost');
+        expect(formatDigestLine(ev({ kind: 'patch', subject: 'bastion',
+                                     detail: 'removed', team: 0 }), SIDES, 0))
+            .toBe('bastion was withdrawn from the war');
+    });
+
     it('drops a kind it has no wording for', () => {
         // A lobby ahead of its client. Fewer lines, never `undefined`.
         expect(formatDigestLine(ev({ kind: 'weather' }), SIDES)).toBe('');

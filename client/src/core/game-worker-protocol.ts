@@ -13,8 +13,9 @@
  *
  * NOTE: this module is the source of truth the GW4-c1…c6 cut builds against; it
  * is intentionally landed first (spec-first) and has no runtime behaviour. The
- * worker (lua-widget-worker.ts, evolving into the game-processor worker) and the
- * manager (lua-widget-manager.ts) import these as they take on each role.
+ * worker (lua-widget-worker.ts, evolving into the game-processor worker) imports
+ * these as it takes on each role; the main-thread lua-widget-manager.ts it
+ * replaced was retired post-GW4.
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
@@ -71,6 +72,17 @@ export interface GpInitToWorker {
     gfx: Record<string, unknown>;
     /** Lifted from `localStorage` on main (standing-order-renderer SHOW_ALLIES). */
     standingOrderShowAllies: boolean;
+    /** PLAN-protocol-guard task 4 (dev harness): override the wire schema hash
+     *  this client claims — `''` sends no `schema_hash` at all. Absent in a
+     *  production build; the only way to drive the server's refusal from a
+     *  browser, since the build guards refuse a patched hash file. */
+    schemaHashOverride?: string;
+    /** PLAN-test-automation P7 gate 3: the page was booted with
+     *  `?allowClientEval=1`. The worker has no page URL, so main reads the
+     *  param and passes it. A DEV build accepts relayed evals with or without
+     *  it (`import.meta.env.DEV`); this is what opens the relay in a
+     *  production bundle. Absent ⇒ false. */
+    allowClientEval?: boolean;
     // NOTE: this used to carry a lobby room roster snapshot to seed
     // `liveState.players` before the LuaUI boot. It claimed lobby `player_id`
     // was the game-server playerID; it is not — it is the DB account id, and
@@ -377,6 +389,16 @@ export interface GpConsoleCommandToWorker {
     command: string;
 }
 
+/** PLAN-test-automation P7: main's answer to a `gp:clientEval` request. The
+ *  worker owns the Connection, so a `js`/`widgets`/`test` eval runs on main
+ *  and its result rides back through the worker to the server. */
+export interface GpClientEvalResultToWorker {
+    type: 'gp:clientEvalResult';
+    requestId: number;
+    success: boolean;
+    output: string;
+}
+
 /** Widget-issued unit order (none send this yet; carried for completeness of
  *  the CommandConnection surface). */
 export interface GpPlayerCommandToWorker {
@@ -432,6 +454,7 @@ export type GpMessageToWorker =
     | GpStandingOrderCreateToWorker
     | GpLuaRulesMsgToWorker
     | GpConsoleCommandToWorker
+    | GpClientEvalResultToWorker
     | GpPlayerCommandToWorker
     | GpSelectionStateToWorker
     | GpReplayControlToWorker
@@ -665,8 +688,9 @@ export type GpMessageToMain =
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
      *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect
-     *  on main. Both the game-processor worker and legacy LuaWidgetManager paths
-     *  post this shape; main.ts and lua-widget-manager.ts handle it identically. */
+     *  on main. The game-processor worker posts this shape; the legacy
+     *  LuaWidgetManager path that used to post it identically was retired
+     *  post-GW4. */
     | { type: 'storage:set'; key: string; value: string }
     /**
      * Drag-select rectangle for the main-thread overlay div (GW4-c5b-2). The
@@ -693,12 +717,23 @@ export type GpMessageToMain =
     | { type: 'gp:playerRoster'; players: RosterPlayerInfo[] }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
+    /** PLAN-protocol-guard task 4: the game server refused this bundle's wire
+     *  schema. Main owns the remedy because the loop guard is `sessionStorage`
+     *  and the give-up surface is DOM, neither of which exists in a worker.
+     *  `message` is the server's text and carries both hashes. */
+    | { type: 'gp:schemaMismatch'; message: string }
     /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an
      *  attacker the local team can't see → a red "attack" radar blip at the
      *  firing position (x,z world elmos) on the main-thread minimap. */
     | { type: 'gp:counterbatteryPing'; x: number; z: number }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** PLAN-test-automation P7: a relayed eval whose target is not `worker`
+     *  (`js` | `widgets` | `test`) has to run on main. Main answers with
+     *  `gp:clientEvalResult`; the worker forwards it to the server. Main must
+     *  ALWAYS answer — the worker holds an 8s timer and the server a 10s
+     *  waiter behind it. */
+    | { type: 'gp:clientEval'; requestId: number; target: string; code: string }
     /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
     | { type: 'gp:pong'; id: number }
     /**

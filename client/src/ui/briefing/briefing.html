@@ -1,0 +1,25 @@
+<!--
+  Scenario briefing splash — static chrome only.
+
+  Every content node below is filled programmatically via textContent
+  (briefing.ts). NOTHING here goes through renderTemplate: briefing prose can
+  originate in the generated_scenarios table, and ui.ts's `{{name}}`
+  substitution does no HTML escaping. Authored text is data, never markup.
+-->
+<div class="briefing-panel" role="dialog" aria-labelledby="briefing-title">
+    <div class="briefing-banner"><img id="briefing-image" alt=""></div>
+    <div class="briefing-body">
+        <h1 id="briefing-title"></h1>
+        <h2 id="briefing-subtitle"></h2>
+        <div id="briefing-story"></div>
+        <div id="briefing-tips-wrap">
+            <h3>Field advice</h3>
+            <ul id="briefing-tips"></ul>
+        </div>
+        <div id="briefing-partime"></div>
+    </div>
+    <button id="briefing-begin-btn" disabled>
+        <span class="briefing-spinner" aria-hidden="true"></span>
+        <span id="briefing-begin-label">Preparing battlefield…</span>
+    </button>
+</div>

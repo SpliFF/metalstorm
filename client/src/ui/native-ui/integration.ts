@@ -7,6 +7,7 @@
 
 import type { Connection } from '../../core/connection.js';
 import { uiStore } from './ui-store.js';
+import { aiGuidanceToWire } from './guidance-wire.js';
 
 /**
  * The slice of `Connection` the widget sendCommand bridge needs. The real
@@ -284,16 +285,25 @@ export function createSendCommand(
                     break;
 
                 case 'AIGuidance':
-                    // Distinct from the ai-command panel's `guidance.*` verbs,
-                    // which DO have a wire target now (see WIRE_VERB_PREFIXES).
-                    // This is the composer's subject="the AI" path, whose
-                    // payload is a free-form {intent, verb, target, priority} —
-                    // it maps onto none of game_ai_guidance.lua's seven
-                    // stance/paint/lock/delegate/fund/roe/veto commands, and
-                    // still wants PLAN-metalstorm-interaction.md §6's guidance
-                    // store. Logged rather than silently dropped so the gap
-                    // stays visible instead of masquerading as a successful send.
-                    console.warn('[native-ui] AIGuidance has no guidance-store target yet (interaction §6 not implemented):', cmd.payload);
+                    // A subject="the AI" commit now REACHES the store. It
+                    // always could have: game_ai_guidance.lua has been live
+                    // (enabled=true) with a RecvLuaMsg listener since the
+                    // interaction lane landed — this case was warning "no
+                    // guidance-store target yet" and dropping the payload on
+                    // the floor, which is how an order the composer reported
+                    // as committed never touched the sim.
+                    //
+                    // `aiGuidanceToWire` (guidance-wire.ts) owns the mapping
+                    // policy: a region target becomes a `guidance.paint`, a
+                    // coordinate/no target becomes a `guidance.stance` from
+                    // the verb. This dispatcher stays a dispatcher — it holds
+                    // no policy of its own — and the mapping is TOTAL, so
+                    // there is no drop path left to warn about.
+                    if (cmd.payload) {
+                        connection.sendLuaRulesMsg(aiGuidanceToWire(cmd.payload).wire);
+                    } else {
+                        console.warn('[native-ui] AIGuidance command carries no payload:', cmd);
+                    }
                     break;
 
                 case 'OrgGroup':

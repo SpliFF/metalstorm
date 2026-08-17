@@ -78,6 +78,38 @@ return {
         { faction = 'union',   team = 1 },
     },
 
+    -- Briefing (S2): lobby/client DISPLAY ONLY. ScenarioDiscovery parses it
+    -- for the loading splash; game_scenario.lua ignores the key entirely.
+    -- Like everything else in this file it must stay inside the pure table
+    -- literal — no concatenation, no function calls — or the whole scenario
+    -- silently vanishes from the lobby's list (see the FILE-SCOPE NOTE above).
+    -- The one easy way to break it: an apostrophe inside a single-quoted tip.
+    -- Escape it (\') or use a [[long string]].
+    -- Edits here are invisible until the lobby restarts or
+    -- POST /api/admin/scenarios/resync runs — the lobby snapshots scenarios
+    -- at startup.
+    briefing = {
+        title    = 'The Standoff',
+        subtitle = 'Scorched Crossing',
+        story    = [[The armistice died at dawn. Compact landing barges ground ashore at Amber Row while Union drop-lifters flared down over Iron Bend — two armies, diagonal across a scorched river country, each sent to take the same prize.
+
+Between them lies Raven Basin: the dead-centre crossing every supply road on this map runs through. Whoever holds the basin holds the war. The towns of the crossing — Marrow Watch on the far diagonal, Storm Sound and Ash Verge on the flanks — declared for nobody. They will trade with whoever controls their streets, and they will remember who let their people die.
+
+Your column is already rolling. The enemy's is too. You will meet in the middle.]],
+        tips     = {
+            'Both armies open with standing FIGHT orders converging on Raven Basin — the battle starts without you, but it will not be won without you.',
+            'Victory is holding Raven Basin for 3 unbroken minutes (earliest decision ~2 minutes in). A contested basin resets the hold clock: winning means holding the middle against the other army, not touching it first.',
+            'Three neutral settlements pay control rewards: Marrow Watch sits equally far from both armies; Storm Sound is your flank if you land in the south-west, Ash Verge if you land in the north-east.',
+            'Each side has a protect objective on its own flank town\'s civilians — it expires at the 10-minute mark, and a raid on the enemy\'s town denies them the reward.',
+            'Your engineers and radar mast start at home, not in the push. Put them to work: radar coverage of the basin approaches decides who sees the fight first.',
+            'Artillery outranges tanks. Keep the ms_artillery_s2 batteries behind your tank line and the basin approaches become killing ground.',
+        },
+        -- image: none yet — the splash falls back to /api/maps/thumb/
+        -- (scorched_crossing_v2.4's processed thumbnail). Add
+        -- scenarios/img/crossing_standoff.jpg (3:1 banner) when art exists.
+        parTimeSec = 900,
+    },
+
     -- No `ai` block, deliberately — see the team-seating note at the top of
     -- this file. An NPC faction here would land on the Gaia team index and
     -- turn the neutral settlements into a third hostile army the lobby has

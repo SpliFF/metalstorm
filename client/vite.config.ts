@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import { staticDataPlugin } from './vite-static-data-plugin.js';
+// @ts-expect-error — plain .mjs, deliberately untyped: it is shared with the
+// `prebuild` npm hook, which cannot consume TypeScript.
+import { protocolGuardPlugin } from './scripts/check-protocol-schema.mjs';
 
 // The Babylon Inspector (used only by the model-inspector debug page,
 // babylon-inspector.html) lazily `import()`s optional editor packages — the
@@ -61,6 +64,10 @@ const REPO_ROOT = resolve(__dirname, '..');
 
 export default defineConfig({
     plugins: [
+        // Wire-schema drift guard (PLAN-protocol-guard task 2). Runs in
+        // buildStart, so it covers `vite dev` too — mprocs launches vite
+        // directly, where npm's `prebuild` hook never fires.
+        protocolGuardPlugin({ repoRoot: REPO_ROOT }),
         stubBabylonEditors(),
         staticDataPlugin({ repoRoot: REPO_ROOT }),
     ],
@@ -121,6 +128,32 @@ export default defineConfig({
     },
     envDir: resolve(__dirname, '..'),
     test: {
-        include: ['src/**/*.test.ts'],
+        // Two projects, so the ONE gate command (`npx vitest run` from client/)
+        // covers both trees. The native-game JS under data/games/*/client is a
+        // separate ESM module tree with no build step and its own vitest config
+        // — it used to be reachable only by naming that config by hand, which
+        // is how PLAN-metalstorm-squad-performance.md §14 S2's 13 governor tests
+        // sat red and unnoticed for a week after a merge dropped the code they
+        // covered. A suite in no gate is not a gate.
+        projects: [
+            {
+                extends: true,
+                test: {
+                    name: 'client',
+                    // `wire/` is the scripted wire client (PLAN-replay §7.11
+                    // T2-a-1). Its off-QUIC half belongs in this gate for the
+                    // reason written above: a suite in no gate is not a gate.
+                    include: ['src/**/*.test.ts', 'wire/**/*.test.ts'],
+                },
+            },
+            {
+                test: {
+                    name: 'metalstorm-game',
+                    root: resolve(__dirname, '../data/games/metalstorm/client'),
+                    include: ['**/*.test.js'],
+                    environment: 'node',
+                },
+            },
+        ],
     },
 });

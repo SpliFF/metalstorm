@@ -101,6 +101,12 @@ function escort.participants(o, ctx)
     return ctx.unitsInArea(cx, cz, PARTICIPATION_RADIUS)
 end
 
+--- The units this objective is defined in terms of — see kill.lua's
+--- unitRefs for why the type module answers this (task 4's DefsReconciled).
+function escort.unitRefs(o)
+    return o.params.payloadUnitIDs
+end
+
 function escort.describe(o)
     return 'Escort convoy to destination'
 end

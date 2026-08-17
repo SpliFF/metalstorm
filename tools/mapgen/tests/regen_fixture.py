@@ -17,13 +17,13 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 import scenariogen as sg              # noqa: E402
-from test_scenariogen import flat_map  # noqa: E402
+from test_scenariogen import wide_flat_map  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 OUT = os.path.join(REPO, "tests", "fixtures", "generated_scenario.lua")
 
 with tempfile.TemporaryDirectory() as t:
-    lua, meta = sg.generate(flat_map(t, "synth_flat"), seed=11,
+    lua, meta = sg.generate(wide_flat_map(t, "synth_wide"), seed=11,
                             game_dir=os.path.join(REPO, "data", "games", "metalstorm"))
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, "w", encoding="utf-8") as f:

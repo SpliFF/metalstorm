@@ -14,7 +14,9 @@
 
 #include "Server/AI/AIScriptContext.h"
 #include "Server/AI/AICommandQueue.h"
+#include "Server/AI/AICommandCodec.h"
 #include "Server/AI/AIStateSnapshot.h"
+#include "Server/SyncedInputJournal.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <filesystem>
@@ -225,8 +227,10 @@ TEST_CASE("AI VM: require rejects path traversal") {
 TEST_CASE("AI VM: strategos multi-file plugin boots via the loader") {
     // The real strategos AI (data/games/metalstorm/ai/strategos) is a
     // multi-file layout whose main.lua require()s config/picture/slate/
-    // planner/actuators/roles + profiles.default. Init() succeeding proves the
-    // loader resolves that whole graph — the AI0-loader acceptance test.
+    // planner/actuators/roles + profiles.default, and (I1/SG1 task 3)
+    // actuators requires the `wire` codec copy. Init() succeeding proves the
+    // loader resolves that whole graph — the AI0-loader acceptance test, and
+    // the only place the sandboxed require is exercised against the real tree.
     const fs::path plugin = fs::path(SPRING_SOURCE_DIR) /
         "data/games/metalstorm/ai/strategos";
     if (!fs::exists(plugin / "main.lua")) {
@@ -554,4 +558,203 @@ TEST_CASE("AI2: real strategos VM issues a directive into the command queue") {
     CHECK(issued->requestedStrength > 0u);   // demand cap threaded from the package
 
     fs::remove_all(mapDir); fs::remove_all(defDir);
+}
+
+// ─────────────── I1/SG1: AI.sendMessage, the AI→synced-Lua write ───────────
+//
+// PLAN-ai-synced-write task 1. The verb pushes an opaque payload as
+// AICommandKind::LuaMsg; the drain (StateStreamer::ApplyAICommands) hands it to
+// `luaRules->RecvLuaMsg(text, playerId)` — the SAME gadget entry point a human's
+// LuaRulesMsg lands on. What is testable here is everything up to that hand-off
+// plus the journal codec; the delivery itself needs a GameServerContext (the
+// streamer is not linked into spring-tests), so it is the SG1 headless smoke's
+// job — task 5(a) in the plan, and this comment is the pointer to it.
+
+TEST_CASE("I1/SG1: AI.sendMessage queues a LuaMsg attributed to the AI's player") {
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_sendmsg_plugin";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        std::ofstream m(dir / "main.lua");
+        m << "function onUpdate(frame)\n"
+             "  local ok = AI.sendMessage('cmd=ai.intent&goalId=17')\n"
+             "  AI.issueCommand(1, 42, ok and 1 or 0)\n"   // report the return value
+             "end\n";
+    }
+    const std::string code = ReadFile(dir / "main.lua");
+
+    AIScriptContext ctx("ai_sendmsg", /*teamId*/ 2, /*allyTeamId*/ 2, dir.string(),
+                        /*mapDataDir*/ "", /*defExportDir*/ "", /*playerId*/ 5);
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.frame = 1;
+    snap.teamId = 2;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 2);
+    // Push order is the correlation guarantee the intent/RecordIntent pairing
+    // rests on (§2.5): the message precedes the command it annotates.
+    CHECK(cmds[0].kind == AICommandKind::LuaMsg);
+    CHECK(cmds[0].text == "cmd=ai.intent&goalId=17");
+    CHECK(cmds[0].teamId == 2);
+    CHECK(cmds[0].playerId == 5);      // AI3 identity, what RecvLuaMsg attributes to
+    CHECK(cmds[1].kind == AICommandKind::UnitCommand);
+    REQUIRE(cmds[1].numParams == 1);
+    CHECK(cmds[1].params[0] == doctest::Approx(1));   // sendMessage returned true
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("I1/SG1: an oversize message is refused at push, and does not raise") {
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_sendmsg_big";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        std::ofstream m(dir / "main.lua");
+        // 2049 bytes — one past the clamp. A throttled planner must degrade,
+        // not crash its tick, so the verb returns false rather than erroring.
+        m << "function onUpdate(frame)\n"
+             "  local ok = AI.sendMessage(string.rep('x', 2049))\n"
+             "  local ok2 = AI.sendMessage(string.rep('y', 2048))\n"
+             "  AI.issueCommand(1, 42, ok and 1 or 0, ok2 and 1 or 0)\n"
+             "end\n";
+    }
+    const std::string code = ReadFile(dir / "main.lua");
+
+    AIScriptContext ctx("ai_sendmsg_big", 0, 0, dir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap; snap.teamId = 0;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+    CHECK(ctx.IsRunning());            // the tick survived the rejection
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 2);         // the rejected one never reached the queue
+    CHECK(cmds[0].kind == AICommandKind::LuaMsg);
+    CHECK(cmds[0].text.size() == kAILuaMsgMaxBytes);   // exactly at the cap passes
+    REQUIRE(cmds[1].numParams == 2);
+    CHECK(cmds[1].params[0] == doctest::Approx(0));    // 2049 → false
+    CHECK(cmds[1].params[1] == doctest::Approx(1));    // 2048 → true
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("I1/SG1: the drain clamp passes 16 LuaMsg per AI player per batch") {
+    // The E6 structural backstop the drain applies (StateStreamer::ApplyAICommands).
+    // It is per PLAYER, not per batch: two AIs in one batch each get their own
+    // 16, which is what stops one defeated planner from starving the other.
+    AILuaMsgDrainBudget budget;
+    int delivered = 0, dropped = 0;
+    for (int i = 0; i < 17; ++i)
+        (budget.TryConsume(/*playerId*/ 5) ? delivered : dropped)++;
+    CHECK(delivered == kAILuaMsgPerDrain);
+    CHECK(dropped == 1);
+
+    CHECK(budget.TryConsume(/*playerId*/ 6));    // a second AI is unaffected
+    // ...and an unattributed AI (-1) is its own bucket, not a shared one.
+    CHECK(budget.TryConsume(-1));
+}
+
+TEST_CASE("I1/SG1: the LuaMsg kind and its payload survive the journal codec") {
+    // Journal chokepoint #4: the drain records EVERY command before applying
+    // any of it, so a replay re-feeds the batch through the same
+    // ApplyAICommands. If the kind byte or the text did not round-trip, a
+    // replayed AI message would apply as a different verb — silently.
+    AICommand c;
+    c.kind     = AICommandKind::LuaMsg;
+    c.teamId   = 3;
+    c.playerId = 9;
+    c.text     = std::string("cmd=ai.intent&goalId=42&dt=7&region=north");
+
+    const std::vector<uint8_t> blob = SerializeAICommand(c);
+    REQUIRE(!blob.empty());
+    CHECK(blob[0] == static_cast<uint8_t>(AICommandKind::LuaMsg));   // kind byte
+
+    AICommand back;
+    REQUIRE(DeserializeAICommand(blob, back));
+    CHECK(back.kind == AICommandKind::LuaMsg);
+    CHECK(back.teamId == 3);
+    CHECK(back.playerId == 9);
+    CHECK(back.text == c.text);
+
+    // An embedded NUL survives too — the payload is bytes, not a C string, and
+    // wire.lua is free to carry any of them.
+    c.text.assign("a\0b", 3);
+    AICommand nulBack;
+    REQUIRE(DeserializeAICommand(SerializeAICommand(c), nulBack));
+    CHECK(nulBack.text.size() == 3);
+    CHECK(nulBack.text == std::string("a\0b", 3));
+
+    // A truncated record is refused rather than half-applied.
+    std::vector<uint8_t> truncated = SerializeAICommand(c);
+    truncated.resize(truncated.size() - 2);
+    AICommand ignored;
+    CHECK_FALSE(DeserializeAICommand(truncated, ignored));
+}
+
+// ────────────────────── SG1 task 5(b): push order is observable ─────────────
+// The correlation the whole veto loop rests on is an ORDERING: `ai.intent`
+// must be pushed immediately BEFORE the directive it annotates, because
+// RecordIntent consumes a tag only if it was stamped in the same frame
+// (game_ai_guidance.lua) — a tag that arrives after its directive annotates
+// nothing, and one pushed for a skipped directive is stolen by the next.
+// actuators.lua's `_issueTagged` is what guarantees it; this is the assertion
+// that the guarantee is *checkable on a real run*, which it was not: every AI
+// record went into the journal with subKind 0, so `/api/journal`'s rows —
+// the only view of a live server's cause stream — could not tell a LuaMsg
+// from the directive beside it.
+TEST_CASE("SG1 5(b): the journal names each AI verb, so intent-before-directive is inspectable") {
+    using namespace syncedinput;
+    MemoryJournal j;
+    Recorder rec;
+    rec.SetJournal(&j);
+    rec.BeginTick(600);
+    rec.SetPhase(TickPhase::Stream);
+
+    // One tagged directive, recorded exactly as StateStreamer's drain does it.
+    auto record = [&](const AICommand& c) {
+        const std::vector<uint8_t> blob = SerializeAICommand(c);
+        rec.RecordAICommand(c.playerId, static_cast<uint8_t>(c.kind),
+                            blob.data(), blob.size());
+    };
+    AICommand tag;
+    tag.kind = AICommandKind::LuaMsg;
+    tag.playerId = 4;
+    tag.teamId = 0;
+    tag.text = "cmd=ai.intent&goalId=obj:1&dt=9&region=meridian_basin";
+    AICommand directive;
+    directive.kind = AICommandKind::IssueDirective;
+    directive.playerId = 4;
+    directive.teamId = 0;
+    directive.directiveType = 9;
+    record(tag);
+    record(directive);
+
+    REQUIRE(j.Records().size() == 2);
+    // Push order, and each record naming its own verb.
+    CHECK(j.Records()[0].kind == InputKind::AICommand);
+    CHECK(j.Records()[0].subKind == static_cast<uint8_t>(AICommandKind::LuaMsg));
+    CHECK(j.Records()[1].subKind == static_cast<uint8_t>(AICommandKind::IssueDirective));
+    CHECK(j.Records()[0].seq < j.Records()[1].seq);
+    CHECK(j.Records()[0].frame == 600);
+    CHECK(j.Records()[1].frame == 600);
+    CHECK(j.Records()[0].playerId == 4);
+
+    // The stamped kind and the payload's kind byte are two copies of one fact.
+    // This is the check that keeps them from drifting: the caller passes the
+    // typed enum, the codec writes byte 0, and nothing else ties them.
+    for (const auto& r : j.Records())
+        CHECK(r.payload[0] == r.subKind);
+
+    // And the name is what an operator actually reads on /api/journal.
+    CHECK(std::string(AICommandKindName(
+              static_cast<AICommandKind>(j.Records()[0].subKind))) == "lua-msg");
+    CHECK(std::string(AICommandKindName(
+              static_cast<AICommandKind>(j.Records()[1].subKind))) == "issue-directive");
 }

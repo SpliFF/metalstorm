@@ -7,7 +7,7 @@
     { "aiId": "strategos", "team": 8, "startPos": 2 }
   ],
   "modOptions": {
-    "scenario": "meridian_basin",
+    "scenario": "meridian_basin_soak",
     "objective_density": "normal",
     "build_time_scale": "1.0"
   },

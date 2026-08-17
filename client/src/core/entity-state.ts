@@ -53,6 +53,23 @@ export const FIELD_BUILD_PROGRESS = 1 << 10;
 export const FIELD_PITCH      = 1 << 11;
 export const FIELD_ROLL       = 1 << 12;
 
+/**
+ * Bit 15 is a FLAG, not a field — it carries no per-entity array.
+ *
+ * The sim has recycled one or more unit ids since the last flagged message
+ * (PLAN-long-uptime S5 task 6), so an id this client is still holding may now
+ * name a different unit. Everything the client derives from a unit id and
+ * keeps across snapshots — selection, squad membership, clip/aim poses,
+ * PREVLOS ghosts — is an association with the *old* occupant and has to go.
+ *
+ * The server flags every message from the recycle up to and including the
+ * next full snapshot (the lane is unreliable and newest-wins, so one flagged
+ * message is not a delivery), and the client acts on the first FULL snapshot
+ * it sees the flag on — that snapshot repopulates the world in the same step,
+ * so the flush leaves no gap.
+ */
+export const FLAG_ID_RECYCLED = 1 << 15;
+
 /** Parsed entity state snapshot — typed arrays are zero-copy views into the buffer. */
 export interface EntityStateSnapshot {
     /** Sim frame this snapshot was built on (header `base_frame`). The

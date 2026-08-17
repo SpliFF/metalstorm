@@ -412,4 +412,53 @@ describe('parseLandmarksFromRulesParams', () => {
         expect(byId.get('Central Tower')?.name).toBe('Central Tower');
         expect(byId.get('Eastern Bridge')?.x).toBe(3000);
     });
+
+    // Nothing publishes landmark_* yet — that is the scenario-gen lane's job.
+    // These pin the consumer side of the contract so the publisher's arrival is
+    // a data change, not a code change (see the parser's doc comment).
+    it('is silent when there is no publisher at all', () => {
+        expect(parseLandmarksFromRulesParams(new Map())).toEqual([]);
+        expect(parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['region_north_name', 'Northgate'],
+            ['objective_count', 2],
+        ]))).toEqual([]);
+    });
+
+    it('drops a landmark with only one coordinate — a place you cannot point at', () => {
+        expect(parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['landmark_grain_silo_x', 1200],
+        ]))).toEqual([]);
+        expect(parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['landmark_grain_silo_name', 'Grain Silo'],
+        ]))).toEqual([]);
+    });
+
+    it('de-slugs the key when the publisher gives no _name', () => {
+        const [landmark] = parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['landmark_grain_silo_x', 1200],
+            ['landmark_grain_silo_z', 1800],
+        ]));
+        expect(landmark.id).toBe('grain_silo');
+        expect(landmark.name).toBe('Grain Silo');   // not "grain_silo" — a slug is not speakable
+    });
+
+    it('lets _name win over the key, mirroring region_<key>_name', () => {
+        const [landmark] = parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['landmark_grain_silo_x', 1200],
+            ['landmark_grain_silo_z', 1800],
+            ['landmark_grain_silo_name', 'The Old Grain Silo'],
+        ]));
+        expect(landmark.id).toBe('grain_silo');
+        expect(landmark.name).toBe('The Old Grain Silo');
+    });
+
+    it('keeps underscores in the key out of the field suffix', () => {
+        // `landmark_(.+)_(name|x|z)` is greedy on the id for exactly this case.
+        const [landmark] = parseLandmarksFromRulesParams(new Map<string, number | string>([
+            ['landmark_west_scarp_relay_x', 10],
+            ['landmark_west_scarp_relay_z', 20],
+        ]));
+        expect(landmark.id).toBe('west_scarp_relay');
+        expect(landmark.name).toBe('West Scarp Relay');
+    });
 });

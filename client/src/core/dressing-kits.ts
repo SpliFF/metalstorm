@@ -60,30 +60,114 @@ export interface DressingKit {
 }
 
 /**
- * §M5 PROTOTYPE SCOPE — one kit, one hull.
+ * Mount tables for all four faction kits × {fable_tank, fable_heavy}.
  *
- * `ms_dress_order` on `fable_tank`, covering the three kit pieces that are
- * cleanly mountable as authored: `staff` (+ its `flag` child, which carries
- * the kit's `idle` clip), `lightbar`, `stowage`. Offsets are verbatim from
- * `art/dressing-kits/ms_dress_order-mounts.txt`.
+ * Transcribed from `data/games/metalstorm/art/dressing-kits/ms_dress_*-mounts.txt`.
+ * Offsets are verbatim hull-local (x, y, z) in metres, Spring frame (-Z forward,
+ * +Y up). The kit glTFs have display fan-out root translations on X that are
+ * discarded — each piece is re-rooted to its mount point.
  *
- * `applique` is deliberately absent: that single mesh bakes all THREE armour
- * plates (side / glacis / ID panel) into one piece spanning x -2.55..2.55, and
- * the mount table asks for them at three different hull locations with
- * different rotations. Mounting it whole reads as a floating fence. Splitting
- * it is a forge-side change, not a client one — see the §M5 decision note.
+ * NOTE: `order` kit's `applique` remains absent until the forge splits that mesh
+ * (currently bakes all 3 plates into one piece spanning x -2.55..2.55; the mount
+ * table wants them at three different locations with different rotations).
  */
 const KITS: Readonly<Record<string, DressingKit>> = {
     order: {
         model: 'ms_dress_order',
         mounts: {
             fable_tank: [
-                // Rear-deck corner; pennant tip reaches +0.98 local X.
                 { piece: 'staff', parent: 'body', offset: [-1.45, 1.86, 3.90] },
-                // Hull deck behind the turret, lenses facing -Z.
                 { piece: 'lightbar', parent: 'body', offset: [0, 1.86, 2.05] },
-                // Engine deck; clears the exhausts at z 3.92.
                 { piece: 'stowage', parent: 'body', offset: [0, 1.86, 3.20] },
+                // applique deferred: needs forge split (side/glacis/ID plates)
+            ],
+            fable_heavy: [
+                { piece: 'staff', parent: 'body', offset: [-2.00, 3.02, 7.60] },
+                { piece: 'lightbar', parent: 'body', offset: [0, 3.02, 3.40] },
+                { piece: 'stowage', parent: 'body', offset: [0, 3.02, 5.60] },
+            ],
+        },
+    },
+    dynasty: {
+        model: 'ms_dress_dynasty',
+        mounts: {
+            fable_tank: [
+                { piece: 'banner', parent: 'body', offset: [0, 1.86, 3.90] },
+                { piece: 'rail_l', parent: 'body', offset: [-1.55, 1.86, 0.30] },
+                { piece: 'rail_r', parent: 'body', offset: [1.55, 1.86, 0.30] },
+                // crest yaw 180° so face shows forward (back plane mounts on hull nose)
+                { piece: 'crest', parent: 'body', offset: [0, 0.95, -4.42], yaw: 180 },
+                { piece: 'lantern_l', parent: 'body', offset: [-1.45, 1.86, -3.60] },
+                { piece: 'lantern_r', parent: 'body', offset: [1.45, 1.86, -3.60] },
+                { piece: 'cowl_l', parent: 'body', offset: [-1.15, 1.86, 3.40] },
+                { piece: 'cowl_r', parent: 'body', offset: [1.15, 1.86, 3.40] },
+            ],
+            fable_heavy: [
+                { piece: 'banner', parent: 'body', offset: [0, 3.02, 7.40] },
+                { piece: 'rail_l', parent: 'body', offset: [-2.10, 3.02, 0.50] },
+                { piece: 'rail_r', parent: 'body', offset: [2.10, 3.02, 0.50] },
+                // Second rail pair for the long heavy hull (16.2 m)
+                { piece: 'rail_l', parent: 'body', offset: [-2.10, 3.02, -4.20] },
+                { piece: 'rail_r', parent: 'body', offset: [2.10, 3.02, 4.20] },
+                { piece: 'crest', parent: 'body', offset: [0, 1.60, -8.12], yaw: 180 },
+                { piece: 'lantern_l', parent: 'body', offset: [-2.00, 3.02, -6.90] },
+                { piece: 'lantern_r', parent: 'body', offset: [2.00, 3.02, -6.90] },
+                { piece: 'cowl_l', parent: 'body', offset: [-1.55, 3.02, 5.35] },
+                { piece: 'cowl_r', parent: 'body', offset: [1.55, 3.02, 5.35] },
+            ],
+        },
+    },
+    resistance: {
+        model: 'ms_dress_resistance',
+        mounts: {
+            fable_tank: [
+                { piece: 'net', parent: 'body', offset: [0, 1.86, 1.00] },
+                { piece: 'stow', parent: 'body', offset: [0.90, 1.86, 3.10] },
+                { piece: 'rack', parent: 'body', offset: [-1.20, 1.86, 3.60] },
+                { piece: 'flag', parent: 'body', offset: [1.45, 1.86, 4.05] },
+                // smoke is turret-local; deferred until turret-parenting supported
+                // { piece: 'smoke', parent: 'turret', offset: [0.95, 0.55, -0.90], yaw: 25 },
+            ],
+            fable_heavy: [
+                { piece: 'net', parent: 'body', offset: [0, 3.02, -0.60] },
+                { piece: 'stow', parent: 'body', offset: [1.40, 3.02, 5.60] },
+                { piece: 'rack', parent: 'body', offset: [-1.70, 3.02, 6.40] },
+                { piece: 'flag', parent: 'body', offset: [2.00, 3.02, 7.60] },
+                // { piece: 'smoke', parent: 'turret', offset: [1.60, 0.70, -1.60], yaw: 25 },
+            ],
+        },
+    },
+    anarchic: {
+        model: 'ms_dress_anarchic',
+        mounts: {
+            fable_tank: [
+                // Side skirts: yaw ±90° (parallel to hull sides)
+                { piece: 'plates', parent: 'body', offset: [-1.87, 0.10, 0], yaw: -90 },
+                { piece: 'plates', parent: 'body', offset: [1.87, 0.10, 0], yaw: 90 },
+                // Rear skirt: no yaw
+                { piece: 'plates', parent: 'body', offset: [0, 0.10, 4.46] },
+                { piece: 'prow', parent: 'body', offset: [0, 0.15, -3.40] },
+                { piece: 'trophies', parent: 'body', offset: [0, 1.86, 2.6] },
+                { piece: 'totem', parent: 'body', offset: [-0.9, 1.86, 3.4] },
+                { piece: 'totem', parent: 'body', offset: [0.9, 1.86, 3.4] },
+                { piece: 'streamer', parent: 'body', offset: [-1.5, 1.86, 3.9] },
+                { piece: 'streamer', parent: 'body', offset: [1.5, 1.86, 3.9] },
+            ],
+            fable_heavy: [
+                // Four side skirts (16.2 m hull needs fore/aft pairs)
+                { piece: 'plates', parent: 'body', offset: [-2.47, 0.30, -2.0], yaw: -90 },
+                { piece: 'plates', parent: 'body', offset: [-2.47, 0.30, 1.9], yaw: -90 },
+                { piece: 'plates', parent: 'body', offset: [2.47, 0.30, -2.0], yaw: 90 },
+                { piece: 'plates', parent: 'body', offset: [2.47, 0.30, 1.9], yaw: 90 },
+                // Rear skirt
+                { piece: 'plates', parent: 'body', offset: [0, 0.30, 8.16] },
+                { piece: 'prow', parent: 'body', offset: [0, 0.30, -6.95], scale: 1.30 },
+                { piece: 'trophies', parent: 'body', offset: [0, 3.02, 5.5] },
+                { piece: 'totem', parent: 'body', offset: [-1.3, 3.02, 6.8] },
+                { piece: 'totem', parent: 'body', offset: [1.3, 3.02, 6.8] },
+                { piece: 'brazier', parent: 'body', offset: [0, 3.02, 7.2] },
+                { piece: 'streamer', parent: 'body', offset: [-2.1, 3.02, 7.6] },
+                { piece: 'streamer', parent: 'body', offset: [2.1, 3.02, 7.6] },
             ],
         },
     },

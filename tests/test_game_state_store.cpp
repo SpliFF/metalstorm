@@ -18,6 +18,7 @@
 
 #include <sqlite3.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -224,6 +225,129 @@ TEST_CASE("E1: a blob from another engine or map is refused, never decoded") {
     // A mismatch is policy, not damage — the E2 ladder must not step past it.
     CHECK_FALSE(IsCorruption(DecodeStatus::EngineMismatch));
     CHECK_FALSE(IsCorruption(DecodeStatus::MapMismatch));
+}
+
+// ─────── defsHash (PLAN-def-reconciliation task 1) ───────
+
+TEST_CASE("the defs content key folds to a header word, and empty is not a hash") {
+    // The header documents 0 as "not recorded". A key that folded to 0 would
+    // be indistinguishable from no key at all, which is the one thing this
+    // field must never be ambiguous about.
+    CHECK(DefsDigestOf("") == 0);
+    CHECK(DefsDigestOf("abc123") != 0);
+    CHECK(DefsDigestOf("abc123") == DefsDigestOf("abc123"));   // pure
+    CHECK(DefsDigestOf("abc123") != DefsDigestOf("abc124"));
+}
+
+TEST_CASE("a snapshot records the defs it was taken under") {
+    BlobMeta meta;
+    meta.engineHash = 5;
+    meta.layoutHash = 6;
+    meta.defsHash   = DefsDigestOf("defs-key-v1");
+    MapDigestOf("m", meta.mapDigest);
+    std::vector<uint8_t> payload(256, 0x5A);
+    const std::vector<uint8_t> blob = EncodeBlob(payload, meta);
+
+    BlobMeta got;
+    std::vector<uint8_t> out;
+    CHECK(DecodeBlob(blob.data(), blob.size(), meta, got, out) == DecodeStatus::Ok);
+    CHECK(got.defsHash == DefsDigestOf("defs-key-v1"));
+    CHECK(got.defsHash != 0);
+}
+
+TEST_CASE("a defs change is REPORTED, never refused") {
+    // The load-bearing negative, and the reason defsHash is not an E1 hash:
+    // PLAN-def-reconciliation §3 says "reconcile is not optional", so a
+    // snapshot taken under different defs must reach the restore path. If this
+    // ever returns a mismatch status, resuming a campaign across a balance
+    // patch — the entire point of that plan — becomes impossible.
+    BlobMeta meta;
+    meta.engineHash = 5;
+    meta.layoutHash = 6;
+    meta.defsHash   = DefsDigestOf("defs-key-v1");
+    MapDigestOf("m", meta.mapDigest);
+    std::vector<uint8_t> payload(256, 0x5A);
+    const std::vector<uint8_t> blob = EncodeBlob(payload, meta);
+
+    BlobMeta expect = meta;
+    expect.defsHash = DefsDigestOf("defs-key-v2");   // the patch landed
+
+    BlobMeta got;
+    std::vector<uint8_t> out;
+    CHECK(DecodeBlob(blob.data(), blob.size(), expect, got, out) == DecodeStatus::Ok);
+    CHECK(out == payload);
+    // …and the caller can still SEE the change: what the header carries is the
+    // snapshot's own identity, not the reader's.
+    CHECK(got.defsHash == DefsDigestOf("defs-key-v1"));
+    CHECK(got.defsHash != expect.defsHash);
+}
+
+TEST_CASE("the store stamps snapshots with the defs key it was told about") {
+    TempDb tdb;
+    FakeSim sim;
+    sim.FillState(512, 3);
+    GameStateStore store(tdb.db, MakeCfg());
+    store.SetSerializer(&sim);
+
+    // Boot order is real: the store exists before the defs cache key does.
+    CHECK(store.DefsHash() == 0);
+    std::string err;
+    sim.frame = 100;
+    REQUIRE(store.Checkpoint(1, "before-defs", err) == 100);
+
+    store.SetDefsHash("content-key-abc");
+    CHECK(store.DefsHash() == DefsDigestOf("content-key-abc"));
+    sim.frame = 200;
+    REQUIRE(store.Checkpoint(1, "after-defs", err) == 200);
+
+    // The row carries hex of the same word, and '' — not "0000000000000000" —
+    // for the snapshot taken before the key existed, so a query can tell the
+    // two apart without opening a blob.
+    sqlite3_stmt* st = nullptr;
+    REQUIRE(sqlite3_prepare_v2(tdb.db,
+        "SELECT frame, defs_hash FROM game_snapshots WHERE game_id='g1' ORDER BY frame",
+        -1, &st, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 100);
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 1))).empty());
+    REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 200);
+    char want[32];
+    std::snprintf(want, sizeof(want), "%016llx",
+                  static_cast<unsigned long long>(DefsDigestOf("content-key-abc")));
+    CHECK(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 1))) == want);
+    sqlite3_finalize(st);
+
+    // And both still restore: an un-stamped snapshot is not a rejected one.
+    REQUIRE(store.Restore(1, 100, err));
+    REQUIRE(store.Restore(1, 200, err));
+}
+
+TEST_CASE("a database written before the defs column gains it on open") {
+    // The migration arm. A store opened against a schema from before
+    // PLAN-def-reconciliation task 1 must not fail its first insert.
+    TempDb tdb;
+    REQUIRE(sqlite3_exec(tdb.db,
+        "CREATE TABLE game_snapshots ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, game_id TEXT NOT NULL,"
+        "  room_id INTEGER NOT NULL, frame INTEGER NOT NULL,"
+        "  taken_at INTEGER NOT NULL, engine_hash TEXT NOT NULL,"
+        "  map_hash TEXT NOT NULL, label TEXT NOT NULL DEFAULT 'auto',"
+        "  raw_size INTEGER NOT NULL, blob_size INTEGER NOT NULL,"
+        "  sha256 TEXT NOT NULL, blob BLOB NOT NULL)",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    FakeSim sim;
+    sim.FillState(256, 9);
+    GameStateStore store(tdb.db, MakeCfg());
+    store.SetSerializer(&sim);
+    store.SetDefsHash("k");
+
+    std::string err;
+    sim.frame = 42;
+    CHECK(store.Checkpoint(1, "auto", err) == 42);
+    CHECK(err.empty());
+    CHECK(CountRows(tdb.db, "g1") == 1);
 }
 
 TEST_CASE("E2: damaged blobs are detected, not decoded into garbage") {

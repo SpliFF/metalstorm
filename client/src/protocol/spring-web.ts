@@ -11,6 +11,8 @@ export { AuthResponse, AuthResponseT } from './spring-web/auth-response.js';
 export { AuthStatus } from './spring-web/auth-status.js';
 export { ChatReceive, ChatReceiveT } from './spring-web/chat-receive.js';
 export { ChatSend, ChatSendT } from './spring-web/chat-send.js';
+export { ClientEvalRequest, ClientEvalRequestT } from './spring-web/client-eval-request.js';
+export { ClientEvalResponse, ClientEvalResponseT } from './spring-web/client-eval-response.js';
 export { ClientMessage, ClientMessageT } from './spring-web/client-message.js';
 export { ClientPayload } from './spring-web/client-payload.js';
 export { CombatEvent, CombatEventT } from './spring-web/combat-event.js';

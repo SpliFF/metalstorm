@@ -5,7 +5,9 @@
 #include "Server/OrgGroups.h"
 #include "Server/StandingOrders.h"
 #include "Lua/LuaGaia.h"
+#include "Lua/LuaParser.h"
 #include "Lua/LuaRules.h"
+#include "System/FileSystem/FileHandler.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
@@ -22,6 +24,8 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/WeaponDef.h"
+#include "Sim/Weapons/WeaponDefHandler.h"
 #include "System/GlobalRNG.h"
 #include "System/SpringLog/SpringLog.h"
 
@@ -47,11 +51,15 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::Directives,     1, "directives",     true,  ""},
         {SectionId::Teams,          1, "teams",          true,  ""},
         // v2: + UnitState::activeIndex (Q-P4). v3: + UnitState::move (option A).
-        {SectionId::Units,          3, "units",          true,  ""},
+        // v4: + WeaponState::weaponDefName (def-reconciliation task 2).
+        {SectionId::Units,          4, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
-        {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
+        // v2: + luasnapshot Value type 5, Lua 5.4's integer subtype (Q-P6).
+        {SectionId::SyncedLua,      2, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
         {SectionId::EnvResources,   1, "envResources",   true,  ""},
+        {SectionId::DefNames,       1, "defNames",       true,  ""},
+        {SectionId::DefScalars,     1, "defScalars",     true,  ""},
     };
     return kSections;
 }
@@ -280,6 +288,73 @@ std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
            (d.first.empty() ? "no per-unit difference" : d.first);
 }
 
+std::string DescribeRulesParamsDivergence(const std::vector<uint8_t>& a,
+                                          const std::vector<uint8_t>& b,
+                                          SectionId section)
+{
+    const auto find = [&](const std::vector<uint8_t>& p,
+                          std::vector<RulesParamState>& out) -> bool {
+        for (const auto& s : WalkSections(p.data(), p.size())) {
+            if (s[0] != static_cast<size_t>(section)) continue;
+            std::string err;
+            return DecodeGameRules(p.data() + s[1], s[2], out, err);
+        }
+        return false;
+    };
+
+    std::vector<RulesParamState> pa, pb;
+    if (!find(a, pa) || !find(b, pb))
+        return {};
+
+    // A rules param's whole identity is its key, so the comparison is keyed by
+    // it: an index-keyed diff of two maps that gained a key in different
+    // places reports every row after it as changed.
+    const auto value = [](const RulesParamState& p) {
+        switch (p.type) {
+            case 0:  return std::string(p.b ? "true" : "false");
+            case 1:  return std::to_string(p.f);
+            default: return "'" + p.s + "'";
+        }
+    };
+    std::unordered_map<std::string, const RulesParamState*> byKey;
+    for (const auto& p : pb) byKey[p.key] = &p;
+
+    std::vector<std::string> changed, onlyA, onlyB;
+    std::unordered_set<std::string> matched;
+    for (const auto& x : pa) {
+        auto it = byKey.find(x.key);
+        if (it == byKey.end()) { onlyA.push_back(x.key); continue; }
+        matched.insert(x.key);
+        const RulesParamState& y = *it->second;
+        if (x.type != y.type || x.los != y.los || x.b != y.b || x.f != y.f || x.s != y.s)
+            changed.push_back(x.key + " " + value(x) + " vs " + value(y));
+    }
+    for (const auto& y : pb)
+        if (matched.find(y.key) == matched.end()) onlyB.push_back(y.key);
+
+    // Bounded: a whole-map disagreement must not push the rest of the verdict
+    // out of a log line. The counts are always exact.
+    const auto list = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < 12; ++i)
+            s += (s.empty() ? "" : ", ") + v[i];
+        if (v.size() > 12) s += ", … (" + std::to_string(v.size() - 12) + " more)";
+        return s;
+    };
+
+    std::string out = std::to_string(pa.size()) + " vs " + std::to_string(pb.size()) +
+                      " params; " + std::to_string(changed.size()) + " differ in value, " +
+                      std::to_string(onlyA.size()) + " only in arm A, " +
+                      std::to_string(onlyB.size()) + " only in arm B.";
+    if (!changed.empty()) out += " changed: " + list(changed) + ".";
+    if (!onlyA.empty())   out += " only A: " + list(onlyA) + ".";
+    if (!onlyB.empty())   out += " only B: " + list(onlyB) + ".";
+    if (changed.empty() && onlyA.empty() && onlyB.empty())
+        out += " No key disagrees — the difference is in the section's encoding "
+               "order, not its content.";
+    return out;
+}
+
 const std::vector<DerivedOmission>& DerivedNotCaptured()
 {
     static const std::vector<DerivedOmission> kDerived = {
@@ -297,6 +372,16 @@ const std::vector<DerivedOmission>& DerivedNotCaptured()
          "state survives being written by the walk (task 1e)"},
         {"a feature's solidOnTop (the object standing on a geothermal vent)",
          "CFeature::EmitGeoSmoke re-picks the nearest solid every 5 frames"},
+        {"the statistical-combat pending-outcome ring (CStatisticalCombat's "
+         "frame-indexed volleys awaiting resolution)",
+         "not rebuilt - deliberately dropped, for the same reason and on the "
+         "same argument as an in-flight projectile below: a scheduled volley "
+         "resolves within a second of being fired, so it is one snapshot "
+         "cadence's worth of fidelity for a section that would have to track "
+         "every weapon type. Named here because PLAN-def-reconciliation E5 asks "
+         "task 2 to remap the ring's weaponDefId and there is no ring in the "
+         "payload to remap - a resumed battle loses the volleys in the air, and "
+         "loses them WITH their def references"},
         {"in-flight projectiles",
          "not rebuilt - deliberately dropped. A projectile's whole lifetime is "
          "well under one snapshot cadence, so carrying them buys a fraction of "
@@ -914,6 +999,7 @@ void WriteWeapon(Writer& w, const WeaponState& s)
     w.I32(s.nextSalvo);
     w.I32(s.numStockpiled);
     w.I32(s.numStockpileQued);
+    w.Str(s.weaponDefName);
 }
 
 WeaponState ReadWeapon(Reader& r)
@@ -924,6 +1010,7 @@ WeaponState ReadWeapon(Reader& r)
     s.nextSalvo        = r.I32();
     s.numStockpiled    = r.I32();
     s.numStockpileQued = r.I32();
+    s.weaponDefName    = r.Str();
     return s;
 }
 
@@ -1530,10 +1617,38 @@ int CensusCommandState(const CommandState& c)
 int CensusWeaponState(const WeaponState& s)
 {
     const auto& [reloadStatus, salvoLeft, nextSalvo, numStockpiled,
-                 numStockpileQued] = s;
+                 numStockpileQued, weaponDefName] = s;
     (void)reloadStatus; (void)salvoLeft; (void)nextSalvo; (void)numStockpiled;
-    (void)numStockpileQued;
-    return 5;
+    (void)numStockpileQued; (void)weaponDefName;
+    return 6;
+}
+
+int CensusUnitDefScalars(const UnitDefScalars& s)
+{
+    const auto& [maxHealth, power, mass, buildTime, cost, storage, harvestStorage,
+                 armoredMultiple, armorType, category, maxRange,
+                 losRadius, airLosRadius, radarRadius, sonarRadius, jammerRadius,
+                 sonarJamRadius, seismicRadius, seismicSignature, decloakDistance,
+                 stealth, sonarStealth, flankingBonusMode,
+                 flankingBonusMobilityAdd, flankingBonusAvgDamage,
+                 flankingBonusDifDamage] = s;
+    (void)maxHealth; (void)power; (void)mass; (void)buildTime; (void)cost;
+    (void)storage; (void)harvestStorage; (void)armoredMultiple; (void)armorType;
+    (void)category; (void)maxRange; (void)losRadius; (void)airLosRadius;
+    (void)radarRadius; (void)sonarRadius; (void)jammerRadius;
+    (void)sonarJamRadius; (void)seismicRadius; (void)seismicSignature;
+    (void)decloakDistance; (void)stealth; (void)sonarStealth;
+    (void)flankingBonusMode;
+    (void)flankingBonusMobilityAdd; (void)flankingBonusAvgDamage;
+    (void)flankingBonusDifDamage;
+    return 26;
+}
+
+int CensusFeatureDefScalars(const FeatureDefScalars& s)
+{
+    const auto& [maxHealth, mass, reclaimTime, defResources] = s;
+    (void)maxHealth; (void)mass; (void)reclaimTime; (void)defResources;
+    return 4;
 }
 
 int CensusUnitState(const UnitState& u)
@@ -1901,9 +2016,9 @@ void ApplyRulesParams(const std::vector<RulesParamState>& in, LuaRulesParams::Pa
 /// light-userdata tag, ...) fails the build until the codec writes it.
 int CensusLuaValue(const luasnapshot::Value& v)
 {
-    const auto& [type, b, num, str, table] = v;
-    (void)type; (void)b; (void)num; (void)str; (void)table;
-    return 5;
+    const auto& [type, b, num, i, str, table] = v;
+    (void)type; (void)b; (void)num; (void)i; (void)str; (void)table;
+    return 6;
 }
 
 const SectionSpec* SpecFor(uint16_t id)
@@ -2134,6 +2249,1343 @@ void ApplyEnvResources(const envressnapshot::EnvResourceState& in)
     envResHandler.SnapshotApply(in);
 }
 
+// ───────── The def name tables (PLAN-def-reconciliation task 1) ─────────
+
+namespace {
+
+void EncodeDefTable(Writer& w, const std::vector<DefNameEntry>& t)
+{
+    w.U32(static_cast<uint32_t>(t.size()));
+    for (const auto& e : t) {
+        w.I32(e.id);
+        w.Str(e.name);
+    }
+}
+
+/// `what` names the family in the refusal, so a corrupt count says which of
+/// the three tables it was corrupt in rather than "a def table".
+bool DecodeDefTable(Reader& r, std::vector<DefNameEntry>& t, const char* what,
+                    size_t size, std::string& err)
+{
+    const uint32_t count = r.U32();
+    // The whole run before the reserve, same discipline as Reader::Floats: a
+    // corrupt count must be a decode failure before it is an allocation. Each
+    // entry costs at least 4 (id) + 4 (name length) bytes.
+    if (r.Remaining() < size_t(count) * 8) {
+        err = std::string("defNames section claims ") + std::to_string(count) + " " +
+              what + " in " + std::to_string(size) + " bytes";
+        r.Fail();
+        return false;
+    }
+    t.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        DefNameEntry e;
+        e.id   = r.I32();
+        e.name = r.Str();
+        t.push_back(std::move(e));
+    }
+    return !r.Bad();
+}
+
+}  // namespace
+
+void EncodeDefNames(const DefNameTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    EncodeDefTable(w, in.units);
+    EncodeDefTable(w, in.weapons);
+    EncodeDefTable(w, in.features);
+}
+
+bool DecodeDefNames(const uint8_t* data, size_t size, DefNameTables& out, std::string& err)
+{
+    Reader r(data, size);
+    DefNameTables t;
+    if (!DecodeDefTable(r, t.units, "unit defs", size, err) ||
+        !DecodeDefTable(r, t.weapons, "weapon defs", size, err) ||
+        !DecodeDefTable(r, t.features, "feature defs", size, err)) {
+        if (err.empty()) err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Bad()) {
+        err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defNames section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+void CaptureDefNames(DefNameTables& out)
+{
+    out = DefNameTables{};
+
+    // The three loops do NOT share a start index, and that is the whole reason
+    // this is written out rather than templated: id 0 is a real weapon def
+    // (`nodefweapon`, which every weaponless slot points at) and is not a real
+    // unit or feature def. Dropping it would shift every weapon index by one
+    // on reconcile — the exact corruption class the section exists to detect.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.units.push_back({int32_t(id), v[id].name});
+    }
+    if (weaponDefHandler != nullptr) {
+        const auto& v = weaponDefHandler->GetWeaponDefsVec();
+        for (size_t id = 0; id < v.size(); ++id)
+            out.weapons.push_back({int32_t(id), v[id].name});
+    }
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.features.push_back({int32_t(id), v[id].name});
+    }
+}
+
+// ───────── The game's own renames (task 2, §2 step 2 / persistence §5) ─────────
+//
+// `gamedata/migrations.lua` is the game's file, not the engine's, and its
+// absence is the normal state: most games never rename a def. It is read
+// through the same mod VFS the def files come from, so a game shipped as a zip
+// needs no special handling.
+//
+//   return {
+//     units    = { old_tank = "new_tank" },
+//     weapons  = { old_gun  = "new_gun"  },
+//     features = { ... },
+//   }
+//
+// A file that exists and does not parse is an error: applying half a rename
+// table would remove exactly the units the author was trying to keep.
+bool LoadDefAliases(DefAliases& out, std::string& err)
+{
+    out = DefAliases{};
+
+    static const char* kPath = "gamedata/migrations.lua";
+    if (!CFileHandler::FileExists(kPath, SPRING_VFS_MOD_BASE))
+        return true;
+
+    LuaParser p(kPath, SPRING_VFS_MOD_BASE, SPRING_VFS_ZIP);
+    if (!p.Execute()) {
+        err = std::string(kPath) + " failed to parse: " + p.GetErrorLog();
+        return false;
+    }
+    const LuaTable root = p.GetRoot();
+    if (!root.IsValid()) {
+        err = std::string(kPath) + " did not return a table";
+        return false;
+    }
+
+    const auto read = [&root](const char* family,
+                              std::unordered_map<std::string, std::string>& into) {
+        const LuaTable t = root.SubTable(family);
+        if (!t.IsValid()) return;
+        std::vector<std::string> keys;
+        t.GetKeys(keys);
+        for (const std::string& k : keys) {
+            const std::string v = t.GetString(k, "");
+            // A rename to nothing is not a removal request - a def that is gone
+            // is gone from the def tables, which is what the removal path reads.
+            // Ignoring it keeps one way to say each thing.
+            if (!v.empty() && v != k) into.emplace(k, v);
+        }
+    };
+    read("units", out.units);
+    read("weapons", out.weapons);
+    read("features", out.features);
+    return true;
+}
+
+std::string DefDelta::Describe() const
+{
+    if (!Changed()) return "unchanged";
+
+    const auto join = [](const std::vector<std::string>& names, size_t total) {
+        std::string s;
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i != 0) s += ", ";
+            s += names[i];
+        }
+        if (total > names.size()) s += "…";
+        return s;
+    };
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    if (renumbered != 0)
+        add(std::to_string(renumbered) + " renumbered (" +
+            join(renumberedNames, renumbered) + ")");
+    if (removed != 0)
+        add(std::to_string(removed) + " removed (" + join(removedNames, removed) + ")");
+    // Additions carry no names: §3 says a new def needs nothing on reconcile,
+    // so the count is the whole finding.
+    if (added != 0)
+        add(std::to_string(added) + " added");
+    return s;
+}
+
+DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
+                         const std::vector<DefNameEntry>& live)
+{
+    DefDelta d;
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // Walked in captured order, so the examples in the log line are stable
+    // between two runs over the same pair of def loads.
+    for (const auto& e : captured) {
+        const auto it = liveByName.find(e.name);
+        if (it == liveByName.end()) {
+            ++d.removed;
+            if (d.removedNames.size() < kDefDeltaExamples) d.removedNames.push_back(e.name);
+        } else if (it->second == e.id) {
+            ++d.unchanged;
+        } else {
+            ++d.renumbered;
+            if (d.renumberedNames.size() < kDefDeltaExamples)
+                d.renumberedNames.push_back(e.name);
+        }
+    }
+
+    std::unordered_set<std::string> capturedNames;
+    capturedNames.reserve(captured.size());
+    for (const auto& e : captured) capturedNames.insert(e.name);
+    for (const auto& e : live)
+        if (capturedNames.count(e.name) == 0) ++d.added;
+
+    return d;
+}
+
+// ───────── The remap pass (PLAN-def-reconciliation task 2, §2 steps 1-2) ─────────
+
+int32_t DefIdMap::Map(int32_t oldId) const
+{
+    if (gone.count(oldId) != 0) return -1;
+    const auto it = to.find(oldId);
+    return (it != to.end()) ? it->second : oldId;
+}
+
+namespace {
+
+/// One family. `renames` collects the aliases that actually fired, so the log
+/// can say which rename moved which object rather than that renames exist.
+bool BuildOneMap(const char* family,
+                 const std::vector<DefNameEntry>& captured,
+                 const std::vector<DefNameEntry>& live,
+                 const std::unordered_map<std::string, std::string>& aliases,
+                 DefIdMap& out,
+                 std::unordered_map<std::string, std::string>* renames,
+                 std::string& err)
+{
+    out = DefIdMap{};
+
+    // An unrecorded vocabulary on EITHER side is "I cannot tell", and the only
+    // safe answer to that is to change nothing. The live side is empty in a
+    // headless run with no def load; the captured side is empty in any snapshot
+    // taken before task 1 shipped the section. Reading either as "every def was
+    // removed" would delete the entire world, so this branch is load-bearing
+    // and is the negative test in the doctests.
+    if (captured.empty() || live.empty()) {
+        out.unknown = true;
+        return true;
+    }
+
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // E1, half one: an alias whose target is ambiguous. `a = "b"` while this
+    // game still defines BOTH means the author renamed something that did not
+    // go away, and there is no way to know which def the old objects are. §4
+    // E1 says refuse, loudly, as an authoring bug.
+    for (const auto& [from, to_] : aliases) {
+        if (liveByName.count(from) != 0 && liveByName.count(to_) != 0) {
+            err = std::string("gamedata/migrations.lua aliases ") + family +
+                  " def '" + from + "' to '" + to_ + "', but this game defines " +
+                  "both - a rename whose source still exists is ambiguous";
+            return false;
+        }
+    }
+
+    // E1, half two: two captured names aliased onto one live name. The objects
+    // of both would land on one def and their counts would silently merge.
+    std::unordered_map<std::string, std::string> claimedBy;
+    for (const auto& e : captured) {
+        const auto a = aliases.find(e.name);
+        if (a == aliases.end()) continue;
+        const auto prev = claimedBy.find(a->second);
+        if (prev != claimedBy.end()) {
+            err = std::string("gamedata/migrations.lua aliases two ") + family +
+                  " defs ('" + prev->second + "' and '" + e.name + "') onto '" +
+                  a->second + "'";
+            return false;
+        }
+        claimedBy.emplace(a->second, e.name);
+    }
+
+    for (const auto& e : captured) {
+        // Aliasing happens BEFORE the lookup (§2 step 2: migrations may alias
+        // renames "before removal applies"), so a renamed def is a renumber and
+        // not a removal followed by an addition.
+        std::string name = e.name;
+        const auto a = aliases.find(name);
+        const bool renamed = (a != aliases.end() && liveByName.count(a->second) != 0);
+        if (renamed) name = a->second;
+
+        const auto it = liveByName.find(name);
+        if (it == liveByName.end()) {
+            out.gone.insert(e.id);
+            out.goneByName.insert(e.name);
+            if (out.goneNames.size() < kDefDeltaExamples)
+                out.goneNames.push_back(e.name);
+            continue;
+        }
+        if (renamed && renames != nullptr) (*renames)[e.name] = name;
+        if (it->second != e.id) out.to.emplace(e.id, it->second);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool BuildDefRemap(const DefNameTables& captured, const DefNameTables& live,
+                   const DefAliases& aliases, DefRemap& out, std::string& err)
+{
+    out = DefRemap{};
+    return BuildOneMap("unit", captured.units, live.units, aliases.units,
+                       out.units, &out.unitRenames, err) &&
+           BuildOneMap("weapon", captured.weapons, live.weapons, aliases.weapons,
+                       out.weapons, nullptr, err) &&
+           BuildOneMap("feature", captured.features, live.features,
+                       aliases.features, out.features, &out.featureRenames, err);
+}
+
+bool RemapReport::Changed() const
+{
+    return unitsRenamed || unitsDropped || featuresRenamed || featuresDropped ||
+           resurrectCleared || wreckRemapped || wreckCleared ||
+           buildCmdsRemapped || buildCmdsDropped || orderDefsRemapped ||
+           orderDefsDropped || ordersDeactivated;
+}
+
+std::string RemapReport::Describe() const
+{
+    if (!Changed()) return "nothing to remap";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitsDropped != 0) {
+        std::string names;
+        for (size_t i = 0; i < droppedUnitNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += droppedUnitNames[i];
+        }
+        if (droppedUnitNames.size() < unitsDropped) names += "…";
+        add(std::to_string(unitsDropped) + " units removed with their def (" +
+            names + ")");
+    }
+    count(unitsRenamed, "units renamed");
+    count(featuresDropped, "features removed with their def");
+    count(featuresRenamed, "features renamed");
+    count(resurrectCleared, "resurrect targets cleared");
+    count(wreckRemapped, "delayed wrecks remapped");
+    count(wreckCleared, "delayed wrecks cleared");
+    count(buildCmdsRemapped, "build orders remapped");
+    count(buildCmdsDropped, "build orders dropped");
+    count(orderDefsRemapped, "order def refs remapped");
+    count(orderDefsDropped, "order def refs dropped");
+    count(ordersDeactivated, "orders deactivated (def filter emptied)");
+    return s;
+}
+
+namespace {
+
+/// The build-order encoding: a command whose id is the NEGATED unit def id.
+/// Shared by CBuilderCAI and CFactoryCAI, and it is the one place a def id
+/// hides inside a field that does not look like one.
+constexpr bool IsBuildCmd(int32_t cmdID) { return cmdID < 0; }
+
+/// Remap a def-id filter list in place (`squadTypes`). Returns false when the
+/// list HAD entries and lost every one of them — the caller must not leave that
+/// as an empty list, because empty means wildcard.
+bool RemapDefFilter(std::vector<uint16_t>& types, const DefIdMap& map,
+                    RemapReport& rep)
+{
+    if (types.empty()) return true;
+    std::vector<uint16_t> kept;
+    kept.reserve(types.size());
+    for (const uint16_t t : types) {
+        const int32_t mapped = map.Map(int32_t(t));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(t)) ++rep.orderDefsRemapped;
+        kept.push_back(uint16_t(mapped));
+    }
+    const bool survived = !kept.empty();
+    types.swap(kept);
+    return survived;
+}
+
+/// BuildBase's params are [x, y, z, defId, defId, ...] (StandingOrders.cpp).
+/// The geometry is never a def, so the walk starts at 3.
+void RemapBuildParams(std::vector<float>& params, const DefIdMap& map,
+                      RemapReport& rep)
+{
+    if (params.size() <= 3) return;
+    std::vector<float> kept(params.begin(), params.begin() + 3);
+    for (size_t i = 3; i < params.size(); ++i) {
+        const int32_t mapped = map.Map(int32_t(params[i]));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(params[i])) ++rep.orderDefsRemapped;
+        kept.push_back(float(mapped));
+    }
+    params.swap(kept);
+}
+
+}  // namespace
+
+std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
+                                      const std::vector<std::string>& liveDefNames)
+{
+    std::vector<int32_t> from(liveDefNames.size(), -1);
+
+    // Positional fallback: a payload with no names is a pre-task-2 units
+    // section (or a fixture that never set them), and matching those by name
+    // would pair every unnamed slot with every other one. Detected on the
+    // captured side because that is the side that can be old.
+    bool anyNames = false;
+    for (const auto& w : captured)
+        if (!w.weaponDefName.empty()) { anyNames = true; break; }
+    if (!anyNames) {
+        for (size_t i = 0; i < std::min(from.size(), captured.size()); ++i)
+            from[i] = int32_t(i);
+        return from;
+    }
+
+    // Occurrence order per name: a def with two identical launchers keeps
+    // "first launcher's stockpile stays in the first launcher".
+    std::vector<bool> used(captured.size(), false);
+    for (size_t i = 0; i < liveDefNames.size(); ++i) {
+        if (liveDefNames[i].empty()) continue;
+        for (size_t j = 0; j < captured.size(); ++j) {
+            if (used[j] || captured[j].weaponDefName != liveDefNames[i]) continue;
+            used[j] = true;
+            from[i] = int32_t(j);
+            break;
+        }
+    }
+    return from;
+}
+
+void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
+                  std::vector<FeatureState>& features,
+                  std::vector<StandingOrder>& orders,
+                  std::vector<Directive>& dirs, RemapReport& out)
+{
+    out = RemapReport{};
+
+    // ── units ──
+    //
+    // A unit whose def is gone does not come back (§2 step 2, "with wreck
+    // substitution off - clean removal"). It is dropped from the payload here,
+    // which is also what keeps ResolveUnitDefs' refusal correct: past this
+    // point a name that does not resolve really is a corrupt payload rather
+    // than a balance patch.
+    {
+        std::vector<UnitState> kept;
+        kept.reserve(units.size());
+        for (auto& u : units) {
+            // The unit's own def travels by NAME, so removal is a name test,
+            // and it has to run before the rename: the captured name is the key
+            // both tables are built on.
+            if (map.units.Gone(u.unitDefName)) {
+                ++out.unitsDropped;
+                if (out.droppedUnitNames.size() < kDefDeltaExamples)
+                    out.droppedUnitNames.push_back(u.unitDefName);
+                // Complete, not capped: this is the list the game's own gadgets
+                // clean up against (task 4's DefsReconciled), and it is the only
+                // notice they get — no UnitDestroyed fires for a unit that never
+                // reached the restored world.
+                out.droppedUnitIds.push_back(u.id);
+                continue;
+            }
+            const auto rn = map.unitRenames.find(u.unitDefName);
+            if (rn != map.unitRenames.end()) {
+                u.unitDefName = rn->second;
+                ++out.unitsRenamed;
+            }
+            kept.push_back(std::move(u));
+        }
+        units.swap(kept);
+    }
+
+    // A dropped unit takes its place in every transport graph with it: a
+    // transportee id that names nothing is skipped by ApplyUnits, but a
+    // transport that was itself dropped would leave its cargo listed as
+    // attached to a unit that never gets created.
+    if (out.unitsDropped != 0) {
+        std::unordered_set<int32_t> live;
+        live.reserve(units.size());
+        for (const auto& u : units) live.insert(u.id);
+        for (auto& u : units) {
+            if (u.transporterId >= 0 && live.count(u.transporterId) == 0)
+                u.transporterId = -1;
+            if (u.loadingTransportId >= 0 && live.count(u.loadingTransportId) == 0)
+                u.loadingTransportId = -1;
+            if (u.unloadingTransportId >= 0 && live.count(u.unloadingTransportId) == 0)
+                u.unloadingTransportId = -1;
+            if (u.transportees.empty()) continue;
+            std::vector<std::pair<int32_t, int32_t>> tees;
+            tees.reserve(u.transportees.size());
+            for (const auto& t : u.transportees)
+                if (live.count(t.first) != 0) tees.push_back(t);
+            u.transportees.swap(tees);
+        }
+    }
+
+    for (auto& u : units) {
+        // The delayed wreck: a raw feature def id (CUnit::delayedWreckLevel's
+        // companion), so it remaps through the feature map and clears when the
+        // wreck's def is gone rather than pointing at whatever took its id.
+        if (u.featureDefID >= 0) {
+            const int32_t mapped = map.features.Map(u.featureDefID);
+            if (mapped < 0) {
+                u.featureDefID = -1;
+                ++out.wreckCleared;
+            } else if (mapped != u.featureDefID) {
+                u.featureDefID = mapped;
+                ++out.wreckRemapped;
+            }
+        }
+
+        // Build orders. The queue is rewritten rather than patched in place
+        // because a build order for a def that no longer exists has to LEAVE:
+        // -id is a valid command id for whichever def now holds that id, so
+        // "leave it" builds the wrong thing forever.
+        if (!u.commands.empty()) {
+            std::vector<CommandState> kept;
+            kept.reserve(u.commands.size());
+            for (auto& c : u.commands) {
+                if (!IsBuildCmd(c.cmdID)) {
+                    kept.push_back(std::move(c));
+                    continue;
+                }
+                const int32_t mapped = map.units.Map(-c.cmdID);
+                if (mapped < 0) {
+                    ++out.buildCmdsDropped;
+                    continue;
+                }
+                if (mapped != -c.cmdID) {
+                    c.cmdID = -mapped;
+                    ++out.buildCmdsRemapped;
+                }
+                kept.push_back(std::move(c));
+            }
+            u.commands.swap(kept);
+        }
+
+        // Weapon slots are NOT remapped here: their pairing needs the live
+        // def's weapon list, which only exists at apply time. MatchWeaponSlots
+        // is that half, and the captured names it matches on travel in the
+        // payload for exactly this reason.
+    }
+
+    // ── features ──
+    {
+        std::vector<FeatureState> kept;
+        kept.reserve(features.size());
+        for (auto& f : features) {
+            if (map.features.Gone(f.featureDefName)) {
+                ++out.featuresDropped;
+                out.droppedFeatureIds.push_back(f.id);
+                continue;
+            }
+            const auto rn = map.featureRenames.find(f.featureDefName);
+            if (rn != map.featureRenames.end()) {
+                f.featureDefName = rn->second;
+                ++out.featuresRenamed;
+            }
+            // A resurrect target that is gone becomes "not resurrectable",
+            // which is a real state (see FeatureState::resurrectUnitDefName)
+            // rather than an invented one.
+            if (!f.resurrectUnitDefName.empty()) {
+                if (map.units.Gone(f.resurrectUnitDefName)) {
+                    f.resurrectUnitDefName.clear();
+                    ++out.resurrectCleared;
+                } else {
+                    const auto ru = map.unitRenames.find(f.resurrectUnitDefName);
+                    if (ru != map.unitRenames.end())
+                        f.resurrectUnitDefName = ru->second;
+                }
+            }
+            kept.push_back(std::move(f));
+        }
+        features.swap(kept);
+    }
+
+    // ── standing orders and directives ──
+    //
+    // Both carry the same two def-id shapes: BuildBase's trailing param list,
+    // and `conditions.squadTypes`, whose empty state is a WILDCARD. Emptying
+    // that filter would widen the order instead of narrowing it, so an order
+    // that loses its whole filter is deactivated and counted.
+    for (auto& o : orders) {
+        if (o.type == StandingOrderType::BuildBase)
+            RemapBuildParams(o.params, map.units, out);
+        if (!RemapDefFilter(o.conditions.squadTypes, map.units, out)) {
+            o.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
+    for (auto& d : dirs) {
+        if (d.type == DirectiveType::BuildBase)
+            RemapBuildParams(d.params, map.units, out);
+        if (!RemapDefFilter(d.conditions.squadTypes, map.units, out)) {
+            d.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
+
+    // Sorted because these two lists reach SYNCED Lua (task 4's call-in), where
+    // the order of a table a gadget iterates is part of the sim's behaviour.
+    // The payload's own order is capture order and not a promise.
+    std::sort(out.droppedUnitIds.begin(), out.droppedUnitIds.end());
+    std::sort(out.droppedFeatureIds.begin(), out.droppedFeatureIds.end());
+}
+
+// ───── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ─────
+
+void CaptureDefScalars(DefScalarTables& out)
+{
+    out = DefScalarTables{};
+
+    // The experience curve. Not a def — modInfo — which is exactly why it has
+    // to be recorded: a modinfo edit moves maxHealth, power and reloadSpeed on
+    // every veteran in the world without moving the defsHash by one bit.
+    out.expPowerScale  = CUnit::GetExpPowerScale();
+    out.expHealthScale = CUnit::GetExpHealthScale();
+    out.expReloadScale = CUnit::GetExpReloadScale();
+
+    // This mirrors CUnit::PreInit + CUnit::FinishedBuilding, statement for
+    // statement, and that duplication is the point: the comparison in
+    // ReconcileScalars is plain equality, so PreInit's clamps and derived
+    // combinations have to be applied HERE rather than reimplemented at every
+    // field. A change to PreInit that this loop does not follow shows up as
+    // every unit in every payload reading as "authored" — visible in the
+    // report's authored count, which is why that count is reported.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const UnitDef& d = v[id];
+            UnitDefScalars s;
+            s.maxHealth = d.health;
+            s.power = d.power;
+            s.mass = d.mass;
+            s.buildTime = d.buildTime;
+            s.cost = {d.cost.metal, d.cost.energy};
+            s.storage = {d.storage.metal, d.storage.energy};
+            s.harvestStorage = {d.harvestStorage.metal, d.harvestStorage.energy};
+            s.armoredMultiple = d.armoredMultiple;
+            s.armorType = d.armorType;
+            s.category = d.category;
+            // A unit's maxRange is built by WeaponLoader as the max over its
+            // loaded weapons' ranges; UnitDef::maxWeaponRange is the same max
+            // taken over the same weapon defs at def-parse time.
+            s.maxRange = d.maxWeaponRange;
+            s.losRadius = std::clamp(int(d.losRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.airLosRadius = std::clamp(int(d.airLosRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.radarRadius = std::clamp(d.radarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarRadius = std::clamp(d.sonarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.jammerRadius = std::clamp(d.jammerRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarJamRadius = std::clamp(d.sonarJamRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicRadius = std::clamp(d.seismicRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicSignature = d.seismicSignature;
+            s.decloakDistance = d.decloakDistance;
+            s.stealth = d.stealth;
+            s.sonarStealth = d.sonarStealth;
+            s.flankingBonusMode = d.flankingBonusMode;
+            s.flankingBonusMobilityAdd = d.flankingBonusMobilityAdd;
+            s.flankingBonusAvgDamage = (d.flankingBonusMax + d.flankingBonusMin) * 0.5f;
+            s.flankingBonusDifDamage = (d.flankingBonusMax - d.flankingBonusMin) * 0.5f;
+            out.units.emplace(d.name, s);
+        }
+    }
+
+    // CFeature::Initialize's four (Feature.cpp: mass, health/maxHealth,
+    // reclaimTime, defResources = def->cost).
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const FeatureDef& d = v[id];
+            FeatureDefScalars s;
+            s.maxHealth = d.health;
+            s.mass = d.mass;
+            s.reclaimTime = d.reclaimTime;
+            s.defResources = {d.cost.metal, d.cost.energy};
+            out.features.emplace(d.name, s);
+        }
+    }
+}
+
+namespace {
+
+void WriteUnitDefScalars(Writer& w, const UnitDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.power); w.F32(s.mass); w.F32(s.buildTime);
+    w.F32(s.cost.metal); w.F32(s.cost.energy);
+    w.F32(s.storage.metal); w.F32(s.storage.energy);
+    w.F32(s.harvestStorage.metal); w.F32(s.harvestStorage.energy);
+    w.F32(s.armoredMultiple);
+    w.I32(s.armorType);
+    w.U32(s.category);
+    w.F32(s.maxRange);
+    w.I32(s.losRadius); w.I32(s.airLosRadius);
+    w.I32(s.radarRadius); w.I32(s.sonarRadius); w.I32(s.jammerRadius);
+    w.I32(s.sonarJamRadius); w.I32(s.seismicRadius);
+    w.F32(s.seismicSignature); w.F32(s.decloakDistance);
+    w.Bool(s.stealth); w.Bool(s.sonarStealth);
+    w.I32(s.flankingBonusMode);
+    w.F32(s.flankingBonusMobilityAdd);
+    w.F32(s.flankingBonusAvgDamage); w.F32(s.flankingBonusDifDamage);
+}
+
+UnitDefScalars ReadUnitDefScalars(Reader& r)
+{
+    UnitDefScalars s;
+    s.maxHealth = r.F32(); s.power = r.F32(); s.mass = r.F32(); s.buildTime = r.F32();
+    s.cost.metal = r.F32(); s.cost.energy = r.F32();
+    s.storage.metal = r.F32(); s.storage.energy = r.F32();
+    s.harvestStorage.metal = r.F32(); s.harvestStorage.energy = r.F32();
+    s.armoredMultiple = r.F32();
+    s.armorType = r.I32();
+    s.category = r.U32();
+    s.maxRange = r.F32();
+    s.losRadius = r.I32(); s.airLosRadius = r.I32();
+    s.radarRadius = r.I32(); s.sonarRadius = r.I32(); s.jammerRadius = r.I32();
+    s.sonarJamRadius = r.I32(); s.seismicRadius = r.I32();
+    s.seismicSignature = r.F32(); s.decloakDistance = r.F32();
+    s.stealth = r.Bool(); s.sonarStealth = r.Bool();
+    s.flankingBonusMode = r.I32();
+    s.flankingBonusMobilityAdd = r.F32();
+    s.flankingBonusAvgDamage = r.F32(); s.flankingBonusDifDamage = r.F32();
+    return s;
+}
+
+void WriteFeatureDefScalars(Writer& w, const FeatureDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.mass); w.F32(s.reclaimTime);
+    w.F32(s.defResources.metal); w.F32(s.defResources.energy);
+}
+
+FeatureDefScalars ReadFeatureDefScalars(Reader& r)
+{
+    FeatureDefScalars s;
+    s.maxHealth = r.F32(); s.mass = r.F32(); s.reclaimTime = r.F32();
+    s.defResources.metal = r.F32(); s.defResources.energy = r.F32();
+    return s;
+}
+
+}  // namespace
+
+void EncodeDefScalars(const DefScalarTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.F32(in.expPowerScale); w.F32(in.expHealthScale); w.F32(in.expReloadScale);
+
+    // Sorted by name, not in hash order: two captures of the same def load must
+    // produce the same bytes or the §8 re-capture bar compares a payload against
+    // a permutation of itself.
+    std::vector<const std::string*> names;
+    names.reserve(in.units.size());
+    for (const auto& [name, s] : in.units) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteUnitDefScalars(w, in.units.at(*n));
+    }
+
+    names.clear();
+    names.reserve(in.features.size());
+    for (const auto& [name, s] : in.features) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteFeatureDefScalars(w, in.features.at(*n));
+    }
+}
+
+bool DecodeDefScalars(const uint8_t* data, size_t size, DefScalarTables& out,
+                      std::string& err)
+{
+    Reader r(data, size);
+    DefScalarTables t;
+    t.expPowerScale = r.F32();
+    t.expHealthScale = r.F32();
+    t.expReloadScale = r.F32();
+
+    const uint32_t units = r.U32();
+    // A corrupt count must be a decode failure before it is an allocation
+    // (Reader::Floats' discipline). The smallest unit entry is a 4-byte name
+    // length plus the fixed field block.
+    if (r.Remaining() < size_t(units) * 4) {
+        err = "defScalars section claims " + std::to_string(units) +
+              " unit defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.units.reserve(units);
+    for (uint32_t i = 0; i < units && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.units.emplace(name, ReadUnitDefScalars(r));
+    }
+    const uint32_t features = r.U32();
+    if (r.Remaining() < size_t(features) * 4) {
+        err = "defScalars section claims " + std::to_string(features) +
+              " feature defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.features.reserve(features);
+    for (uint32_t i = 0; i < features && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.features.emplace(name, ReadFeatureDefScalars(r));
+    }
+
+    if (r.Bad()) {
+        err = "defScalars section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defScalars section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+bool ScalarReport::Changed() const
+{
+    return unitDefsRetuned || featureDefsRetuned || unitFieldsReDerived ||
+           unitsHealthScaled || featureFieldsReDerived || featuresHealthScaled ||
+           featuresResourcesScaled || unitsUnknownDef || featuresUnknownDef;
+}
+
+std::string ScalarReport::Describe() const
+{
+    if (!ran) return "no def scalars recorded in this snapshot";
+    if (!Changed()) return "no def scalar moved";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitDefsRetuned != 0 || featureDefsRetuned != 0) {
+        std::string names;
+        for (size_t i = 0; i < retunedNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += retunedNames[i];
+        }
+        if (retunedNames.size() < unitDefsRetuned + featureDefsRetuned) names += "…";
+        add(std::to_string(unitDefsRetuned) + " unit + " +
+            std::to_string(featureDefsRetuned) + " feature defs retuned (" + names + ")");
+    }
+    count(unitsTouched, "units adjusted");
+    count(unitFieldsReDerived, "unit fields re-derived");
+    count(unitsHealthScaled, "unit health fractions preserved");
+    count(unitFieldsAuthored, "unit fields kept (authored, not the def's)");
+    count(featuresTouched, "features adjusted");
+    count(featureFieldsReDerived, "feature fields re-derived");
+    count(featuresHealthScaled, "feature health fractions preserved");
+    count(featuresResourcesScaled, "feature reclaim pools rescaled");
+    count(featureFieldsAuthored, "feature fields kept (authored)");
+    count(unitsUnknownDef, "units whose def has no recorded scalars");
+    count(featuresUnknownDef, "features whose def has no recorded scalars");
+    return s;
+}
+
+namespace {
+
+/// "Was this field ever authored?" over floats. Relative, because the audited
+/// values span a build time of 3 and a health pool of 200 000 and a fixed
+/// epsilon cannot serve both; and needed at all because the captured value has
+/// been through a float round-trip, so it is not bit-equal to the def's own
+/// float even when nothing ever touched it.
+bool SameScalar(float a, float b)
+{
+    return std::fabs(a - b) <=
+           1e-5f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
+}
+bool SameScalar(const ResPair& a, const ResPair& b)
+{
+    return SameScalar(a.metal, b.metal) && SameScalar(a.energy, b.energy);
+}
+template <typename T> bool SameScalar(const T& a, const T& b) { return a == b; }
+
+/// Did this def's newborn values move between the two loads? Only the report's
+/// "N defs retuned" count is built on this — every disposition that touches an
+/// object runs field by field below, so a field missing from this list costs a
+/// log line's accuracy and nothing else. The census tripwire is what says the
+/// field list is complete.
+bool SameDefScalars(const UnitDefScalars& a, const UnitDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.power, b.power) &&
+           SameScalar(a.mass, b.mass) && SameScalar(a.buildTime, b.buildTime) &&
+           SameScalar(a.cost, b.cost) && SameScalar(a.storage, b.storage) &&
+           SameScalar(a.harvestStorage, b.harvestStorage) &&
+           SameScalar(a.armoredMultiple, b.armoredMultiple) &&
+           a.armorType == b.armorType && a.category == b.category &&
+           SameScalar(a.maxRange, b.maxRange) &&
+           a.losRadius == b.losRadius && a.airLosRadius == b.airLosRadius &&
+           a.radarRadius == b.radarRadius && a.sonarRadius == b.sonarRadius &&
+           a.jammerRadius == b.jammerRadius &&
+           a.sonarJamRadius == b.sonarJamRadius &&
+           a.seismicRadius == b.seismicRadius &&
+           SameScalar(a.seismicSignature, b.seismicSignature) &&
+           SameScalar(a.decloakDistance, b.decloakDistance) &&
+           a.stealth == b.stealth && a.sonarStealth == b.sonarStealth &&
+           a.flankingBonusMode == b.flankingBonusMode &&
+           SameScalar(a.flankingBonusMobilityAdd, b.flankingBonusMobilityAdd) &&
+           SameScalar(a.flankingBonusAvgDamage, b.flankingBonusAvgDamage) &&
+           SameScalar(a.flankingBonusDifDamage, b.flankingBonusDifDamage);
+}
+
+bool SameDefScalars(const FeatureDefScalars& a, const FeatureDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.mass, b.mass) &&
+           SameScalar(a.reclaimTime, b.reclaimTime) &&
+           SameScalar(a.defResources, b.defResources);
+}
+
+/// THE RULE, once: a captured value that still equals what the OLD def gave a
+/// newborn was never authored, so it becomes what the NEW def gives. Anything
+/// else is a deliberate write by the game's Lua (or by gameplay) and survives
+/// the resume untouched — reconciling it would silently revert a gadget.
+template <typename T>
+void ReDerive(T& cur, const T& born, const T& live,
+              size_t& reDerived, size_t& authored, bool& touched)
+{
+    if (!SameScalar(cur, born)) { ++authored; return; }
+    if (SameScalar(born, live)) return;   // nothing moved
+    cur = live;
+    ++reDerived;
+    touched = true;
+}
+
+/// maxHealth / power under the experience curve: CUnit::AddExperience recomputes
+/// both off unitDef whenever experience moves, so a veteran's value is the def's
+/// times a factor and comparing against the raw def value would read every
+/// veteran as authored.
+float ExpScaled(float base, float limExp, float scale, bool clampMin)
+{
+    if (scale <= 0.0f) return base;
+    const float v = base * (1.0f + limExp * scale);
+    return clampMin ? std::max(0.1f, v) : v;
+}
+
+}  // namespace
+
+void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
+                      const DefRemap& map, std::vector<UnitState>& units,
+                      std::vector<FeatureState>& features, ScalarReport& out)
+{
+    out = ScalarReport{};
+
+    // An empty captured table is a snapshot taken before this section existed.
+    // Treating it as "every def was retuned to the live values" would overwrite
+    // every authored scalar in the world, so it does nothing at all — the same
+    // one-directional guard as task 2's `unknown` vocabulary. The live table
+    // being empty (this process has parsed no def) is likewise nothing to do.
+    if (captured.Empty() || live.Empty()) return;
+    out.ran = true;
+
+    // The captured tables are keyed by the names the SNAPSHOT used; the payload
+    // has already been through RemapPayload, so its objects carry LIVE names.
+    // The rename tables bridge the two, inverted.
+    std::unordered_map<std::string, std::string> liveToCaptured;
+    for (const auto& [from, to] : map.unitRenames) liveToCaptured.emplace(to, from);
+    std::unordered_map<std::string, std::string> liveToCapturedFeature;
+    for (const auto& [from, to] : map.featureRenames)
+        liveToCapturedFeature.emplace(to, from);
+
+    const auto capturedName =
+        [](const std::unordered_map<std::string, std::string>& inv,
+           const std::string& liveName) -> const std::string& {
+            const auto it = inv.find(liveName);
+            return (it != inv.end()) ? it->second : liveName;
+        };
+
+    // Which defs were retuned at all, independent of what the world holds:
+    // reported because "3 defs retuned, 400 units adjusted" and "400 defs
+    // retuned, 400 units adjusted" are a balance tweak and a whole rebalance.
+    const auto renamed = [](const std::unordered_map<std::string, std::string>& fwd,
+                            const std::string& from) -> const std::string& {
+        const auto it = fwd.find(from);
+        return (it != fwd.end()) ? it->second : from;
+    };
+    for (const auto& [name, born] : captured.units) {
+        const std::string& liveName = renamed(map.unitRenames, name);
+        const auto lit = live.units.find(liveName);
+        if (lit == live.units.end()) continue;   // removed: task 2's problem
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.unitDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+        out.retunedUnitDefs.push_back(liveName);
+    }
+    for (const auto& [name, born] : captured.features) {
+        const std::string& liveName = renamed(map.featureRenames, name);
+        const auto lit = live.features.find(liveName);
+        if (lit == live.features.end()) continue;
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.featureDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+        out.retunedFeatureDefs.push_back(liveName);
+    }
+
+    // The two retune loops walk unordered_maps, so their order is a hash
+    // artefact — and unlike `retunedNames` (a log line) these lists reach synced
+    // Lua. `retunedNames` is left in map order deliberately: it is five examples
+    // in a WARNING, and sorting it would only make the examples always be the
+    // alphabetically-first five rather than a spread.
+    std::sort(out.retunedUnitDefs.begin(), out.retunedUnitDefs.end());
+    std::sort(out.retunedFeatureDefs.begin(), out.retunedFeatureDefs.end());
+
+    for (auto& u : units) {
+        const auto cit = captured.units.find(capturedName(liveToCaptured, u.unitDefName));
+        const auto lit = live.units.find(u.unitDefName);
+        if (cit == captured.units.end() || lit == live.units.end()) {
+            // A def with no recorded scalars on either side. Not a refusal: the
+            // payload is internally consistent and the object's values are the
+            // ones it was captured with, which is strictly today's behaviour.
+            ++out.unitsUnknownDef;
+            continue;
+        }
+        UnitDefScalars born = cit->second;
+        UnitDefScalars now  = lit->second;
+
+        // ── the newborn value is not always the def value ──
+        //
+        // Three fields are set at FinishedBuilding rather than PreInit, so a
+        // unit still under construction has never held the def's value and
+        // comparing it against one would read as authored. And `mass` is not a
+        // def cache at all on two paths: it stays at its constructor value while
+        // beingBuilt (Unit.cpp:268) and a transport ACCUMULATES its cargo's mass
+        // into it (Unit.cpp:2686), so a loaded transport's mass is a sum, not a
+        // number any def knows. Both are skipped rather than guessed at.
+        const bool massIsDefs = !u.beingBuilt && u.transportees.empty() &&
+                                u.transporterId < 0;
+        if (u.beingBuilt) {
+            born.storage = ResPair{};
+            now.storage = ResPair{};
+            born.losRadius = born.airLosRadius = 0;
+            now.losRadius = now.airLosRadius = 0;
+        }
+
+        const float limExp = u.experience / (u.experience + 1.0f);
+        born.maxHealth = ExpScaled(born.maxHealth, limExp, captured.expHealthScale, true);
+        now.maxHealth  = ExpScaled(now.maxHealth,  limExp, live.expHealthScale, true);
+        born.power = ExpScaled(born.power, limExp, captured.expPowerScale, false);
+        now.power  = ExpScaled(now.power,  limExp, live.expPowerScale, false);
+
+        bool touched = false;
+        size_t& rd = out.unitFieldsReDerived;
+        size_t& au = out.unitFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        // ── vitals, and §2 step 3's fraction preservation ──
+        //
+        // The order is load-bearing: the fraction is taken against the maxHealth
+        // the snapshot was captured under, so it has to be read before the
+        // re-derive rewrites it. A nerfed def leaves a damaged unit damaged by
+        // the same proportion; a buffed one raises its absolute health, which
+        // §3 accepted explicitly (it is not a heal — the unit is exactly as
+        // wounded as it was).
+        const float capturedMax = u.maxHealth;
+        field(u.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(u.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            u.health = std::max(0.0f, u.health / capturedMax) * u.maxHealth;
+            ++out.unitsHealthScaled;
+        }
+        field(u.power, born.power, now.power);
+        if (massIsDefs) field(u.mass, born.mass, now.mass);
+        field(u.buildTime, born.buildTime, now.buildTime);
+        field(u.cost, born.cost, now.cost);
+        field(u.storage, born.storage, now.storage);
+        field(u.harvestStorage, born.harvestStorage, now.harvestStorage);
+
+        // reloadSpeed has no def input at all — it is 1 plus the experience
+        // term, so the curve is the only thing that can move it.
+        const float bornReload = (captured.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * captured.expReloadScale : 1.0f;
+        const float liveReload = (live.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * live.expReloadScale : 1.0f;
+        field(u.reloadSpeed, bornReload, liveReload);
+
+        // ── combat ──
+        field(u.armoredMultiple, born.armoredMultiple, now.armoredMultiple);
+        // curArmorMultiple is armoredMultiple-or-1 by armoredState, which is
+        // exactly what Spring.SetUnitArmored maintains.
+        field(u.curArmorMultiple,
+              u.armoredState ? born.armoredMultiple : 1.0f,
+              u.armoredState ? now.armoredMultiple : 1.0f);
+        // armorType and category have NO Lua setter and nothing mutates them
+        // after PreInit, so they are unconditional re-derives — and armorType is
+        // the gap task 2 filed: an index into the armor-type list, which no
+        // section carries and no name-keyed remap could reach. The fix is not a
+        // fourth name table; it is not restoring a stale index at all.
+        field(u.armorType, born.armorType, now.armorType);
+        field(u.category, born.category, now.category);
+        field(u.maxRange, born.maxRange, now.maxRange);
+        field(u.flankingBonusMode, born.flankingBonusMode, now.flankingBonusMode);
+        field(u.flankingBonusMobilityAdd, born.flankingBonusMobilityAdd,
+              now.flankingBonusMobilityAdd);
+        // flankingBonusMobility is NOT here: it is an accumulator, not a cache
+        // (Unit.cpp:699 adds mobilityAdd to it on every SlowUpdate). Found live
+        // by the authored-count line below — every unit in the fixture reported
+        // exactly one authored field, and it was this one.
+        field(u.flankingBonusAvgDamage, born.flankingBonusAvgDamage,
+              now.flankingBonusAvgDamage);
+        field(u.flankingBonusDifDamage, born.flankingBonusDifDamage,
+              now.flankingBonusDifDamage);
+
+        // ── sensors ──
+        field(u.realLosRadius, born.losRadius, now.losRadius);
+        field(u.realAirLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.losRadius, born.losRadius, now.losRadius);
+        field(u.airLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.radarRadius, born.radarRadius, now.radarRadius);
+        field(u.sonarRadius, born.sonarRadius, now.sonarRadius);
+        field(u.jammerRadius, born.jammerRadius, now.jammerRadius);
+        field(u.sonarJamRadius, born.sonarJamRadius, now.sonarJamRadius);
+        field(u.seismicRadius, born.seismicRadius, now.seismicRadius);
+        field(u.seismicSignature, born.seismicSignature, now.seismicSignature);
+        field(u.decloakDistance, born.decloakDistance, now.decloakDistance);
+        field(u.stealth, born.stealth, now.stealth);
+        field(u.sonarStealth, born.sonarStealth, now.sonarStealth);
+
+        if (touched) ++out.unitsTouched;
+    }
+
+    for (auto& f : features) {
+        const auto cit =
+            captured.features.find(capturedName(liveToCapturedFeature, f.featureDefName));
+        const auto lit = live.features.find(f.featureDefName);
+        if (cit == captured.features.end() || lit == live.features.end()) {
+            ++out.featuresUnknownDef;
+            continue;
+        }
+        const FeatureDefScalars& born = cit->second;
+        const FeatureDefScalars& now  = lit->second;
+
+        bool touched = false;
+        size_t& rd = out.featureFieldsReDerived;
+        size_t& au = out.featureFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        const float capturedMax = f.maxHealth;
+        field(f.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(f.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            f.health = std::max(0.0f, f.health / capturedMax) * f.maxHealth;
+            ++out.featuresHealthScaled;
+        }
+        field(f.mass, born.mass, now.mass);
+        field(f.reclaimTime, born.reclaimTime, now.reclaimTime);
+
+        // `resources` is what is LEFT to reclaim and CFeature keeps it capped at
+        // defResources, using the ratio between them as the reclaim fraction
+        // (Feature.cpp:284, :421). So a re-costed wreck gets the same treatment
+        // health does: preserve the fraction, not the absolute amount, or a
+        // cheapened def leaves half-reclaimed wrecks holding more than they
+        // could ever have held.
+        const ResPair capturedRes = f.defResources;
+        field(f.defResources, born.defResources, now.defResources);
+        if (!SameScalar(f.defResources, capturedRes)) {
+            const auto scale = [](float cur, float from, float to) {
+                return (from > 0.0f) ? std::max(0.0f, cur / from) * to : to;
+            };
+            f.resources.metal = scale(f.resources.metal, capturedRes.metal,
+                                      f.defResources.metal);
+            f.resources.energy = scale(f.resources.energy, capturedRes.energy,
+                                       f.defResources.energy);
+            ++out.featuresResourcesScaled;
+        }
+
+        if (touched) ++out.featuresTouched;
+    }
+}
+
+// ───── The game's turn: DefsReconciled (task 4, §2 step 5) ─────
+
+namespace {
+
+using LuaValue = luasnapshot::Value;
+
+/// A Lua 1..n array of strings. Sorted by the caller (or already complete and
+/// sorted on the report) — a gadget iterating this with ipairs is running SYNCED
+/// code, so the order is sim behaviour and not presentation.
+LuaValue StringArray(std::vector<std::string> names)
+{
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (auto& n : names)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Str(std::move(n)));
+    return out;
+}
+
+LuaValue IntArray(const std::vector<int32_t>& ids)
+{
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (const int32_t id : ids)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Int(id));
+    return out;
+}
+
+/// old name → new name, as a Lua map. Keyed by the CAPTURED name because that is
+/// the name a gadget's own saved state was written with — the whole point of
+/// handing it over is that the gadget cannot look the old name up any more.
+LuaValue RenameMap(const std::unordered_map<std::string, std::string>& renames)
+{
+    std::vector<std::pair<std::string, std::string>> sorted(renames.begin(), renames.end());
+    std::sort(sorted.begin(), sorted.end());
+    LuaValue out = LuaValue::Table();
+    for (auto& [from, to] : sorted)
+        out.table.emplace_back(LuaValue::Str(from), LuaValue::Str(to));
+    return out;
+}
+
+/// Every captured def of one family that this game no longer defines. From
+/// `goneByName`, which the map builds complete precisely because the two
+/// families that travel by name have to be tested against it.
+LuaValue RemovedNames(const DefIdMap& fam)
+{
+    return StringArray(std::vector<std::string>(fam.goneByName.begin(),
+                                                fam.goneByName.end()));
+}
+
+void AddCount(LuaValue& into, const char* key, size_t n)
+{
+    into.table.emplace_back(LuaValue::Str(key), LuaValue::Int(static_cast<int64_t>(n)));
+}
+
+} // namespace
+
+luasnapshot::Value BuildDefsReconciledDelta(const DefDelta& unitDelta,
+                                            const DefDelta& weaponDelta,
+                                            const DefDelta& featureDelta,
+                                            const DefRemap& remap,
+                                            const RemapReport& remapRep,
+                                            const ScalarReport& scalarRep)
+{
+    // Nil rather than an empty table: "nothing moved" is the ordinary resume and
+    // the call-in must not fire on it. A gadget handed an empty delta would have
+    // to re-derive that answer from eleven counters, and one of them would
+    // eventually be forgotten.
+    //
+    // A pure def ADDITION fires this too, even though §3 says additions need
+    // nothing from the engine. They can need something from the GAME: a gadget
+    // that caches "what can this factory build" has to hear about a def that
+    // appeared, and the engine cannot know which gadgets those are.
+    if (!unitDelta.Changed() && !weaponDelta.Changed() && !featureDelta.Changed() &&
+        !remapRep.Changed() && !scalarRep.Changed())
+        return LuaValue::Nil();
+
+    LuaValue units = LuaValue::Table();
+    units.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.units));
+    units.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.unitRenames));
+    units.table.emplace_back(LuaValue::Str("retuned"), StringArray(scalarRep.retunedUnitDefs));
+
+    LuaValue features = LuaValue::Table();
+    features.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.features));
+    features.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.featureRenames));
+    features.table.emplace_back(LuaValue::Str("retuned"),
+                                StringArray(scalarRep.retunedFeatureDefs));
+
+    // Weapons carry no `renamed` half and the absence is structural, not an
+    // oversight: DefRemap aliases weapon names inside the ID map (a weapon is
+    // never referenced by name from anything a gadget saves), so there is no
+    // captured→live weapon name pairing to hand over. Removals are still
+    // reported — a gadget keying anything on a weapon def name wants those.
+    LuaValue weapons = LuaValue::Table();
+    weapons.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.weapons));
+
+    LuaValue counts = LuaValue::Table();
+    AddCount(counts, "buildOrdersDropped",     remapRep.buildCmdsDropped);
+    AddCount(counts, "featureDefsAdded",       featureDelta.added);
+    AddCount(counts, "featureDefsRenumbered",  featureDelta.renumbered);
+    AddCount(counts, "featureDefsRetuned",     scalarRep.featureDefsRetuned);
+    AddCount(counts, "featuresAdjusted",       scalarRep.featuresTouched);
+    AddCount(counts, "featuresDropped",        remapRep.featuresDropped);
+    AddCount(counts, "featuresHealthScaled",   scalarRep.featuresHealthScaled);
+    AddCount(counts, "ordersDeactivated",      remapRep.ordersDeactivated);
+    AddCount(counts, "unitDefsAdded",          unitDelta.added);
+    AddCount(counts, "unitDefsRenumbered",     unitDelta.renumbered);
+    AddCount(counts, "unitDefsRetuned",        scalarRep.unitDefsRetuned);
+    AddCount(counts, "unitFieldsAuthored",     scalarRep.unitFieldsAuthored);
+    AddCount(counts, "unitFieldsReDerived",    scalarRep.unitFieldsReDerived);
+    AddCount(counts, "unitsAdjusted",          scalarRep.unitsTouched);
+    AddCount(counts, "unitsDropped",           remapRep.unitsDropped);
+    AddCount(counts, "unitsHealthScaled",      scalarRep.unitsHealthScaled);
+    AddCount(counts, "weaponDefsAdded",        weaponDelta.added);
+    AddCount(counts, "weaponDefsRenumbered",   weaponDelta.renumbered);
+
+    LuaValue out = LuaValue::Table();
+    out.table.emplace_back(LuaValue::Str("counts"), std::move(counts));
+    // The digest string §2 step 6 asks for, composed HERE rather than in Lua:
+    // it is the two reports' own Describe() output, and a second wording of the
+    // same counts in Lua is a second wording to keep in step.
+    out.table.emplace_back(LuaValue::Str("digest"),
+                           LuaValue::Str(remapRep.Describe() + " | " +
+                                         scalarRep.Describe()));
+    out.table.emplace_back(LuaValue::Str("droppedFeatures"),
+                           IntArray(remapRep.droppedFeatureIds));
+    out.table.emplace_back(LuaValue::Str("droppedUnits"),
+                           IntArray(remapRep.droppedUnitIds));
+    out.table.emplace_back(LuaValue::Str("features"), std::move(features));
+    // False on a pre-task-3 snapshot: the retune lists are then EMPTY BECAUSE
+    // NOTHING WAS RECORDED, not because nothing moved, and a gadget deciding
+    // whether to re-derive its own def caches needs to tell those apart — the
+    // same one-directional guard the two passes apply to their own vocabularies.
+    out.table.emplace_back(LuaValue::Str("retunesKnown"),
+                           LuaValue::Boolean(scalarRep.ran));
+    out.table.emplace_back(LuaValue::Str("units"), std::move(units));
+    out.table.emplace_back(LuaValue::Str("weapons"), std::move(weapons));
+    return out;
+}
+
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
 //
 // One recursive value format: type byte, then the payload for that type, and a
@@ -2161,6 +3613,11 @@ void WriteLuaValue(Writer& w, const luasnapshot::Value& v)
             std::memcpy(&bits, &v.num, sizeof(bits));
             w.U64(bits);
         } break;
+        case luasnapshot::Value::Type::Integer:
+            // Two's complement through U64 rather than the double path: an
+            // integer past 2^53 is exactly what the subtype exists to keep.
+            w.U64(static_cast<uint64_t>(v.i));
+            break;
         case luasnapshot::Value::Type::String:
             w.Str(v.str);
             break;
@@ -2185,7 +3642,7 @@ luasnapshot::Value ReadLuaValue(Reader& r, int depth)
     }
 
     const uint8_t type = r.U8();
-    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Table)) {
+    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Integer)) {
         r.Fail();
         return v;
     }
@@ -2201,6 +3658,9 @@ luasnapshot::Value ReadLuaValue(Reader& r, int depth)
             const uint64_t bits = r.U64();
             std::memcpy(&v.num, &bits, sizeof(v.num));
         } break;
+        case luasnapshot::Value::Type::Integer:
+            v.i = static_cast<int64_t>(r.U64());
+            break;
         case luasnapshot::Value::Type::String:
             v.str = r.Str();
             break;
@@ -2547,6 +4007,13 @@ void CaptureUnits(std::vector<UnitState>& out)
                 ws.nextSalvo = w->nextSalvo;
                 ws.numStockpiled = w->numStockpiled;
                 ws.numStockpileQued = w->numStockpileQued;
+                // What this slot IS, so the restore can find it again after a
+                // def gains or reorders a weapon (task 2). A weapon with no
+                // def cannot happen (CWeapon's constructor takes one), but the
+                // null check costs nothing and the empty name degrades to the
+                // old positional match.
+                if (w->weaponDef != nullptr)
+                    ws.weaponDefName = w->weaponDef->name;
             }
             s.weapons.push_back(ws);
         }
@@ -2689,9 +4156,14 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
     u->captureProgress = s.captureProgress;
     u->buildProgress = s.buildProgress;
     u->experience = s.experience;
-    // limExperience is a pure function of experience (rebuilt, not captured);
-    // AddExperience(0) is the engine's own way of recomputing it.
-    u->AddExperience(0.0f);
+    // limExperience is a pure function of experience (rebuilt, not captured) —
+    // but AddExperience(0) does NOT rebuild it: the engine's first statement is
+    // `if (exp == 0.0f) return`, so the call this line used to make was a no-op
+    // and every restored veteran came back with limExperience 0 until its next
+    // kill. That is not cosmetic: limExperience is CWeapon's accuracy scale
+    // (Weapon.cpp) and a missile's wobble factor, so a restored veteran shot
+    // like a rookie. Recomputed the way AddExperience does it (Unit.cpp:1494).
+    u->limExperience = s.experience / (s.experience + 1.0f);
     u->recentDamage = s.recentDamage;
     u->power = s.power;
     u->SetMass(s.mass);
@@ -2789,29 +4261,75 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
         cai->selfDCountdown = s.selfDCountdown;
     }
 
-    // The def decides how many weapons a unit has, so a count mismatch means
-    // the defs moved under the snapshot (§2.1: there is no defsHash yet).
-    // Apply what lines up and say so rather than dropping the stockpile
-    // silently.
-    if (s.weapons.size() != u->weapons.size()) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            SLOG(SPRING_LOG_WARNING,
-                 "snapshot restore: unit %d ('%s') has %zu weapons, the snapshot "
-                 "recorded %zu - per-weapon state applied for the first %zu only",
-                 u->id, s.unitDefName.c_str(), u->weapons.size(), s.weapons.size(),
-                 std::min(u->weapons.size(), s.weapons.size()));
+    // The def decides how many weapons a unit has and in what order, so the
+    // pairing between captured slots and live ones is BY NAME, not by position
+    // (task 2 — MatchWeaponSlots, and the WeaponState::weaponDefName comment
+    // for why the positional version was a wrong-but-plausible restore). A
+    // live slot with no captured counterpart is E4's up-gunned fleet and keeps
+    // its constructor state: loaded, no stockpile.
+    {
+        std::vector<std::string> liveNames;
+        liveNames.reserve(u->weapons.size());
+        for (const CWeapon* w : u->weapons)
+            liveNames.emplace_back((w != nullptr && w->weaponDef != nullptr)
+                                       ? w->weaponDef->name : std::string());
+
+        const std::vector<int32_t> from = MatchWeaponSlots(s.weapons, liveNames);
+        size_t paired = 0;
+        size_t reloadClamped = 0;
+        for (size_t i = 0; i < u->weapons.size(); ++i) {
+            CWeapon* w = u->weapons[i];
+            if (w == nullptr || from[i] < 0) continue;
+            const WeaponState& ws = s.weapons[size_t(from[i])];
+            w->reloadStatus = ws.reloadStatus;
+            // §2 step 3's other half: cycle state clamps to the NEW cycle
+            // length. reloadStatus is the frame the weapon may fire again
+            // (Weapon.cpp: frameNum + reloadTime/reloadSpeed) and reloadTime
+            // comes off the live def, so a weapon whose reload was shortened
+            // restores stuck mid-cycle for longer than the new def allows —
+            // and one whose owner is mid-reload of a cycle that no longer
+            // exists never becomes ready at a frame the new cycle would.
+            // Clamped rather than reset: a nerfed (longer) reload keeps its
+            // remaining wait, which is the fraction-preserving disposition.
+            const int cycle = std::max(1, int(w->reloadTime /
+                                              std::max(0.01f, u->reloadSpeed)));
+            if (w->reloadStatus > gs->frameNum + cycle) {
+                w->reloadStatus = gs->frameNum + cycle;
+                ++reloadClamped;
+            }
+            w->salvoLeft = ws.salvoLeft;
+            w->nextSalvo = ws.nextSalvo;
+            w->numStockpiled = ws.numStockpiled;
+            w->numStockpileQued = ws.numStockpileQued;
+            ++paired;
         }
-    }
-    for (size_t i = 0; i < std::min(u->weapons.size(), s.weapons.size()); ++i) {
-        CWeapon* w = u->weapons[i];
-        if (w == nullptr) continue;
-        w->reloadStatus = s.weapons[i].reloadStatus;
-        w->salvoLeft = s.weapons[i].salvoLeft;
-        w->nextSalvo = s.weapons[i].nextSalvo;
-        w->numStockpiled = s.weapons[i].numStockpiled;
-        w->numStockpileQued = s.weapons[i].numStockpileQued;
+        // Both directions are worth a line, and only once: a fleet-wide def
+        // change would otherwise write one per unit.
+        if (paired != s.weapons.size() || paired != u->weapons.size()) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: unit %d ('%s') has %zu weapons, the "
+                     "snapshot recorded %zu - %zu slot(s) paired by weapon def "
+                     "name, %zu captured slot(s) had no live weapon, %zu live "
+                     "slot(s) start fresh (E4)",
+                     u->id, s.unitDefName.c_str(), u->weapons.size(),
+                     s.weapons.size(), paired, s.weapons.size() - paired,
+                     u->weapons.size() - paired);
+            }
+        }
+        if (reloadClamped != 0) {
+            static bool clampWarned = false;
+            if (!clampWarned) {
+                clampWarned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: %zu weapon(s) on unit %d ('%s') were "
+                     "mid-reload past the live def's cycle length and were "
+                     "clamped to it (def-reconciliation task 3, §2 step 3)",
+                     reloadClamped, u->id, s.unitDefName.c_str());
+            }
+        }
     }
 
     ApplyRulesParams(s.modParams, u->modParams);
@@ -3293,6 +4811,20 @@ bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err)
     return ok;
 }
 
+/// Task 4, §2 step 5. Best-effort by design — see CSyncedLuaHandle::
+/// DefsReconciled for why a raising handler does not fail the restore.
+void NotifyDefsReconciled(const luasnapshot::Value& delta)
+{
+    if (delta.IsNil()) return;   // an ordinary resume: nothing moved
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        std::string one;
+        if (!handle->DefsReconciled(delta, one))
+            SLOG(SPRING_LOG_ERROR, "snapshot restore: DefsReconciled (%s): %s",
+                 key, one.c_str());
+    }
+}
+
 // ───────────────────────── The gameRules section ─────────────────────────
 //
 // Task 1d-b's finding. Every OTHER rulesParam family hangs off an object the
@@ -3470,6 +5002,16 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 CaptureEnvResources(env);
                 EncodeEnvResources(env, section);
             } break;
+            case SectionId::DefNames: {
+                DefNameTables defs;
+                CaptureDefNames(defs);
+                EncodeDefNames(defs, section);
+            } break;
+            case SectionId::DefScalars: {
+                DefScalarTables scalars;
+                CaptureDefScalars(scalars);
+                EncodeDefScalars(scalars, section);
+            } break;
             default:
                 // An implemented section with no writer is a programming
                 // error, not a runtime condition - fail the checkpoint rather
@@ -3518,7 +5060,10 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
     bool haveFeatures = false, haveGameRules = false, haveEnvRes = false;
+    bool haveDefNames = false, haveDefScalars = false;
     envressnapshot::EnvResourceState envRes;
+    DefNameTables defNames;
+    DefScalarTables defScalars;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<RulesParamState> gameRules;
     std::vector<TeamState> teams;
@@ -3623,6 +5168,18 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveEnvRes = true;
                 break;
+            case SectionId::DefNames:
+                if (!DecodeDefNames(data + r.Pos(), len, defNames, err))
+                    return false;
+                sr.Skip(len);
+                haveDefNames = true;
+                break;
+            case SectionId::DefScalars:
+                if (!DecodeDefScalars(data + r.Pos(), len, defScalars, err))
+                    return false;
+                sr.Skip(len);
+                haveDefScalars = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -3648,9 +5205,99 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
         !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
-        !haveGameRules || !haveEnvRes) {
+        !haveGameRules || !haveEnvRes || !haveDefNames || !haveDefScalars) {
         err = "payload is missing a required section";
         return false;
+    }
+
+    // ── The def vocabulary: report, then RECONCILE (task 1 + task 2) ──
+    //
+    // A defs change is not an error (§3: "reconcile is not optional" — the
+    // snapshot taken before a balance patch is exactly the one that has to
+    // reach the restore path). It is reported, and then every def reference in
+    // the payload is rewritten through name-keyed maps before anything is
+    // resolved against a live def. Still in the staging phase, deliberately:
+    // the pass edits the decoded payload, and the one thing it CAN refuse (E1,
+    // an ambiguous rename) has to refuse while there is still a live world to
+    // fall back on.
+    //
+    // Nil unless something moved. Built here, in the staging phase where the
+    // reports exist, and delivered at the very END of the commit phase (task 4,
+    // §2 step 5): a gadget can only repair state it has already restored.
+    luasnapshot::Value reconcileDelta = luasnapshot::Value::Nil();
+    {
+        DefNameTables liveDefs;
+        CaptureDefNames(liveDefs);
+        const DefDelta units_ = CompareDefNames(defNames.units, liveDefs.units);
+        const DefDelta weapons_ = CompareDefNames(defNames.weapons, liveDefs.weapons);
+        const DefDelta features_ = CompareDefNames(defNames.features, liveDefs.features);
+        const bool moved = units_.Changed() || weapons_.Changed() || features_.Changed();
+        if (moved) {
+            SLOG(SPRING_LOG_INFO,
+                 "snapshot restore: defs moved under this snapshot - units: %s | "
+                 "weapons: %s | features: %s",
+                 units_.Describe().c_str(), weapons_.Describe().c_str(),
+                 features_.Describe().c_str());
+        }
+
+        DefAliases aliases;
+        if (!LoadDefAliases(aliases, err))
+            return false;
+
+        DefRemap remap;
+        if (!BuildDefRemap(defNames, liveDefs, aliases, remap, err))
+            return false;
+
+        RemapReport rep;
+        // §3's fast path: a tuning-only patch renames and renumbers nothing, so
+        // steps 1-2 have no work and the payload is not touched at all.
+        if (!remap.Identity()) {
+            RemapPayload(remap, units, features, orders, dirs, rep);
+            // WARNING rather than INFO: this is the line a returning player's
+            // "where did my army go" question is answered from, and §2 step 6's
+            // digest is built on the same counts.
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def references - %s",
+                 rep.Describe().c_str());
+        } else if (moved) {
+            SLOG(SPRING_LOG_INFO,
+                 "snapshot restore: no def reference needed rewriting (additions "
+                 "and tuning only)");
+        }
+
+        // §2 steps 3-4, and it runs whether or not step 1-2 had work: a
+        // tuning-only patch is precisely the case where no name and no id moved
+        // and every NUMBER did. The fast path is inside the pass (a def whose
+        // newborn values did not move re-derives nothing).
+        ScalarReport srep;
+        DefScalarTables liveScalars;
+        CaptureDefScalars(liveScalars);
+        ReconcileScalars(defScalars, liveScalars, remap, units, features, srep);
+        if (srep.Changed()) {
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def scalars - %s",
+                 srep.Describe().c_str());
+        } else {
+            // Reported even when nothing moved, and the authored counts are why:
+            // CaptureDefScalars mirrors CUnit::PreInit by hand, and if that
+            // mirror ever drifts, every field of every unit reads as "authored"
+            // and this whole pass silently stops re-deriving anything. A restore
+            // into an UNCHANGED def load should show a small authored count (the
+            // handful of values the game's gadgets really do write) — a number
+            // near units × fields is the mirror being wrong, not the game being
+            // opinionated. It is the only in-production check on the half no
+            // doctest can reach.
+            // NOTICE, not INFO: INFO is below the server's default level, and a
+            // tripwire nobody can see is not a tripwire. One line per restore.
+            SLOG(SPRING_LOG_NOTICE,
+                 "snapshot restore: %s [%zu unit + %zu feature def-derived "
+                 "field(s) authored by the game and kept as captured]",
+                 srep.Describe().c_str(), srep.unitFieldsAuthored,
+                 srep.featureFieldsAuthored);
+        }
+
+        reconcileDelta = BuildDefsReconciledDelta(units_, weapons_, features_,
+                                                  remap, rep, srep);
     }
 
     // The last fallible work, and it MUST be here rather than in the commit
@@ -3758,6 +5405,17 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         err = "world restored but synced Lua Load failed: " + luaErr;
         return false;
     }
+
+    // §2 step 5, and it is LAST for three reasons that all point the same way.
+    // After ApplySyncedLua, because a gadget repairs the state it just restored,
+    // not the state this process happened to be holding. After the failure
+    // check above, because a gadget whose Load failed must not then be asked to
+    // reconcile what it did not restore. And after gsRNG.SetGenState, because a
+    // handler that draws (expiring an objective, re-rolling a target) has to
+    // draw from the resumed world's stream — the draws are part of the resumed
+    // war, not of the checkpoint. No-op unless the defs actually moved, which is
+    // what keeps the §8 round-trip's byte-for-byte re-capture intact.
+    NotifyDefsReconciled(reconcileDelta);
     return true;
 }
 
@@ -3779,6 +5437,8 @@ int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }
 int Stats(const TeamStatsState& s)               { return CensusStats(s); }
 int Res(const ResPair& r)                        { return CensusResPair(r); }
 int LuaValue(const luasnapshot::Value& v)        { return CensusLuaValue(v); }
+int UnitDefScalars_(const UnitDefScalars& s)     { return CensusUnitDefScalars(s); }
+int FeatureDefScalars_(const FeatureDefScalars& s) { return CensusFeatureDefScalars(s); }
 
 int MoveBase(const movetypesnapshot::BaseState& b)   { return CensusMoveBase(b); }
 int MoveGround(const movetypesnapshot::GroundState& g) { return CensusMoveGround(g); }
