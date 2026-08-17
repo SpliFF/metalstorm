@@ -383,12 +383,85 @@ def build_soldier_s4():
     return p
 
 
+def hardhat(p, d, zone, crown=1.78, brim=True):
+    """Hard hat: dome + front brim (the engineer silhouette tell)."""
+    boxp(p, (0.0, crown * d.K, 0.01 * d.K),
+         (0.20 * d.K, 0.11 * d.K, 0.20 * d.K), zone, ch=0.04, skip=('-y',))
+    if brim:
+        boxp(p, (0.0, (crown - 0.045) * d.K, -0.11 * d.K),
+             (0.22 * d.K, 0.03 * d.K, 0.09 * d.K), zone, ch=0.01)
+
+
+def build_engineer_s2():
+    """Line engineer — s1's field engineer with a fuller kit."""
+    d = dims(height=1.85)
+    p = Part('body')
+    leg(p, 1, L.Z_LEG, L.Z_RUBBER, d)
+    leg(p, -1, L.Z_LEG, L.Z_RUBBER, d)
+    boxp(p, d.PELVIS_C, d.PELVIS_SZ, L.Z_STEELD, ch=0.03)
+    torso(p, d.TORSO_RINGS, L.Z_YELLOW)            # hi-vis vest
+    # team stripe down the vest front
+    boxp(p, (0.0, 1.26 * d.K, -0.135 * d.K),
+         (0.07 * d.K, 0.34 * d.K, 0.02 * d.K), L.Z_TORSO_T, ch=0.01)
+    # twin back tanks (s1 carries one)
+    for sx in (1, -1):
+        boxp(p, (sx * 0.11 * d.K, 1.32 * d.K, 0.15 * d.K),
+             (0.11, 0.30, 0.10), L.Z_STEEL, ch=0.03)
+    arm(p, 1, d.ARM_SIDES, L.Z_ARMOR, L.Z_GLOVE, d)
+    arm(p, -1, d.ARM_SIDES, L.Z_ARMOR, L.Z_GLOVE, d)
+    boxp(p, d.NECK_C, d.NECK_SZ, L.Z_STEELD, ch=0.02)
+    boxp(p, d.HEAD_C, d.HEAD_SZ, L.Z_SKIN, ch=0.03)
+    hardhat(p, d, L.Z_YELLOW)
+    # tool roll on the left hip
+    boxp(p, (0.19 * d.K, 1.02 * d.K, 0.02),
+         (0.065, 0.12, 0.085), L.Z_CANVAS, ch=0.02)
+    wrench(p, -1, L.Z_STEEL)
+    return p
+
+
+def build_engineer_s3():
+    """Heavy construction rig — welding mask down, twin bottles, cutting torch."""
+    d = dims(height=1.90, bulk=1.10)
+    p = Part('body')
+    leg(p, 1, L.Z_LEG, L.Z_RUBBER, d)
+    leg(p, -1, L.Z_LEG, L.Z_RUBBER, d)
+    boxp(p, d.PELVIS_C, d.PELVIS_SZ, L.Z_STEELD, ch=0.03)
+    rings = [(y, hx * 1.10, hz * 1.10) for (y, hx, hz) in d.TORSO_RINGS]
+    torso(p, rings, L.Z_YELLOW)
+    boxp(p, (0.0, 1.26 * d.K, -0.15 * d.K),
+         (0.08 * d.K, 0.34 * d.K, 0.02 * d.K), L.Z_TORSO_T, ch=0.01)
+    # gas bottles, taller than s2's tanks
+    for sx in (1, -1):
+        boxp(p, (sx * 0.12 * d.K, 1.34 * d.K, 0.17 * d.K),
+             (0.115, 0.36, 0.115), L.Z_STEEL, ch=0.03)
+    pauldrons(p, d, L.Z_ARMORD)
+    arm(p, 1, d.ARM_GRIP, L.Z_ARMOR, L.Z_GLOVE, d)
+    arm(p, -1, d.ARM_SIDES, L.Z_ARMOR, L.Z_GLOVE, d)
+    boxp(p, d.NECK_C, d.NECK_SZ, L.Z_STEELD, ch=0.02)
+    boxp(p, d.HEAD_C, d.HEAD_SZ, L.Z_SKIN, ch=0.03)
+    # no brim — the lowered mask below already owns the face read, and the
+    # brim's 48 tris do not fit under the 800-tri infantry budget
+    hardhat(p, d, L.Z_YELLOW, brim=False)
+    # welding mask lowered over the face — dark glass, reads as "not a soldier"
+    boxp(p, (0.0, 1.63 * d.K, -0.125 * d.K),
+         (0.15 * d.K, 0.17 * d.K, 0.035 * d.K), L.Z_GLASS, ch=0.012)
+    # cutting torch in the gripped hand
+    seg(p, (0.10 * d.K, 1.19 * d.K, -0.20), (0.09 * d.K, 1.24 * d.K, -0.40),
+        0.022, 0.014, L.Z_STEELD, n=5)
+    return p
+
+
 MODELS = {
     'ms_soldiers_s1':  (build_soldier,  True),
     'ms_soldiers_s2':  (build_soldier_s2, True),
     'ms_soldiers_s3':  (build_soldier_s3, True),
     'ms_soldiers_s4':  (build_soldier_s4, True),
     'ms_engineers_s1': (build_engineer, True),
+    'ms_engineers_s2': (build_engineer_s2, True),
+    'ms_engineers_s3': (build_engineer_s3, True),
+    # ms_engineers_s4 is deliberately absent: its def calls it a "Mobile
+    # fabrication platform — single vast crawler", which is a vehicle, not a
+    # humanoid. It needs a tracked-chassis generator, not this body plan.
     'ms_civilians':    (build_civilian, False),   # gaia — no team mask
     'ms_militia':      (build_militia,  True),
 }
