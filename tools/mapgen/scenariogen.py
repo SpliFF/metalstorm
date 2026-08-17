@@ -6,10 +6,27 @@ Metalstorm wars do not start with one builder unit. A scenario lands an army
 that already exists at a start location and sends it out to take control of
 ground that is already occupied — so what this tool emits is: a pre-deployed
 roster per playable side, clusters of existing buildings (towns / outposts /
-bases / extraction sites) owned by neutral or hostile factions, and exactly one
-terminal objective the war can be won on.
+bases / extraction sites / support works / harbours / shanty camps) owned by
+neutral or hostile factions, a set of objectives spanning several types, and
+exactly one terminal objective the war can be won on.
 
     scenariogen.py <map-dir> --seed 7 [--out FILE] [knobs...]
+    scenariogen.py <map-dir> --seed 7 --coverage --player     # the harness war
+
+THE COVERAGE WAR (--coverage, 2026-08-18). One switch that forces the knob
+preset able to reach every def ms_defs.load() knows — all 67 — and then REFUSES
+unless the staged result really contains one of each, plus one of every mobile
+def per side and at least one civilian township with people in it. It exists
+because an ordinary war stages about a third of the catalog (measured: 24 of 67
+on techno_lands at seed 11), so most of the shipped content had never been seen
+in a generated war at all. See gate_full_coverage.
+
+OBJECTIVE TYPES. The engine implements six (control kill escort protect extract
+infra); this generator emits four of them, and the missing two are a property of
+the file format rather than of this module: `kill` and `infra` are defined in
+terms of runtime unit ids, and game_scenario.lua's only population markers
+resolve the CIVILIAN registry. The full argument, with the two markers written
+out, is in emit_lua beside the objectives block.
 
 `<map-dir>` is a PROCESSED map directory (data/maps/<id>), not the source
 package. Anchoring on it rather than on __file__ is deliberate and copied from
@@ -168,6 +185,8 @@ from scenario_templates import (                          # noqa: E402
     BRIDGE_NOUN,
     BRIDGE_SPANS,
     CLUSTER_TEMPLATES,
+    COVERAGE_CLUSTER_KINDS,
+    COVERAGE_MIN_OVERRIDES,
     HOSTILE_FACTION,
     HOSTILE_SLATE_KINDS,
     MAX_BRIDGE_SPANS,
@@ -233,6 +252,22 @@ FOOTPRINT_GAP = 32
 # and reports it only by returning nil, so an under-spaced pair loses one of the
 # two silently — the staged war is simply one unit short of the file.
 UNIT_SPAWN_GAP = 16
+
+# --- the landing-zone fan ---------------------------------------------------
+# A roster entry's PREFERRED slot sits on one of a set of concentric rings
+# around the landing anchor, `ARMY_RING_SEATS` seats to a ring. Seats-per-ring
+# rather than one ring of N seats, because a single ring divides its
+# circumference by the entry count and so gets tighter the more entries there
+# are: the `full` roster's 36 entries on one 260-radius ring would be 45 elmos
+# apart, below the combined body radii of the two 5x5 units either side of them.
+#
+# 8 seats at radius 260 is 204 elmos of arc, which clears the widest pair the
+# rosters contain (a 6x6 ms_artillery_s4 against a 5x5 ms_tanks_s4: 34 + 28 + 16
+# of gap = 78) with room for each entry's own count-spread. It is also exactly
+# what `standard` (8 entries) and `light` (3) already had, so neither moves.
+ARMY_RING_SEATS = 8
+ARMY_RING_RADIUS = 260
+ARMY_RING_STEP = 130
 
 # --- planned towns (town-planner T4) ---------------------------------------
 # A `town` cluster is no longer a ring of scattered buildings: it is a street
@@ -534,6 +569,61 @@ def read_road_fords(map_dir: str) -> list[dict]:
              "depth": float(m.group("depth")),
              "wade": float(m.group("wade"))}
             for m in _FORD_RE.finditer(text[head:])]
+
+
+_CONVOY_ID_RE = re.compile(r"id\s*=\s*'(?P<id>[A-Za-z0-9_]+)'")
+_CONVOY_POINT_RE = re.compile(
+    r"\{\s*x\s*=\s*(?P<x>-?[0-9.]+)\s*,\s*z\s*=\s*(?P<z>-?[0-9.]+)\s*,?\s*\}")
+
+
+def read_convoy_routes(map_dir: str) -> list[dict]:
+    """The civilian convoy routes the MAP publishes, if it publishes any.
+
+    `mapdata/civilians.lua`'s `convoys` block, read for one thing only: an
+    escort objective's route id and the point its truck stops at.
+
+    WHY A MAP AND NOT A SCENARIO OWNS THIS. A convoy is spawned by
+    civilians/convoy.lua from map data, on a timer staggered past GameStart —
+    the vehicle does not exist when the scenario loads, so an escort objective
+    cannot name it. game_scenario.lua's answer is `_populatePayloadFrom =
+    { route = <id> }`, which parks the objective until
+    GG.Scenario.NotifyConvoySpawn fires for that route. So the generator can
+    emit an escort exactly when the map has a route to hang it on, and not
+    otherwise: this is a READER, not a writer, and a map with no convoys gets
+    no escort objectives rather than a broken one.
+
+    Measured 2026-08-18: of the thirteen maps in data/maps, ONE
+    (meridian_basin) publishes convoys. Generated wars on the other twelve
+    therefore carry no escort objective, and that is a map-content fact rather
+    than a generator gap — see the objectives note in emit_lua.
+
+    The terminus is the route's LAST waypoint, because that is where
+    convoy.lua despawns the truck: a destArea offset from it can never be
+    satisfied (the same trap meridian_basin.lua's own escort comments record).
+    Same regex-not-interpreter rule as every other reader in this module.
+    """
+    path = os.path.join(map_dir, "mapdata", "civilians.lua")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    head = text.find("convoys")
+    if head < 0:
+        return []
+    text = text[head:]
+    # Split on the id anchors: everything up to the next `id =` belongs to this
+    # route, so the last {x,z} pair in that span is this route's terminus.
+    marks = list(_CONVOY_ID_RE.finditer(text))
+    out = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        pts = _CONVOY_POINT_RE.findall(text[m.end():end])
+        if not pts:
+            continue
+        x, z = pts[-1]
+        out.append({"id": m.group("id"),
+                    "x": int(float(x)), "z": int(float(z))})
+    return out
 
 
 def region_centre(region: dict) -> tuple[float, float]:
@@ -905,7 +995,8 @@ def region_anchor(terrain: Terrain, region: dict,
 
 def place_cluster(rnd, terrain: Terrain, facts, region: dict, kind: str,
                   anchor: tuple[int, int], placed: list[Building],
-                  placed_units: list[tuple[int, int, object]]
+                  placed_units: list[tuple[int, int, object]],
+                  min_overrides: dict[str, int] | None = None
                   ) -> tuple[list[Building], list[dict]]:
     """One town / outpost / base / extraction site: buildings then garrison.
 
@@ -926,11 +1017,17 @@ def place_cluster(rnd, terrain: Terrain, facts, region: dict, kind: str,
                           int(0.40 * min(max(xs) - min(xs), max(zs) - min(zs)))))
 
     # --- how many of each building, from the template's weights -------------
+    # `min_overrides` raises a def's guaranteed count without touching the
+    # template (COVERAGE_MIN_OVERRIDES). It can only raise: a coverage run must
+    # never stage FEWER of something than an ordinary war would, or the harness
+    # stops being a superset of what it is meant to be covering. The cap rises
+    # with it for the same reason a min above a max is nonsense.
+    over = min_overrides or {}
     wanted: list[str] = []
     for defname, _w, lo, _hi in tpl["buildings"]:
-        wanted.extend([defname] * lo)
+        wanted.extend([defname] * max(lo, over.get(defname, 0)))
     extra = _pick_int(rnd, 1, 3)
-    caps = {d: hi for d, _w, _lo, hi in tpl["buildings"]}
+    caps = {d: max(hi, over.get(d, 0)) for d, _w, _lo, hi in tpl["buildings"]}
     for _ in range(extra):
         cand = [b for b in tpl["buildings"]
                 if wanted.count(b[0]) < caps[b[0]]]
@@ -992,15 +1089,26 @@ def place_cluster(rnd, terrain: Terrain, facts, region: dict, kind: str,
                     rad = ring_r + widen * 70
                     for _ in range(10):
                         ang = rnd.random() * math.tau
-                        x = ax + math.cos(ang) * rad
-                        z = az + math.sin(ang) * rad
+                        # TEST THE INTEGER, because the integer is what gets
+                        # stored and what every later gate re-reads. Testing
+                        # the float and truncating afterwards moves the point
+                        # by up to 1.41 elmos AFTER it passed, which is enough
+                        # to cross a clearance boundary it had just cleared:
+                        # observed as an ms_militia stored 153.09 elmos from an
+                        # ms_depot whose blocked footprint reaches 153.14, so
+                        # place_cluster accepted it and
+                        # gate_no_unit_in_a_footprint then refused the whole
+                        # war. A rounding step between a check and its subject
+                        # is the check being asked about a different point.
+                        x = int(ax + math.cos(ang) * rad)
+                        z = int(az + math.sin(ang) * rad)
                         if not terrain.passable(x, z, mclass):
                             continue
                         if not all(b.clears(x, z) for b in buildings + placed):
                             continue
                         if _too_close(x, z, f, placed_units + local_units):
                             continue
-                        spot = (int(x), int(z))
+                        spot = (x, z)
                         break
                     if spot:
                         break
@@ -1275,14 +1383,19 @@ def _place_guardians(rnd, terrain: Terrain, facts, anchor, placed, placed_units,
                 rad = 180 + widen * 70
                 for _ in range(10):
                     ang = rnd.random() * math.tau
-                    x, z = ax + math.cos(ang) * rad, az + math.sin(ang) * rad
+                    # Integers, for the reason spelled out in place_cluster's
+                    # garrison loop: the stored point and the tested point have
+                    # to be the same point, or a later gate is asked about a
+                    # position this one never graded.
+                    x = int(ax + math.cos(ang) * rad)
+                    z = int(az + math.sin(ang) * rad)
                     if not terrain.passable(x, z, mclass):
                         continue
                     if not all(b.clears(x, z) for b in placed):
                         continue
                     if _too_close(x, z, f, placed_units + local):
                         continue
-                    spot = (int(x), int(z))
+                    spot = (x, z)
                     break
                 if spot:
                     break
@@ -1937,6 +2050,76 @@ def gate_no_two_units_share_a_spot(points: list[tuple[str, float, float, object]
                        "\n  ".join(bad))
 
 
+def gate_full_coverage(staged: dict[str, list[str]], facts,
+                       per_side: dict[int, set[str]], sides: int,
+                       townships) -> None:
+    """A `--coverage` war really does stage one of every def, per the directive.
+
+    Three separate claims, because they are separately falsifiable and the
+    directive makes all three:
+
+      * THE WAR contains at least one of every def ms_defs.load() knows — all
+        67, mobile and building alike. Buildings are a war-level claim, not a
+        per-side one: the cluster layer stands them on neutral and hostile
+        ground by design, and demanding each side own a shipyard would mean
+        inventing a placement path nothing else in the generator has.
+      * EACH SIDE fields at least one of every MOBILE def. That is the half the
+        roster owns, and the half a player sees on their own colour.
+      * AT LEAST ONE PLANNED TOWNSHIP WITH RESIDENTS EXISTS. The directive asks
+        for civilian towns by name, and this is also the load-bearing
+        precondition for two of the war's three objective types: `protect` and
+        `extract` are both authored against a township's `ambient` population
+        (see the objectives note in emit_lua), so a coverage war with no town
+        silently ships with only `control` objectives — which is the exact
+        defect this whole lane is about. Checked here rather than trusted,
+        because plan_township refuses ground for perfectly good reasons and a
+        war can lose every town it asked for without any layer erroring.
+
+    This gate exists because every layer beneath it is best-effort. place_cluster
+    drops a building it cannot site and says nothing; place_sites stops at the
+    regions it was given; plan_township refuses ground it does not like. Each of
+    those is correct in isolation — a war that thins out on a cramped map beats
+    a war that refuses — and each of them silently turns "coverage" into "usually
+    coverage". A harness whose entire job is to put every def on screen cannot
+    be usually right, so the composition is asserted here and REFUSED by name.
+
+    `staged` maps def name → the labels it was staged under, so the refusal can
+    say what was missing rather than only that something was.
+    """
+    catalog = set(facts)
+    present = set(staged)
+    missing = sorted(catalog - present)
+    problems = []
+    if missing:
+        problems.append(
+            "the war stages none of: " + ", ".join(missing) +
+            f"\n    ({len(present)}/{len(catalog)} defs covered)")
+
+    mobile = {n for n, f in facts.items() if not f.building}
+    for team in range(sides):
+        short = sorted(mobile - per_side.get(team, set()))
+        if short:
+            problems.append(f"side {team} fields none of: " + ", ".join(short))
+
+    peopled = [s for s in townships if s.populace.head_count()]
+    if not peopled:
+        problems.append(
+            f"no planned township with residents ({len(townships)} planned) — "
+            "so the war has no civilian population, and with none there is "
+            "nothing for its protect or extract objectives to be about; it "
+            "would ship with `control` objectives only")
+
+    if problems:
+        raise Rejected(
+            "--coverage asked for one of every def and did not get it:\n  " +
+            "\n  ".join(problems) +
+            "\n  A coverage war is a harness, so an incomplete one is a failed "
+            "run rather than a thinner war. Try another seed or a map with more "
+            "buildable regions — the cluster layer needs one free region per "
+            "kind, and the works/harbour clusters carry the defs no other "
+            "template names.")
+
+
 # ==========================================================================
 # Generation
 # ==========================================================================
@@ -2038,10 +2221,11 @@ def scenario_id(map_id: str, seed: int, version: int) -> str:
 def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
              outposts: int = 2, bases: int = 1, mines: int = 1,
              sites: int = 3, relics: int = 1, wrecks: int = 5,
-             bridges: int = 1,
+             bridges: int = 1, works: int = 0, harbour: int = 0,
+             shanty: int = 0,
              hostility: str = "mixed", roster: str = "standard",
              version: int = GENERATOR_VERSION, game_dir: str | None = None,
-             test_scenario: bool = True):
+             test_scenario: bool = True, coverage: bool = False):
     """Build one scenario. Returns `(lua_source, meta)`. Raises `Rejected`.
 
     `test_scenario` is what invariant 5 is conditional on — see the module
@@ -2067,9 +2251,33 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     Two refusals survive in BOTH modes, because no transport fixes them: a
     labelled point on impassable ground, and a home region containing no ground
     passable for its own roster.
+
+    `coverage` is the full-coverage war (2026-08-18). It is a PRESET PLUS A
+    GATE, not a new placement path: it forces the knobs that between them can
+    reach every def ms_defs.load() knows (the `full` roster, one works and one
+    harbour cluster, every site kind, every relic kind), and then asserts the
+    result with gate_full_coverage. The gate is the load-bearing half — every
+    layer under it is best-effort by design (place_cluster silently drops a
+    building it cannot site, place_sites stops at the regions it has), so a
+    preset alone buys "usually complete", and a war that is usually complete is
+    not a coverage harness. It REFUSES instead, naming the missing defs.
     """
     import random
     rnd = random.Random(seed)
+
+    if coverage:
+        # Explicit knobs still win, so `--coverage --towns 5` means five towns.
+        # Only the ones a coverage war cannot do without are forced.
+        roster = "full"
+        works = max(works, 1)
+        harbour = max(harbour, 1)
+        shanty = max(shanty, 1)
+        sites = max(sites, len(SITE_TEMPLATES))
+        relics = max(relics, len(ANCIENT_SITES))
+        towns = max(towns, 1)
+        outposts = max(outposts, 1)
+        bases = max(bases, 1)
+        mines = max(mines, 1)
 
     map_id = os.path.basename(map_dir.rstrip("/"))
     repo_root = os.path.abspath(os.path.join(map_dir, "..", "..", ".."))
@@ -2250,9 +2458,31 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         out.sort(key=lambda t: t[:3])
         return [t[3] for t in out]
 
-    plan = ([("base", i) for i in range(bases)] +
+    # ORDERED BY HOW PICKY THE CONSUMER IS, not by how important it is.
+    # `candidates()` hands out regions richest-rank first and `used` is shared,
+    # so whatever is planned last competes for whatever is left.
+    #
+    # PLANNED TOWNS GO FIRST because they are by far the pickiest: a township
+    # needs five-plus lots of buildable street frontage, and plan_township
+    # refuses ground every other kind would happily take (a scattered cluster
+    # needs one clear footprint at a time). Measured the hard way — with the
+    # coverage clusters planned first, meridian_basin planned ZERO towns at
+    # every seed tried, because the works/harbour/shanty had already taken the
+    # only three regions flat enough to hold streets. A war with no town has no
+    # civilian population, and with no population there is nothing for a
+    # protect or an extract objective to be about, so that ordering quietly
+    # cost the war two of its three objective types as well as its towns.
+    #
+    # The coverage clusters go next, ahead of the ordinary military kinds, for
+    # the reason that ordering was reached for in the first place: they carry
+    # the defs no other template names, so their absence is a generation
+    # failure rather than a thinner war.
+    plan = ([("town", i) for i in range(towns)] +
+            [("works", i) for i in range(works)] +
+            [("harbour", i) for i in range(harbour)] +
+            [("shanty", i) for i in range(shanty)] +
+            [("base", i) for i in range(bases)] +
             [("outpost", i) for i in range(outposts)] +
-            [("town", i) for i in range(towns)] +
             [("mine", i) for i in range(mines)])
 
     used: set[str] = set()
@@ -2294,7 +2524,9 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                     break
 
             bs, gs = place_cluster(rnd, terrain, facts, r, kind, anchor,
-                                   all_buildings, all_cluster_units)
+                                   all_buildings, all_cluster_units,
+                                   min_overrides=(COVERAGE_MIN_OVERRIDES.get(kind)
+                                                  if coverage else None))
             if not bs:
                 continue
             used.add(r["key"])
@@ -2345,6 +2577,10 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # a map that publishes none simply carves as R4 did.
     road_links = read_road_links(map_dir)
     road_yards = read_road_yards(map_dir)
+    # Read here rather than in the emitter so the run summary and --meta-json
+    # can report "this map publishes no convoys" as a fact about the MAP, which
+    # is what it is — see read_convoy_routes.
+    convoy_routes = read_convoy_routes(map_dir)
     frontage_entries, frontage_refusals = rf.stage_frontage(
         rnd, terrain, facts, road_links, ROAD_FRONTAGE,
         mclass=DEFAULT_CLASS,
@@ -2412,21 +2648,48 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         elif hostility == "hostile":
             c["owner"] = hostile_team
         else:                       # mixed — towns and mines are civilian ground
-            c["owner"] = "neutral" if c["kind"] in ("town", "mine") else hostile_team
+            # The harbour joins them: its garrison is civilians and a civtruck,
+            # and handing a working port to the marauders would put an armed
+            # faction's flag on a dock crewed by the people who live there.
+            # The works does NOT — a field workshop and a supply dump are
+            # exactly the rear-area assets an occupier takes first.
+            c["owner"] = ("neutral"
+                          if c["kind"] in ("town", "mine", "harbour", "shanty")
+                          else hostile_team)
 
     # --- armies -------------------------------------------------------------
     units = []
     force = []          # per side: (centroid_x, centroid_z, min_speed)
+    # ONE list for EVERY side's spawn points, not one per side. Two armies are
+    # placed one after the other and each was previously blind to the other's
+    # units, which is invisible for as long as the landing zones are far apart
+    # and wrong as soon as they are not: on a 1024-elmo synthetic map the
+    # `full` roster put side 0's ms_radar_s1 and side 1's ms_civbus 61 elmos
+    # apart against a combined body radius of 67, and Spring answers that by
+    # returning nil for the second CreateUnit — one of the two units simply
+    # never appears, with nothing in any log. The shared list is also what
+    # gate_no_two_units_share_a_spot has always graded, so the placer and the
+    # gate now ask the same question instead of the gate catching the placer.
+    all_army_points: list[tuple[int, int, object]] = []
     for i, (r, (ax, az)) in enumerate(zip(side_regions, side_anchors)):
         n_total, sum_x, sum_z, speed_min = 0, 0.0, 0.0, math.inf
         # Fan the roster's entries around the landing zone so a `count`-spread
         # entry does not overlap the next entry's.
         roster_entries = ARMY_ROSTERS[roster]
-        army_points: list[tuple[int, int, object]] = []
         for j, (defname, count, spacing) in enumerate(roster_entries):
             f = facts[defname]
             spacing = spacing or 150
             offs = grid_offsets(count, spacing)
+
+            def spread(px, pz):
+                """The INTEGER positions this entry's `count` copies land on.
+
+                Integers because integers are what is stored and what every
+                later gate re-reads — the same rule place_cluster's garrison
+                loop follows, and for the same reason: a truncation between a
+                check and its subject moves the point after it passed.
+                """
+                return [(int(px + dx), int(pz + dz)) for dx, dz in offs]
 
             def usable(px: float, pz: float) -> bool:
                 """Every instance this entry spawns is on clear, drivable ground.
@@ -2436,25 +2699,54 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                 that reach a neighbouring structure. Anything landing inside a
                 blocked yardmap is trapped there permanently.
                 """
-                for dx, dz in offs:
-                    x, z = px + dx, pz + dz
+                for x, z in spread(px, pz):
                     if f.movementclass and not terrain.passable(x, z, f.movementclass):
                         return False
                     if not all(b.clears(x, z) for b in all_buildings):
                         return False
-                    if _too_close(x, z, f, all_cluster_units + army_points):
+                    if _too_close(x, z, f, all_cluster_units + all_army_points):
                         return False
                 return True
 
             # Preferred slot first, then widening rings. Walking outward rather
             # than nudging keeps the army a coherent landing party instead of
             # scattering it across the region.
-            ang0 = math.tau * j / len(roster_entries)
-            ex, ez = int(ax + math.cos(ang0) * 260), int(az + math.sin(ang0) * 260)
+            #
+            # The preferred slot is picked off a MULTI-RING fan, not off one
+            # ring of `len(roster_entries)` angles. A single ring divides its
+            # circumference by the entry count, so it silently shrinks the
+            # spacing between preferred slots as the roster grows: at radius
+            # 260 an 8-entry roster gets 204 elmos between neighbours, and the
+            # 36-entry `full` roster gets 45 — less than two 5x5 bodies, so
+            # every entry after the first few fails `usable()` on its preferred
+            # slot and falls into the widening search. That still terminates,
+            # but it lands the army wherever the search happened to look rather
+            # than in the fan the fan exists to lay out. ARMY_RING_SEATS caps
+            # the seats per ring instead, so ring 0 holds 8 and the rest spill
+            # outward at ARMY_RING_STEP intervals — `standard` and `light` are
+            # unaffected (both fit ring 0, and 8 seats at radius 260 is the
+            # spacing they already had).
+            seat = j % ARMY_RING_SEATS
+            ring = j // ARMY_RING_SEATS
+            ang0 = math.tau * seat / ARMY_RING_SEATS
+            r0 = ARMY_RING_RADIUS + ring * ARMY_RING_STEP
+            ex, ez = int(ax + math.cos(ang0) * r0), int(az + math.sin(ang0) * r0)
             if not usable(ex, ez):
                 found = False
+                # Widen from THIS entry's own ring, alternating out and in.
+                # Anchoring the search at a fixed 260 would send an outer-ring
+                # entry hunting inward through the ground the inner rings have
+                # already taken, which is the slowest possible order and lands
+                # the tail of a big roster furthest from where it belongs.
+                # Inward steps are still offered (a ring can overshoot the
+                # region's drivable ground) but never closer than the base ring.
+                radii = []
                 for step in range(1, 10):
-                    rad = 260 + step * 130
+                    radii.append(r0 + step * ARMY_RING_STEP)
+                    inward = r0 - step * ARMY_RING_STEP
+                    if inward >= ARMY_RING_RADIUS:
+                        radii.append(inward)
+                for rad in radii:
                     for k in range(12):
                         ang = ang0 + math.tau * k / 12
                         cx2 = int(ax + math.cos(ang) * rad)
@@ -2471,7 +2763,7 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                         f"{defname} that is both drivable and clear of the "
                         f"buildings placed nearby — the army would spawn "
                         f"trapped inside a structure's footprint.")
-            army_points.extend((int(ex + dx), int(ez + dz), f) for dx, dz in offs)
+            all_army_points.extend((x, z, f) for x, z in spread(ex, ez))
             entry = {"def": defname, "team": i, "x": ex, "z": ez,
                      "facing": "south", "count": count,
                      "spacing": spacing}
@@ -2612,8 +2904,12 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     spawn_points = []
     for u in units:
         for dx, dz in grid_offsets(u.get("count", 1), u.get("spacing", 150)):
+            # int(), matching what the placer graded and what the loader will
+            # round these to — grading the float and staging the truncation is
+            # how a war passes its own gate and then loses a unit at CreateUnit.
             spawn_points.append((f"{u['def']} (team {u['team']})",
-                                 u["x"] + dx, u["z"] + dz, facts[u["def"]]))
+                                 int(u["x"] + dx), int(u["z"] + dz),
+                                 facts[u["def"]]))
     for c in clusters:
         for g in c["garrison"]:
             spawn_points.append((f"{g['def']} in {c['region']['key']}",
@@ -2636,6 +2932,49 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                    for ship in townships for c in ship.populace.residents]
     gate_no_civilian_in_a_town_footprint(town_points, all_buildings)
     gate_no_two_units_share_a_spot(spawn_points + town_points)
+
+    # --- the coverage census ------------------------------------------------
+    # Taken over the PLACED result, never over the templates: what a template
+    # names and what a war stands on the ground are exactly the two things this
+    # gate exists to tell apart. Every producer of a def contributes — the
+    # rosters, both halves of every cluster, the planned towns' statics and
+    # residents, the sites, the relic guardians and the roadside yards — so a
+    # def reaching the file by any route counts as covered by that route.
+    staged_defs: dict[str, list[str]] = {}
+
+    def _census(defname: str, where: str) -> None:
+        staged_defs.setdefault(defname, []).append(where)
+
+    per_side_defs: dict[int, set[str]] = {}
+    for u in units:
+        _census(u["def"], f"army (team {u['team']})")
+        if isinstance(u["team"], int) and u["team"] < sides:
+            per_side_defs.setdefault(u["team"], set()).add(u["def"])
+    for c in clusters:
+        for b in c["buildings"]:
+            _census(b.defname, f"{c['kind']} in {c['region']['key']}")
+        for g in c["garrison"]:
+            _census(g["def"], f"{c['kind']} garrison in {c['region']['key']}")
+    for ship in townships:
+        for b in ship.buildings:
+            _census(b.defname, f"town {ship.key}")
+        for res in ship.populace.residents:
+            _census(res.defname, f"town {ship.key} populace")
+    for s in site_entries:
+        _census(s["def"], f"site {s['name']}")
+    for rel in relic_entries:
+        for g in rel["guards"]:
+            _census(g["def"], f"guarding {rel['name']}")
+    for e in frontage_entries:
+        _census(e["def"], f"frontage on {e['road_name']}")
+        for p in e["parked"]:
+            _census(p["def"], f"parked at {e['road_name']}")
+    for e in layby_entries:
+        for p in e["props"]:
+            _census(p["def"], f"layby on {e['road_name']}")
+
+    if coverage:
+        gate_full_coverage(staged_defs, facts, per_side_defs, sides, townships)
 
     # --- name ---------------------------------------------------------------
     # "<the place being fought over> — <a seeded suffix>", the shape the
@@ -2712,11 +3051,22 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "crossings": [(c["region"]["key"], c["name"], c["chain"],
                        round(c["width"])) for c in crossings],
         "landmarks": sorted(landmark_names),
+        # The coverage census (full-coverage war, 2026-08-18). Reported on
+        # EVERY run, not only under --coverage: "which of the 67 defs did this
+        # war actually stand on the ground" is the question the directive is
+        # about, and a reader comparing an ordinary war against a coverage one
+        # needs the same number from both. `coverage` says whether the gate ran.
+        "coverage": coverage,
+        "staged_defs": {d: sorted(set(w)) for d, w in sorted(staged_defs.items())},
+        "staged_def_count": len(staged_defs),
+        "catalog_def_count": len(facts),
+        "uncovered_defs": sorted(set(facts) - set(staged_defs)),
+        "per_side_defs": {t: sorted(v) for t, v in sorted(per_side_defs.items())},
     }
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
                     hostile_team, sides, not_before, hold, townships,
-                    frontage_entries, layby_entries), meta
+                    frontage_entries, layby_entries, convoy_routes), meta
 
 
 # ==========================================================================
@@ -2734,7 +3084,7 @@ def _team_field(owner) -> str:
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
              hostile_team, sides, not_before, hold, townships=(),
-             frontage_entries=(), layby_entries=()) -> str:
+             frontage_entries=(), layby_entries=(), convoy_routes=()) -> str:
     L: list[str] = []
     add = L.append
 
@@ -3193,6 +3543,147 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
             add(f"        {{ type = 'control', scope = 'tactical', forTeam = nil, "
                 f"region = {_lua_str(key)}, reward = {reward}, "
                 f"expiresAtFrame = nil }},  -- {why}")
+
+    # ----------------------------------------------------------------------
+    # The non-control objectives (full-coverage war, 2026-08-18)
+    # ----------------------------------------------------------------------
+    # Until now the generator emitted `control` and nothing else, while the
+    # engine implemented six types and the hand-authored Meridian Basin used
+    # four of them. What follows closes as much of that as a GENERATED file
+    # can, and the limits are worth stating precisely because they are not
+    # generator laziness — they are a property of what a static scenario file
+    # can name.
+    #
+    # WHAT A STATIC FILE CAN NAME. Four of the six types are defined in terms
+    # of runtime unit ids, which a file written before the game boots does not
+    # have. game_scenario.lua's answer is two population markers, and they
+    # decide the whole shape of this block:
+    #
+    #   _populateTargetsFrom {x,z,r,role} -> params.targetUnitIDs   (protect)
+    #   _populatePayloadFrom {x,z,r,role} -> params.payloadUnitIDs  (extract)
+    #   _populatePayloadFrom {route}      -> params.payloadUnitIDs  (escort)
+    #
+    # Both area forms resolve through populateCiviliansInArea, i.e. the
+    # CIVILIAN registry only. So a generated war can author:
+    #
+    #   protect  YES — a township's `ambient` residents are exactly what the
+    #                  marker finds, and estate.lua already treats them as the
+    #                  population a protect objective is about.
+    #   extract  YES — same population, and extract.lua MOVES the payload
+    #                  itself once the pickup area is secured (fromLua, free),
+    #                  so it needs no order the player cannot give a civilian.
+    #                  This is why extract works where a naive escort does not.
+    #   escort   ONLY ON A MAP THAT PUBLISHES CONVOYS. The payload has to be a
+    #                  vehicle that DRIVES to destArea, and the only thing that
+    #                  drives one is civilians/convoy.lua off mapdata/
+    #                  civilians.lua. Using a town's ambient residents instead
+    #                  would author an objective nothing can ever complete:
+    #                  routines.lua wanders them locally and they would never
+    #                  reach a destination anywhere else on the map.
+    #   kill     NO  — needs params.targetUnitID, a single runtime id. There is
+    #                  no population marker that fills it (the two above fill
+    #                  the PLURAL ...UnitIDs fields), so no static file can
+    #                  author a kill objective at all.
+    #   infra    NO  — needs params.buildingUnitIDs, and both markers resolve
+    #                  civilians. A building is never a civilian, so the
+    #                  markers cannot reach one however it is placed.
+    #
+    # kill and infra are therefore an ENGINE gap, not a generator gap: they
+    # want a `_populate...From` that resolves ordinary units by area and def.
+    # Recorded here rather than worked around, because the available
+    # workarounds all amount to emitting an objective that can never resolve.
+    protect_lines, extract_lines = [], []
+    for j, ship in enumerate(townships):
+        m = ship.meta()
+        if not m["civilians"]:
+            continue        # nobody to protect, and nobody to extract
+        r = max(360, int(m["radius"]))
+        # The two objectives on one town go to DIFFERENT sides on purpose. One
+        # faction is asked to keep the town's people alive where they stand;
+        # the other is asked to secure the same streets and pull them out to
+        # its own lines. Both can succeed, neither is the other's failure
+        # condition, and the pair is the clearest thing a generated war can say
+        # about why the town matters. Alternating by index means a war with a
+        # single township still carries both types.
+        keeper = j % sides
+        mover = (j + 1) % sides
+        protect_lines.append(
+            (f"        -- {m['name']} ({m['key']}): {m['civilians']} residents\n"
+             f"        {{ type = 'protect', scope = 'tactical', forTeam = {keeper},\n"
+             f"          params = {{ targetUnitIDs = {{}}, quorum = 1 }},\n"
+             f"          _populateTargetsFrom = {{ x = {m['x']}, z = {m['z']}, "
+             f"r = {r}, role = 'ambient' }},\n"
+             f"          reward = 120, expiresAtFrame = {not_before + 9000} }},"))
+        # The evacuation runs to the MOVER's own landing zone, which is the one
+        # point on the map that side certainly holds. `threshold` and
+        # `holdFrames` are meridian_basin.lua's, unchanged: 5000 of friendly
+        # strength held for 10 seconds is what "secured" has meant since the
+        # type shipped, and a generated war inventing its own number would make
+        # two scenarios' extractions incomparable for no gain.
+        ex, ez = side_anchors[mover]
+        extract_lines.append(
+            (f"        -- {m['name']} ({m['key']}) -> side {mover}'s landing zone\n"
+             f"        {{ type = 'extract', scope = 'tactical', forTeam = {mover},\n"
+             f"          params = {{ payloadUnitIDs = {{}},\n"
+             f"              pickupArea = {{ x = {m['x']}, z = {m['z']}, r = {r} }},\n"
+             f"              extractArea = {{ x = {int(ex)}, z = {int(ez)}, r = 400 }},\n"
+             f"              holdFrames = 300, threshold = 5000, quorum = 1 }},\n"
+             f"          _populatePayloadFrom = {{ x = {m['x']}, z = {m['z']}, "
+             f"r = {r}, role = 'ambient' }},\n"
+             f"          reward = 150, expiresAtFrame = {not_before + 27000} }},"))
+
+    if protect_lines:
+        add("")
+        add("        -- PROTECT. The township's `ambient` residents, resolved at")
+        add("        -- frame 30 by game_scenario.lua's deferred sweep (the units do")
+        add("        -- not exist when this file is parsed). `expiresAtFrame` is")
+        add("        -- MANDATORY for this type — protect.init refuses an open-ended")
+        add("        -- one, because 'survive until expiry' has no other way to")
+        add("        -- resolve — and expiry counts as SUCCESS here, uniquely.")
+        add("        --")
+        add("        -- quorum 1: the town does not have to come through whole, it")
+        add("        -- has to come through. A quorum of 'everyone' would fail the")
+        add("        -- objective to the first stray shell and teach a player that")
+        add("        -- the objective was never really theirs to win.")
+        for line in protect_lines:
+            add(line)
+
+    if extract_lines:
+        add("")
+        add("        -- EXTRACT. Two phases: hold `threshold` strength inside the")
+        add("        -- pickup area for `holdFrames`, then the payload is moved to")
+        add("        -- the extract area and >= quorum arriving completes it. The")
+        add("        -- move is done BY THE GADGET, which is what makes this type")
+        add("        -- authorable from a generated file at all — no player can")
+        add("        -- order a civilian anywhere.")
+        for line in extract_lines:
+            add(line)
+
+    if convoy_routes:
+        add("")
+        add("        -- ESCORT, one per convoy route THIS MAP publishes in")
+        add("        -- mapdata/civilians.lua. Deliberately absent on a map with no")
+        add("        -- convoys: the payload must be a vehicle that drives itself to")
+        add("        -- destArea, and civilians/convoy.lua is the only thing that")
+        add("        -- drives one.")
+        add("        --")
+        add("        -- payloadUnitIDs starts empty and STAYS empty until the route")
+        add("        -- spawns: convoy.lua staggers its first run 0-60s past")
+        add("        -- GameStart, so this objective is parked by route id and fired")
+        add("        -- by GG.Scenario.NotifyConvoySpawn rather than by the frame-30")
+        add("        -- sweep. destArea is the route's LAST waypoint because that is")
+        add("        -- where the truck is despawned — a destArea offset from the")
+        add("        -- terminus can never be satisfied.")
+        for k, route in enumerate(convoy_routes):
+            add(f"        {{ type = 'escort', scope = 'tactical', "
+                f"forTeam = {k % sides},")
+            add("          params = { payloadUnitIDs = {},")
+            add(f"              destArea = {{ x = {route['x']}, z = {route['z']}, "
+                f"r = 400 }}, quorum = 1 }},")
+            add(f"          _populatePayloadFrom = {{ route = "
+                f"{_lua_str(route['id'])} }},")
+            add(f"          reward = 100, expiresAtFrame = {not_before + 18000} }},")
+
     add("    },")
     add("}")
     add("")
@@ -3265,9 +3756,29 @@ def main(argv=None):
                     help="wrecks scattered on the contested region")
     ap.add_argument("--bridges", type=int, default=1,
                     help="chained road spans over water gaps, where one fits")
+    ap.add_argument("--works", type=int, default=0,
+                    help="support-works clusters (the buildings_support.lua "
+                         "tail: command post, comms relay, field workshop, "
+                         "rail platform)")
+    ap.add_argument("--harbour", type=int, default=0,
+                    help="harbour-works clusters (shipyard, pontoon wharf, "
+                         "mooring mast, port crane). Not water-gated — see "
+                         "the template.")
+    ap.add_argument("--shanty", type=int, default=0,
+                    help="shanty camps: the informal settlement (shanty block, "
+                         "market stalls, meeting hall, water works, watchtower, "
+                         "barricades) the planned Township never draws")
     ap.add_argument("--hostility", default="mixed",
                     choices=["neutral", "hostile", "mixed"])
     ap.add_argument("--roster", default="standard", choices=sorted(ARMY_ROSTERS))
+    ap.add_argument("--coverage", action="store_true",
+                    help="FULL-COVERAGE WAR: force the knob preset that can "
+                         "reach every def ms_defs knows (--roster full, one "
+                         "works and one harbour cluster, every site and relic "
+                         "kind), then REFUSE unless the staged result really "
+                         "contains one of each — and one of every mobile def "
+                         "per side. Explicit knobs still win, so "
+                         "`--coverage --towns 5` means five towns.")
     ap.add_argument("--player", action="store_true",
                     help="generate for a HUMAN: drop the mutual-ground-"
                          "reachability gate, so islands, rivers and straits "
@@ -3297,9 +3808,11 @@ def main(argv=None):
             map_dir, seed, sides=args.sides, towns=args.towns,
             outposts=args.outposts, bases=args.bases, mines=args.mines,
             sites=args.sites, relics=args.relics, wrecks=args.wrecks,
-            bridges=args.bridges,
+            bridges=args.bridges, works=args.works, harbour=args.harbour,
+            shanty=args.shanty,
             hostility=args.hostility, roster=args.roster,
-            game_dir=args.game_dir, test_scenario=not args.player)
+            game_dir=args.game_dir, test_scenario=not args.player,
+            coverage=args.coverage)
     except Rejected as e:
         print(f"REJECTED — {e}", file=sys.stderr)
         return 2
