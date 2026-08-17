@@ -278,6 +278,24 @@ RunScenarioGen(const std::string &mapsDir, const std::string &mapId,
   addInt("--relics", "relics", 0, 32);
   addInt("--wrecks", "wrecks", 0, 32);
   addInt("--bridges", "bridges", 0, 32);
+  // The civilian cluster kinds the coverage war needs (scenariogen.py's
+  // --works/--harbour/--shanty). Same clamp and rationale as above: without
+  // them an HTTP caller can ask for a full-coverage war but not shape it.
+  addInt("--works", "works", 0, 32);
+  addInt("--harbour", "harbour", 0, 32);
+  addInt("--shanty", "shanty", 0, 32);
+  // Boolean knobs. `coverage` forces the preset that can reach every def and
+  // then refuses unless the staged war really contains one of each; `player`
+  // drops the mutual-ground-reachability gate for a human-played war. Both
+  // were CLI-only, which made the full-coverage war unreachable over HTTP —
+  // i.e. unreachable from the picker, which is the only place it matters.
+  const auto addFlag = [&](const char *flag, const char *key) {
+    if (knobs.contains(key) && knobs[key].is_boolean() &&
+        knobs[key].get<bool>())
+      cmd += std::string(" ") + flag;
+  };
+  addFlag("--coverage", "coverage");
+  addFlag("--player", "player");
   const auto addEnum = [&](const char *flag, const char *key) {
     if (!knobs.contains(key) || !knobs[key].is_string())
       return;
@@ -3122,7 +3140,8 @@ int main(int argc, char *argv[]) {
 
   // POST /api/admin/scenarios/generate
   //   {gameId, mapId, seed?, sides?, towns?, outposts?, bases?, mines?,
-  //    sites?, relics?, wrecks?, bridges?, hostility?, roster?}
+  //    sites?, relics?, wrecks?, bridges?, works?, harbour?, shanty?,
+  //    hostility?, roster?, coverage?, player?}
   // Generate a war for `mapId`, store it, materialise it, and return the
   // entry exactly as the Create Game picker will now see it.
   net.AddHttpPost(
