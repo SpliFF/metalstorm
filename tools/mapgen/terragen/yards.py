@@ -57,6 +57,7 @@ a margin.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -506,6 +507,32 @@ def pad_relief(height: np.ndarray, pad: YardPad, cellsize: float) -> float:
         return 0.0
     hh = height[rows, cols][inside]
     return float(hh.max() - hh.min())
+
+
+def report_pad_refusals(refusals: list[YardRefusal]) -> list[tuple[str, int]]:
+    """Print WHY the stations that carry no pad carry none, commonest first.
+
+    The third instrument beside `report_pad_relief` and `report_pad_ramps`, and
+    the one a map with NO pads needs: those two print one line per pad, so a map
+    where every station was refused reports the same silence as a map whose
+    roads were never surveyed. Skerry Reach is that map — 58 stations, 0 pads —
+    and "0 prepared, 58 refused" on its own cannot tell a planner that has
+    stopped working from an archipelago with nowhere to put 560x600 elmos of
+    flat ground.
+
+    Reasons are counted rather than listed: `plan_yard_pads` produces one per
+    station and the interesting fact is the distribution, not the 58 lines. A
+    reason carrying a measurement (`the ground holds N elmos of relief`) is
+    folded to its wording so the count means something.
+    """
+    tally: dict[str, int] = {}
+    for r in refusals:
+        key = re.sub(r"\d+(\.\d+)?", "N", r.reason)
+        tally[key] = tally.get(key, 0) + 1
+    out = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    for reason, n in out:
+        print(f"  yard refused x{n}: {reason}")
+    return out
 
 
 def report_pad_relief(height: np.ndarray, pads: list[YardPad], cellsize: float,

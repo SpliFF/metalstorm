@@ -252,6 +252,64 @@ class FindCrossings(unittest.TestCase):
                          br.find_crossings(net, h, CELL))
 
 
+class FordsArePublished(unittest.TestCase):
+    """roads R3d — "no bridge" is two facts, and the map has to say which.
+
+    Before R3d every refusal was the same disappointed print line, so a map
+    published where its bridges went and never published where its roads waded
+    — the larger set, and the only one a unit has to survive.
+    """
+
+    def _survey(self, h, pl):
+        return br.find_crossings(FakeNet([link(straight(*pl))]), h, CELL)
+
+    def test_a_causeway_is_a_ford_not_a_defect(self):
+        h = channel_map(x0=800.0, x1=2000.0)
+        got, refused = self._survey(h, (200.0, 1500.0, 2600.0, 1500.0))
+        self.assertEqual(got, [])
+        self.assertTrue(refused[0].fordable)
+        self.assertEqual(refused[0].road_class, rd.ROAD_HIGHWAY)
+        # the road's own tangent survived the refusal
+        self.assertAlmostEqual(br.heading_dir(refused[0].heading)[0], 1.0,
+                               places=2)
+
+    def test_a_plank_over_a_ditch_is_a_ford_not_a_defect(self):
+        h = channel_map(x0=1200.0, x1=1290.0)
+        _got, refused = self._survey(h, (400.0, 1500.0, 2400.0, 1500.0))
+        self.assertTrue(refused[0].fordable)
+
+    def test_water_deeper_than_the_wade_is_NOT_fordable(self):
+        h = channel_map(depth=-40.0)
+        _got, refused = self._survey(h, (400.0, 1500.0, 2400.0, 1500.0))
+        self.assertFalse(refused[0].fordable)
+
+    def test_the_fords_table_is_the_superset_of_the_crossings_table(self):
+        """One road, two wet runs: one bridgeable, one too wide for a chain."""
+        h = channel_map(x0=1200.0, x1=1600.0)
+        xs = np.arange(h.shape[1]) * CELL
+        h[:, (xs >= 2200.0) & (xs <= 3600.0)] = -6.0
+        got, refused = self._survey(h, (400.0, 1500.0, 4200.0, 1500.0, 400))
+        self.assertEqual(len(got), 1)
+        self.assertEqual([r.fordable for r in refused], [True])
+        rows = br.emit_fords_lua(got, refused)
+        self.assertEqual(len(rows), 2)
+        spans = sorted(int(re.search(r"spans = (\d+)", r).group(1))
+                       for r in rows)
+        self.assertEqual(spans[0], 0)            # the causeway, unbridged
+        self.assertEqual(spans[1], got[0].spans)  # the chain, same number
+
+    def test_an_unfordable_run_is_never_published_as_a_ford(self):
+        h = channel_map(depth=-40.0)
+        got, refused = self._survey(h, (400.0, 1500.0, 2400.0, 1500.0))
+        self.assertEqual(br.emit_fords_lua(got, refused), [])
+
+    def test_every_row_carries_the_wade_it_was_graded_against(self):
+        h = channel_map(x0=800.0, x1=2000.0)
+        got, refused = self._survey(h, (200.0, 1500.0, 2600.0, 1500.0))
+        rows = br.emit_fords_lua(got, refused, wade_depth=17.0)
+        self.assertIn("wade = 17", rows[0])
+
+
 class RoadsLuaContract(unittest.TestCase):
     """The map's emitter and scenariogen's reader are the two ends of one file."""
 
@@ -288,13 +346,55 @@ class RoadsLuaContract(unittest.TestCase):
 
     def test_a_pre_r3b_roads_lua_reads_as_no_fords(self):
         text = self._emit([])
-        text = text[:text.index("    crossings = {")] + "}\n"
+        # cut the whole block INCLUDING its comment header — the header names
+        # the key, and a reader that searches for the name would find it there
+        text = text[:text.index("    -- Bridge crossings")] + "}\n"
         self.assertNotIn("crossings", text)
         self.assertEqual(self._read(text), [])
 
     def test_a_map_with_no_roads_lua_reads_as_no_fords(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(sg.read_road_crossings(d), [])
+
+    def test_the_fords_block_round_trips_through_the_real_file(self):
+        """roads R3d, both ends: emit_roads_lua -> read_road_fords."""
+        h = channel_map(x0=800.0, x1=2000.0)
+        xs = np.arange(h.shape[1]) * CELL
+        h[:, (xs >= 2400.0) & (xs <= 2800.0)] = -6.0
+        net = FakeNet([link(straight(200.0, 1500.0, 3200.0, 1500.0, 400))])
+        got, refused = br.find_crossings(net, h, CELL)
+        rn = rd.RoadNetwork(links=list(net.links))
+        text = pkg.emit_roads_lua(rn, CELL, rd.RoadParams(), crossings=got,
+                                  refusals=refused)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "mapdata"))
+            with open(os.path.join(d, "mapdata", "roads.lua"), "w") as fh:
+                fh.write(text)
+            fords = sg.read_road_fords(d)
+            crossings = sg.read_road_crossings(d)
+        self.assertEqual(len(crossings), 1)          # only the narrow run
+        self.assertEqual(len(fords), 2)              # both wet runs
+        self.assertEqual(sorted(f["spans"] for f in fords),
+                         [0, crossings[0]["spans"]])
+        for f in fords:
+            self.assertLessEqual(f["depth"], f["wade"])
+            self.assertGreater(f["length"], 0.0)
+
+    def test_the_fords_key_exists_even_with_no_fords(self):
+        self.assertIn("fords = {", self._emit([]))
+
+    def test_a_pre_r3d_roads_lua_reads_as_no_fords(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "mapdata"))
+            with open(os.path.join(d, "mapdata", "roads.lua"), "w") as fh:
+                fh.write("return {\n    links = {},\n    junctions = {},\n"
+                         "    crossings = {},\n}\n")
+            self.assertEqual(sg.read_road_fords(d), [])
+            self.assertEqual(sg.read_road_crossings(d), [])
+
+    def test_a_map_with_no_roads_lua_reads_as_no_fords_either(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(sg.read_road_fords(d), [])
 
     def test_the_published_def_is_a_real_featuredef(self):
         facts = sg.load_feature_facts(GAME_DIR)

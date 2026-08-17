@@ -344,6 +344,16 @@ _CROSSING_RE = re.compile(
     r'width\s*=\s*(?P<width>-?[0-9.]+)\s*,\s*'
     r'depth\s*=\s*(?P<depth>-?[0-9.]+)\s*\}')
 
+_FORD_RE = re.compile(
+    r'\{\s*link\s*=\s*(?P<link>-?[0-9]+)\s*,\s*'
+    r'class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
+    r'x\s*=\s*(?P<x>-?[0-9.]+)\s*,\s*z\s*=\s*(?P<z>-?[0-9.]+)\s*,\s*'
+    r'heading\s*=\s*(?P<heading>-?[0-9]+)\s*,\s*'
+    r'spans\s*=\s*(?P<spans>[0-9]+)\s*,\s*'
+    r'length\s*=\s*(?P<length>-?[0-9.]+)\s*,\s*'
+    r'depth\s*=\s*(?P<depth>-?[0-9.]+)\s*,\s*'
+    r'wade\s*=\s*(?P<wade>-?[0-9.]+)\s*\}')
+
 
 _LINK_RE = re.compile(
     r'\{\s*class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
@@ -469,6 +479,12 @@ def read_road_crossings(map_dir: str) -> list[dict]:
     head = text.find("crossings")
     if head < 0:
         return []
+    # Bounded at `fords` for the reason its two siblings are bounded at the
+    # block after them. A pre-R3d map has no `fords` block, and `find` returning
+    # -1 reads to the end of the file, which is what that map needs.
+    tail = text.find("fords", head)
+    text = text[head:tail if tail > 0 else len(text)]
+    head = 0
     return [{"def": m.group("def"),
              "x": int(float(m.group("x"))), "z": int(float(m.group("z"))),
              "heading": int(m.group("heading")),
@@ -477,6 +493,47 @@ def read_road_crossings(map_dir: str) -> list[dict]:
              "width": float(m.group("width")),
              "depth": float(m.group("depth"))}
             for m in _CROSSING_RE.finditer(text[head:])]
+
+
+def read_road_fords(map_dir: str) -> list[dict]:
+    """Every wet stretch of deck the MAP published (roads R3d).
+
+    The fourth reader of `mapdata/roads.lua` and the SUPERSET of
+    `read_road_crossings`: a crossing is a place to build a chain of spans, a
+    ford is a place the road goes through water — bridged (`spans > 0`) or not
+    (`spans == 0`). The distinction matters to anything that routes: a span is
+    non-blocking decoration (terragen/bridges.py), so what a convoy actually
+    does at either kind is wade, and `depth` against its own move class's
+    `maxwaterdepth` is the only question worth asking. `wade` on each row is
+    the depth the generator graded it against, so a caller comparing a
+    different move class can see what the row already assumed.
+
+    Every row here is crossable BY CONSTRUCTION — a run deeper than the wade is
+    a broken route and the generator does not publish it as a ford. A caller
+    may still refuse a row for its own class; it may not find a surprise.
+
+    Same empty-vs-absent rule as its three siblings: a map generated before R3d
+    ships no `fords` key, which returns [] exactly as a map whose roads never
+    touch water does — and Meridian Basin is the second of those, not the
+    first. Callers must treat "no fords" as an ordinary map.
+    """
+    path = os.path.join(map_dir, "mapdata", "roads.lua")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    head = text.find("fords")
+    if head < 0:
+        return []
+    return [{"link": int(m.group("link")),
+             "road_class": int(m.group("class")),
+             "x": int(float(m.group("x"))), "z": int(float(m.group("z"))),
+             "heading": int(m.group("heading")),
+             "spans": int(m.group("spans")),
+             "length": float(m.group("length")),
+             "depth": float(m.group("depth")),
+             "wade": float(m.group("wade"))}
+            for m in _FORD_RE.finditer(text[head:])]
 
 
 def region_centre(region: dict) -> tuple[float, float]:
