@@ -236,6 +236,9 @@ interface MemberEntry {
      *  key + Map lookup that resolved it was a per-member-per-frame string
      *  allocation on the hottest path in the client frame (PLAN-perf M13). */
     spritePool?: InstancePool;
+    /** Resolved capsule pool for (defId, team), cached for the same reason —
+     *  the capsule key is now a `${defId}:${team}` string too. */
+    capsulePool?: InstancePool;
 }
 
 /** M13 fix 2's legacy arm. ON restores the pre-M13 `updateMember` preamble —
@@ -349,8 +352,19 @@ export function setPoolCompactionGate(fraction: number, minDead?: number): {
     return { fraction: COMPACT_MIN_FRACTION, minDead: COMPACT_MIN_DEAD };
 }
 
-const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
+/** Legacy proxy-capsule height (elmos) — the fallback when the host supplies
+ *  no `getMemberStats` for a def. Defs with stats are sized per member by
+ *  `memberCapsuleHeight` instead. */
+const MEMBER_HEIGHT = 9;
 const MEMBER_RADIUS = 1.6;
+/** Aspect of the sized capsule: radius as a fraction of height. 1.6/9 ≈ a
+ *  standing humanoid's proportions (0.32-elmo radius on a 1.8-elmo body). */
+const MEMBER_RADIUS_FRAC = MEMBER_RADIUS / MEMBER_HEIGHT;
+/** Clamp band for `memberCapsuleHeight` (elmos). The floor keeps a degenerate
+ *  def visible at all; the ceiling is above `ms_habitat` (25.5) so no real def
+ *  saturates it today. */
+const MEMBER_HEIGHT_MIN = 1.2;
+const MEMBER_HEIGHT_MAX = 30;
 const WRECK_SIZE = 4;         // elmos — flat debris box
 /** Gait bob amplitude (elmos). Published on every PoolView so a direct writer
  *  applies the same walk cue as `updateMember` without a second constant. */
@@ -440,6 +454,37 @@ export interface SquadHost {
     /** The def's Full→impostor member switch distance (elmos). Undefined
      *  disables the MODEL tier for that def (sprite-only). */
     getImpostorDistance?(defId: number): number | undefined;
+    /** Raw def stats for sizing the proxy capsule (`memberCapsuleHeight`):
+     *  the def's aggregate mass and its `squad_size` fan-out hint. Undefined
+     *  (or a host without the method) keeps the legacy fixed-size capsule. */
+    getMemberStats?(defId: number): MemberStats | undefined;
+}
+
+/** What `memberCapsuleHeight` derives a proxy size from. Both numbers are
+ *  SQUAD-level (the sim atom): `mass` is the def's aggregate mass, `squadSize`
+ *  the cosmetic member fan-out it is split across. */
+export interface MemberStats {
+    mass?: number;
+    squadSize?: number;
+}
+
+/** Proxy-capsule height (elmos) for ONE member of a squad def.
+ *
+ *  The def's footprint is useless here: it is the SQUAD's pathing reservation
+ *  (32 elmos across for 16 soldiers), so any per-member share of it is still
+ *  4–8× a body. The per-member MASS share is the datum that actually tracks
+ *  the authored art: Metalstorm units are ~1 elmo per metre and masses are
+ *  authored on a tonnes-like curve, so at ~unit density `cbrt(mass/members)`
+ *  lands on the art — soldiers 90/16 → 1.78 (model 1.85), engineers 80/8 →
+ *  2.15 (measured impostorSize 2.31), tanks-s2 1000/4 → 6.3 (model 9.0).
+ *  Clamped so a degenerate def can neither vanish nor tower; no stats at all
+ *  (host without the callback, unknown def) keeps the legacy constant. */
+export function memberCapsuleHeight(stats?: MemberStats): number {
+    const mass = stats?.mass ?? 0;
+    if (!(mass > 0)) return MEMBER_HEIGHT;
+    const members = Math.max(1, Math.floor(stats?.squadSize ?? 1));
+    const h = Math.cbrt(mass / members);
+    return Math.min(MEMBER_HEIGHT_MAX, Math.max(MEMBER_HEIGHT_MIN, h));
 }
 
 export class SquadRenderBackend {
@@ -452,8 +497,10 @@ export class SquadRenderBackend {
      *  (game-processor) as squads are routed. */
     private squadTeam = new Map<number, number>();
 
-    /** One capsule member pool per team (lazily created). */
-    private memberPools = new Map<number, InstancePool>();
+    /** One proxy-capsule member pool per "defId:team" (lazily created) — the
+     *  capsule is sized from the def (`memberCapsuleHeight`), so it cannot be
+     *  shared team-wide the way the old fixed-size capsule was. */
+    private memberPools = new Map<string, InstancePool>();
     /** One sprite member pool per "defId:team" (lazily created). */
     private spritePools = new Map<string, InstancePool>();
     /** One 3D-model member pool per "defId:team" (lazily created; mesh borrowed
@@ -665,7 +712,7 @@ export class SquadRenderBackend {
         } else {
             const pool = this.ensureCapsule(entry);
             this.writeMatrix(pool, entry.capsule!.index,
-                x, my + MEMBER_HEIGHT * 0.5, z, headingY, 1);
+                x, my + pool.yBias, z, headingY, 1);
         }
     }
 
@@ -723,7 +770,14 @@ export class SquadRenderBackend {
     }
 
     private ensureCapsule(entry: MemberEntry): InstancePool {
-        const pool = this.getMemberPool(entry.team);
+        // Same caching rationale as ensureSprite: the pool key is a
+        // `${defId}:${team}` string and both parts are fixed for the entry's
+        // lifetime, so resolve once (this runs per capsule member per frame).
+        let pool = LEGACY_BACKEND_PLUMBING ? undefined : entry.capsulePool;
+        if (!pool) {
+            pool = this.getMemberPool(entry.defId, entry.team);
+            entry.capsulePool = pool;
+        }
         if (!entry.capsule || entry.capsule.pool !== pool) {
             if (entry.capsule) this.freeSlot(entry.capsule.pool, entry.capsule.index);
             entry.capsule = this.allocRef(pool);
@@ -1069,13 +1123,18 @@ export class SquadRenderBackend {
 
     // --- internals ----------------------------------------------------------
 
-    private getMemberPool(team: number): InstancePool {
-        let pool = this.memberPools.get(team);
+    private getMemberPool(defId: number, team: number): InstancePool {
+        const key = `${defId}:${team}`;
+        let pool = this.memberPools.get(key);
         if (pool) return pool;
-        const mesh = MeshBuilder.CreateCapsule(`squadMember_t${team}`, {
-            height: MEMBER_HEIGHT, radius: MEMBER_RADIUS, tessellation: 6, subdivisions: 1,
+        // Size the capsule to the def it stands in for (memberCapsuleHeight) —
+        // the old one-size-per-team capsule was 9 elmos against 1.8-elmo
+        // infantry, so a model-less squad dwarfed every real unit beside it.
+        const height = memberCapsuleHeight(this.host.getMemberStats?.(defId));
+        const mesh = MeshBuilder.CreateCapsule(`squadMember_d${defId}_t${team}`, {
+            height, radius: height * MEMBER_RADIUS_FRAC, tessellation: 6, subdivisions: 1,
         }, this.scene);
-        const mat = new StandardMaterial(`squadMemberMat_t${team}`, this.scene);
+        const mat = new StandardMaterial(`squadMemberMat_d${defId}_t${team}`, this.scene);
         const c = this.host.getTeamColor(team);
         mat.diffuseColor = c;
         mat.specularColor = new Color3(0.1, 0.1, 0.1);
@@ -1085,9 +1144,9 @@ export class SquadRenderBackend {
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.doNotSyncBoundingInfo = true;
         pool = this.newPool(mesh);
-        pool.yBias = MEMBER_HEIGHT * 0.5;   // capsule is centre-anchored
+        pool.yBias = height * 0.5;   // capsule is centre-anchored
         this.refreshView(pool);
-        this.memberPools.set(team, pool);
+        this.memberPools.set(key, pool);
         return pool;
     }
 

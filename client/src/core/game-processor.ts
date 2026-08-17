@@ -2148,6 +2148,18 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
         getMemberModel: (defId, team) => er.getMemberModel(defId, team),
         getImpostorDistance: (defId) =>
             gpDefCache?.getUnitDef(defId)?.lodThresholds?.impostorDistance,
+        // Proxy-capsule sizing (memberCapsuleHeight): aggregate def mass +
+        // the squad_size fan-out hint, so a model-less member draws at ~its
+        // body size instead of the legacy 9-elmo pill.
+        getMemberStats: (defId) => {
+            const def = gpDefCache?.getUnitDef(defId);
+            if (!def) return undefined;
+            const squadSize = Number(def.customParams?.squad_size);
+            return {
+                mass: def.mass,
+                squadSize: Number.isFinite(squadSize) && squadSize > 0 ? squadSize : 1,
+            };
+        },
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {
