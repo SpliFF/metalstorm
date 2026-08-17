@@ -127,6 +127,7 @@ export function validateScenario(scn, opts = {}) {
     checkFeatures(scn, add, opts, checkName);
     checkAi(scn, add, opts);
     checkObjectiveChaining(scn, add);
+    checkObjectivePopulation(scn, add, opts);
     checkReservedBlocks(scn, add);
     checkMcpLayer(scn, add, opts);
 
@@ -481,6 +482,82 @@ function checkObjectiveChaining(scn, add) {
         }
         if (o.phase !== undefined && !isNum(o.phase))
             add('error', 'objective-chain-id', `${path}.phase`, '"phase" must be a number');
+    });
+}
+
+// The params fields a `_populateUnitsFrom` marker may resolve into, mirroring
+// game_scenario.lua's POPULATE_INTO. kill's `targetUnitID` is the one SINGULAR
+// field; everything else is an array.
+const POPULATE_INTO = new Map([
+    ['targetUnitID', 'singular'],       // kill
+    ['targetUnitIDs', 'plural'],        // protect
+    ['payloadUnitIDs', 'plural'],       // extract / escort
+    ['buildingUnitIDs', 'plural'],      // infra
+]);
+
+/**
+ * Population markers (game_scenario.lua's objectives block in `validate`).
+ * Mirrored for the loader's reason: a malformed marker either errors inside
+ * the frame-30 sweep or resolves into a params field the type module refuses
+ * at init — both after the war has already booted clean.
+ */
+function checkObjectivePopulation(scn, add, opts) {
+    const checkArea = (m, path, allowRoute) => {
+        if (!m || typeof m !== 'object' || Array.isArray(m)) {
+            add('error', 'objective-populate', path, 'must be a table');
+            return false;
+        }
+        if (allowRoute && m.route !== undefined) {
+            if (!isStr(m.route))
+                add('error', 'objective-populate', path, '"route" must be a string convoy route id');
+            return false;   // route form carries no area
+        }
+        if (!isNum(m.x) || !isNum(m.z) || !isNum(m.r)) {
+            add('error', 'objective-populate', path,
+                `needs numeric "x", "z" and "r"${allowRoute ? ' (or a string "route")' : ''}`);
+            return false;
+        }
+        return true;
+    };
+    seq(scn.objectives).forEach((o, i) => {
+        const path = `objectives[${i + 1}]`;
+        if (!o || typeof o !== 'object') return;
+        if (o._populateTargetsFrom !== undefined)
+            checkArea(o._populateTargetsFrom, `${path}._populateTargetsFrom`, false);
+        if (o._populatePayloadFrom !== undefined)
+            checkArea(o._populatePayloadFrom, `${path}._populatePayloadFrom`, true);
+        if (o._populateUnitsFrom !== undefined) {
+            const m = o._populateUnitsFrom;
+            const mpath = `${path}._populateUnitsFrom`;
+            if (!checkArea(m, mpath, false)) return;
+            const into = m.into === undefined ? 'targetUnitIDs' : m.into;
+            if (!POPULATE_INTO.has(into)) {
+                add('error', 'objective-populate', `${mpath}.into`,
+                    `unknown "into" field "${into}" (expected one of `
+                    + `${[...POPULATE_INTO.keys()].sort().join(', ')})`);
+            }
+            if (m.defs !== undefined) {
+                if (!isSeqLike(m.defs) || seq(m.defs).length === 0) {
+                    add('error', 'objective-populate', `${mpath}.defs`,
+                        '"defs" must be a non-empty array of unit def names');
+                } else {
+                    seq(m.defs).forEach((d, di) =>
+                        checkDef(d, `${mpath}.defs[${di + 1}]`, add, opts.unitDefs));
+                }
+            }
+            if (m.team !== undefined && m.team !== null && !isNum(m.team) && m.team !== 'neutral')
+                add('error', 'objective-populate', `${mpath}.team`,
+                    `"team" must be a number or "neutral", got "${m.team}"`);
+            // kill is the only type defined in terms of ONE runtime id; the
+            // mismatch either way authors an objective its type module
+            // refuses at init, every time, silently.
+            if (o.type === 'kill' && POPULATE_INTO.get(into) !== 'singular')
+                add('error', 'objective-populate', `${mpath}.into`,
+                    'a kill objective needs `into = "targetUnitID"` (the one singular field)');
+            else if (o.type !== 'kill' && POPULATE_INTO.get(into) === 'singular')
+                add('error', 'objective-populate', `${mpath}.into`,
+                    '`into = "targetUnitID"` is kill-only; every other type reads a plural field');
+        }
     });
 }
 

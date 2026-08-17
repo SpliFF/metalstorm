@@ -279,6 +279,48 @@ test('objective-chain-id: parentId is a runtime id, not a name', () => {
     assert.equal(f.filter((x) => x.rule === 'objective-chain-id' && x.severity === 'error').length, 2);
 });
 
+test('objective-populate: a malformed marker is a finding, not a silent no-op', () => {
+    // Before this rule, every shape here booted clean and then either errored
+    // inside the frame-30 sweep (a nil coordinate) or minted an objective its
+    // type module refuses at init (a bad `into`) — both invisible at load.
+    const bad = (obj) => findings(BASE.replace("{ type = 'destroy_all', victory = true }",
+        `{ type = 'destroy_all', victory = true },\n    ${obj}`));
+    // markers must be tables with a full area
+    assert.ok(has(bad("{ type = 'protect', _populateTargetsFrom = 'nearby' }"),
+        'error', 'objective-populate'));
+    assert.ok(has(bad("{ type = 'protect', _populateTargetsFrom = { x = 1, z = 1 } }"),
+        'error', 'objective-populate'));
+    assert.ok(has(bad("{ type = 'escort', _populatePayloadFrom = { route = 42 } }"),
+        'error', 'objective-populate'));
+    // _populateUnitsFrom: into must name a real params field
+    assert.ok(has(bad("{ type = 'kill', _populateUnitsFrom = { x = 1, z = 1, r = 10, into = 'victimIDs' } }"),
+        'error', 'objective-populate'));
+    // kill is singular-only, and the singular is kill-only
+    assert.ok(has(bad("{ type = 'kill', _populateUnitsFrom = { x = 1, z = 1, r = 10, into = 'targetUnitIDs' } }"),
+        'error', 'objective-populate'));
+    assert.ok(has(bad("{ type = 'infra', _populateUnitsFrom = { x = 1, z = 1, r = 10, into = 'targetUnitID' } }"),
+        'error', 'objective-populate'));
+    // defs must be a non-empty array of KNOWN defs; team a number or 'neutral'
+    assert.ok(has(bad("{ type = 'infra', _populateUnitsFrom = { x = 1, z = 1, r = 10, defs = {}, into = 'buildingUnitIDs' } }"),
+        'error', 'objective-populate'));
+    assert.ok(has(bad("{ type = 'infra', _populateUnitsFrom = { x = 1, z = 1, r = 10, defs = { 'ms_comand_post' }, into = 'buildingUnitIDs' } }"),
+        'error', 'unknown-unitdef'));
+    assert.ok(has(bad("{ type = 'infra', _populateUnitsFrom = { x = 1, z = 1, r = 10, team = 'gaia', into = 'buildingUnitIDs' } }"),
+        'error', 'objective-populate'));
+});
+
+test('objective-populate: the authorable kill and infra markers pass', () => {
+    const f = findings(BASE.replace("{ type = 'destroy_all', victory = true }",
+        "{ type = 'destroy_all', victory = true },\n"
+        + "    { type = 'kill', _populateUnitsFrom = { x = 1, z = 1, r = 160, "
+        + "defs = { 'ms_command_post' }, team = 2, into = 'targetUnitID' } },\n"
+        + "    { type = 'infra', params = { buildingUnitIDs = {}, quorum = 1, rewardPerMinute = 5 }, "
+        + "_populateUnitsFrom = { x = 1, z = 1, r = 420, "
+        + "defs = { 'ms_habitat' }, team = 'neutral', into = 'buildingUnitIDs' } }"));
+    assert.ok(!has(f, 'error', 'objective-populate'), JSON.stringify(f));
+    assert.ok(!has(f, 'error', 'unknown-unitdef'), JSON.stringify(f));
+});
+
 test('standing-orders-noop: the top-level orders block is loudly ignored', () => {
     const f = findings(BASE.replace('objectives =', "orders = { { cmd = 'FIGHT' } },\n  objectives ="));
     assert.ok(has(f, 'warning', 'standing-orders-noop'));

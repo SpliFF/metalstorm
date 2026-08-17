@@ -1414,18 +1414,31 @@ class TestFullCoverageWar(unittest.TestCase):
         self.assertTrue(cov["coverage"])
 
     def test_objectives_span_more_than_control(self):
-        """The other half of the directive. Three types, and exactly one of
-        them terminal."""
+        """The other half of the directive: ALL SIX engine types, and exactly
+        one of them terminal.
+
+        Five of the six must appear on the coverage map itself. The sixth,
+        escort, is keyed to MAP CONTENT rather than to the generator — its
+        payload must be a convoy vehicle, and techno_lands publishes no
+        mapdata/civilians.lua routes — so it is asserted on meridian_basin,
+        the shipped convoy-publishing map, as a player scenario (meridian's
+        split components refuse the test-scenario gate by design)."""
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
                 lua, _meta = self._gen(seed)
                 types = set(re.findall(r"\{ type = '(\w+)'", code_only(lua)))
-                self.assertIn("control", types)
-                self.assertIn("protect", types)
-                self.assertIn("extract", types)
+                for t in ("control", "protect", "extract", "kill", "infra"):
+                    self.assertIn(t, types)
                 self.assertEqual(count_victory_flags(lua), 1,
                                  "exactly one terminal objective, or the war "
                                  "cannot end")
+        merid = os.path.join(MAPS_DIR, "meridian_basin")
+        if not os.path.isdir(merid):
+            self.skipTest("meridian_basin not present for the escort half")
+        lua, _meta = sg.generate(merid, seed=11, game_dir=GAME_DIR,
+                                 test_scenario=False)
+        types = set(re.findall(r"\{ type = '(\w+)'", code_only(lua)))
+        self.assertIn("escort", types)
 
     def test_the_non_control_objectives_carry_the_params_their_type_needs(self):
         """Each type module validates its own params and REFUSES at create

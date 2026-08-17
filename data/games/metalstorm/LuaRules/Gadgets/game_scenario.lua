@@ -80,6 +80,17 @@ local DEFAULT_CONTROL_HOLD_FRAMES = 900   -- 30s hold to complete — mirrors
 -- override either via o.holdFrames.
 local DEFAULT_VICTORY_HOLD_FRAMES = 5400  -- 3 min
 
+-- The params fields a `_populateUnitsFrom` marker may resolve into — one per
+-- objective type that is defined in terms of runtime unit ids (kill's is the
+-- one SINGULAR field; the type modules spell out why in kill.lua's unitRefs).
+-- Shared by validate() and resolveDeferredObjectives so the two cannot drift.
+local POPULATE_INTO = {
+    targetUnitID    = 'singular',   -- kill
+    targetUnitIDs   = 'plural',     -- protect
+    payloadUnitIDs  = 'plural',     -- extract / escort
+    buildingUnitIDs = 'plural',     -- infra
+}
+
 -- ============================================================
 -- Helpers
 -- ============================================================
@@ -462,6 +473,78 @@ local function validate(scn, knownDefs, knownFeatureDefs)
         end
         if o.phase ~= nil and type(o.phase) ~= 'number' then
             errors[#errors + 1] = ctx .. ': "phase" must be a number'
+        end
+
+        -- Population markers. Checked hard for the same reason `phases` is:
+        -- every wrong shape here fails SILENTLY, or worse — a marker with a
+        -- nil coordinate errors inside the frame-30 sweep, and an `into` that
+        -- names no params field creates an objective whose type module refuses
+        -- init after the war has already booted clean.
+        local function checkArea(m, mctx, allowRoute)
+            if type(m) ~= 'table' then
+                errors[#errors + 1] = mctx .. ': must be a table'
+                return false
+            end
+            if allowRoute and m.route ~= nil then
+                if type(m.route) ~= 'string' then
+                    errors[#errors + 1] = mctx .. ': "route" must be a string convoy route id'
+                end
+                return false        -- route form carries no area
+            end
+            if type(m.x) ~= 'number' or type(m.z) ~= 'number' or
+               type(m.r) ~= 'number' then
+                errors[#errors + 1] = mctx .. ': needs numeric "x", "z" and "r"' ..
+                    (allowRoute and ' (or a string "route")' or '')
+                return false
+            end
+            return true
+        end
+        if o._populateTargetsFrom ~= nil then
+            checkArea(o._populateTargetsFrom, ctx .. '._populateTargetsFrom', false)
+        end
+        if o._populatePayloadFrom ~= nil then
+            checkArea(o._populatePayloadFrom, ctx .. '._populatePayloadFrom', true)
+        end
+        if o._populateUnitsFrom ~= nil then
+            local m = o._populateUnitsFrom
+            local mctx = ctx .. '._populateUnitsFrom'
+            if checkArea(m, mctx, false) then
+                local into = m.into or 'targetUnitIDs'
+                if POPULATE_INTO[into] == nil then
+                    local allowed = {}
+                    for k in pairs(POPULATE_INTO) do allowed[#allowed + 1] = k end
+                    table.sort(allowed)
+                    errors[#errors + 1] = mctx .. ': unknown "into" field "' ..
+                        tostring(into) .. '" (expected one of ' ..
+                        table.concat(allowed, ', ') .. ')'
+                end
+                if m.defs ~= nil then
+                    if type(m.defs) ~= 'table' or #m.defs == 0 then
+                        errors[#errors + 1] = mctx ..
+                            ': "defs" must be a non-empty array of unit def names'
+                    else
+                        for di, d in ipairs(m.defs) do
+                            checkDef(d, mctx .. '.defs[' .. di .. ']')
+                        end
+                    end
+                end
+                if m.team ~= nil and type(m.team) ~= 'number' and m.team ~= 'neutral' then
+                    errors[#errors + 1] = mctx .. ': "team" must be a number or ' ..
+                        '"neutral", got "' .. tostring(m.team) .. '"'
+                end
+                -- kill is defined in terms of ONE runtime id (params.
+                -- targetUnitID) and is the only type that is. A kill marker
+                -- resolving into a plural field — or any other type resolving
+                -- into the singular one — authors an objective whose type
+                -- module refuses init every time, silently.
+                if o.type == 'kill' and POPULATE_INTO[into] ~= 'singular' then
+                    errors[#errors + 1] = mctx .. ': a kill objective needs ' ..
+                        '`into = "targetUnitID"` (the one singular field)'
+                elseif o.type ~= 'kill' and POPULATE_INTO[into] == 'singular' then
+                    errors[#errors + 1] = mctx .. ': `into = "targetUnitID"` is ' ..
+                        'kill-only; every other type reads a plural field'
+                end
+            end
         end
     end
 
@@ -947,32 +1030,62 @@ local deferredObjectives = {}
 -- instead of a fixed frame.
 local pendingConvoyObjectives = {}   -- route id -> list of scenario objective defs
 
-local function populateCiviliansInArea(x, z, r, role)
-    -- Find all civilian units in the specified area with the given role.
-    -- Civilian identity + role come from the GG.Civilians registry (the source
-    -- of truth — roles like 'ambient'/'convoy'/'payload' live only there, not
-    -- on unitdefs). A def-level fallback (customParams.civilian, which the real
-    -- civilian defs carry) covers any civilian not routed through the registry.
+--- ONE area query for every population marker. `filter` fields, all optional:
+---   civilian — unit must be a civilian: in the GG.Civilians registry (the
+---              source of truth — roles like 'ambient'/'convoy'/'payload' live
+---              only there, not on unitdefs), with a def-level fallback
+---              (customParams.civilian, which the real civilian defs carry)
+---              for any civilian not routed through the registry.
+---   role     — GG.Civilians registry role must match. Registry-only, so a
+---              role filter excludes every non-registered unit.
+---   defs     — set (name -> true) the unit's DEF NAME must be in.
+---   team     — unit's team must equal resolveTeam(team) ('neutral' = Gaia).
+local function populateUnitsInArea(x, z, r, filter)
+    filter = filter or {}
     local result = {}
     local units = Spring.GetUnitsInCylinder(x, z, r)
     local Civ = GG.Civilians
+    local team = filter.team ~= nil and resolveTeam(filter.team) or nil
     for _, unitID in ipairs(units) do
-        local isCiv = Civ and Civ.IsCivilian and Civ.IsCivilian(unitID)
-        if not isCiv then
+        local ok = true
+        if filter.civilian then
+            local isCiv = Civ and Civ.IsCivilian and Civ.IsCivilian(unitID)
+            if not isCiv then
+                local udid = Spring.GetUnitDefID(unitID)
+                local ud = udid and UnitDefs[udid]
+                local cp = ud and ud.customParams
+                isCiv = cp and (cp.civilian or cp.is_civilian) ~= nil
+            end
+            if not isCiv then ok = false end
+        end
+        if ok and filter.role ~= nil then
+            local unitRole = Civ and Civ.GetRole and Civ.GetRole(unitID)
+            if unitRole ~= filter.role then ok = false end
+        end
+        if ok and filter.defs ~= nil then
             local udid = Spring.GetUnitDefID(unitID)
             local ud = udid and UnitDefs[udid]
-            local cp = ud and ud.customParams
-            isCiv = cp and (cp.civilian or cp.is_civilian) ~= nil
+            if not (ud and filter.defs[ud.name]) then ok = false end
         end
-        if isCiv then
-            -- Check role if specified (role is registry-only).
-            local unitRole = Civ and Civ.GetRole and Civ.GetRole(unitID)
-            if not role or unitRole == role then
-                result[#result + 1] = unitID
-            end
+        if ok and team ~= nil and Spring.GetUnitTeam(unitID) ~= team then
+            ok = false
         end
+        if ok then result[#result + 1] = unitID end
     end
     return result
+end
+
+local function populateCiviliansInArea(x, z, r, role)
+    return populateUnitsInArea(x, z, r, { civilian = true, role = role })
+end
+
+--- `_populateUnitsFrom.defs` is authored as an array of def names (the shape
+--- everything else in a scenario file uses); the filter wants a set.
+local function defNameSet(list)
+    if list == nil then return nil end
+    local set = {}
+    for _, name in ipairs(list) do set[name] = true end
+    return set
 end
 
 --- Fold an objective's authoring-convenience flat fields (region,
@@ -1080,9 +1193,46 @@ local function resolveDeferredObjectives()
                        ' civilian payload for ' .. (o.type or 'unknown') .. ' objective')
         end
 
-        -- Only create if we have units (empty arrays fail init validation)
+        -- Populate ORDINARY units (kill/infra, or anything else that wants a
+        -- non-civilian resolution) from the general area query. validate() has
+        -- already vetted the marker's shape, defs and `into`.
+        local emptySingular = false
+        if o._populateUnitsFrom then
+            local m = o._populateUnitsFrom
+            local ids = populateUnitsInArea(m.x, m.z, m.r, {
+                civilian = m.civilian, role = m.role,
+                defs = defNameSet(m.defs), team = m.team,
+            })
+            local into = m.into or 'targetUnitIDs'
+            if POPULATE_INTO[into] == 'singular' then
+                -- kill wants ONE runtime id. Nearest match to the marker
+                -- centre, so two candidates in radius resolve the same way
+                -- every run rather than by engine iteration order.
+                local best, bestDist
+                for _, unitID in ipairs(ids) do
+                    local ux, _, uz = Spring.GetUnitPosition(unitID)
+                    local d = ux and ((ux - m.x) ^ 2 + (uz - m.z) ^ 2) or math.huge
+                    if best == nil or d < bestDist then best, bestDist = unitID, d end
+                end
+                params[into] = best
+                emptySingular = best == nil
+            else
+                params[into] = ids
+            end
+            Spring.Echo('[game_scenario] populated ' .. #ids .. ' unit(s) into ' ..
+                       into .. ' for ' .. (o.type or 'unknown') .. ' objective')
+        end
+
+        -- Only create if every populated field resolved somebody: an empty
+        -- array (or a nil targetUnitID) fails the type module's init, Create
+        -- returns nil, and — worse — a def that fails init on a scoped team is
+        -- the "Bad teamID" blast radius stageObjectives documents. Skipping is
+        -- the contract: a marker that finds nobody is a war without that
+        -- objective, never a broken one.
         if (not params.targetUnitIDs or #params.targetUnitIDs > 0) and
-           (not params.payloadUnitIDs or #params.payloadUnitIDs > 0) then
+           (not params.payloadUnitIDs or #params.payloadUnitIDs > 0) and
+           (not params.buildingUnitIDs or #params.buildingUnitIDs > 0) and
+           not emptySingular then
             createPopulatedObjective(o, params, 'deferred')
         else
             Spring.Echo('[game_scenario] skipped ' .. o.type ..
@@ -1146,7 +1296,8 @@ local function stageObjectives(objectives)
 
         -- Check if this objective needs runtime unit population
         -- (empty targetUnitIDs/payloadUnitIDs + a _populateFrom marker)
-        local needsTargets = o._populateTargetsFrom ~= nil
+        local needsTargets = o._populateTargetsFrom ~= nil or
+                             o._populateUnitsFrom ~= nil
         local payloadFrom = o._populatePayloadFrom
 
         if payloadFrom and payloadFrom.route then
