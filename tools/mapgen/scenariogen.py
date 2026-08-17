@@ -22,11 +22,13 @@ on techno_lands at seed 11), so most of the shipped content had never been seen
 in a generated war at all. See gate_full_coverage.
 
 OBJECTIVE TYPES. The engine implements six (control kill escort protect extract
-infra); this generator emits four of them, and the missing two are a property of
-the file format rather than of this module: `kill` and `infra` are defined in
-terms of runtime unit ids, and game_scenario.lua's only population markers
-resolve the CIVILIAN registry. The full argument, with the two markers written
-out, is in emit_lua beside the objectives block.
+infra); this generator emits all six — escort only on a map that publishes
+convoy routes, which is a map-content fact rather than a generator gap. `kill`
+and `infra` were unauthorable until 2026-08-18 because game_scenario.lua's only
+population markers resolved the CIVILIAN registry; its `_populateUnitsFrom`
+marker (same deferred frame-30 sweep, ordinary units, filtered by def/team) is
+what closed that. The full map of type -> marker is in emit_lua beside the
+objectives block.
 
 `<map-dir>` is a PROCESSED map directory (data/maps/<id>), not the source
 package. Anchoring on it rather than on __file__ is deliberate and copied from
@@ -3554,17 +3556,21 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     # generator laziness — they are a property of what a static scenario file
     # can name.
     #
-    # WHAT A STATIC FILE CAN NAME. Four of the six types are defined in terms
+    # WHAT A STATIC FILE CAN NAME. Five of the six types are defined in terms
     # of runtime unit ids, which a file written before the game boots does not
-    # have. game_scenario.lua's answer is two population markers, and they
+    # have. game_scenario.lua's answer is three population markers, and they
     # decide the whole shape of this block:
     #
     #   _populateTargetsFrom {x,z,r,role} -> params.targetUnitIDs   (protect)
     #   _populatePayloadFrom {x,z,r,role} -> params.payloadUnitIDs  (extract)
     #   _populatePayloadFrom {route}      -> params.payloadUnitIDs  (escort)
+    #   _populateUnitsFrom {x,z,r,defs,team,into}                   (kill/infra)
     #
-    # Both area forms resolve through populateCiviliansInArea, i.e. the
-    # CIVILIAN registry only. So a generated war can author:
+    # The first two resolve through populateCiviliansInArea, i.e. the CIVILIAN
+    # registry only; `_populateUnitsFrom` (2026-08-18) is the general form —
+    # ORDINARY units, narrowed by def name and team, resolved into whichever
+    # params field `into` names (`targetUnitID`, the one SINGULAR field, is
+    # what unlocked kill). So a generated war can author:
     #
     #   protect  YES — a township's `ambient` residents are exactly what the
     #                  marker finds, and estate.lua already treats them as the
@@ -3580,18 +3586,20 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     #                  would author an objective nothing can ever complete:
     #                  routines.lua wanders them locally and they would never
     #                  reach a destination anywhere else on the map.
-    #   kill     NO  — needs params.targetUnitID, a single runtime id. There is
-    #                  no population marker that fills it (the two above fill
-    #                  the PLURAL ...UnitIDs fields), so no static file can
-    #                  author a kill objective at all.
-    #   infra    NO  — needs params.buildingUnitIDs, and both markers resolve
-    #                  civilians. A building is never a civilian, so the
-    #                  markers cannot reach one however it is placed.
-    #
-    # kill and infra are therefore an ENGINE gap, not a generator gap: they
-    # want a `_populate...From` that resolves ordinary units by area and def.
-    # Recorded here rather than worked around, because the available
-    # workarounds all amount to emitting an objective that can never resolve.
+    #   kill     YES — _populateUnitsFrom with into = 'targetUnitID'. The
+    #                  loader resolves the match NEAREST the marker centre and
+    #                  SKIPS the objective when nothing matches (an unresolved
+    #                  objective fails its type module's init, and a failed
+    #                  init on a scoped team is the "Bad teamID" gadget-removal
+    #                  blast radius) — so a target that failed to site costs
+    #                  the war one objective, never boots a broken one.
+    #   infra    YES — same marker, into = 'buildingUnitIDs', defs + team
+    #                  narrowing the area query to the settlement's own
+    #                  buildings. Emitted OPEN-ENDED (no expiresAtFrame):
+    #                  that variant pays rewardPerMinute while the buildings
+    #                  run and never completes on its own — the "keep it
+    #                  running" reading, which is what a standing settlement
+    #                  is, as opposed to the timed hold protect already gives.
     protect_lines, extract_lines = [], []
     for j, ship in enumerate(townships):
         m = ship.meta()
@@ -3683,6 +3691,93 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
             add(f"          _populatePayloadFrom = {{ route = "
                 f"{_lua_str(route['id'])} }},")
             add(f"          reward = 100, expiresAtFrame = {not_before + 18000} }},")
+
+    # KILL: one decapitation raid on the NPC faction — its command building,
+    # or failing that a relic guardian. Both are hostile-team by construction
+    # (guardians exist only when hostility != neutral), so a fully neutral war
+    # carries no kill objective, deliberately: the only kill it could author
+    # would be an execution of somebody's civilians.
+    kill_target = None
+    for pref in ("ms_command_nexus", "ms_command_post", "ms_garrison"):
+        for c in clusters:
+            if c["owner"] != hostile_team:
+                continue
+            b = next((b for b in c["buildings"] if b.defname == pref), None)
+            if b is not None:
+                kill_target = {
+                    "def": b.defname, "x": b.x, "z": b.z,
+                    "what": (f"the {CLUSTER_TEMPLATES[c['kind']]['label'].lower()}"
+                             f"'s {pref} at {c['region']['key']}")}
+                break
+        if kill_target:
+            break
+    if kill_target is None:
+        for rel in relic_entries:
+            if rel["guards"]:
+                g = rel["guards"][0]
+                kill_target = {"def": g["def"], "x": g["x"], "z": g["z"],
+                               "what": f"a guardian of {rel['name']}"}
+                break
+    if kill_target is not None:
+        add("")
+        add("        -- KILL. `targetUnitID` is a SINGLE runtime id, so it rides the")
+        add("        -- general `_populateUnitsFrom` marker with the one singular")
+        add("        -- `into`: the frame-30 sweep resolves the match nearest the")
+        add("        -- marker centre, and SKIPS the objective if the target failed")
+        add("        -- to stage — a skipped objective, never a broken one. Open")
+        add("        -- race (forTeam nil): kill.onUnitDestroyed credits whoever")
+        add("        -- actually lands the blow.")
+        add(f"        -- target: {kill_target['what']}")
+        add("        { type = 'kill', scope = 'tactical', forTeam = nil,")
+        add(f"          _populateUnitsFrom = {{ x = {kill_target['x']}, "
+            f"z = {kill_target['z']}, r = 160,")
+        add(f"              defs = {{ {_lua_str(kill_target['def'])} }}, "
+            f"team = {hostile_team}, into = 'targetUnitID' }},")
+        add("          reward = 160, expiresAtFrame = nil },")
+
+    # INFRA, the open-ended "keep it running" variant: no expiresAtFrame, so
+    # it pays rewardPerMinute while the buildings stand and never completes on
+    # its own — a standing settlement as an income source, complementing the
+    # timed protect on the same town's PEOPLE. One per township; a war that
+    # planned no town falls back to its first neutral cluster with buildings,
+    # so a townless map (meridian's scarps refuse every township candidate)
+    # still fields the type.
+    infra_sources = []
+    for j, ship in enumerate(townships):
+        m = ship.meta()
+        infra_sources.append((f"{m['name']} ({m['key']})", m["x"], m["z"],
+                              max(360, int(m["radius"])),
+                              sorted({b.defname for b in ship.buildings}),
+                              j % sides))
+    if not infra_sources:
+        for c in clusters:
+            if c["owner"] != "neutral" or not c["buildings"]:
+                continue
+            tpl = CLUSTER_TEMPLATES[c["kind"]]
+            infra_sources.append(
+                (f"{tpl['label']} at {c['region']['key']}",
+                 c["anchor"][0], c["anchor"][1], tpl["radius"],
+                 sorted({b.defname for b in c["buildings"]}), 0))
+            break
+    if infra_sources:
+        add("")
+        add("        -- INFRA (open-ended). buildingUnitIDs resolves at frame 30 via")
+        add("        -- `_populateUnitsFrom`, narrowed to the settlement's own def")
+        add("        -- names on the NEUTRAL (Gaia) team so a garrison or a passing")
+        add("        -- army never pollutes the list. quorum 1 for protect's reason:")
+        add("        -- the settlement does not have to come through whole — infra")
+        add("        -- FAILS below quorum, and 'lose any one building' would be a")
+        add("        -- failure condition the holder cannot reasonably meet.")
+        for what, x, z, r, defs, keeper in infra_sources:
+            defs_lua = ", ".join(_lua_str(d) for d in defs)
+            add(f"        -- {what}: {len(defs)} building def(s)")
+            add(f"        {{ type = 'infra', scope = 'tactical', forTeam = {keeper},")
+            add("          params = { buildingUnitIDs = {}, quorum = 1, "
+                "rewardPerMinute = 5 },")
+            add(f"          _populateUnitsFrom = {{ x = {x}, z = {z}, r = {r},")
+            add(f"              defs = {{ {defs_lua} }}, team = 'neutral', "
+                "into = 'buildingUnitIDs' },")
+            add("          reward = 0, expiresAtFrame = nil },")
 
     add("    },")
     add("}")
