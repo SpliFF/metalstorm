@@ -441,5 +441,32 @@ return {
               holdFrames = 300, threshold = 5000, quorum = 1 },
           _populatePayloadFrom = { x = 1189, z = 2905, r = 760, role = 'ambient' },
           reward = 150, expiresAtFrame = 27000 },
+
+        -- KILL. `targetUnitID` is a SINGLE runtime id, so it rides the
+        -- general `_populateUnitsFrom` marker with the one singular
+        -- `into`: the frame-30 sweep resolves the match nearest the
+        -- marker centre, and SKIPS the objective if the target failed
+        -- to stage — a skipped objective, never a broken one. Open
+        -- race (forTeam nil): kill.onUnitDestroyed credits whoever
+        -- actually lands the blow.
+        -- target: the forward base's ms_command_nexus at r2_0
+        { type = 'kill', scope = 'tactical', forTeam = nil,
+          _populateUnitsFrom = { x = 3412, z = 682, r = 160,
+              defs = { 'ms_command_nexus' }, team = 2, into = 'targetUnitID' },
+          reward = 160, expiresAtFrame = nil },
+
+        -- INFRA (open-ended). buildingUnitIDs resolves at frame 30 via
+        -- `_populateUnitsFrom`, narrowed to the settlement's own def
+        -- names on the NEUTRAL (Gaia) team so a garrison or a passing
+        -- army never pollutes the list. quorum 1 for protect's reason:
+        -- the settlement does not have to come through whole — infra
+        -- FAILS below quorum, and 'lose any one building' would be a
+        -- failure condition the holder cannot reasonably meet.
+        -- Vesper Watch (r0_2): 6 building def(s)
+        { type = 'infra', scope = 'tactical', forTeam = 0,
+          params = { buildingUnitIDs = {}, quorum = 1, rewardPerMinute = 5 },
+          _populateUnitsFrom = { x = 1189, z = 2905, r = 760,
+              defs = { 'ms_barricade_set', 'ms_market_stalls', 'ms_meeting_hall', 'ms_shanty_block', 'ms_watchtower', 'ms_water_works' }, team = 'neutral', into = 'buildingUnitIDs' },
+          reward = 0, expiresAtFrame = nil },
     },
 }
