@@ -46,6 +46,9 @@ CIV_SHIRT = (170, 168, 158)
 CIV_PANTS = (76, 82, 94)
 CIV_HAIR  = (58, 46, 38)
 CIV_BOOT  = (44, 47, 52)
+CANVAS    = (84, 78, 64)      # webbing / pouch canvas (heavy tiers)
+VISOR     = (30, 26, 20)      # exo-suit optics housing
+VISOR_GLOW = (150, 96, 28)    # amber — human tech (cyan is ancient-only)
 
 # ── swatch registry: paint_infantry.py fills each cell from this list ─────
 SWATCHES = []      # dicts: rect, dif, ao, rough, metal, team, emis
@@ -101,6 +104,12 @@ Z_SHIRT   = SW(CIV_SHIRT, rough=200, metal=6)
 Z_PANTS   = SW(CIV_PANTS, rough=190, metal=10)
 Z_HAIR    = SW(CIV_HAIR,  rough=210, metal=6)
 Z_CIVBOOT = SW(CIV_BOOT,  rough=200, metal=20)
+# heavy tiers (soldiers s2/s3/s4) — APPEND ONLY. `SW` allocates cells in call
+# order, so a new swatch must never be inserted above an existing one: that
+# would renumber every cell below it and silently repaint the four shipped
+# s1-tier bodies (their .bin UVs are frozen).
+Z_CANVAS  = SW(CANVAS,   rough=208, metal=6)    # webbing, pouches, mortar bag
+Z_VISOR   = SW(VISOR,    rough=70,  metal=0, emis=VISOR_GLOW)  # exo optics
 
 # ── shared humanoid joints (world metres, feet at Y=0) ───────────────────
 HIP_X   = 0.11          # half-stance width at the hips
