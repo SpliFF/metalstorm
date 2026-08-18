@@ -1359,6 +1359,42 @@ class TestFullCoverageTemplates(unittest.TestCase):
                                         f"{kind}/{defname} override lowers a minimum")
 
 
+class TestRegenerateHeader(unittest.TestCase):
+    """The "regenerate with" header line must carry every flag that actually
+    shaped the file (2026-08-18 provenance fix). No map or game content is
+    needed — `regenerate_flags()` only reads `meta["params"]`.
+    """
+
+    def test_coverage_run_carries_coverage_and_the_forced_cluster_counts(self):
+        """Before this fix the header dropped `--coverage` entirely, so a
+        reader who ran the printed line back got a smaller, non-coverage war
+        — the exact failure mode a regenerate-with line exists to prevent.
+        """
+        meta = {"params": {"coverage": True, "player": False,
+                           "works": 1, "harbour": 1, "shanty": 1}}
+        self.assertEqual(
+            sg.regenerate_flags(meta),
+            ["--coverage", "--works 1", "--harbour 1", "--shanty 1"])
+
+    def test_player_flag_is_carried(self):
+        meta = {"params": {"coverage": False, "player": True,
+                           "works": 0, "harbour": 0, "shanty": 0}}
+        self.assertEqual(sg.regenerate_flags(meta), ["--player"])
+
+    def test_an_ordinary_run_adds_no_flags(self):
+        meta = {"params": {"coverage": False, "player": False,
+                           "works": 0, "harbour": 0, "shanty": 0}}
+        self.assertEqual(sg.regenerate_flags(meta), [])
+
+    def test_explicit_works_harbour_shanty_are_carried_without_coverage(self):
+        """A plain (non-coverage) run that explicitly asked for a works or
+        harbour cluster must still reproduce it — the same class of omission
+        the HTTP route's --works/--harbour/--shanty knobs introduced."""
+        meta = {"params": {"coverage": False, "player": False,
+                           "works": 2, "harbour": 0, "shanty": 1}}
+        self.assertEqual(sg.regenerate_flags(meta), ["--works 2", "--shanty 1"])
+
+
 class TestFullCoverageWar(unittest.TestCase):
     """The generated article: a `--coverage` war really does contain one of
     everything, and its objectives are not all `control`.
@@ -1412,6 +1448,36 @@ class TestFullCoverageWar(unittest.TestCase):
         self.assertLess(plain["staged_def_count"], cov["staged_def_count"])
         self.assertFalse(plain["coverage"])
         self.assertTrue(cov["coverage"])
+
+    def test_params_blob_records_what_coverage_forced_not_what_was_requested(self):
+        """2026-08-18 provenance bug: `generate()` was called with the
+        default `roster="standard"`, and `--coverage` overrides that to
+        `full` internally — but the stored `params` blob used to be built
+        straight from the caller's original arguments, so it kept recording
+        `roster: "standard"` even though `full` is what actually got staged.
+        Same check for the other knobs `--coverage` forces to a floor.
+        """
+        _lua, cov = self._gen(11)
+        params = cov["params"]
+        self.assertEqual(params["roster"], "full")
+        self.assertGreaterEqual(params["works"], 1)
+        self.assertGreaterEqual(params["harbour"], 1)
+        self.assertGreaterEqual(params["shanty"], 1)
+        self.assertTrue(params["coverage"])
+
+    def test_header_regenerate_line_carries_coverage_and_the_forced_knobs(self):
+        """The generated file's own header must reproduce ITSELF, not a
+        smaller war: before this fix it carried only `--seed`, so following
+        it regenerated a non-coverage war with a fraction of the defs."""
+        lua, cov = self._gen(11)
+        # The regenerate-with line is the one carrying --seed; the "GENERATED
+        # by" banner above it also names scenariogen.py but never takes flags.
+        header = next(ln for ln in lua.splitlines() if "scenariogen.py" in ln
+                      and "--seed" in ln)
+        self.assertIn("--coverage", header)
+        self.assertIn(f"--works {cov['params']['works']}", header)
+        self.assertIn(f"--harbour {cov['params']['harbour']}", header)
+        self.assertIn(f"--shanty {cov['params']['shanty']}", header)
 
     def test_objectives_span_more_than_control(self):
         """The other half of the directive. Three types, and exactly one of

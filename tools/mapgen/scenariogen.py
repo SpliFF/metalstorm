@@ -3062,6 +3062,22 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "catalog_def_count": len(facts),
         "uncovered_defs": sorted(set(facts) - set(staged_defs)),
         "per_side_defs": {t: sorted(v) for t, v in sorted(per_side_defs.items())},
+        # The knobs this run actually used, AFTER `coverage`'s forcing above —
+        # not the ones a caller asked for. `roster`, `works`, `harbour`,
+        # `shanty`, `sites`, `relics`, `towns`, `outposts`, `bases` and `mines`
+        # are all local variables the `if coverage:` block may have overridden
+        # by the time we get here, so reading them off `meta["params"]` rather
+        # than off the caller's original arguments is what makes a `--coverage`
+        # run's stored record (and its regenerate-with header, see emit_lua)
+        # say `full`/1/1/1 instead of quietly echoing back the request that
+        # coverage overrode.
+        "params": {
+            "sides": sides, "towns": towns, "outposts": outposts,
+            "bases": bases, "mines": mines, "sites": sites, "relics": relics,
+            "wrecks": wrecks, "bridges": bridges, "works": works,
+            "harbour": harbour, "shanty": shanty, "hostility": hostility,
+            "roster": roster, "player": not test_scenario, "coverage": coverage,
+        },
     }
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
@@ -3081,6 +3097,31 @@ def _team_field(owner) -> str:
     return str(owner) if isinstance(owner, int) else _lua_str(owner)
 
 
+def regenerate_flags(meta) -> list[str]:
+    """Which CLI flags belong on this scenario's "regenerate with" header line,
+    beyond `data/maps/<id> --seed <n>`.
+
+    Every flag that actually shaped the file has to be here, or a reader who
+    runs the printed line back gets a smaller or differently-composed war than
+    the one they were looking at. Read off `meta["params"]` — the knobs AFTER
+    `coverage`'s forcing (see generate()), never the raw request — because a
+    `--coverage` run's real `roster`/`works`/`harbour`/`shanty` can differ from
+    what was asked for.
+    """
+    params = meta.get("params", {})
+    flags = []
+    if params.get("coverage"):
+        flags.append("--coverage")
+    if params.get("player"):
+        flags.append("--player")
+    for flag, key in (("--works", "works"), ("--harbour", "harbour"),
+                      ("--shanty", "shanty")):
+        value = params.get(key, 0)
+        if value:
+            flags.append(f"{flag} {value}")
+    return flags
+
+
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
              hostile_team, sides, not_before, hold, townships=(),
@@ -3093,13 +3134,12 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
         f"generator-version={meta['version']}")
     add("--")
     add("-- Do not hand-edit: regenerate with")
-    # `--player` belongs in the reproduce line whenever it was used: without it
-    # this command does not regenerate the file, it prints a refusal, and the
-    # reader concludes the generator is broken rather than that the mode is
-    # missing.
+    # See regenerate_flags(): every flag that actually shaped this file has to
+    # be on this line, or a reader who runs it back gets a smaller or
+    # differently-composed war than the one they were looking at.
     add(f"--   tools/mapgen/scenariogen.py data/maps/{meta['map_id']} "
-        f"--seed {meta['seed']}"
-        f"{'' if meta.get('test_scenario', True) else ' --player'}")
+        f"--seed {meta['seed']}" +
+        "".join(f" {f}" for f in regenerate_flags(meta)))
     add("-- Generation is deterministic, so the same map and seed reproduce")
     add("-- this file byte for byte.")
     add("--")
@@ -3915,21 +3955,12 @@ def main(argv=None):
     if args.meta_json:
         import json
         payload = dict(meta)
-        # The knobs, echoed back so a stored scenario records the complete
-        # input needed to reproduce itself. `seed`, `map_id` and `version` are
-        # already top-level fields of meta.
-        payload["params"] = {
-            "sides": args.sides, "towns": args.towns,
-            "outposts": args.outposts, "bases": args.bases,
-            "mines": args.mines, "sites": args.sites, "relics": args.relics,
-            "wrecks": args.wrecks, "bridges": args.bridges,
-            "hostility": args.hostility, "roster": args.roster,
-            # The mode is a generation input, so it is echoed with the rest of
-            # the knobs — a stored scenario that cannot say whether its gate ran
-            # cannot be reproduced, and cannot be safely handed to a headless
-            # launch either.
-            "player": args.player,
-        }
+        # `payload["params"]` already came along with `meta` above — it is
+        # the knobs AFTER `coverage`'s forcing (see generate()), not the raw
+        # `args.*` a caller asked for. Building it fresh from `args` here
+        # would silently undo that and go back to echoing the request rather
+        # than what was actually used (e.g. `roster: "standard"` on a
+        # `--coverage` run that actually staged `full`).
         with open(args.meta_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, sort_keys=True, indent=2)
 
