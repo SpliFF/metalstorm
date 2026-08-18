@@ -64,6 +64,9 @@ class PlacementContext:
     exclusion: np.ndarray     # bool (H, W): no features here (roads, pads, water…)
     water_level: float = 0.0
     paths: list | None = None # list of (N,2) world-coord polylines (roads…)
+    # Deck HALF-width per entry of `paths`, same order. Optional: without it
+    # an along_paths layer keeps its plain centreline offset (pre-R2 behaviour).
+    path_halfwidths: list[float] | None = None
 
     @property
     def map_w(self) -> float:
@@ -157,6 +160,22 @@ class Layer:
     path_offset: float = 30.0               # lateral distance from centreline
     path_offset_jitter: float = 6.0
     path_both_sides: bool = True            # hashed side pick vs always +offset
+    # A lateral offset is measured from the CENTRELINE, but a road's deck is
+    # per class since R2 (a highway is 1.6x the base width), so one constant
+    # offset is on the verge of a track and on the CARRIAGEWAY of a highway —
+    # which is what put 457 of meridian_basin's 474 highway fences on the deck.
+    # When ctx.path_halfwidths is supplied the offset is raised, per polyline,
+    # to clear that polyline's own deck edge by the jitter plus this margin;
+    # a road narrow enough that path_offset already clears it is untouched.
+    #
+    # The margin is DERIVED from what the bake paints, not tuned by eye: the
+    # albedo's deck edge is ragged by up to 2.6 elmos and then fades over 3
+    # more (bake.py `ragged` / the /3.0 ramp), and a log fence is ~8 elmos long
+    # about its own origin — so anything under ~10 leaves a prop standing on
+    # tarmac even when its ORIGIN clears the geometric half-width. 2.0 was the
+    # first value here and it cleared the deck while still reading as on-road
+    # at ground level.
+    path_min_clearance: float = 10.0
 
 
 @dataclass
@@ -263,7 +282,11 @@ def _sample_along_paths(layer: Layer, ctx: PlacementContext, suit: np.ndarray, l
         nrm = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
         side = np.where(_hash01(pkey, si, lseed, 22) < 0.5, -1.0, 1.0) \
             if layer.path_both_sides else np.ones(n)
-        off = layer.path_offset + (
+        base_off = layer.path_offset
+        if ctx.path_halfwidths is not None and pi < len(ctx.path_halfwidths):
+            base_off = max(base_off, ctx.path_halfwidths[pi]
+                           + layer.path_offset_jitter + layer.path_min_clearance)
+        off = base_off + (
             _hash01(pkey, si, lseed, 23) * 2.0 - 1.0) * layer.path_offset_jitter
         pos = pos + nrm * (side * off)[:, None]
         heading = np.arctan2(tang[:, 1], tang[:, 0])

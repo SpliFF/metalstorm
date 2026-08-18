@@ -1310,8 +1310,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     for sx, sz in starts:
         excl |= np.hypot(xx - sx, zz - sz) < 500.0
 
+    # Deck half-width per polyline: a roadside layer offsets from the
+    # centreline, and since R2 that is a per-class distance (roads R4d).
     ctx = pl.PlacementContext(h, slope, b, moist, cell, seed, exclusion=excl,
-                              paths=polylines)
+                              paths=polylines,
+                              path_halfwidths=[rd.class_width(rc, rp) * 0.5
+                                               for rc in network.road_classes])
 
     def sand_suit(c):
         desert = pl.biome_suitability({bio.DESERT: 0.9})(c)
