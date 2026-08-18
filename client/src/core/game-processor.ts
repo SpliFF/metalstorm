@@ -884,9 +884,12 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (fogMesh) sceneLighting.csm.removeShadowCaster(fogMesh, false);
     gpLosBitmapStore.forEach(bitmap => fog.apply(bitmap));
 
-    // DXT1/KTX2 tile textures over HTTP.
-    if (map.tilesX > 0 && map.tilesZ > 0) {
-        loadTerrainTextures(scene, terrain, mapBaseUrl, mapDims).catch(e => {
+    // Ground albedo: one map-space texture where the map ships one
+    // (PLAN-maps.md §2n ruling 1 — the server does not extract `tiles.ktx2`
+    // for such a map at all), otherwise the DXT1/KTX2 tile atlas over HTTP.
+    if (map.groundTexUrl || (map.tilesX > 0 && map.tilesZ > 0)) {
+        loadTerrainTextures(scene, terrain, mapBaseUrl, mapDims,
+                            map.groundTexUrl).catch(e => {
             postLog(2, `[gp] terrain texture loading failed: ${e}`);
         });
     }

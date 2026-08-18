@@ -101,6 +101,17 @@ export interface ParsedMapData {
     metalmap: Uint8Array;
     minimapUrl: string;
     tilesUrl: string;
+    /**
+     * Map-space ground albedo, or '' when the map delivers its ground colour
+     * through the SMT tile dictionary at `tilesUrl`.
+     *
+     * DEVIATION from Recoil (PLAN-maps.md §2n ruling 1): the tile dictionary
+     * terragen writes is a lossy vector quantizer whose 32-elmo seam grid M7d
+     * measured at 15.7x the interior gradient. One 2048² map-space texture
+     * beats it on error, on seams and on bytes; a map opts in and the server
+     * then does not extract `tiles.ktx2` for it at all.
+     */
+    groundTexUrl: string;
     mapDataUrl: string;
     mapSourceUrl: string;
     decals: MapDecalsInfo;
@@ -257,6 +268,7 @@ export async function fetchMapDataHttp(mapId: string): Promise<ParsedMapData> {
         metalmap: new Uint8Array(mmBuf),
         minimapUrl: meta.minimapUrl ?? '',
         tilesUrl: meta.tilesUrl ?? '',
+        groundTexUrl: meta.groundTexUrl ?? '',
         mapDataUrl: meta.mapDataUrl ?? '',
         mapSourceUrl: meta.mapSourceUrl ?? '',
         decals,
@@ -401,6 +413,7 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
         heightmap, tileindex, typemap, metalmap,
         minimapUrl: fb.minimapUrl() ?? '',
         tilesUrl: fb.tilesUrl() ?? '',
+        groundTexUrl: fb.groundTexUrl() ?? '',
         mapDataUrl: fb.mapDataUrl() ?? '',
         mapSourceUrl: fb.mapSourceUrl() ?? '',
         decals,

@@ -1882,6 +1882,17 @@ table MapData {
     /// Paths (relative to map_source_url) of .lua files under LuaUI/Widgets/
     /// that the client should load into fengari on map start.
     widgets: [string];
+    /// HTTP URL of the map-space ground albedo, or "" when the map delivers
+    /// its ground colour through the SMT tile dictionary (`tiles_url`).
+    ///
+    /// DEVIATION from Recoil, ruled in 2026-08-19 (PLAN-maps.md §2n): the
+    /// tile dictionary this project's generator writes is a lossy vector
+    /// quantizer, and M7f measured it against ground truth at 12.5 % of
+    /// texels >4 levels off with a 15.7x seam jump on the 32-elmo tile grid.
+    /// One 2048² map-space texture beats it on error, on seams and on bytes.
+    /// Opt-in per map: a map that ships an exactly-deduped SMT (i.e. every
+    /// real Spring map) leaves this empty and is unaffected.
+    ground_tex_url: string;
 }
 
 /// One queued order for a unit. Mirrors Spring's Command struct.

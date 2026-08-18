@@ -15564,6 +15564,7 @@ struct MapDataT : public ::flatbuffers::NativeTable {
   std::unique_ptr<SpringWeb::MapWaterT> water{};
   bool has_lua_gaia = false;
   std::vector<std::string> widgets{};
+  std::string ground_tex_url{};
   MapDataT() = default;
   MapDataT(const MapDataT &o);
   MapDataT(MapDataT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -15601,7 +15602,8 @@ struct MapData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_DECALS = 46,
     VT_WATER = 48,
     VT_HAS_LUA_GAIA = 50,
-    VT_WIDGETS = 52
+    VT_WIDGETS = 52,
+    VT_GROUND_TEX_URL = 54
   };
   uint16_t mapx() const {
     return GetField<uint16_t>(VT_MAPX, 0);
@@ -15683,6 +15685,19 @@ struct MapData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *widgets() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_WIDGETS);
   }
+  /// HTTP URL of the map-space ground albedo, or "" when the map delivers
+  /// its ground colour through the SMT tile dictionary (`tiles_url`).
+  ///
+  /// DEVIATION from Recoil, ruled in 2026-08-19 (PLAN-maps.md §2n): the
+  /// tile dictionary this project's generator writes is a lossy vector
+  /// quantizer, and M7f measured it against ground truth at 12.5 % of
+  /// texels >4 levels off with a 15.7x seam jump on the 32-elmo tile grid.
+  /// One 2048² map-space texture beats it on error, on seams and on bytes.
+  /// Opt-in per map: a map that ships an exactly-deduped SMT (i.e. every
+  /// real Spring map) leaves this empty and is unaffected.
+  const ::flatbuffers::String *ground_tex_url() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GROUND_TEX_URL);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint16_t>(verifier, VT_MAPX, 2) &&
@@ -15729,6 +15744,8 @@ struct MapData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_WIDGETS) &&
            verifier.VerifyVector(widgets()) &&
            verifier.VerifyVectorOfStrings(widgets()) &&
+           VerifyOffset(verifier, VT_GROUND_TEX_URL) &&
+           verifier.VerifyString(ground_tex_url()) &&
            verifier.EndTable();
   }
   MapDataT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -15815,6 +15832,9 @@ struct MapDataBuilder {
   void add_widgets(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> widgets) {
     fbb_.AddOffset(MapData::VT_WIDGETS, widgets);
   }
+  void add_ground_tex_url(::flatbuffers::Offset<::flatbuffers::String> ground_tex_url) {
+    fbb_.AddOffset(MapData::VT_GROUND_TEX_URL, ground_tex_url);
+  }
   explicit MapDataBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -15852,8 +15872,10 @@ inline ::flatbuffers::Offset<MapData> CreateMapData(
     ::flatbuffers::Offset<SpringWeb::MapDecals> decals = 0,
     ::flatbuffers::Offset<SpringWeb::MapWater> water = 0,
     bool has_lua_gaia = false,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> widgets = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> widgets = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> ground_tex_url = 0) {
   MapDataBuilder builder_(_fbb);
+  builder_.add_ground_tex_url(ground_tex_url);
   builder_.add_widgets(widgets);
   builder_.add_water(water);
   builder_.add_decals(decals);
@@ -15908,7 +15930,8 @@ inline ::flatbuffers::Offset<MapData> CreateMapDataDirect(
     ::flatbuffers::Offset<SpringWeb::MapDecals> decals = 0,
     ::flatbuffers::Offset<SpringWeb::MapWater> water = 0,
     bool has_lua_gaia = false,
-    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *widgets = nullptr) {
+    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *widgets = nullptr,
+    const char *ground_tex_url = nullptr) {
   auto start_positions__ = start_positions ? _fbb.CreateVectorOfStructs<SpringWeb::MapStartPos>(*start_positions) : 0;
   auto feature_types__ = feature_types ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*feature_types) : 0;
   auto features__ = features ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MapFeature>>(*features) : 0;
@@ -15922,6 +15945,7 @@ inline ::flatbuffers::Offset<MapData> CreateMapDataDirect(
   auto map_data_url__ = map_data_url ? _fbb.CreateString(map_data_url) : 0;
   auto map_source_url__ = map_source_url ? _fbb.CreateString(map_source_url) : 0;
   auto widgets__ = widgets ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*widgets) : 0;
+  auto ground_tex_url__ = ground_tex_url ? _fbb.CreateString(ground_tex_url) : 0;
   return SpringWeb::CreateMapData(
       _fbb,
       mapx,
@@ -15948,7 +15972,8 @@ inline ::flatbuffers::Offset<MapData> CreateMapDataDirect(
       decals,
       water,
       has_lua_gaia,
-      widgets__);
+      widgets__,
+      ground_tex_url__);
 }
 
 ::flatbuffers::Offset<MapData> CreateMapData(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -24301,7 +24326,8 @@ inline MapDataT::MapDataT(const MapDataT &o)
         decals((o.decals) ? new SpringWeb::MapDecalsT(*o.decals) : nullptr),
         water((o.water) ? new SpringWeb::MapWaterT(*o.water) : nullptr),
         has_lua_gaia(o.has_lua_gaia),
-        widgets(o.widgets) {
+        widgets(o.widgets),
+        ground_tex_url(o.ground_tex_url) {
   features.reserve(o.features.size());
   for (const auto &features_ : o.features) { features.emplace_back((features_) ? new SpringWeb::MapFeatureT(*features_) : nullptr); }
   feature_defs.reserve(o.feature_defs.size());
@@ -24334,6 +24360,7 @@ inline MapDataT &MapDataT::operator=(MapDataT o) FLATBUFFERS_NOEXCEPT {
   std::swap(water, o.water);
   std::swap(has_lua_gaia, o.has_lua_gaia);
   std::swap(widgets, o.widgets);
+  std::swap(ground_tex_url, o.ground_tex_url);
   return *this;
 }
 
@@ -24371,6 +24398,7 @@ inline void MapData::UnPackTo(MapDataT *_o, const ::flatbuffers::resolver_functi
   { auto _e = water(); if (_e) { if(_o->water) { _e->UnPackTo(_o->water.get(), _resolver); } else { _o->water = std::unique_ptr<SpringWeb::MapWaterT>(_e->UnPack(_resolver)); } } else if (_o->water) { _o->water.reset(); } }
   { auto _e = has_lua_gaia(); _o->has_lua_gaia = _e; }
   { auto _e = widgets(); if (_e) { _o->widgets.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->widgets[_i] = _e->Get(_i)->str(); } } else { _o->widgets.resize(0); } }
+  { auto _e = ground_tex_url(); if (_e) _o->ground_tex_url = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<MapData> MapData::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDataT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -24406,6 +24434,7 @@ inline ::flatbuffers::Offset<MapData> CreateMapData(::flatbuffers::FlatBufferBui
   auto _water = _o->water ? CreateMapWater(_fbb, _o->water.get(), _rehasher) : 0;
   auto _has_lua_gaia = _o->has_lua_gaia;
   auto _widgets = _o->widgets.size() ? _fbb.CreateVectorOfStrings(_o->widgets) : 0;
+  auto _ground_tex_url = _o->ground_tex_url.empty() ? 0 : _fbb.CreateString(_o->ground_tex_url);
   return SpringWeb::CreateMapData(
       _fbb,
       _mapx,
@@ -24432,7 +24461,8 @@ inline ::flatbuffers::Offset<MapData> CreateMapData(::flatbuffers::FlatBufferBui
       _decals,
       _water,
       _has_lua_gaia,
-      _widgets);
+      _widgets,
+      _ground_tex_url);
 }
 
 inline UnitOrderT *UnitOrder::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

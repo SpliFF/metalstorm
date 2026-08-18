@@ -1973,6 +1973,11 @@ int main(int argc, char *argv[]) {
             // URLs for binary data and source assets
             j["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
             j["tilesUrl"] = "/api/maps/data/" + m.id + "/tiles.ktx2";
+            // Map-space ground albedo (PLAN-maps §2n ruling 1). Empty string
+            // when the map has none — the client then stays on tilesUrl.
+            j["groundTexUrl"] = m.groundTex.empty()
+                                    ? std::string()
+                                    : "/api/maps/data/" + m.id + "/" + m.groundTex;
             j["mapDataUrl"] = "/api/maps/data/" + m.id;
             j["mapSourceUrl"] = "/api/maps/data/" + m.id;
 

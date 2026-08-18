@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, VertexBuffer } from '@babylonjs/core';
+import { NullEngine, Scene, VertexBuffer, StandardMaterial, Texture } from '@babylonjs/core';
 import {
     planAtlasPages, extractKtx2Levels, compositeAtlasLevel,
     fogTierAlpha255, DEFAULT_FOG_DARKENING,
@@ -7,7 +7,8 @@ import {
     buildTerrainMesh, DeformableTerrain, isTerrainMesh,
     attachTerrainSplatFromDecals, attachTerrainDetailPlainFromDecals,
     attachTerrainSplatNormalFromDecals, attachTerrainDetailFromDecals,
-    applyWebGLTexture, setTerrainDetailPluginEnabled, drainGlErrors,
+    applyWebGLTexture, applyGroundTexture, loadTerrainTextures,
+    setTerrainDetailPluginEnabled, drainGlErrors,
     type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
 import { TerrainSplatPlugin } from './terrain-splat-plugin.js';
@@ -843,5 +844,85 @@ describe('terrain near-field detail attach', () => {
         expect(pluginOf(group.materials[0])?.isEnabled).toBe(false);
         expect(setTerrainDetailPluginEnabled(group, true)).toBe(true);
         expect(pluginOf(group.materials[0])?.isEnabled).toBe(true);
+    });
+});
+
+// PLAN-maps.md §2n ruling 1 (M7f option A): a map may deliver its whole ground
+// albedo as ONE map-space texture instead of the SMT tile dictionary. The
+// dictionary's 32-elmo seam grid is the defect this removes; the client half
+// is a preference, and the thing that would silently undo it is the atlas path
+// running anyway (on a map whose `tiles.ktx2` the server never wrote).
+describe('map-space ground texture (PLAN-maps §2n)', () => {
+    const GROUND = '/api/maps/data/skerry_reach/ground.ktx2';
+    const BASE = 'http://localhost:1/api/maps/m/data';
+    const pluginOf = (mat: unknown): TerrainSplatPlugin | undefined =>
+        ((mat as { pluginManager?: { _plugins?: unknown[] } }).pluginManager?._plugins
+            ?.find((p): p is TerrainSplatPlugin => p instanceof TerrainSplatPlugin));
+    const SCORCHED = {
+        detailTex: 'detail.ktx2',
+        splatDetailTex: 'splat_detail.ktx2',
+        splatDistrTex: 'splat_distr.ktx2',
+        splatNormal: ['splat_normal_0.ktx2', 'splat_normal_1.ktx2',
+            'splat_normal_2.ktx2', 'splat_normal_3.ktx2'] as
+            [string, string, string, string],
+        splatScales: [0.018, 0.005, 0.02, 0.02] as [number, number, number, number],
+        splatMults: [1, 1, 1, 1] as [number, number, number, number],
+        splatDetailNormalDiffuseAlpha: true,
+    };
+
+    it('textures the terrain from the map-space albedo', () => {
+        const { scene, group } = makeChunkedTerrain();
+        applyGroundTexture(scene, group, GROUND);
+        const mat = group.materials[0] as StandardMaterial;
+        expect(mat.diffuseTexture?.name).toBe(GROUND);
+        // it IS the map: a bilinear tap at the edge must not wrap around
+        expect(mat.diffuseTexture!.wrapU).toBe(Texture.CLAMP_ADDRESSMODE);
+        expect(mat.diffuseTexture!.wrapV).toBe(Texture.CLAMP_ADDRESSMODE);
+        expect(mat.diffuseTexture!.anisotropicFilteringLevel).toBe(8);
+    });
+
+    it('carries the near-field detail plugin across the swap, like the atlas does', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims);
+        const before = pluginOf(group.materials[0])!;
+        applyGroundTexture(scene, group, GROUND);
+        const after = pluginOf(group.materials[0])!;
+        expect(after).not.toBe(before);
+        expect(after.mode).toBe('splatNormal');
+    });
+
+    it('takes the ground texture INSTEAD of the tile atlas, never both', async () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        // NullEngine has no WebGL context, so the atlas path bails at
+        // getEngineGl() and leaves the material untextured. Reaching the
+        // ground texture at all therefore proves the short-circuit — and the
+        // fetch that path would make (tiles.ktx2 does not exist for such a
+        // map) is never issued.
+        const fetches: string[] = [];
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = ((u: string) => {
+            fetches.push(String(u));
+            return Promise.reject(new Error('404'));
+        }) as typeof fetch;
+        try {
+            await loadTerrainTextures(scene, group, BASE, dims, GROUND);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        expect(fetches).toEqual([]);
+        expect((group.materials[0] as StandardMaterial).diffuseTexture?.name)
+            .toBe(GROUND);
+    });
+
+    it('falls back to the atlas when the map ships no ground texture', async () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        const before = group.materials[0];
+        await loadTerrainTextures(scene, group, BASE, dims, '');
+        // no WebGL context under NullEngine: the atlas path bails, so the
+        // material is untouched — what matters is that it did NOT take the
+        // ground-texture branch with an empty URL.
+        expect(group.materials[0]).toBe(before);
+        expect((group.materials[0] as StandardMaterial).diffuseTexture?.name)
+            .not.toBe(GROUND);
     });
 });

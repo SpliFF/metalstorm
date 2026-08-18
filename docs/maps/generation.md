@@ -569,6 +569,25 @@ on — see the research record in PLAN-maps.md §1.2:
    architectural. `eval_ground_albedo.py` (§7) is how a replacement is
    argued, and PLAN-maps.md M7 item 1 carries the options.
 
+   **The architectural fix is now built, and a generated map takes it by
+   default** (PLAN-maps.md §2n ruling 1, M7f option A). Beside the SMT, a map
+   ships `maps/ground.png` — one **2048² map-space albedo, 8 elmos/texel on a
+   16k map**, box-downsampled from the *same* full-resolution bake the tile
+   dictionary is clustered from, so both paths carry the same pixels. It is
+   declared as `resources.groundtex` (a DEVIATION: not a Recoil key), and
+   `MapProcessor` converts it to `ground.ktx2` and then **does not extract the
+   SMT tile dictionary for that map at all** — the client prefers the
+   map-space texture over the tile atlas. Measured against the unquantized
+   bake (M7f): reconstruction error 2.51 → 1.95 mean levels, texels >4 levels
+   off 12.5 % → 7.5 %, seam ratio 15.74 → 1.20, delivered bytes 8.4 → 3.7 MB.
+   `--no-ground-texture` opts a generator run out.
+
+   **Opt-in per map is part of the ruling, not a detail.** Real Spring maps
+   (`scorched_crossing`, `green_flat`, `wanderlust`, `pools_of_ilys`) ship
+   *exactly* deduped SMTs that this path would degrade, so they declare no
+   `groundtex` and are untouched. Nothing is retrofitted: a terragen map picks
+   the texture up on its next regeneration.
+
    Two hard-won rules keep the bake artefact-free:
    - **The bake stays low-frequency** (nothing under ~50-elmo wavelength).
      Tile dedup collapses uniform areas onto a handful of representative
@@ -763,6 +782,10 @@ cd tools/mapgen
 .venv/bin/python eval_ground_albedo.py $TMPDIR/skerry_reach_tiles.npy \
     --seed 20260730 --crops 432,400,16 --crop-dir /tmp/albedo
 ```
+
+(Since PLAN-maps §2n the map-space path is what a generated map ships — see
+§5 — so this tool now prices a *shipped* format against ground truth rather
+than a proposal.)
 
 It carries both paths all the way to what the GPU samples — the tile
 dictionary (cluster → DXT1 → decode) and a low-resolution map-space albedo

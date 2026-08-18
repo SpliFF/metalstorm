@@ -27,7 +27,7 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
     {
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db,
-            "SELECT splat_detail_normal_diffuse_alpha FROM maps LIMIT 1", -1, &stmt, nullptr);
+            "SELECT ground_tex FROM maps LIMIT 1", -1, &stmt, nullptr);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_OK) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS maps", nullptr, nullptr, nullptr);
@@ -80,7 +80,11 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
             -- diagnostic / so Lua VFS reads of raw map content can pick
             -- the right adapter — positions on the record itself are
             -- already RH after the importer.
-            legacy_coord_system INTEGER
+            legacy_coord_system INTEGER,
+            -- Map-space ground albedo (PLAN-maps §2n): the processed-dir
+            -- filename, or empty when the map delivers its ground colour
+            -- through the SMT tile dictionary as Spring does.
+            ground_tex TEXT
         );
     )", nullptr, nullptr, nullptr);
 }
@@ -169,11 +173,11 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
          feature_types,features_blob,feature_defs,
          water_base_color,water_surface_color,water_min_color,
          water_surface_alpha,water_damage,void_water,
-         widgets,sound_preset,legacy_coord_system)
+         widgets,sound_preset,legacy_coord_system,ground_tex)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,
-                ?,?,?)
+                ?,?,?,?)
     )", -1, &stmt, nullptr);
 
     int i = 1;
@@ -227,6 +231,7 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
     sqlite3_bind_text(stmt, i++, widgetsStr.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, m.soundPreset.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, i++, m.legacyCoordSystem ? 1 : 0);
+    sqlite3_bind_text(stmt, i++, m.groundTex.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
@@ -267,7 +272,7 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db, bool* ok) {
         "feature_types,features_blob,feature_defs,"
         "water_base_color,water_surface_color,water_min_color,"
         "water_surface_alpha,water_damage,void_water,widgets,sound_preset,"
-        "legacy_coord_system FROM maps", -1, &stmt, nullptr);
+        "legacy_coord_system,ground_tex FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         if (ok) *ok = false;
         SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed (%d): %s",
@@ -431,6 +436,9 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db, bool* ok) {
         } else {
             m.legacyCoordSystem = sqlite3_column_int(stmt, i++) != 0;
         }
+
+        // Map-space ground albedo (PLAN-maps §2n); empty = SMT tile path.
+        m.groundTex = maybeStr(i++);
 
         result.push_back(std::move(m));
     }

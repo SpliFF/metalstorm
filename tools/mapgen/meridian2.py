@@ -191,7 +191,7 @@ DECLARED_REACHABILITY = reach.SPLIT
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
              no_package=False, climate="temperate",
              map_id="meridian_basin", display_name="Meridian Basin",
-             reachability=None):
+             reachability=None, ground_texture=True):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -681,12 +681,17 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     reach.check(reachability)
     print(f"reachability declared \"{reachability}\" for {map_id}:")
     reach.report(pas.read_all(h, cell, starts), reachability)
+    from terragen import bake as bake_mod
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
         description="Two sides of an eroded river basin: ridge corridors, three fords, civilian valleys.",
         min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
+        # PLAN-maps §2n ruling 1: a generated map ships the map-space ground
+        # albedo instead of relying on the lossy SMT tile dictionary.
+        ground_texture_size=(bake_mod.GROUND_TEXTURE_SIZE_DEFAULT
+                             if ground_texture else 0),
         start_positions=starts,
         seed=seed,
         reachability=reachability,
@@ -785,6 +790,12 @@ def main():
                          "\'split\' for every meridian variant: the severing "
                          "scarp is in the layout contract (PLAN-maps "
                          "\u00a72k).")
+    ap.add_argument("--ground-texture", dest="ground_texture",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="ship maps/ground.png — the map-space ground albedo "
+                         "M7f measured and PLAN-maps \u00a72n ruled in. "
+                         "--no-ground-texture leaves the map on the SMT tile "
+                         "dictionary and its 32-elmo seam grid.")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--with-features", action="store_true",
                     help="scatter the full vegetation set into "
@@ -840,6 +851,7 @@ def main():
              preview_only=args.preview_only, no_package=args.no_package,
              climate=args.climate, map_id=args.map_id,
              reachability=args.reachability,
+             ground_texture=args.ground_texture,
              display_name=args.display_name)
 
 

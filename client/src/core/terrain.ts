@@ -1130,15 +1130,61 @@ async function buildMapAtlasPages(
 }
 
 /**
+ * Apply the map's ground albedo as ONE map-space texture — PLAN-maps.md §2n
+ * ruling 1 (M7f option A), the path a map opts into by declaring
+ * `resources.groundtex`.
+ *
+ * FIDELITY-STANDIN / DEVIATION from Recoil, and the reason it is worth one:
+ * Recoil delivers the ground albedo only through the SMF's tile dictionary,
+ * and the dictionary terragen writes is a lossy vector quantizer rather than
+ * Spring's exact dedup (see `dxt1.cluster_tiles`). M7d measured its seam jump
+ * across the 32-elmo tile grid at 15.7x the interior gradient — a visible
+ * checkerboard on smooth ground — and M7f measured the replacement: at 2048²
+ * a map-space texture reads 1.95 mean levels of error against 2.51, 7.5 % of
+ * texels badly wrong against 12.5 %, seam ratio 1.20 against 15.74, in a third
+ * of the bytes. Per-texel grain stays the runtime splat layer's job either
+ * way. A map that ships an exactly-deduped SMT (every real Spring map) never
+ * declares this and keeps the faithful path.
+ *
+ * The mesh already carries GLOBAL 0..1 map UVs, so the texture needs no
+ * remapping: the same UVs that indexed the atlas index this.
+ */
+export function applyGroundTexture(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    groundTexUrl: string,
+): void {
+    const tex = new Texture(groundTexUrl, scene, false,
+        false /* invertY: KTX2 path ignores, raster stays top-down */);
+    // Clamp, not wrap: this texture IS the map, and a bilinear tap at the very
+    // edge must not fetch the far side of the world.
+    tex.wrapU = Texture.CLAMP_ADDRESSMODE;
+    tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+    applyTerrainDiffuseTexture(scene, terrain, tex);
+}
+
+/**
  * Composite DXT1 tiles into per-page atlas textures and apply to terrain.
  * One page for the common case; a MultiMaterial grid for over-cap maps.
+ *
+ * `groundTexUrl` (PLAN-maps §2n) short-circuits the whole atlas path: a map
+ * that ships a map-space ground albedo has no `tiles.ktx2` on the server at
+ * all, because MapProcessor stops extracting the tile dictionary for it.
  */
 export async function loadTerrainTextures(
     scene: Scene,
     terrain: TerrainMeshGroup,
     mapBaseUrl: string,
     dims: MapDimensions,
+    groundTexUrl = '',
 ): Promise<void> {
+    if (groundTexUrl) {
+        console.log(`[terrain] map-space ground albedo: ${groundTexUrl} ` +
+            `(SMT tile dictionary not delivered for this map)`);
+        applyGroundTexture(scene, terrain, groundTexUrl);
+        return;
+    }
+
     let gl: WebGL2RenderingContext;
     try { gl = getEngineGl(scene.getEngine() as Engine); } catch { console.warn('[terrain] no WebGL context'); return; }
 
@@ -1178,6 +1224,19 @@ export function applyWebGLTexture(
     const texture = new Texture(null, scene);
     texture._texture = internalTex;
 
+    applyTerrainDiffuseTexture(scene, terrain, texture);
+}
+
+/**
+ * Swap the terrain onto a StandardMaterial carrying `texture` as its ground
+ * albedo, preserving the material plugins attached to whatever was there
+ * before. Shared by the DXT1 atlas path and the map-space ground texture —
+ * the two differ only in where the pixels come from, and the plugin-reattach
+ * dance below is exactly the part that is easy to get wrong twice.
+ */
+function applyTerrainDiffuseTexture(
+    scene: Scene, terrain: TerrainMeshGroup, texture: Texture,
+): void {
     // Remove vertex colours if present (they'd multiply with the sampled
     // diffuse colour and darken the terrain)
     for (const mesh of terrain.allMeshes) {
@@ -1195,12 +1254,13 @@ export function applyWebGLTexture(
 
     // Carry the ground-decal overlay (PLAN-decals.md) onto the new material.
     // The overlay plugin is attached to the *initial* terrain material in
-    // main.ts; this textured material is built later (once the map atlas
-    // finishes loading) and swapped in here. Without re-attaching, the
-    // textured terrain samples no overlay and scars/tracks never render.
-    // Anisotropic filtering on the baked far-field: the oblique RTS camera
-    // samples the ground at grazing angles where trilinear alone blurs badly.
-    // 8x on the bake per PLAN-maps.md (4x default elsewhere).
+    // main.ts; this textured material is built later (once the ground texture
+    // or the map atlas finishes loading) and swapped in here. Without
+    // re-attaching, the textured terrain samples no overlay and scars/tracks
+    // never render.
+    // Anisotropic filtering: the oblique RTS camera samples the ground at
+    // grazing angles where trilinear alone blurs badly. 8x per PLAN-maps.md
+    // (4x default elsewhere).
     texture.anisotropicFilteringLevel = 8;
 
     // Chunks share ONE material, so the previous plugin state lives on that

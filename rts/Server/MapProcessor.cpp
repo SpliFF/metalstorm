@@ -296,6 +296,11 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                     meta.decals.splatDetailTex  = getTex("splatdetailtex",  "splatDetailTex");
                     meta.decals.splatDistrTex   = getTex("splatdistrtex",   "splatDistrTex");
                     meta.decals.detailNormalTex = getTex("detailnormaltex", "detailNormalTex");
+                    // DEVIATION (PLAN-maps §2n ruling 1): not a Recoil key.
+                    // A map that declares it delivers its ground albedo as
+                    // one map-space texture instead of through the SMT tile
+                    // dictionary; see MapMetadata::groundTex.
+                    meta.groundTex              = getTex("groundtex",        "groundTex");
                     meta.decals.splatDetailNormalTex[0] = getTex("splatdetailnormaltex1", "splatDetailNormalTex1");
                     meta.decals.splatDetailNormalTex[1] = getTex("splatdetailnormaltex2", "splatDetailNormalTex2");
                     meta.decals.splatDetailNormalTex[2] = getTex("splatdetailnormaltex3", "splatDetailNormalTex3");
@@ -566,7 +571,23 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
     // --mip-levels. WebGL2 cannot runtime-generate mipmaps for a
     // compressed-format texture (gl.generateMipmap() only supports
     // uncompressed formats), so the full chain must ship pre-baked.
-    if (!meta.smtPath.empty()) {
+    // A map that ships a map-space ground albedo does not need the tile
+    // dictionary delivered at all: the client prefers `ground.ktx2` and would
+    // never sample the atlas (PLAN-maps §2n ruling 1). Skipping it is most of
+    // what the ruling buys — on skerry_reach the SMT KTX2 is 8.4 MB against
+    // the ground texture's ~2.8 MB. `tileindex.bin` above is still written:
+    // it is small, it is part of the SMF record, and it keeps a client that
+    // predates this path able to fall back if the texture is missing.
+    if (!meta.smtPath.empty() && !meta.groundTex.empty()) {
+        // Drop any tiles.ktx2 an earlier processing of this map left behind:
+        // it holds THAT version's pixels, and a stale albedo served to a
+        // client that still asks for it is worse than a 404.
+        std::error_code rmEc;
+        std::filesystem::remove(meta.processedDir + "/tiles.ktx2", rmEc);
+        SLOG(SPRING_LOG_INFO,
+            "%s: ships a map-space ground albedo (%s) — not extracting the "
+            "SMT tile dictionary", meta.id.c_str(), meta.groundTex.c_str());
+    } else if (!meta.smtPath.empty()) {
         std::ifstream smt(meta.smtPath, std::ios::binary);
         smt.seekg(16); // skip magic
         int smtVersion, smtNumTiles;
@@ -742,6 +763,81 @@ static bool ParseSignedDcReport(const std::string& out,
     return n == 9;
 }
 
+/// Resolve one mapinfo-declared texture reference and convert it to a
+/// `<baseName>.ktx2` in the processed dir, rewriting `field` to the output
+/// name (or clearing it when the source cannot be resolved / the converter
+/// fails). Shared by the decal set and by the map-space ground albedo, which
+/// is converted EARLIER than the decals — see ExtractGroundTexture.
+static bool ConvertMapTexture(const MapMetadata& meta, std::string& field,
+                              const char* baseName, bool wantDc,
+                              std::string* toolOutput) {
+    if (field.empty()) return false;
+    std::string src = resolveTexturePath(meta.sourcePath, field);
+    if (src.empty()) {
+        // Declared means the mapper intended it; failing to resolve it is a
+        // content bug, and at DEBUG the whole pipeline reads as wired from
+        // the logs (PLAN-terrain-detailtex.md §1) — that is how the dead
+        // `detailTex` path stayed invisible.
+        SLOG(SPRING_LOG_WARNING, "texture '%s' declared but unresolvable: %s",
+            baseName, field.c_str());
+        field.clear();
+        return false;
+    }
+
+    const std::string dstName = std::string(baseName) + ".ktx2";
+    const std::string dstPath = meta.processedDir + "/" + dstName;
+
+    // --mipmaps: Recoil's near-field detail is signed (tex*2-1), so it
+    // self-fades to nothing as the mip chain averages it towards mid-grey.
+    // That chain IS the distance falloff — there is no fade uniform in
+    // SMFFragProg — so a level-1 decal KTX2 aliases at full strength all
+    // the way to the horizon. DDS sources keep whatever chain they ship
+    // (the flag only reaches the RGBA8 encode path).
+    // --signed-dc-report is only asked of `detailTex`: it is the one
+    // decal the shader adds unmodulated (`baseColor += tex*2-1`, no
+    // distribution map in front of it), so its mean is a flat tint on
+    // the whole map. See DetailTexDc.h.
+    const std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+        " --encoding uastc --mipmaps"
+        + (wantDc ? " --signed-dc-report" : "") +
+        " \"" + src + "\" \"" + dstPath + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) { field.clear(); return false; }
+    char buf[256];
+    std::string out;
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    const int rc = pclose(p);
+    if (rc != 0) {
+        SLOG(SPRING_LOG_WARNING, "textureconverter failed (%d): %s  %s",
+            rc, src.c_str(), out.c_str());
+        field.clear();
+        return false;
+    }
+    if (toolOutput) *toolOutput = out;
+    field = dstName;
+    return true;
+}
+
+/// The map-space ground albedo (PLAN-maps §2n ruling 1). Converted BEFORE the
+/// binary extraction, not with the other textures, because ExtractBinaryData
+/// skips the SMT tile dictionary for a map that ships one — so whether this
+/// texture actually exists has to be known first. A declared-but-broken
+/// ground texture therefore falls back to the tile path instead of leaving
+/// the map with no ground colour at all.
+bool MapProcessor::ExtractGroundTexture(MapMetadata& meta) {
+    if (meta.groundTex.empty()) return true;
+    const std::string declared = meta.groundTex;
+    if (!ConvertMapTexture(meta, meta.groundTex, "ground", false, nullptr)) {
+        SLOG(SPRING_LOG_WARNING,
+            "%s: ground texture '%s' declared but not produced — falling back "
+            "to the SMT tile dictionary", meta.id.c_str(), declared.c_str());
+        return false;
+    }
+    SLOG(SPRING_LOG_INFO, "%s: map-space ground albedo -> %s",
+        meta.id.c_str(), meta.groundTex.c_str());
+    return true;
+}
+
 bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
     // Filled by the `detailTex` conversion below and judged after every
     // field is resolved, because whether a non-neutral DC matters at all
@@ -755,53 +851,11 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
     // auto-routes DDS-as-blocks vs RGBA-encode internally; we just hand it
     // the source path and the desired output.
     auto convertField = [&](std::string& field, const char* baseName) {
-        if (field.empty()) return;
-        std::string src = resolveTexturePath(meta.sourcePath, field);
-        if (src.empty()) {
-            // Declared means the mapper intended it; failing to resolve it is a
-            // content bug, and at DEBUG the whole pipeline reads as wired from
-            // the logs (PLAN-terrain-detailtex.md §1) — that is how the dead
-            // `detailTex` path stayed invisible.
-            SLOG(SPRING_LOG_WARNING, "decal '%s' declared but unresolvable: %s",
-                baseName, field.c_str());
-            field.clear();
-            return;
-        }
-
-        std::string dstName = std::string(baseName) + ".ktx2";
-        std::string dstPath = meta.processedDir + "/" + dstName;
-
-        // --mipmaps: Recoil's near-field detail is signed (tex*2-1), so it
-        // self-fades to nothing as the mip chain averages it towards mid-grey.
-        // That chain IS the distance falloff — there is no fade uniform in
-        // SMFFragProg — so a level-1 decal KTX2 aliases at full strength all
-        // the way to the horizon. DDS sources keep whatever chain they ship
-        // (the flag only reaches the RGBA8 encode path).
-        // --signed-dc-report is only asked of `detailTex`: it is the one
-        // decal the shader adds unmodulated (`baseColor += tex*2-1`, no
-        // distribution map in front of it), so its mean is a flat tint on
-        // the whole map. See DetailTexDc.h.
         const bool wantDc = (std::strcmp(baseName, "detail") == 0);
-
-        std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
-            " --encoding uastc --mipmaps"
-            + (wantDc ? " --signed-dc-report" : "") +
-            " \"" + src + "\" \"" + dstPath + "\" 2>&1";
-        FILE* p = popen(cmd.c_str(), "r");
-        if (!p) { field.clear(); return; }
-        char buf[256];
         std::string out;
-        while (fgets(buf, sizeof(buf), p)) out += buf;
-        int rc = pclose(p);
-        if (rc != 0) {
-            SLOG(SPRING_LOG_WARNING, "textureconverter failed (%d): %s  %s",
-                rc, src.c_str(), out.c_str());
-            field.clear();
-            return;
-        }
+        if (!ConvertMapTexture(meta, field, baseName, wantDc, &out)) return;
         if (wantDc)
             haveDetailDc = ParseSignedDcReport(out, detailBaseMean, detailTopMean);
-        field = dstName;
     };
 
     convertField(meta.decals.detailTex,       "detail");
@@ -1404,6 +1458,10 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
         SLOG(SPRING_LOG_ERROR, "failed to read SMF header");
         return false;
     }
+
+    // Before the binary extraction: it skips the SMT tile dictionary for a
+    // map that really does ship a map-space ground albedo (PLAN-maps §2n).
+    ExtractGroundTexture(meta);
 
     if (!ExtractBinaryData(meta)) {
         SLOG(SPRING_LOG_ERROR, "failed to extract binary data");

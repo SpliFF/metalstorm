@@ -26,6 +26,10 @@ private:
     bool ExtractMinimapWebP(const MapMetadata& meta);
     bool ExtractFeatures(MapMetadata& meta);
     bool ExtractDecalTextures(MapMetadata& meta);
+    /// The map-space ground albedo (PLAN-maps §2n). Runs before
+    /// ExtractBinaryData, which skips the SMT tile dictionary for a map that
+    /// ships one.
+    bool ExtractGroundTexture(MapMetadata& meta);
     void EnumerateWidgets(MapMetadata& meta);
     void ExtractRegions(const MapMetadata& meta);
     /// Validates `mapdata/regions.lua` against the decoded heightmap (E1,

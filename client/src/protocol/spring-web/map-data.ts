@@ -245,8 +245,27 @@ widgetsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * HTTP URL of the map-space ground albedo, or "" when the map delivers
+ * its ground colour through the SMT tile dictionary (`tiles_url`).
+ *
+ * DEVIATION from Recoil, ruled in 2026-08-19 (PLAN-maps.md §2n): the
+ * tile dictionary this project's generator writes is a lossy vector
+ * quantizer, and M7f measured it against ground truth at 12.5 % of
+ * texels >4 levels off with a 15.7x seam jump on the 32-elmo tile grid.
+ * One 2048² map-space texture beats it on error, on seams and on bytes.
+ * Opt-in per map: a map that ships an exactly-deduped SMT (i.e. every
+ * real Spring map) leaves this empty and is unaffected.
+ */
+groundTexUrl():string|null
+groundTexUrl(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+groundTexUrl(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 54);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startMapData(builder:flatbuffers.Builder) {
-  builder.startObject(25);
+  builder.startObject(26);
 }
 
 static addMapx(builder:flatbuffers.Builder, mapx:number) {
@@ -459,6 +478,10 @@ static startWidgetsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addGroundTexUrl(builder:flatbuffers.Builder, groundTexUrlOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(25, groundTexUrlOffset, 0);
+}
+
 static endMapData(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -491,7 +514,8 @@ unpack(): MapDataT {
     (this.decals() !== null ? this.decals()!.unpack() : null),
     (this.water() !== null ? this.water()!.unpack() : null),
     this.hasLuaGaia(),
-    this.bb!.createScalarList<string>(this.widgets.bind(this), this.widgetsLength())
+    this.bb!.createScalarList<string>(this.widgets.bind(this), this.widgetsLength()),
+    this.groundTexUrl()
   );
 }
 
@@ -522,6 +546,7 @@ unpackTo(_o: MapDataT): void {
   _o.water = (this.water() !== null ? this.water()!.unpack() : null);
   _o.hasLuaGaia = this.hasLuaGaia();
   _o.widgets = this.bb!.createScalarList<string>(this.widgets.bind(this), this.widgetsLength());
+  _o.groundTexUrl = this.groundTexUrl();
 }
 }
 
@@ -551,7 +576,8 @@ constructor(
   public decals: MapDecalsT|null = null,
   public water: MapWaterT|null = null,
   public hasLuaGaia: boolean = false,
-  public widgets: (string)[] = []
+  public widgets: (string)[] = [],
+  public groundTexUrl: string|Uint8Array|null = null
 ){}
 
 
@@ -571,6 +597,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const decals = (this.decals !== null ? this.decals!.pack(builder) : 0);
   const water = (this.water !== null ? this.water!.pack(builder) : 0);
   const widgets = MapData.createWidgetsVector(builder, builder.createObjectOffsetList(this.widgets));
+  const groundTexUrl = (this.groundTexUrl !== null ? builder.createString(this.groundTexUrl!) : 0);
 
   MapData.startMapData(builder);
   MapData.addMapx(builder, this.mapx);
@@ -598,6 +625,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   MapData.addWater(builder, water);
   MapData.addHasLuaGaia(builder, this.hasLuaGaia);
   MapData.addWidgets(builder, widgets);
+  MapData.addGroundTexUrl(builder, groundTexUrl);
 
   return MapData.endMapData(builder);
 }

@@ -715,6 +715,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              raise_penalty: int = 1,
              reachability: "str | None" = None,
              region_graph: bool = True,
+             ground_texture: bool = True,
              target_regions: int = REGION_TARGET_DEFAULT):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
@@ -1512,6 +1513,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              "island road nets, coastal towns, ruins.")),
         min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
+        # PLAN-maps §2n ruling 1: a generated map ships the map-space ground
+        # albedo. `--no-ground-texture` leaves it on the SMT tile dictionary,
+        # whose 32-elmo seam grid is the defect this replaces.
+        ground_texture_size=(bk.GROUND_TEXTURE_SIZE_DEFAULT if ground_texture else 0),
         start_positions=starts,
         seed=seed,
         reachability=reachability,
@@ -1689,6 +1694,13 @@ def main():
                          "provider, whose regions have NO neighbours: keep it "
                          "only for a map whose scenarios address regions by "
                          "grid key (\"2:2\").")
+    ap.add_argument("--ground-texture", dest="ground_texture",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="ship maps/ground.png — the map-space ground albedo "
+                         "M7f measured and PLAN-maps §2n ruled in (2048^2, "
+                         "8 elmos/texel on a 16k map). --no-ground-texture "
+                         "leaves the map on the SMT tile dictionary, which "
+                         "puts a 32-elmo seam grid on smooth ground.")
     ap.add_argument("--target-regions", dest="target_regions", type=int,
                     default=REGION_TARGET_DEFAULT,
                     help="size of the region graph's BASE grid; the emitted "
@@ -1744,6 +1756,8 @@ def main():
             passthrough += ["--carve-raise-penalty", str(args.raise_penalty)]
         if not args.region_graph:
             passthrough.append("--no-region-graph")
+        if not args.ground_texture:
+            passthrough.append("--no-ground-texture")
         if args.target_regions != REGION_TARGET_DEFAULT:
             passthrough += ["--target-regions", str(args.target_regions)]
         if args.fast:
@@ -1771,6 +1785,7 @@ def main():
              start_connectivity=args.start_connectivity,
              raise_penalty=args.raise_penalty,
              region_graph=args.region_graph,
+             ground_texture=args.ground_texture,
              target_regions=args.target_regions)
 
 

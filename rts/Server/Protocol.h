@@ -1638,6 +1638,12 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     // --- Texture URLs (lobby HTTP) ---
     auto miniUrl = fbb.CreateString("/api/maps/data/" + m.id + "/minimap.ktx2");
     auto tilesUrl = fbb.CreateString("/api/maps/data/" + m.id + "/tiles.ktx2");
+    // Map-space ground albedo (PLAN-maps §2n ruling 1). Empty for a map that
+    // has none, which leaves the client on `tiles_url` — and for a map that
+    // has one, MapProcessor did not extract `tiles.ktx2` at all.
+    auto groundUrl = m.groundTex.empty()
+        ? fbb.CreateString("")
+        : fbb.CreateString("/api/maps/data/" + m.id + "/" + m.groundTex);
     auto baseUrl = fbb.CreateString("/api/maps/data/" + m.id);
     auto sourceUrl = fbb.CreateString("/api/maps/data/" + m.id);
 
@@ -1672,6 +1678,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     mdb.add_decals(decalsOff);
     mdb.add_water(waterOff);
     mdb.add_widgets(widgetsOff);
+    mdb.add_ground_tex_url(groundUrl);
     mdb.add_has_lua_gaia(m.hasLuaGaia);
     auto data = mdb.Finish();
 

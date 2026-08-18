@@ -453,3 +453,52 @@ def make_splat_distr(
         axis=-1,
     )
     return np.clip(w4 * 255, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Map-space ground albedo (PLAN-maps M7f option A, user ruling 2026-08-19 §2n)
+# ---------------------------------------------------------------------------
+# The shipped delivery path for the ground albedo is Spring's SMT tile
+# dictionary, which is LOSSY here (dxt1.cluster_tiles is a vector quantizer,
+# not Spring's exact dedup) and — measured in M7f — puts 12.5 % of texels more
+# than 4 levels off truth and a 15.7x seam discontinuity on the 32-elmo grid.
+# A single low-resolution map-space texture beats it on every axis at once
+# (2048²: error 2.51 -> 1.95, bad texels 12.5 -> 7.5 %, seam 15.74 -> 1.20,
+# 8.4 -> 2.8 MB), because the bake it delivers holds nothing finer than the
+# ~50-elmo wavelength floor §5 already imposes — per-texel grain is the
+# runtime splat layer's job.
+#
+# Derived by BOX-DOWNSAMPLING the same full-resolution tile bake the SMT is
+# clustered from, so the two delivery paths carry the same pixels and the
+# comparison eval_ground_albedo.py makes is the one that ships.
+GROUND_TEXTURE_SIZE_DEFAULT = 2048
+
+
+def ground_texture_from_tiles(
+    tiles: np.ndarray, tiles_x: int, tiles_z: int, size: int,
+) -> np.ndarray:
+    """Box-downsample the (N, 32, 32, 3) tile bake to a `size`² map-space
+    albedo. `size` must divide the full-resolution edge by a factor that
+    itself divides the 32-texel tile, so no output texel straddles two tiles
+    and the reduction is exact."""
+    full_x, full_z = tiles_x * 32, tiles_z * 32
+    if full_x != full_z:
+        raise ValueError(f"non-square bake {full_x}x{full_z}: ground texture "
+                         "assumes a square map")
+    if size <= 0 or full_x % size:
+        raise ValueError(f"ground texture size {size} does not divide the "
+                         f"{full_x}-texel bake")
+    factor = full_x // size
+    if 32 % factor:
+        raise ValueError(f"ground texture size {size} implies a {factor}x "
+                         "reduction, which does not divide the 32-texel tile")
+    out_per_tile = 32 // factor
+    out = np.empty((size, size, 3), dtype=np.uint8)
+    for tz in range(tiles_z):
+        row = np.asarray(tiles[tz * tiles_x:(tz + 1) * tiles_x], dtype=np.float32)
+        red = (row.reshape(tiles_x, out_per_tile, factor, out_per_tile, factor, 3)
+                  .mean(axis=(2, 4)))                       # (tiles_x, o, o, 3)
+        red = red.transpose(1, 0, 2, 3).reshape(out_per_tile, tiles_x * out_per_tile, 3)
+        out[tz * out_per_tile:(tz + 1) * out_per_tile] = np.clip(
+            np.rint(red), 0, 255).astype(np.uint8)
+    return out
