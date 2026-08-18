@@ -269,13 +269,38 @@ def name_for(index: int, seed: int) -> tuple[str, str]:
 # Region graph construction
 # --------------------------------------------------------------------------
 
-def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
-    """Partition the map into a grid of regions, then wire edges by passability.
+# Partition tuning. A leaf is a rectangle; a cell is subdivided while it holds
+# more than one component worth representing, down to MAX_SPLIT_DEPTH levels
+# (a 4x4 base grid can therefore reach 16x16) or MIN_REGION_SAMPLES, whichever
+# comes first. The floor exists because a region the AI cannot manoeuvre inside
+# is not worth a key: 128 samples is 1024 elmos a side.
+MAX_SPLIT_DEPTH = 2
+MIN_REGION_SAMPLES = 128
+MIN_SPLIT_COMP_SAMPLES = 256      # a pocket of a few dozen samples is noise
+MIN_SPLIT_COMP_FRAC = 0.05        # ...and so is 5% of the cell's passable area
+MIN_PASS_FRAC = 0.04              # nothing traversable: not a place an army can be
+MIN_CROSSINGS = 3                 # a one-cell notch in a cliff is not a road
 
-    Cells are the partition unit (matching the rectangular polygons the
-    hand-authored map uses), but an edge is emitted only where the two cells
-    share passable samples that are in the SAME connected component — which is
-    what makes the graph a movement graph rather than a picture of the grid.
+
+def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
+    """Partition the map into regions and wire edges by passability.
+
+    The partition unit is a rectangle (matching the rectangular polygons the
+    hand-authored map uses and the point-in-polygon lookup `regions/
+    partition.lua` runs), but it is NOT a plain grid: a cell holding more than
+    one connected component of the passable mask is subdivided, quadtree-style,
+    until each leaf is dominated by a single component (or hits the size
+    floor). Every leaf then carries the component it belongs to, and an edge is
+    emitted only between two leaves of the SAME component that share enough
+    passable border samples of that component.
+
+    That last rule is the fix for M9j's FIND. A 4x4 grid cell routinely spans
+    several components, so the older per-rectangle partition emitted A-B over
+    component 5 and B-C over component 9 and a graph walk chained them into a
+    route across an armour split — on every archipelago we ship, the AI's
+    movement graph claimed every start reached every other. Because a region
+    now belongs to exactly one component and an edge never crosses components,
+    a walk cannot leave the component it starts in, by construction.
     """
     aspect = H / W
     cols = max(2, int(round(math.sqrt(target / aspect))))
@@ -284,22 +309,24 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
     cw = W / cols
     ch = H / rows
 
-    def cell_of(x, z):
-        return min(cols - 1, int(x / cw)), min(rows - 1, int(z / ch))
+    # The quadtree is evaluated on a FINE grid (cols*2^depth) whose statistics
+    # are gathered in ONE pass over the samples and then aggregated upward — a
+    # recursive descent that re-read the samples per level would trip the
+    # 2049^2 maps into minutes.
+    step0 = 1 << MAX_SPLIT_DEPTH
+    fcols, frows = cols * step0, rows * step0
+    xb = [(i * W) // fcols for i in range(fcols + 1)]
+    zb = [(i * H) // frows for i in range(frows + 1)]
 
-    # Per-cell statistics.
-    cells = {}
-    for cz in range(rows):
-        for cx in range(cols):
-            x0, x1 = int(cx * cw), int((cx + 1) * cw)
-            z0, z1 = int(cz * ch), int((cz + 1) * ch)
-            n = npass = 0
+    fine = {}
+    for fz in range(frows):
+        for fx in range(fcols):
+            n = npass = water = 0
             hsum = 0.0
-            water = 0
             comp_hist = {}
-            for z in range(z0, min(z1, H)):
+            for z in range(zb[fz], zb[fz + 1]):
                 b = z * W
-                for x in range(x0, min(x1, W)):
+                for x in range(xb[fx], xb[fx + 1]):
                     i = b + x
                     n += 1
                     hsum += hs[i]
@@ -308,75 +335,142 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
                     if ok[i]:
                         npass += 1
                         comp_hist[comp[i]] = comp_hist.get(comp[i], 0) + 1
-            if n == 0:
-                continue
-            cells[(cx, cz)] = {
-                "x0": x0, "x1": x1, "z0": z0, "z1": z1,
+            fine[(fx, fz)] = {"n": n, "npass": npass, "water": water,
+                              "hsum": hsum, "comp_hist": comp_hist}
+
+    def merge(fx0, fx1, fz0, fz1):
+        n = npass = water = 0
+        hsum = 0.0
+        comp_hist = {}
+        for fz in range(fz0, fz1):
+            for fx in range(fx0, fx1):
+                f = fine[(fx, fz)]
+                n += f["n"]; npass += f["npass"]; water += f["water"]
+                hsum += f["hsum"]
+                for c, k in f["comp_hist"].items():
+                    comp_hist[c] = comp_hist.get(c, 0) + k
+        return {"x0": xb[fx0], "x1": xb[fx1], "z0": zb[fz0], "z1": zb[fz1],
+                "_fx0": fx0, "_fx1": fx1, "_fz0": fz0, "_fz1": fz1,
                 "n": n, "npass": npass, "water": water,
-                "mean_h": hsum / n,
+                "mean_h": hsum / n if n else 0.0,
                 "comp": max(comp_hist, key=comp_hist.get) if comp_hist else -1,
-                "comp_hist": comp_hist,
-            }
+                "comp_hist": comp_hist}
+
+    # Start positions decide splits too. A start sitting in a minority pocket
+    # of its cell would otherwise be absorbed into the dominant component's
+    # region and read as connected to it — the very claim this partition
+    # exists to stop making — so a cell whose starts disagree with each other
+    # or with the dominant component is split regardless of how small the
+    # pocket is.
+    start_comp = [_nearest_passable_component(ok, comp, W, H, sx, sz)
+                  for sx, sz in starts]
+
+    def starts_in(c):
+        return [k for k, (sx, sz) in enumerate(starts)
+                if c["x0"] <= sx / ELMOS_PER_SQUARE < c["x1"]
+                and c["z0"] <= sz / ELMOS_PER_SQUARE < c["z1"]]
+
+    def wants_split(c, depth):
+        if depth >= MAX_SPLIT_DEPTH:
+            return False
+        if (c["_fx1"] - c["_fx0"] < 2) or (c["_fz1"] - c["_fz0"] < 2):
+            return False
+        if min(c["x1"] - c["x0"], c["z1"] - c["z0"]) < 2 * MIN_REGION_SAMPLES:
+            return False
+        big = [n for n in c["comp_hist"].values()
+               if n >= MIN_SPLIT_COMP_SAMPLES
+               and n >= MIN_SPLIT_COMP_FRAC * max(1, c["npass"])]
+        if len(big) > 1:
+            return True
+        here = {start_comp[k] for k in starts_in(c) if start_comp[k] >= 0}
+        return len(here) > 1 or (here and here != {c["comp"]})
+
+    leaves = []
+    stack = [(0, cx * step0, (cx + 1) * step0, cz * step0, (cz + 1) * step0)
+             for cz in range(rows) for cx in range(cols)]
+    while stack:
+        depth, fx0, fx1, fz0, fz1 = stack.pop()
+        c = merge(fx0, fx1, fz0, fz1)
+        if c["n"] == 0:
+            continue
+        if wants_split(c, depth):
+            mx, mz = (fx0 + fx1) // 2, (fz0 + fz1) // 2
+            stack += [(depth + 1, fx0, mx, fz0, mz), (depth + 1, mx, fx1, fz0, mz),
+                      (depth + 1, fx0, mx, mz, fz1), (depth + 1, mx, fx1, mz, fz1)]
+        else:
+            leaves.append(c)
 
     # Drop cells with essentially nothing traversable — an all-water or
     # all-cliff cell is not a place an army can be, and emitting it as a region
     # would give the AI a destination it can never occupy.
-    MIN_PASS_FRAC = 0.04
-    keys = [k for k, c in cells.items()
+    kept = [c for c in leaves
             if c["npass"] / c["n"] >= MIN_PASS_FRAC and c["comp"] >= 0]
-    keys.sort(key=lambda k: (k[1], k[0]))
+    kept.sort(key=lambda c: (c["_fz0"], c["_fx0"]))
 
-    idx_of = {k: i for i, k in enumerate(keys)}
     regions = []
-    for i, k in enumerate(keys):
-        c = cells[k]
+    for i, c in enumerate(kept):
         key, name = name_for(i, seed)
         regions.append({
-            "_cell": k, "_c": c, "key": key, "name": name,
+            "_cell": (c["_fx0"], c["_fz0"]), "_c": c, "key": key, "name": name,
             "neighbors": [], "tags": [], "value": 1.0,
         })
 
-    # De-duplicate names (the generator can collide on small maps).
-    seen = {}
+    # De-duplicate names. `name_for` draws from a 30x24 vocabulary, so the
+    # component split — which raises a 16-rectangle map to ~110 regions — makes
+    # collisions the norm rather than a small-map curiosity. The suffixed key
+    # is registered too: `validateGraph` rejects the whole graph on a duplicate
+    # key (and game_regions.lua then falls back to the grid provider, silently),
+    # so "amber_cut_2" colliding with a literal "amber_cut_2" must not happen.
+    used = set()
     for r in regions:
-        if r["key"] in seen:
-            seen[r["key"]] += 1
-            r["key"] = f"{r['key']}_{seen[r['key']]}"
-            r["name"] = f"{r['name']} {seen[r['key']]}"
-        else:
-            seen[r["key"]] = 1
+        base = r["key"]
+        if base not in used:
+            used.add(base)
+            continue
+        n = 2
+        while f"{base}_{n}" in used:
+            n += 1
+        r["key"] = f"{base}_{n}"
+        r["name"] = f"{r['name']} {n}"
+        used.add(r["key"])
 
     # Edges: count samples along the shared border where BOTH sides are
-    # passable and in the same component. A handful of stray samples is noise
-    # (a one-cell notch in a cliff is not a road), so require a real opening.
-    MIN_CROSSINGS = 3
-    for (cx, cz), i in idx_of.items():
-        for dx, dz in ((1, 0), (0, 1)):
-            nk = (cx + dx, cz + dz)
-            j = idx_of.get(nk)
-            if j is None:
+    # passable and in the component both regions belong to. A handful of stray
+    # samples is noise (a one-cell notch in a cliff is not a road), so require
+    # a real opening. Leaves are a disjoint cover, so "adjacent" is an overlap
+    # test on the shared boundary rather than a grid-index step.
+    for i, ri in enumerate(regions):
+        a = ri["_c"]
+        for j in range(i + 1, len(regions)):
+            rj = regions[j]
+            b = rj["_c"]
+            if a["comp"] != b["comp"]:
                 continue
-            a, b = cells[(cx, cz)], cells[nk]
+            cid = a["comp"]
             crossings = 0
-            if dx == 1:
-                xb = a["x1"]
-                if xb < W:
-                    for z in range(max(a["z0"], b["z0"]), min(a["z1"], b["z1"], H)):
-                        pa, pb = z * W + xb - 1, z * W + xb
-                        if ok[pa] and ok[pb] and comp[pa] == comp[pb]:
+            if a["x1"] == b["x0"] or b["x1"] == a["x0"]:
+                left, right = (a, b) if a["x1"] == b["x0"] else (b, a)
+                xb_ = left["x1"]
+                z0, z1 = max(a["z0"], b["z0"]), min(a["z1"], b["z1"], H)
+                if 0 < xb_ < W:
+                    for z in range(z0, z1):
+                        pa, pb = z * W + xb_ - 1, z * W + xb_
+                        if ok[pa] and ok[pb] and comp[pa] == cid and comp[pb] == cid:
                             crossings += 1
-            else:
-                zb = a["z1"]
-                if zb < H:
-                    for x in range(max(a["x0"], b["x0"]), min(a["x1"], b["x1"], W)):
-                        pa, pb = (zb - 1) * W + x, zb * W + x
-                        if ok[pa] and ok[pb] and comp[pa] == comp[pb]:
+            elif a["z1"] == b["z0"] or b["z1"] == a["z0"]:
+                top, bot = (a, b) if a["z1"] == b["z0"] else (b, a)
+                zb_ = top["z1"]
+                x0, x1 = max(a["x0"], b["x0"]), min(a["x1"], b["x1"], W)
+                if 0 < zb_ < H:
+                    for x in range(x0, x1):
+                        pa, pb = (zb_ - 1) * W + x, zb_ * W + x
+                        if ok[pa] and ok[pb] and comp[pa] == cid and comp[pb] == cid:
                             crossings += 1
             if crossings >= MIN_CROSSINGS:
-                regions[i]["neighbors"].append(regions[j]["key"])
-                regions[j]["neighbors"].append(regions[i]["key"])
-                regions[i].setdefault("_cross", {})[regions[j]["key"]] = crossings
-                regions[j].setdefault("_cross", {})[regions[i]["key"]] = crossings
+                ri["neighbors"].append(rj["key"])
+                rj["neighbors"].append(ri["key"])
+                ri.setdefault("_cross", {})[rj["key"]] = crossings
+                rj.setdefault("_cross", {})[ri["key"]] = crossings
 
     # Tags + value.
     main_comp = None
@@ -386,8 +480,11 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
     if comp_area:
         main_comp = max(comp_area, key=comp_area.get)
 
-    start_cells = {cell_of(sx / ELMOS_PER_SQUARE, sz / ELMOS_PER_SQUARE)
-                   for sx, sz in starts}
+    start_regions = set()
+    for k, (sx, sz) in enumerate(starts):
+        home = region_at(regions, sx, sz)
+        if home is not None:
+            start_regions.add(home["key"])
 
     heights = [r["_c"]["mean_h"] for r in regions]
     hmed = sorted(heights)[len(heights) // 2] if heights else 0.0
@@ -397,7 +494,7 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
         tags = []
         pass_frac = c["npass"] / c["n"]
         water_frac = c["water"] / c["n"]
-        if r["_cell"] in start_cells:
+        if r["key"] in start_regions:
             tags.append("home")
         if c["comp"] != main_comp:
             tags.append("island")
@@ -429,6 +526,57 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
         r["value"] = round(max(0.1, v), 3)
 
     return regions, cols, rows, cw, ch
+
+
+def partition_purity(regions):
+    """How much passable ground a region's own component does NOT account for.
+
+    A leaf that still holds two components after the split floor is reached
+    keeps only the dominant one: samples of the minority component inside it
+    are attributed to a region they cannot drive out of. That is a deliberate
+    trade (the alternative is regions too small to manoeuvre in), but it is
+    exactly the kind of loss M9j found being reported as zero, so it is
+    counted and printed rather than left to inference.
+
+    Two counts, because they answer different questions: `orphan` is every
+    such sample (most of them are three-sample slivers of cliff shelf that no
+    partition would ever give a key to), while `notable` counts only samples
+    of a minority component big enough inside that leaf to have deserved its
+    own region — i.e. the part of the loss that is a granularity choice rather
+    than noise.
+
+    Returns (impure_leaves, orphan_samples, notable_samples,
+    passable_samples_in_regions).
+    """
+    impure = orphan = notable = total = 0
+    for r in regions:
+        c = r["_c"]
+        total += c["npass"]
+        off = c["npass"] - c["comp_hist"].get(c["comp"], 0)
+        if off:
+            impure += 1
+            orphan += off
+            notable += sum(n for cid, n in c["comp_hist"].items()
+                           if cid != c["comp"] and n >= MIN_SPLIT_COMP_SAMPLES)
+    return impure, orphan, notable, total
+
+
+def region_at(regions, sx, sz):
+    """The region whose rectangle contains a world position, or None.
+
+    Regions are a disjoint cover of the map, so containment is unambiguous —
+    which is what makes it the honest way to ask "which region is this start
+    in". Answering by nearest cell CENTRE instead (what the pre-component
+    partition did) can hand a start to a rectangle it does not stand in, and
+    on a split map that silently re-attaches it to the wrong component.
+    """
+    x = sx / ELMOS_PER_SQUARE
+    z = sz / ELMOS_PER_SQUARE
+    for r in regions:
+        c = r.get("_c")
+        if c and c["x0"] <= x < c["x1"] and c["z0"] <= z < c["z1"]:
+            return r
+    return None
 
 
 def map_extent(W: int, H: int) -> tuple[int, int]:
@@ -584,31 +732,45 @@ def verify_starts(ok, comp, W, H, starts, intent=reach.DEFAULT_INTENT):
 
 
 def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
-    """Secondary check: the emitted graph should not contradict the mask.
+    """Secondary check: the emitted graph must not contradict the mask.
 
-    Two claims, and only the first is a gate:
+    Two claims, and BOTH are gates since the per-component partition landed:
 
       * every pair of starts the MASK puts in one component must be connected
         by the graph. A graph that drops a route armour really has is a graph
         the AI will not use.
       * no pair of starts the mask puts in DIFFERENT components may be
-        connected by the graph. This one is reported, not failed, because every
-        shipped generated map violates it today: `build_regions` emits an edge
-        only where two cells share passable samples of the same component, but
-        a 4x4 grid cell routinely contains several components, so A-B (over
-        component 5) chained to B-C (over component 9) reads as a route from A
-        to C across two armour realms. That is Meridian Basin's original sin
-        reproduced by our own generator, it predates the §2k ruling, and fixing
-        it means splitting a region per component rather than per rectangle —
-        PLAN-maps.md M-track queue item 2. Until then the count is printed so
-        it cannot be mistaken for zero.
+        connected by the graph. This one used to be reported-not-failed
+        because every shipped generated map violated it: the old partition was
+        one region per grid rectangle, a rectangle spans several components,
+        and A-B (over component 5) chained to B-C (over component 9) read as a
+        route from A to C across two armour realms — 15 start pairs on
+        sundered_arc, 16 on meridian_basin, 28 of 28 on each 8-island map.
+        `build_regions` now splits a region per (rectangle, component) and
+        never emits an edge between components, so the count is zero by
+        construction and a non-zero one is a defect, not a known gap.
+
+    A start is attributed to the region whose rectangle CONTAINS it. Regions
+    are a disjoint cover, so that is unambiguous — and it is the check's whole
+    load-bearing step, because attributing by nearest cell centre can hand a
+    start in a minority pocket to a rectangle it does not stand in and quietly
+    re-attach it to the dominant component.
     """
     if not regions or len(starts) < 2:
         return True, "graph check skipped", 0
     by_key = {r["key"]: r for r in regions}
     cell_to_key = {r["_cell"]: r["key"] for r in regions}
     keys = []
+    homes = []
     for sx, sz in starts:
+        home = region_at(regions, sx, sz)
+        homes.append(home)
+        if home is not None:
+            keys.append(home["key"])
+            continue
+        # No containing rectangle (a start outside every kept region, or a
+        # caller passing regions with no `_c` at all): fall back to the
+        # nearest cell centre in grid units.
         cx = int(sx / ELMOS_PER_SQUARE / cw)
         cz = int(sz / ELMOS_PER_SQUARE / ch)
         best, bd = None, None
@@ -646,11 +808,25 @@ def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
         return False, (f"graph leaves same-component start pairs unreachable: "
                        f"{missing}"), len(crossed)
     if crossed:
-        return True, (f"graph connects all same-component start pairs, but "
-                      f"⚠ CLAIMS a route for {len(crossed)} pair(s) the mask "
-                      f"puts in different components: {crossed} — a region "
-                      f"rectangle spanning two components chains an edge "
-                      f"across an armour split (M-track queue item 2)"), len(crossed)
+        # Two different defects reach this line, and naming the wrong one costs
+        # a session: an EDGE that crosses components (which the partition makes
+        # impossible by construction), or a START standing in a rectangle whose
+        # dominant component is not the start's own — the pocket was too small
+        # to earn its own region, so the sim will file that army in a region
+        # connected to ground it cannot drive to.
+        misattributed = [i for i, h in enumerate(homes)
+                         if h is not None and h.get("_c")
+                         and ids.get(i, -1) >= 0
+                         and h["_c"]["comp"] != ids[i]]
+        why = ("an edge crossed an armour split, which the per-component "
+               "partition is supposed to make impossible")
+        if misattributed:
+            why = (f"start(s) {misattributed} stand in a region whose "
+                   f"component is not their own — a pocket below the region "
+                   f"size floor")
+        return False, (f"graph CLAIMS a route for {len(crossed)} pair(s) the "
+                       f"mask puts in different components: {crossed} — {why} "
+                       f"(PLAN-maps.md M-track, M9k)"), len(crossed)
     return True, "graph agrees with the mask on every start pair", 0
 
 
@@ -701,7 +877,10 @@ def main(argv=None):
     ap.add_argument("map_dir")
     ap.add_argument("--class", dest="mclass", default=DEFAULT_CLASS,
                     choices=sorted(MOVE_CLASSES))
-    ap.add_argument("--target-regions", type=int, default=20)
+    ap.add_argument("--target-regions", type=int, default=20,
+                    help="size of the BASE grid. The emitted count is higher: "
+                         "a rectangle holding two connected components is "
+                         "subdivided until each leaf belongs to one of them")
     ap.add_argument("--starts", default=None,
                     help='override start positions, "x,z;x,z"')
     ap.add_argument("--verify", action="store_true",
@@ -770,8 +949,16 @@ def main(argv=None):
     biggest = 100.0 * max(sizes) / npass if npass else 0.0
     print(f"{map_id}: {W}x{H} samples, {args.mclass} passable {frac:.1f}% of map, "
           f"largest component {biggest:.1f}% of passable")
-    print(f"  grid {cols}x{rows} -> {len(regions)} regions, "
+    impure, orphan, notable, in_regions = partition_purity(regions)
+    print(f"  grid {cols}x{rows} -> {len(regions)} regions "
+          f"(per rectangle x component), "
           f"{sum(len(r['neighbors']) for r in regions) // 2} edges")
+    pct = (100.0 * orphan / in_regions) if in_regions else 0.0
+    npct = (100.0 * notable / in_regions) if in_regions else 0.0
+    print(f"  partition: {impure} leaf/leaves still hold a second component; "
+          f"{orphan} passable sample(s) ({pct:.2f}%) sit in a region of "
+          f"another component, {notable} ({npct:.2f}%) of them in a pocket "
+          f"big enough to have deserved its own region")
     src = "mapinfo" if args.expect == "auto" else "--expect"
     print(f"  intent: reachability = \"{intent}\" (from {src})")
     print(f"  starts: {len(starts)}  terrain: {'PASS' if passed else 'FAIL'} — {msg}")

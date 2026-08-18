@@ -236,13 +236,14 @@ class TheVerifierJudgesAgainstTheDeclaration(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("stale", msg)
 
-    def test_the_graph_check_reports_a_cross_component_claim(self):
+    def test_the_graph_check_fails_a_cross_component_claim(self):
         """A single region spanning both pockets links starts the mask splits.
 
-        Reported, not failed: every generated map ships this today (15 pairs on
-        sundered_arc, 16 on meridian_basin, 28 on each 8-island map), it
-        predates the ruling, and the fix is a region-per-component partition —
-        M-track queue item 2.
+        This was reported-not-failed while every generated map shipped it (15
+        pairs on sundered_arc, 16 on meridian_basin, 28 on each 8-island map).
+        M9k made the partition per (rectangle, component), so the count is zero
+        by construction on the generator's own output and a non-zero one is a
+        defect — the hand-built regions below are what that defect looks like.
         """
         regions = [
             {"key": "west", "_cell": (0, 0), "neighbors": ["mid"]},
@@ -253,7 +254,7 @@ class TheVerifierJudgesAgainstTheDeclaration(unittest.TestCase):
         passed, msg, crossed = rfm.verify_graph(
             regions, ids, [(0.0, 0.0), (2 * E * rfm.ELMOS_PER_SQUARE, 0.0)],
             1.0, 1.0, reach.SPLIT)
-        self.assertTrue(passed, msg)
+        self.assertFalse(passed, msg)
         self.assertEqual(crossed, 1)
         self.assertIn("different components", msg)
 
