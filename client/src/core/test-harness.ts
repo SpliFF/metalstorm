@@ -323,6 +323,22 @@ export class TestHarness {
         return this.deps.workerCall('uiProfileStop');
     }
 
+    /** PLAN-perf M27 — arm (or, with `false`, disarm) the `entity`-phase cost
+     *  split: interpolation tick / per-squad pose sync / squad update /
+     *  backend flush / impostor flush / event drain / residual. Arming zeroes
+     *  the accumulator, so arm → run the window → dump reports that window.
+     *  Measurement only; disarm when done. */
+    async entityBreakdownArm(on?: boolean): Promise<unknown> {
+        return this.deps.workerCall('entityBreakdownArm', on == null ? [] : [on]);
+    }
+
+    /** Per-frame means of the M27 slices, with the mean squad and entity
+     *  counts of the window (the band any µs/squad figure is quoted over) and
+     *  a pre-formatted `.table`. */
+    async entityBreakdownDump(): Promise<unknown> {
+        return this.deps.workerCall('entityBreakdownDump');
+    }
+
     /** PLAN-fx-offload X5 — per-def cost/skip counts for the legacy
      *  per-frame entity-FX compatibility path (entity-fx-fence.ts), ranked
      *  most-expensive-first like uiProfileDump(). Always-on (no start/stop
