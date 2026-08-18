@@ -34,6 +34,12 @@ local function buildPackages(picture, role)
                 id       = 'pkg:' .. regionKey,
                 region   = regionKey,
                 strength = bucket.strength,
+                -- Absolute hitpoints (picture.lua's `health`), carried ONLY so
+                -- the actuator can state a demand cap in the engine's own scale
+                -- — `strength` is a head count and the engine's is hitpoints
+                -- (D68). Never scored on: every weight here is calibrated
+                -- against `strength`.
+                health   = bucket.health or 0,
                 baseSum  = bucket.strength,   -- proxy for Σ authority_cost_base
                 groups   = bucket.groups or {},
                 locked   = bucket.locked or false,  -- guidance asset_locks or explicit
@@ -431,6 +437,11 @@ local function emit(assignments, packages, usedPkg, ctx)
                     -- in the actuator, so one directive can't drain the whole
                     -- idle pool (plan §3.2 demand model).
                     strength  = a.pkg.strength,
+                    -- The SAME package expressed in the engine's scale
+                    -- (absolute hitpoints). The demand cap is stated from this
+                    -- one; `strength` stays the number the AI reasons and
+                    -- narrates in (D68).
+                    healthStrength = a.pkg.health or 0,
                 }
                 intent[#intent + 1] = {
                     goal = a.goal.id, group = pid, region = a.goal.region,

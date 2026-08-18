@@ -516,6 +516,21 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
     return false;
 }
 
+// See the declaration in OrgGroups.h for why this is a decision rather than
+// plumbing. Keep it here, next to Evaluate's candidate gate, so the two halves
+// of the idle rule stay readable together.
+StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
+                                             float withinRadius)
+{
+    StandingOrderConditions conds;
+    conds.idleOnly = false;
+    if (withinRadius > 0.0f) {
+        conds.withinCenter = float3(withinX, 0.0f, withinZ);
+        conds.withinRadius = withinRadius;
+    }
+    return conds;
+}
+
 uint32_t DirectiveManager::Create(int team, DirectiveType type, uint8_t priority,
                                   OrderShape shape, std::vector<float> params,
                                   StandingOrderConditions cond, uint32_t groupId,

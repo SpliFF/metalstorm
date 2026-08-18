@@ -56,6 +56,15 @@ local DIRECTIVE_FOR_NAME = {
     OVERWATCH     = DirectiveType.Overwatch,
 }
 
+--- Fallback directive lifetime, in frames, when the caller does not state the
+-- strategic tick period. 15 s at 30 Hz = 3 x the LOD-0 tick, so a directive
+-- always outlives the tick that issued it. NEVER 0: 0 means "no expiry", and a
+-- planner that re-states its whole plan every tick with no expiry accumulates
+-- one live directive per goal per tick forever (measured: 107 live directives on
+-- one team by frame 6 000, every one of them commanding the same eight units —
+-- endtoend D68).
+local DEFAULT_DIRECTIVE_TTL_FRAMES = 450
+
 --=============================================================================
 -- Construction.  cfg = { role, profile }.
 --=============================================================================
@@ -66,6 +75,7 @@ function Actuators.new(cfg)
     self.caps    = Actuators._detect()
     self.lastIntent = nil
     self.lastSuggestFrame = nil  -- rate limiter for suggest-only mode (mentor)
+    self.ttlFrames = nil         -- set per apply() from the live tick period
     return self
 end
 
@@ -219,6 +229,21 @@ end
 -- Picture (for region geometry). Returns the spec table, or nil if the target
 -- region has no resolvable geometry (a blind AI can't place it — skip, honest,
 -- rather than issuing a directive at (0,0)).
+--- How long a directive this tick issues should live.
+---
+--- The plan is RE-STATED IN FULL every strategic tick (main.lua is stateless by
+--- design, plan §7), so a directive's job is to carry this tick's intent until
+--- the next tick replaces it — and then to die. Two ticks' worth: it survives
+--- its own tick plus one late or skipped one (a contended machine really does
+--- delay a tick), and no longer. The period is the LOD-adjusted one main.lua is
+--- about to sleep for, not the LOD-0 base, or a dormant NPC's orders would
+--- expire twenty seconds into a sixty-second nap and leave its army standing.
+function Actuators:_directiveTtlFrames()
+    local ttl = self.ttlFrames
+    if type(ttl) ~= 'number' or ttl <= 0 then return DEFAULT_DIRECTIVE_TTL_FRAMES end
+    return math.max(1, math.floor(ttl * 2))
+end
+
 function Actuators:_directiveSpec(d, picture, priority)
     local dtype = DIRECTIVE_FOR_NAME[d.directive]
     if not dtype then return nil end            -- unmapped name → skip loudly-ish
@@ -232,11 +257,29 @@ function Actuators:_directiveSpec(d, picture, priority)
         priority = priority,
         shape   = OrderShape.Circle,
         params  = { cx, 0, cz, radius },        -- [x,y,z,radius] (Circle)
-        -- Demand cap: pull roughly the assigned package's worth of idle squads,
-        -- no more (the evaluator stops once assignedStrength ≥ requestedStrength).
-        -- 0 = "take what idles" (uncapped) — we always cap so one directive
-        -- can't drain the whole idle pool.
-        requestedStrength = math.max(1, math.floor(d.strength or 0)),
+        -- Demand cap: pull roughly the assigned package's worth of squads, no
+        -- more (the evaluator stops once assignedStrength ≥ requestedStrength).
+        -- 0 = "take what idles" (uncapped).
+        --
+        -- ⚠ THE CAP IS IN THE ENGINE'S SCALE, WHICH IS ABSOLUTE HITPOINTS
+        -- (endtoend D68). `DirectiveManager::Evaluate` accrues
+        -- `assignedStrength += u->health` from `CUnit::health` — real hitpoints —
+        -- while the planner's `strength` sums the runtime's 0-1 health RATIOS,
+        -- i.e. a head count (see picture.lua's force-read header). Capping on
+        -- `strength` therefore asked for "3 hitpoints" for a 3-unit package, and
+        -- the first unit assigned (~1 200 hp) slammed the cap shut: every
+        -- directive recruited EXACTLY ONE unit however much force it announced,
+        -- which is how the AI narrated "Taking Raven Basin — 3 force" with
+        -- nothing in the basin and idle units left standing.
+        -- `healthStrength` is that same package priced in hitpoints.
+        --
+        -- A package we cannot price at all (no def export) sends 0 —
+        -- deliberately uncapped rather than fabricating a cap: a wrong cap
+        -- under-commits silently, while an uncapped directive is still bounded
+        -- by the priority ladder and the §8 E6 rate clamp.
+        requestedStrength = math.max(0, math.floor(d.healthStrength or 0)),
+        -- Every directive is MORTAL (D68). See _directiveTtlFrames.
+        expiresInFrames = self:_directiveTtlFrames(),
         -- No within-filter by default: draw idle unassigned squads from
         -- anywhere and advance them to the region. (Region-local tightening —
         -- within = {x=cx,z=cz,radius=radius} for pure hold directives — is a
@@ -282,7 +325,12 @@ end
 --=============================================================================
 -- apply — consume the planner's plan.  One entry point main.lua calls.
 --=============================================================================
-function Actuators:apply(plan, picture)
+--- `opts.tickFrames` is the period main.lua will sleep for after this tick
+--- (LOD-adjusted). It sets how long the directives issued here live — see
+--- _directiveTtlFrames. Absent, the actuator falls back to a fixed lifetime
+--- rather than issuing an immortal directive.
+function Actuators:apply(plan, picture, opts)
+    self.ttlFrames = opts and opts.tickFrames or nil
     -- Mentor/suggest-only mode (PLAN-metalstorm-onboarding.md §3): the planner
     -- runs normally but output routes to SUGGESTIONS via chat + suggested_for
     -- hints, rather than spending authority on real orders. The profile carries
@@ -327,7 +375,8 @@ end
 function Actuators:_applyPosture(d, picture)
     local priority = 255                        -- defence outranks everything
     local spec = self:_directiveSpec(
-        { directive = d.directive or 'DEFEND', region = d.region, strength = d.strength },
+        { directive = d.directive or 'DEFEND', region = d.region,
+          strength = d.strength, healthStrength = d.healthStrength },
         picture, priority)
     -- Tagged like any other directive: a DEFEND posture is charged through the
     -- same path, so its intent line is vetoable too (its spend is 0, which is

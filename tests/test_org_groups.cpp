@@ -360,6 +360,54 @@ TEST_SUITE("DirectiveManager") {
         CHECK(directiveManager.GetAllDirectives()[0].conditions.squadTypes.empty());
     }
 
+    // endtoend D68: the AI's directive-conditions decision. Both halves matter
+    // and only one of them is obvious.
+    //
+    // (a) NOT idle-gated. The drain used to hardcode `idleOnly = true` for every
+    //     planner directive, so the AI could recruit only units with an empty
+    //     command queue — on a scenario-staged army, the two or three the
+    //     scenario left unordered. The AI announced force at the war-ending
+    //     objective and could not move the army it was announcing.
+    // (b) The within-filter still travels. It is the AI's only way to say
+    //     "draw from near here", and an unset radius must leave NO filter
+    //     rather than a zero-radius one that matches nothing.
+    TEST_CASE("an AI directive is an explicit commander order, not idle-gated (D68)") {
+        const StandingOrderConditions conds = AIDirectiveConditions(0.0f, 0.0f, 0.0f);
+        // The whole defect in one assertion.
+        CHECK(conds.idleOnly == false);
+        // No radius asked for → no spatial filter at all (0 is "unset", never
+        // "a circle of radius 0", which would refuse every unit on the map).
+        CHECK(conds.withinRadius == 0.0f);
+
+        const StandingOrderConditions within = AIDirectiveConditions(120.0f, 340.0f, 64.0f);
+        CHECK(within.idleOnly == false);
+        CHECK(within.withinRadius == 64.0f);
+        CHECK(within.withinCenter.x == 120.0f);
+        CHECK(within.withinCenter.z == 340.0f);
+        // y is unused by the filter and is pinned flat rather than left to the
+        // caller's stack.
+        CHECK(within.withinCenter.y == 0.0f);
+    }
+
+    // The gate the decision above has to survive: a NON-idle-gated directive
+    // recruits a unit that already has orders, and an idle-gated one does not.
+    // Asserted on the release rule's own reading of the flag, which is the
+    // inverse test and the half that is easy to lose (OrgGroups.cpp's Evaluate).
+    TEST_CASE("the idle flag survives Create for an AI directive (D68)") {
+        resetManagers();
+        const uint32_t d = directiveManager.Create(
+            1, DirectiveType::Assault, 50, OrderShape::Circle, {10, 0, 20, 8},
+            AIDirectiveConditions(10.0f, 20.0f, 0.0f), 0, 3600, "", 0, 0, 4);
+        REQUIRE(d != 0);
+        const Directive& live = directiveManager.GetAllDirectives()[0];
+        CHECK(live.conditions.idleOnly == false);
+        CHECK(live.authorPlayerId == 4);
+        // And the demand cap arrives in the engine's own scale (hitpoints), not
+        // as a unit count — the other half of D68, stated here so the number's
+        // magnitude is on the record next to the flag.
+        CHECK(live.requestedStrength == 3600);
+    }
+
     TEST_CASE("RemoveForGroup drops all of a group's directives") {
         resetManagers();
         const uint32_t g = orgGroups.Create(1, Echelon::Platoon, "g", {}, 0, 0);

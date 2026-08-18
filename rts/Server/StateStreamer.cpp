@@ -824,12 +824,12 @@ void StateStreamer::ApplyAICommands(const std::vector<AICommand>& aiCmds) {
                         cmd.directiveType, cmd.requestedStrength))
                     continue;
 
-                StandingOrderConditions conds;
-                conds.idleOnly = true;
-                if (cmd.withinRadius > 0.0f) {
-                    conds.withinCenter = float3(cmd.withinX, 0.0f, cmd.withinZ);
-                    conds.withinRadius = cmd.withinRadius;
-                }
+                // idleOnly=false — an AI directive is its team commander's
+                // explicit order, same rule D56 gave a human. See
+                // AIDirectiveConditions (OrgGroups.h) for the whole argument;
+                // this used to hardcode `true` and was half of D68.
+                const StandingOrderConditions conds = AIDirectiveConditions(
+                    cmd.withinX, cmd.withinZ, cmd.withinRadius);
                 // Same author plumbing as a human's create (objectives §5.1):
                 // an AI slot is a real virtual player with its own pool, so its
                 // directives attribute to it with no special case.

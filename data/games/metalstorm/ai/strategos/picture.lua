@@ -395,7 +395,24 @@ end
 --=============================================================================
 -- Force reads (own + enemy). Today the runtime returns raw UNITS; the plan
 -- speaks in SQUADS + org-groups (AI2). We bucket whatever we get into
--- regions and note the fidelity. Strength = current health (regions plan §2).
+-- regions and note the fidelity.
+--
+-- ⚠ WHAT `strength` ACTUALLY IS (endtoend D68, corrected 2026-08-18). The
+-- runtime's `unit.health` is a **0-1 ratio**, not absolute hitpoints
+-- (`AIStateSnapshot.cpp:45` — `health / maxHealth`), so a bucket's `strength`
+-- is a sum of fractions: effectively a HEAD COUNT discounted by damage, and
+-- that is the scale every consumer here is calibrated against (pSuccess
+-- weighs it against the same-scaled enemy read; `baseSum` prices it; the
+-- narration prints it as "N force"). The header used to claim "current health"
+-- and the actuator believed it, which is how a 3-unit package asked the engine
+-- for 3 hitpoints' worth of force — see `Actuators:_directiveSpec`.
+--
+-- So each bucket carries BOTH numbers, deliberately:
+--   * `strength` — Σ health ratio (effective units). The AI's own scale.
+--   * `health`   — Σ ratio x def hp (absolute hitpoints, from power.json).
+--     The ENGINE's scale, and the only one that may cross into a directive's
+--     `requestedStrength` (`OrgGroups.cpp` accrues `assignedStrength` from
+--     `CUnit::health`, absolute).
 --=============================================================================
 
 --- def→class lookup: powerTable[defId].class, or nil for defs with no
@@ -407,7 +424,37 @@ local function classOf(power, defId)
     return entry and entry.class or nil
 end
 
---- Own force ledger: ledger[regionKey] = { strength, groups, byClass }.
+--- Nominal hitpoints for a def the power table cannot price. Only reachable
+-- when the def export is unavailable (the AI4 STUB path) or a def is missing
+-- from power.json; a def that IS priced always uses its own `hp`. Warned once
+-- rather than silently substituted, because the number it feeds is a
+-- directive's demand cap and a wrong one under-commits force (D68).
+local NOMINAL_UNIT_HP = 1000
+local warnedNominalHp = false
+
+--- Absolute hitpoints for one unit read: the runtime's 0-1 ratio times the
+-- def's `hp` from the power table (the same public number players see).
+local function absoluteHealth(power, defId, ratio)
+    local entry = power and power[defId]
+    local hp = entry and tonumber(entry.hp)
+    if not hp or hp <= 0 then
+        hp = NOMINAL_UNIT_HP
+        if not warnedNominalHp then
+            warnedNominalHp = true
+            local AI = _G.AI
+            if type(AI) == 'table' and type(AI.log) == 'function' then
+                AI.log(string.format(
+                    "[strategos] AI-STANDIN: no power.json hp for def %s (and possibly "
+                    .. "others) - pricing force at a nominal %d hp per unit; directive "
+                    .. "demand caps are approximate (endtoend D68)",
+                    tostring(defId), NOMINAL_UNIT_HP))
+            end
+        end
+    end
+    return ratio * hp
+end
+
+--- Own force ledger: ledger[regionKey] = { strength, health, groups, byClass }.
 -- Buckets units/squads into regions via the region point-lookup grid
 -- (regionOf, regions §1.2) and classes via the power-table def→class map
 -- (AI4). Unresolved points land under 'wilds' (regionOf's own catch-all,
@@ -428,11 +475,12 @@ local function buildLedger(c, regions, power)
         local key = Picture.regionOf(u.x, u.z, regions) or '_all'
         local bucket = ledger[key]
         if not bucket then
-            bucket = { strength = 0, groups = {}, byClass = {} }
+            bucket = { strength = 0, health = 0, groups = {}, byClass = {} }
             ledger[key] = bucket
         end
         local health = u.health or 0
         bucket.strength = bucket.strength + health
+        bucket.health = bucket.health + absoluteHealth(power, u.defId, health)
         local class = classOf(power, u.defId) or '_unclassed'
         bucket.byClass[class] = (bucket.byClass[class] or 0) + health
     end

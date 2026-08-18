@@ -127,6 +127,59 @@ describe("budget governor", function()
         assert.is_true(countType(out.directives, 'directive') >= 1)
     end)
 
+    -- D68: the planner has to hand the actuator BOTH scales. The head count is
+    -- what it reasons and narrates in; the hitpoint figure is the only one the
+    -- engine's demand cap can read, and a directive emitted without it is
+    -- uncapped-or-broken at the boundary.
+    it("every emitted directive carries the package's hitpoint figure (D68)", function()
+        local role = fullSideRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin' } },
+                front = { owner = 1, value = 1.0, neighbors = { 'home' } },
+                basin = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            intel  = { front = { strength = 5, confidence = 1.0, lastSeenFrame = 1000 } },
+            -- The real shape a Picture produces: a head count AND its price.
+            ledger = { home = { strength = 6, health = 7200 } },
+            economy = { ownPool = 1000, teamPool = 0, costScale = 1.0 },
+        })
+        local out = plan(p)
+
+        local seen = 0
+        for _, d in ipairs(out.directives) do
+            if d.type == 'directive' or d.type == 'posture' then
+                seen = seen + 1
+                assert.are.equal(6, d.strength)
+                assert.are.equal(7200, d.healthStrength)
+            end
+        end
+        assert.is_true(seen >= 1)
+    end)
+
+    -- A ledger bucket with no price (a Picture from before D68, or a blind one)
+    -- must emit 0 rather than nil: the actuator turns 0 into "no cap", and nil
+    -- into an arithmetic error on a live tick.
+    it("a bucket with no hitpoint figure emits 0, never nil (D68)", function()
+        local role = fullSideRole()
+        local out = plan(makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0, value = 1.5, neighbors = { 'front' } },
+                front = { owner = 1, value = 1.0, neighbors = { 'home' } },
+            },
+            intel  = { front = { strength = 5, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger = { home = { strength = 6 } },     -- no `health`
+            economy = { ownPool = 1000, teamPool = 0, costScale = 1.0 },
+        }))
+        for _, d in ipairs(out.directives) do
+            if d.type == 'directive' or d.type == 'posture' then
+                assert.are.equal(0, d.healthStrength)
+            end
+        end
+    end)
+
     it("a broke AI turtles — only DEFEND postures go out", function()
         local out = plan(economyFixture(0))
         assert.is_true(out.posturesOnly)

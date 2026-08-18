@@ -1466,6 +1466,36 @@ Client → server: ViewportUpdate (camera position/zoom)
 Client: interpolates entities between ticks, renders via Babylon.js
 ```
 
+### Macro directives — the two scales and the idle rule
+
+A `GroupDirective` (human or AI) is an area order the engine decomposes onto
+units in `DirectiveManager::Evaluate` (`rts/Server/OrgGroups.cpp`). Two contracts
+cross layers here, and both were broken end-to-end until 2026-08-18 (endtoend
+D68):
+
+* **`requestedStrength` is ABSOLUTE HITPOINTS**, the same scale as
+  `assignedStrength` (accrued from `CUnit::health`). Recruiting stops once
+  `assignedStrength >= requestedStrength`, so a caller that states a unit COUNT
+  caps its directive at the first recruit. The client sends 0 ("take what
+  idles"); the strategos AI must convert, because its own force numbers are sums
+  of the AI runtime's **0-1 health ratios** (`AIStateSnapshot.cpp` reports
+  `health / maxHealth`), i.e. head counts. `picture.lua` therefore carries both
+  numbers per region and only the hitpoint one may reach a directive.
+* **`conditions.idleOnly` decides whether a directive can override standing
+  orders.** "Idle" means an empty command queue everywhere in the engine, and
+  every Metalstorm scenario stages its army with opening orders — so an
+  idle-gated directive addresses only the units a scenario deliberately left
+  unordered. An explicit order from a team's commander (human class-filtered
+  directive, or any AI directive — see `AIDirectiveConditions`) therefore sets
+  `idleOnly = false`. A directive that is NOT idle-gated is released when its own
+  order completes (empty queue), the exact inverse of the idle-gated release
+  rule; both live in `Evaluate`.
+
+A directive with `expiresInFrames = 0` never expires. The strategos planner
+re-states its whole plan every strategic tick, so its directives carry a TTL of
+two tick periods — without one, a team accumulates one live directive per goal
+per tick (measured at 116 by frame 6 000, all commanding the same units).
+
 ### Synced-input funnel (the cause stream)
 
 Everything that changes the synced sim from **outside** it passes through

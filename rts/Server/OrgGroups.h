@@ -210,7 +210,13 @@ struct Directive {
     /// trailing type params (e.g. Escort guard-target id).
     std::vector<float> params;
     StandingOrderConditions conditions;   /// conditions.orgGroup mirrors groupId
-    uint32_t requestedStrength = 0;        /// demand model; 0 = take what idles
+    /// Demand model; 0 = take what idles (uncapped). ⚠ IN ABSOLUTE HITPOINTS,
+    /// the same scale as `assignedStrength` below — `Evaluate` stops recruiting
+    /// once `assignedStrength >= requestedStrength` and accrues that sum from
+    /// `CUnit::health`. A caller that states it as a unit COUNT caps every
+    /// directive at its first recruit (endtoend D68; the strategos AI did
+    /// exactly that, see `actuators.lua:_directiveSpec`).
+    uint32_t requestedStrength = 0;
     std::string phasesJson;                /// reserved v0 (macro-orders §4.4)
     bool active = true;
     uint32_t createdAtFrame = 0;
@@ -220,6 +226,23 @@ struct Directive {
     /// numerator streamed in DirectiveInfo.assigned_strength.
     float assignedStrength = 0.0f;
 };
+
+/// Conditions an AI-issued (planner) directive carries.
+///
+/// Its own function because the answer is a DECISION, not plumbing (endtoend
+/// D56 + D68): `idleOnly` is the wire default, and an idle-gated directive can
+/// only ever recruit a unit whose command queue is empty. Every Metalstorm
+/// scenario stages its army with opening orders, so an idle-gated AI directive
+/// addresses only the handful of units the scenario deliberately left
+/// unordered — the AI announces force at an objective and cannot move the army
+/// it is announcing. D56 settled this for a human ("the player picked a force
+/// and gave it an order, which is the definition of overriding what that force
+/// is doing"); an AI slot is a real player commanding its own team, and its
+/// directive is that same explicit order, so it gets the same answer.
+///
+/// `withinRadius <= 0` means no spatial filter (draw from anywhere).
+StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
+                                             float withinRadius);
 
 using DirectiveChangeNotifier = std::function<void(int team)>;
 

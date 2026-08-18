@@ -25,7 +25,7 @@ local Roles  = require('roles')
 local function makeAI(opts)
     opts = opts or {}
     local log = { directives = {}, postures = {}, groups = {}, commands = {},
-                  messages = {}, queue = {} }
+                  messages = {}, queue = {}, chats = {} }
     _G.AI = {
         createGroup = function(squads, echelon)
             log.groups[#log.groups + 1] = { squads = squads, echelon = echelon }
@@ -44,6 +44,11 @@ local function makeAI(opts)
         -- floor). Present so a violation is caught as a recorded call, not a
         -- nil-index crash.
         issueCommand = function(...) log.commands[#log.commands + 1] = { ... } end,
+        -- Narration sink. Present because the announcement is the surface D68
+        -- was FOUND on — a fire read "Taking Raven Basin — 3 force" off a live
+        -- chat log while the basin was empty — so what it says is a testable
+        -- product, not flavour.
+        chat = function(msg) log.chats[#log.chats + 1] = tostring(msg) end,
     }
     -- I1/SG1's message verb. `opts.noSendMessage` stages an engine that predates
     -- it, so the feature-detect degrade path is covered rather than assumed.
@@ -98,7 +103,10 @@ describe("actuators — AI2 real verb path (§4/§10 task 5)", function()
         a:apply({
             directives = {
                 { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
-                  region = 'front', goalId = 'exp:front', predictedCost = 50, strength = 500 },
+                  region = 'front', goalId = 'exp:front', predictedCost = 50,
+                  -- 4 units, 500 hitpoints: the planner emits BOTH scales and
+                  -- only one of them may become the demand cap (D68).
+                  strength = 4, healthStrength = 500 },
             },
             intent = {},
         }, pictureWithRegions())
@@ -112,10 +120,136 @@ describe("actuators — AI2 real verb path (§4/§10 task 5)", function()
         assert.are.equal(150, d.spec.params[1])
         assert.are.equal(50,  d.spec.params[3])
         assert.is_true(d.spec.params[4] > 0)
-        assert.are.equal(500, d.spec.requestedStrength)  -- demand cap from package strength
+        -- Demand cap in the ENGINE's scale (hitpoints), never the head count.
+        assert.are.equal(500, d.spec.requestedStrength)
 
         -- Structural floor: the per-squad command verb was NEVER touched.
         assert.are.equal(0, #log.commands)
+    end)
+
+    -- endtoend D68. THE defect: the cap was stated in the planner's own scale
+    -- (a damage-discounted head count) and the engine reads it as hitpoints, so
+    -- the first unit assigned met a cap of "3" and every directive recruited
+    -- exactly one unit however much force it announced.
+    it("the demand cap is the package's hitpoints, not its head count (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+
+        a:apply({
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', goalId = 'exp:front', predictedCost = 50,
+                  strength = 3, healthStrength = 3600 },
+            },
+            intent = {},
+        }, pictureWithRegions())
+
+        assert.are.equal(1, #log.directives)
+        assert.are.equal(3600, log.directives[1].spec.requestedStrength)
+        -- The head count must not appear anywhere in the spec. A cap of 3 is
+        -- the bug, and a cap of 3 is what a re-inlined `d.strength` produces.
+        assert.are_not.equal(3, log.directives[1].spec.requestedStrength)
+    end)
+
+    -- The announcement keeps speaking the AI's scale — "3 force" means three
+    -- units, and is honest. Pinned so nobody "fixes" the narration to hitpoints
+    -- while chasing D68.
+    it("narrates the head count while capping on hitpoints (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+
+        a:apply({
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', goalId = 'exp:front', predictedCost = 50,
+                  strength = 3, healthStrength = 3600 },
+            },
+            intent = {},
+        }, pictureWithRegions())
+
+        local said = table.concat(log.chats or {}, "\n")
+        assert.is_truthy(said:find("3 force", 1, true))
+        assert.is_nil(said:find("3600 force", 1, true))
+    end)
+
+    -- A package the Picture could not price at all sends 0 = "take what idles"
+    -- (uncapped), NOT 1. Sending 1 is the D68 failure mode by another route: it
+    -- reads as one hitpoint and shuts the cap on the first recruit.
+    it("an unpriced package asks for no cap rather than a cap of one (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+
+        a:apply({
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', goalId = 'exp:front', strength = 3 },  -- no healthStrength
+            },
+            intent = {},
+        }, pictureWithRegions())
+
+        assert.are.equal(1, #log.directives)
+        assert.are.equal(0, log.directives[1].spec.requestedStrength)
+    end)
+
+    -- D68's third mechanism, and the one only a live run found: the planner
+    -- re-states its whole plan every tick and `expiresInFrames` was never set,
+    -- so 0 = "forever" and the team accumulated a live directive per goal per
+    -- tick. Measured at 107 on one team by frame 6 000, all of them commanding
+    -- the same eight units.
+    it("every directive expires with the plan that issued it (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+
+        local plan = {
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', strength = 3, healthStrength = 3600 },
+                { type = 'posture', directive = 'DEFEND', groupId = 'pkg:home',
+                  region = 'home', strength = 3, healthStrength = 3600 },
+            },
+            intent = {},
+        }
+        a:apply(plan, pictureWithRegions(), { tickFrames = 150 })
+
+        assert.are.equal(2, #log.directives)
+        for _, d in ipairs(log.directives) do
+            -- Two ticks' worth: survives its own tick and one late one, then dies.
+            assert.are.equal(300, d.spec.expiresInFrames)
+        end
+    end)
+
+    -- A dormant NPC sleeps for up to 60 s (LOD 3). Its orders must not expire
+    -- 20 s in, or the army stands still for the rest of the nap.
+    it("the lifetime follows the LOD-adjusted tick period (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+        local plan = {
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', strength = 3, healthStrength = 3600 },
+            },
+            intent = {},
+        }
+        a:apply(plan, pictureWithRegions(), { tickFrames = 1800 })   -- LOD 3
+        assert.are.equal(3600, log.directives[1].spec.expiresInFrames)
+    end)
+
+    -- A caller that says nothing must still get a mortal directive. 0 is the
+    -- engine's "no expiry" and is the value that produced the 107.
+    it("a caller that states no tick period still issues a mortal directive (D68)", function()
+        local log = makeAI()
+        local a = Actuators.new({ role = fullSideRole(), profile = require('profiles.default') })
+        a:apply({
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'front', strength = 3, healthStrength = 3600 },
+            },
+            intent = {},
+        }, pictureWithRegions())
+
+        local ttl = log.directives[1].spec.expiresInFrames
+        assert.is_true(ttl > 0)
+        assert.are.equal(450, ttl)
     end)
 
     it("an unmapped directive name or a region with no geometry is skipped, not faked", function()

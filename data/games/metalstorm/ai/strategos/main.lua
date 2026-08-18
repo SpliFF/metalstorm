@@ -285,7 +285,13 @@ local function strategicTick(frame)
     --    directives onto the real AI2 verbs (the standing-order fallback is
     --    gone) and announces intent (plan §5.1) + publishes the intent report
     --    (PLAN-metalstorm-interaction.md §6.3).
-    self.actuators:apply(plan, picture)
+    -- The tick period is handed over so the directives issued here EXPIRE with
+    -- this tick's plan instead of outliving it (D68): main.lua re-states the
+    -- whole plan every tick, so an immortal directive is a duplicate that never
+    -- stops commanding. `self.lodTier` is already the NEXT tier at this point,
+    -- so this is the period the AI is about to sleep for.
+    self.actuators:apply(plan, picture,
+        { tickFrames = Lod.periodFor(self.lodTier, role, Config) })
 
     -- Tick summary — one legible line per strategic tick so a headless full-side
     -- run is observable (plan §5.1: the AI's reasoning must be inspectable). Not
