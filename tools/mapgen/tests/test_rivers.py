@@ -478,18 +478,19 @@ class BankClampIsAReliefTerm(unittest.TestCase):
         a river's depth — spends **0.2 of 21.3 elmos** on the real map and
         0.00 here. It only ever cuts inside the wetted width, which is ~1 %
         of land cells and is nowhere near the top of the distribution.
-      * the **bank clamp** — `bank_slope` out to `bank_width`, which reads
-        like an edge-treatment cosmetic — spends **all** of it, because it
-        clamps every cell within `bank_width` of a channel to
-        `water_z + bank_slope * (d - half)`. On ground steeper than
-        `bank_slope` (0.35 = 19 deg, against the solver's own 33 deg talus)
-        that shaves the valley shoulders, and on the shipped arc it covers
+      * the **bank** — `bank_slope` and the reach it grades over, which
+        reads like an edge-treatment cosmetic — spends **all** of it, because
+        it grades every cell within that reach of a channel down onto a
+        surface anchored at the water. On ground steeper than the bank that
+        shaves the valley shoulders, and on the pre-M9g arc it covered
         **9.5 % of the map at a mean cut of 21 elmos** (max 153).
 
-    So `bank_width` is a relief knob, not a river-edge detail: 55 -> 110 on
-    the shipped arc costs 44 elmos of q0.999 and 16 of summit. A test that
-    only asserted "rivers lower the map" would pass with the bank clamp
-    deleted, which is why both halves are measured separately here.
+    So the bank's reach is a relief knob, not a river-edge detail: pre-M9g,
+    `bank_width` 55 -> 110 on the shipped arc cost 44 elmos of q0.999 and 16
+    of summit. M9g reshaped the bank and moved that knob (see
+    `test_the_reach_dials_move_relief_monotonically`) without touching the
+    fact. A test that only asserted "rivers lower the map" would pass with
+    the bank deleted, which is why both halves are measured separately here.
     """
 
     def setUp(self):
@@ -505,56 +506,85 @@ class BankClampIsAReliefTerm(unittest.TestCase):
 
     def test_the_bed_spends_nothing_and_the_bank_spends_all_of_it(self):
         full = self.drop()
-        self.assertGreater(full, 5.0, "the fixture has to lose relief at all")
-        # the bed alone: same network, no clamp outside the wetted width
+        self.assertGreater(full, 2.0, "the fixture has to lose relief at all")
+        # the bed alone: same network, no bank outside the wetted width
         bed = self.drop(bank_width=0.0)
         self.assertLess(bed, 0.1 * full,
                         "the bed is not what spends the aim residual")
-        # the clamp alone: same ribbon, no bed cut at all
+        # the bank alone: same ribbon, no bed cut at all
         bank = self.drop(depth_min=0.0, depth_max=0.0)
         self.assertAlmostEqual(bank, full, delta=0.05 * full)
 
-    def test_bank_width_moves_relief_monotonically(self):
-        widths = [0.0, 20.0, 45.0, 90.0]
-        drops = [self.drop(bank_width=w) for w in widths]
+    def test_the_reach_dials_move_relief_monotonically(self):
+        """M9g moved the relief knob without moving the relief FACT.
+
+        Pre-M9g the reach was `bank_width` flat, so that one number was the
+        dial (55 -> 110 on the arc cost 44 elmos of q0.999). It is now the
+        CAP on a width-scaled reach, so on a fixture whose channels sit near
+        the width floor it stops biting as soon as it clears that reach —
+        10 -> 15 -> 20 elmos still moves the drop 0.29 -> 3.07 -> 3.44 and
+        20/45/90 are the same number to the digit. The dials that carry it
+        now are `bank_reach_ratio` and `bank_outer_slope`, and each is
+        checked here with a factor-2 discrimination so that neutering either
+        one is a failure rather than a shrug.
+        """
+        caps = [0.0, 10.0, 15.0, 20.0, 45.0, 90.0]
+        drops = [self.drop(bank_width=w) for w in caps]
         self.assertTrue(all(b >= a - 1e-9 for a, b in zip(drops, drops[1:])),
-                        f"not monotone in bank_width: {drops}")
-        self.assertGreater(drops[2], 2.0 * drops[1],
-                           f"bank_width is not a relief knob here: {drops}")
-        # ...and it saturates once the ribbon covers the high ground, which is
-        # why the fixture cannot be widened to make the effect arbitrarily
-        # large: at 180 on this dome the drop is the 90 figure to the digit.
-        self.assertAlmostEqual(self.drop(bank_width=180.0), drops[3],
-                               delta=0.05 * drops[3])
+                        f"not monotone in the cap: {drops}")
+        self.assertGreater(drops[3], 2.0 * drops[1],
+                           f"the cap does not bite below the reach: {drops}")
+        self.assertAlmostEqual(drops[-1], drops[3], delta=0.05 * drops[3])
+
+        ratios = [0.5, 1.6, 3.0, 6.0]
+        rd = [self.drop(bank_reach_ratio=r) for r in ratios]
+        self.assertTrue(all(b >= a - 1e-9 for a, b in zip(rd, rd[1:])),
+                        f"not monotone in bank_reach_ratio: {rd}")
+        self.assertGreater(rd[-1], 2.0 * rd[1],
+                           f"bank_reach_ratio is not a relief knob here: {rd}")
+
+        # the outer slope is the same dial read the other way: a steeper ramp
+        # crosses the hillside sooner, so it spends LESS relief. This is the
+        # trade M9g's rim-step floor is paid out of.
+        slopes = [0.7, 1.0, 1.4, 2.0]
+        sd = [self.drop(bank_outer_slope=o) for o in slopes]
+        self.assertTrue(all(b <= a + 1e-9 for a, b in zip(sd, sd[1:])),
+                        f"not monotone (down) in bank_outer_slope: {sd}")
+        self.assertGreater(sd[0], 2.0 * sd[2],
+                           f"bank_outer_slope is not a relief knob here: {sd}")
 
 
-class BankClampIsNotAValleyForm(unittest.TestCase):
-    """CHARACTERISATION of the shape the bank clamp authors today, which is
-    not the shape its name implies. These guards pass on the DEFECT; when the
-    ribbon is reshaped (PLAN-maps M9g) they are meant to fail, and the fix is
-    to invert them, not to loosen them.
+class BankRibbonIsAValleyForm(unittest.TestCase):
+    """The shape the bank authors, pinned AFTER M9g reshaped it.
 
-    M9f established that the clamp, not the bed, spends the arc's relief
-    residual, and left one question behind: is a 19 deg bank the valley form
-    the map wants? M9g looked, and the answer is that `bank_slope` was never
-    the axis:
+    Was `BankClampIsNotAValleyForm` — a characterisation of the defect,
+    written to fail the day the ribbon was reshaped, with the instruction to
+    invert rather than loosen it. This is that inversion; both cases keep the
+    pre-M9g shape as a live NEGATIVE control (`legacy()` below), so an
+    assertion that has stopped discriminating fails here rather than passing
+    quietly.
 
-      * **the cut deepens AWAY from the water.** A valley is deepest at its
-        axis. The clamped plane rises at `bank_slope` from the water line
-        while the ground it replaces rises faster, so the deepest cut is at
-        the ribbon's outer edge — on the shipped arc, mean cut 15.1 elmos at
-        0-10 elmos from the channel against 27.4 at 55-70.
-      * **it then stops dead.** `_bin_field` is `+inf` beyond
-        `half + bank_width`, so the last cell inside the ribbon is a step
-        whose height is its own cut: mean 17, p95 51, max 153 elmos across
-        one 8-elmo cell on the arc. That is the dark rim that turns a
-        hillshade of a dense network into a quilt of pods.
+    What changed and what did not:
 
-    Both are measured against the natural surface at the same cells, so
-    neither can be satisfied by ground that was already steep, and the second
-    carries the positive control this file's header demands: a ribbon that
-    TAPERS instead of terminating (the same cut field, smoothed) leaves an
-    edge step equal to the terrain's own, and the assertion rejects it.
+      * **the cut used to deepen AWAY from the water** — a plane rising at
+        `bank_slope` under ground that rises faster is deepest at the ribbon's
+        outer edge (15.1 elmos at 0-10 from the channel against 27.4 at 55-70
+        on the shipped arc). The ramp turns that over: the cut peaks
+        mid-apron and comes back down, because the bank's slope passes the
+        hillside's inside the reach.
+      * **it used to stop dead** — `+inf` beyond `half + bank_width` left a
+        one-cell step whose height was its own cut (mean 17, p95 51, max 153
+        on the arc). The ribbon now ends where the bank CROSSES the ground.
+      * **⚠ the crossing still leaves a step, and that is a floor, not a
+        residual defect.** A `min` carve against a height-independent field
+        is a projection; the cut at its last inside cell is the slope
+        difference at the crossing times the cell size. Only a field that
+        hugs the terrain tapers to nothing, and a height-referenced field is
+        neither idempotent nor order-independent — the two properties the
+        whole carve rule exists for. So the guard here is "much smaller than
+        the wall, and it cannot be driven to the terrain's own step", and the
+        gaussian-smoothed cut is kept as the positive control that shows what
+        the unreachable end of that scale looks like.
 
     Fixture params are the arc's (`bank_width` 55), not the dataclass default
     of 90, so the numbers here are comparable with the shipped map's.
@@ -562,6 +592,9 @@ class BankClampIsNotAValleyForm(unittest.TestCase):
 
     BW = 55.0
     BANDS = ((0.0, 15.0), (15.0, 40.0), (40.0, 1e9))
+    #: the pre-M9g shape: constant reach, no ramp, hard termination.
+    LEGACY = {"bank_reach_ratio": 0.0, "bank_outer_slope": 0.0,
+              "bank_reach_slack": 1.0}
 
     def setUp(self):
         self.h = hilly()
@@ -572,6 +605,9 @@ class BankClampIsNotAValleyForm(unittest.TestCase):
         net = riv.build(self.h, self.recv, self.levels, self.accum, CELL, 0.0,
                         seed=3, params=p)
         return self.h - net.terrain, net.dist
+
+    def legacy(self, **kw):
+        return self.carve(**{**self.LEGACY, **kw})
 
     def bands(self, cut, dist):
         """Mean cut in each distance-from-channel band, NaN where empty."""
@@ -602,47 +638,74 @@ class BankClampIsNotAValleyForm(unittest.TestCase):
             before = np.where(out, np.maximum(before, np.roll(h0, shift, axis=axis) - h0), before)
         return after[rim], before[rim]
 
-    def test_the_cut_deepens_away_from_the_water(self):
-        cut, dist = self.carve()
-        got = self.bands(cut, dist)
+    def test_the_cut_turns_over_instead_of_deepening_to_the_rim(self):
+        got = self.bands(*self.carve())
         means = [m for _, m in got]
-        self.assertTrue(all(b > a for a, b in zip(means, means[1:])),
-                        f"cut should deepen outward on the defect: {got}")
-        self.assertGreater(means[-1], 1.5 * means[0],
-                           f"outer band is not the deep one: {got}")
+        self.assertLessEqual(means[-1], means[-2],
+                             f"the ribbon still deepens to its rim: {got}")
+        self.assertLess(means[-1], 1.25 * means[0],
+                        f"the outer band is still the deep one: {got}")
 
-        # the profile is the CLAMP's, not the bed's: with the clamp off there
+        # negative control: the pre-M9g plane, on the same terrain, still
+        # climbs all the way out — so the assertion above is about the shape
+        # and not about this fixture.
+        was = self.bands(*self.legacy())
+        wm = [m for _, m in was]
+        self.assertTrue(all(b > a for a, b in zip(wm, wm[1:])),
+                        f"the defect no longer reproduces: {was}")
+        self.assertGreater(wm[-1], 1.5 * wm[0], f"{was}")
+
+        # the profile is the BANK's, not the bed's: with the bank off there
         # is no cut beyond the wetted width at all, so nothing to grade.
-        bed_cut, bed_dist = self.carve(bank_width=0.0)
-        bed = self.bands(bed_cut, bed_dist)
+        bed = self.bands(*self.carve(bank_width=0.0))
         self.assertEqual([n for n, _ in bed[1:]], [0, 0],
                          f"the bed alone reaches past 15 elmos: {bed}")
 
-        # and it is not `bank_slope` that decides it — matching the solver's
-        # own 33 deg talus leaves the same shape, which is the whole of M9g's
-        # answer to the look-question M9f raised.
-        talus = self.bands(*self.carve(bank_slope=0.65))
-        tm = [m for _, m in talus]
-        self.assertTrue(all(b > a for a, b in zip(tm, tm[1:])),
-                        f"talus arm should keep the same shape: {talus}")
-        self.assertGreater(tm[-1], 1.4 * tm[0], f"{talus}")
+    def test_the_ribbon_crosses_out_instead_of_ending_in_a_wall(self):
+        after, before = self.rim_step(self.h, self.h - self.carve()[0])
+        was_after, was_before = self.rim_step(self.h, self.h - self.legacy()[0])
 
-    def test_the_ribbon_ends_in_a_step_the_terrain_did_not_have(self):
+        # the defect still reproduces on the old shape...
+        self.assertGreater(was_after.mean(), 3.0 * was_before.mean(),
+                           f"legacy rim {was_after.mean():.2f} vs natural "
+                           f"{was_before.mean():.2f}")
+        self.assertGreater(float(np.quantile(was_after, 0.95)), 20.0,
+                           "the tall end of the legacy rim is what showed in "
+                           "a hillshade")
+        # ...and the crossing is most of it, in the mean and in the tail.
+        self.assertLess(after.mean(), 0.7 * was_after.mean(),
+                        f"rim {after.mean():.2f} vs legacy "
+                        f"{was_after.mean():.2f}")
+        self.assertLess(float(np.quantile(after, 0.95)),
+                        0.6 * float(np.quantile(was_after, 0.95)),
+                        "the tall end of the rim did not come down")
+
+    def test_the_rim_step_is_a_floor_a_steeper_ramp_cannot_beat(self):
+        """The trade, asserted: past a point a steeper bank crosses the
+        hillside faster and the step it leaves gets TALLER again, while the
+        relief it spends keeps falling. There is no setting of this shape
+        that reaches the terrain's own step — only a height-referenced field
+        does that, and it would cost idempotence.
+        """
+        rims = []
+        for outer in (1.0, 1.4, 2.0, 3.0):
+            after, before = self.rim_step(
+                self.h, self.h - self.carve(bank_outer_slope=outer)[0])
+            rims.append((float(after.mean()), float(before.mean())))
+        means = [a for a, _ in rims]
+        self.assertGreater(means[-1], min(means),
+                           f"a steeper ramp keeps helping: {means}")
+        self.assertGreater(min(means), 2.0 * min(b for _, b in rims),
+                           f"the floor is gone — re-read the guard: {rims}")
+
+        # positive control, and the unreachable end of the scale: the same cut
+        # smoothed to nothing at its edge leaves the terrain's own step.
         cut, _ = self.carve()
-        after, before = self.rim_step(self.h, self.h - cut)
-        self.assertGreater(after.mean(), 3.0 * before.mean(),
-                           f"rim step {after.mean():.2f} vs natural "
-                           f"{before.mean():.2f}")
-        self.assertGreater(float(np.quantile(after, 0.95)), 20.0,
-                           "the tall end of the rim is what shows in a hillshade")
-
-        # positive control: the same cut, tapered to nothing at its edge
-        # instead of terminating, leaves the terrain's own step and no more.
-        tapered = ndimage.gaussian_filter(cut, 2.0)
-        t_after, t_before = self.rim_step(self.h, self.h - tapered)
+        t_after, t_before = self.rim_step(
+            self.h, self.h - ndimage.gaussian_filter(cut, 2.0))
         self.assertLess(t_after.mean(), 1.3 * t_before.mean(),
                         f"the guard cannot tell a tapered ribbon from a "
-                        f"terminating one: {t_after.mean():.2f} vs "
+                        f"crossing one: {t_after.mean():.2f} vs "
                         f"{t_before.mean():.2f}")
 
 

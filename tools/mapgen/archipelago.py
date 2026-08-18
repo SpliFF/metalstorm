@@ -1086,17 +1086,16 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
 
         # islands have tiny catchments: seed generously, keep the channels narrow
         #
-        # ⚠ `bank_width` is the arc's most consequential terrain knob and the
-        # one nothing here is aimed at (M9g). It is not the channels that are
-        # narrow: at 55 the graded apron is 110 elmos either side of a median
-        # 10-elmo channel, it covers 31.8 % of the land against the bed's
-        # 4.4 %, and because the clamp is deepest at its outer edge and then
-        # terminates, it replaces the erosion fabric with flat pods rimmed by
-        # one-cell steps (mean 17 elmos, max 153). At 20 the same network
-        # reads as drainage etched into intact ridges. Left at 55 on purpose
-        # for now: any change here re-ships the terrain the arc's blocked-on-
-        # user armour-split verdict is measured on, and the fix is a shape
-        # change in `_bin_field`, not this number. PLAN-maps M9g.
+        # ⚠ the bank's reach is the arc's most consequential terrain knob
+        # (M9f), and M9g reshaped what it does rather than retuning it. 55 is
+        # no longer the reach: it is the CAP on a reach that scales with the
+        # local channel width (`bank_reach_ratio`), so the median 10-elmo
+        # headwater grades an apron of its own size instead of the trunk's,
+        # and the bank ramps up to `bank_outer_slope` so the ribbon ends where
+        # it crosses the hillside instead of terminating in a one-cell wall.
+        # The cap is left at 55 because it still binds on the trunk reaches
+        # and because it is the number every relief measurement in §2b was
+        # taken against. PLAN-maps M9g.
         rp_riv = riv.RiverParams(channel_fraction=(0.045 if fast else 0.025),
                                  width_coef=0.05, width_min=9.0, width_max=48.0,
                                  depth_max=6.0, bank_width=55.0)

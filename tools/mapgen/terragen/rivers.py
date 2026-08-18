@@ -74,44 +74,59 @@ class RiverParams:
     depth_max: float = 14.0
 
     # --- carve shape ------------------------------------------------------
-    # ⚠ THESE TWO ARE A RELIEF TERM, not a river-edge cosmetic (PLAN-maps
-    # M9f). The clamp holds every cell within `bank_width` of a channel at
-    # `water_z + bank_slope * (d - half)`, so on ground steeper than
-    # `bank_slope` (0.35 = 19 deg, against the arc solver's own 33 deg talus)
-    # it shaves the valley shoulders — 9.5 % of the shipped arc at a mean cut
-    # of 21 elmos, max 153. It, and not the bed depth above, is the entire
-    # reason the packaged map stands 1.6-2.7 % under the relief the closed-loop
+    # ⚠ THIS BLOCK IS A RELIEF TERM, not a river-edge cosmetic (PLAN-maps
+    # M9f). The bank grades every cell within its reach of a channel down to
+    # `water_z + rise(d - half)`, so on ground steeper than the bank it shaves
+    # the valley shoulders. It, and not the bed depth above, is the entire
+    # reason the packaged map stood 1.6-2.7 % under the relief the closed-loop
     # aim converged to (the bed spends 0.2 of 21.3 elmos at q0.999; pads,
-    # roads and the sill carve spend 0.0 each). Widening it costs relief
-    # linearly: 55 -> 110 on the arc is -44 elmos of q0.999 and -16 of summit.
-    # Pinned in tests/test_rivers.py::BankClampIsAReliefTerm.
+    # roads and the sill carve spend 0.0 each). Pinned in
+    # tests/test_rivers.py::BankClampIsAReliefTerm.
     #
-    # ⚠ AND THE SHAPE IT AUTHORS IS NOT A VALLEY (M9g, the look M9f asked
-    # for). A valley is deepest at its axis; this is deepest at its RIM. On
-    # the shipped arc the mean cut RISES with distance from the water —
-    # 15.1 elmos at 0-10, 20.9 at 20-30, 27.4 at 55-70 — because the clamped
-    # plane rises at `bank_slope` while the ground it replaces rises faster,
-    # so the ribbon hinges at the water line and planes ground it never
-    # floods. Then it STOPS: `_bin_field` goes to `+inf` at
-    # `half + bank_width`, so the ribbon ends in a one-cell step whose height
-    # IS the cut there — mean 17, p95 51, max 153 elmos across one 8-elmo
-    # cell on the shipped arc, a 19-cell wall. In a hillshade the erosion
-    # fabric is replaced by a quilt of flat pods with hard dark rims wherever
-    # the channel network is dense.
+    # ⚠ RESHAPED BY M9g (2026-08-18). What it used to be: a PLANE at
+    # `bank_slope` out to a CONSTANT `bank_width`, `+inf` beyond. Both halves
+    # were defects, and neither was `bank_slope` (0.35 = 19 deg and 0.65 = the
+    # solver's own talus are visually indistinguishable and differ by 3.9
+    # elmos of q0.999):
     #
-    # `bank_slope` is NOT the knob for that: 0.35 (19 deg) and 0.65 (the
-    # solver's own talus) are visually indistinguishable and differ by 3.9
-    # elmos of q0.999. `bank_width` is — it is a constant, so a headwater
-    # trickle at the 9-elmo width floor (46 % of the arc's channel vertices)
-    # grades the same 110-elmo apron as the trunk, 12x its own water. At 20
-    # the network reads as a drainage network etched into intact ridges and
-    # 16.3 % of land sits inside the ribbon; at the shipped 55 it is 31.8 %.
-    # The fix is a shape change — taper the cut to zero at the edge, scale
-    # the reach with channel width — not a smaller constant, and it re-ships
-    # every map that has rivers. See PLAN-maps M9g and
-    # tests/test_rivers.py::BankClampIsNotAValleyForm.
-    bank_slope: float = 0.35         # rise per world unit beyond the wetted edge
-    bank_width: float = 90.0         # how far past the wetted edge the carve reaches
+    #   * a plane that rises slower than the ground it replaces cuts DEEPEST
+    #     AT ITS RIM — 15.1 elmos at 0-10 from the water against 27.4 at
+    #     55-70 on the shipped arc — and then terminated dead at the clip, so
+    #     the last cell inside the ribbon was a step whose height was its own
+    #     cut (mean 17, p95 51, max 153 elmos across one 8-elmo cell). That is
+    #     the dark rim that turned a hillshade of a dense network into a quilt
+    #     of flat pods.
+    #   * a CONSTANT reach means a headwater trickle at the 9-elmo width floor
+    #     (46 % of the arc's channel vertices) grades the same apron as the
+    #     trunk, 12x its own water.
+    #
+    # So the bank is now a RAMP whose slope grows from `bank_slope` at the
+    # wetted edge to `bank_outer_slope` one reach out (and stays there), over
+    # a reach of `bank_reach_ratio * w` — the LOCAL channel width — clamped
+    # into `[bank_reach_min, bank_width]`. `bank_width` survives as the CAP,
+    # not the reach. An outer slope above the generator's own talus is what
+    # makes the ribbon end where the bank CROSSES the hillside instead of
+    # where the raster stops caring, and a crossing is not a truncation.
+    #
+    # ⚠ The rim step this leaves is a FLOOR, not a residual defect (M9g). A
+    # `min` carve against a height-independent field is a projection: the cut
+    # it leaves at its last inside cell is the slope difference at the
+    # crossing times the cell size, so tapering it to nothing would need a
+    # field that hugs the terrain — which is height-referenced, and therefore
+    # neither idempotent nor order-independent (see `carve`). Gentler crossing
+    # = wider ribbon = more relief spent; `bank_outer_slope` IS that dial.
+    # Measured on tests/test_rivers.py's fixture, pre-M9g against shipped:
+    # rim step mean 6.38 -> 3.93 elmos and p95 35.8 -> 15.5 against a natural
+    # 1.30, ribbon 38.1 % -> 21.1 % of land, relief spent 10.97 -> 3.44 elmos
+    # of q0.999, and the cut profile turns over (9.9 / 12.0 / 10.7 by band)
+    # instead of climbing to a wall. Pinned in
+    # tests/test_rivers.py::BankRibbonIsAValleyForm.
+    bank_slope: float = 0.35         # rise per world unit at the wetted edge
+    bank_width: float = 90.0         # CAP on the reach (was: the reach itself)
+    bank_reach_ratio: float = 1.6    # reach = ratio * channel width (0 = constant)
+    bank_reach_min: float = 12.0     # floor on the reach, world units
+    bank_outer_slope: float = 1.4    # slope the ramp reaches one reach out
+    bank_reach_slack: float = 3.0    # hard backstop clip, in reaches (1 = pre-M9g)
 
     # --- centreline treatment --------------------------------------------
     dp_epsilon: float = 24.0         # Douglas-Peucker tolerance, world units
@@ -489,11 +504,32 @@ def _bin_field(shape, cellsize, lines, attrs, params: RiverParams):
     half = np.maximum(src_half[ir, ic], 1e-6)
     dep = src_dep[ir, ic]
 
+    if params.bank_reach_ratio > 0.0:
+        reach = np.clip(params.bank_reach_ratio * (2.0 * half),
+                        params.bank_reach_min, params.bank_width)
+    else:
+        reach = np.full_like(half, params.bank_width)
+    reach = np.maximum(reach, 1e-6)
+
     inner = d <= half
     bed = wz - dep * np.clip(1.0 - (d / half) ** 2, 0.0, 1.0)
-    bank = wz + params.bank_slope * (d - half)
+
+    # The bank is a RAMP, not a plane (M9g). Its slope grows from `bank_slope`
+    # at the wetted edge to `bank_outer_slope` one reach out, and stays there;
+    # so a bank that starts below the hillside it grades ends above it, and
+    # the ribbon ends where the two surfaces CROSS instead of where the raster
+    # stops caring. That is the whole of the rim-step fix: `min` carving can
+    # only leave a step if the ribbon is truncated mid-cut, and the crossing
+    # of two surfaces is not a truncation. `bank_outer_slope` above the
+    # generator's own talus is what makes the crossing exist on steep ground.
+    x = np.maximum(d - half, 0.0)
+    ramp = np.minimum(x, reach)
+    extra = max(params.bank_outer_slope - params.bank_slope, 0.0)
+    rise = (params.bank_slope * x
+            + extra * (ramp * ramp * 0.5 / reach + np.maximum(x - reach, 0.0)))
+    bank = wz + rise
     field = np.where(inner, bed, bank)
-    field = np.where(d <= half + params.bank_width, field, np.inf)
+    field = np.where(d <= half + params.bank_reach_slack * reach, field, np.inf)
     return field, inner, wz, d
 
 
