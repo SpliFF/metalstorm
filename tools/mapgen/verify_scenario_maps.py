@@ -27,6 +27,17 @@ WHAT IS CHECKED, and what is deliberately not:
   * A map named by a scenario but absent from `data/maps/` is a FAIL, not a
     skip: the war is offerable and cannot be staged.
 
+  * The verdict is now the MAP's, not this gate's. Since the §2k ruling
+    (PLAN-maps.md, 2026-08-16) a split or island map is legal player content, so
+    `regions_from_map.py --verify` judges the connectivity it measures against
+    the intent the map's own `mapinfo.lua` declares — and this sweep inherits
+    that exit code. Concretely: a war offered on a map that declares
+    `metalstorm.reachability = "split"` PASSES here, because crossing to the
+    other island is a transport problem rather than a broken map. The separate
+    question of whether a MACHINE-run war may be staged on such a map is
+    `scenariogen.gate_reachability`'s `mutual` flag, not this file's. As of
+    2026-08-18 no offerable war targets a declared-split map.
+
 Usage:
     python3 tools/mapgen/verify_scenario_maps.py [--game metalstorm] [--class VEH]
 

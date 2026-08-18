@@ -8,6 +8,20 @@ local mapinfo = {
     mapfile = "maps/skerry_reach.smf",
     legacycoordsystem = false,
 
+    -- Metalstorm extension block. `CMapInfo` never reads this; it is
+    -- the map's own statement about itself, for tools.
+    -- reachability: does armour reach every start from every other?
+    --   "connected" — yes, and `regions_from_map.py --verify` fails
+    --                  this map if it ever stops being true.
+    --   "split"     — no, ON PURPOSE (PLAN-maps.md §2k): the starts
+    --                  sit in several armour realms and the crossing
+    --                  is a transport problem, not a defect. `--verify`
+    --                  then fails this map if it comes out CONNECTED,
+    --                  because the declaration would be stale.
+    metalstorm = {
+        reachability = "split",
+    },
+
     maxmetal = 0.5,
     extractorradius = 90,
 

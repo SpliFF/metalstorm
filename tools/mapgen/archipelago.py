@@ -53,6 +53,7 @@ from terragen import noise as tn            # noqa: E402
 from terragen import package as pkg         # noqa: E402
 from terragen import passability as pas     # noqa: E402
 from terragen import placement as pl        # noqa: E402
+from terragen import reachability as reach   # noqa: E402
 from terragen import rivers as riv          # noqa: E402
 from terragen import roads as rd            # noqa: E402
 from terragen import selftest as stest      # noqa: E402
@@ -627,6 +628,31 @@ def report_surface(h: np.ndarray, cellsize: float, label: str,
     return SurfaceReport(label, dv, relief, rr, an)
 
 
+# Which shipped maps are armour-split ON PURPOSE (PLAN-maps.md §2k, user ruling
+# 2026-08-16). Keyed by `--id` and authored here rather than measured, because a
+# declaration the generator derives from its own output can never disagree with
+# it — and a rule the producer satisfies by construction is inert. An id absent
+# from this table declares "connected", so a new map that strands its starts by
+# accident still fails `regions_from_map.py --verify`.
+#
+#   sundered_arc — a volcanic island arc. `arc_uplift`'s cross-strike breaks cut
+#     BELOW the waterline by design; the shallowest strait is a 32.4-elmo sill
+#     against VEH's 20-elmo wade (M8w FIND 3), and at every landmass tried the
+#     map comes out in two or three armour realms with 5 of 8 pads on the main
+#     one (M9c FIND 3 / M9d FIND 3). Shipped split.
+#   skerry_reach — 8 starts, 8 components for all three classes. It is a skerry
+#     field; that is the map.
+SHIPPED_REACHABILITY = {
+    "sundered_arc": reach.SPLIT,
+    "skerry_reach": reach.SPLIT,
+    # the three climate variants of skerry_reach's recipe (M9-vegetation) —
+    # same 9-island mounds terrain, same 8-into-8 split, different palette
+    "frost_reach": reach.SPLIT,
+    "dune_reach": reach.SPLIT,
+    "verdant_shoals": reach.SPLIT,
+}
+
+
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
              preview_only: bool = False, no_package: bool = False,
@@ -639,7 +665,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              aim_iterations: "int | None" = None,
              connect: "bool | None" = None,
              start_connectivity: "bool | None" = None,
-             raise_penalty: int = 1):
+             raise_penalty: int = 1,
+             reachability: "str | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -660,6 +687,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     if aim_iterations is None:
         aim_iterations = ARC_AIM_ITERATIONS if terrain == "arc" else 1
     aim_iterations = max(1, int(aim_iterations))
+    # The map's own statement about its armour realms (PLAN-maps.md §2k). Per
+    # `--id` from SHIPPED_REACHABILITY above, overridable from the CLI, and
+    # never derived from the terrain the run produces.
+    if reachability is None:
+        reachability = SHIPPED_REACHABILITY.get(map_id, reach.DEFAULT_INTENT)
+    reach.check(reachability)
     # sill carving is post-erosion and submarine, so it is not in the erosion
     # cache key — it cannot change what the solver converged to
     if connect is None:
@@ -1390,6 +1423,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
               f"({top - HEIGHT_CEILING_FLOOR:.0f} elmos off the summit) "
               f"into a flat top)")
 
+    # The declaration against the surface that ships. Read here, not inside the
+    # pad loop: the pads move under rivers and the carve (roads FIND 30), and the
+    # declaration is a claim about the packaged bytes.
+    print(f"reachability declared \"{reachability}\" for {map_id}:")
+    reach.report(pas.read_all(h, cell, starts), reachability)
+
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
@@ -1405,6 +1444,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
         seed=seed,
+        reachability=reachability,
         # sea-dominated map: brighter, more opaque surface so the ocean
         # reads clearly against the islands at strategic zoom
         water_surface_color=(0.40, 0.52, 0.60),
@@ -1560,6 +1600,15 @@ def main():
                          "Default 1 (the shortest-hop search this generator "
                          "has always used); only meaningful with "
                          "--connect-starts. See PLAN-maps M9e.")
+    ap.add_argument("--reachability", default=None, choices=reach.INTENTS,
+                    help="the map's own claim about its armour realms, written "
+                         "into mapinfo.lua and read by "
+                         "`regions_from_map.py --verify`. Default is per --id "
+                         "from SHIPPED_REACHABILITY (sundered_arc and "
+                         "skerry_reach ship \'split\' by ruling, PLAN-maps "
+                         "\u00a72k); any other id defaults to \'connected\', "
+                         "so a new map that strands its starts still fails the "
+                         "gate.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -1589,6 +1638,8 @@ def main():
                        "--router", args.router,
                        "--relief-target", str(args.relief_target),
                        "--arc-detail", str(args.arc_detail)]
+        if args.reachability is not None:
+            passthrough += ["--reachability", args.reachability]
         if args.hardness_detail is not None:
             passthrough += ["--hardness-detail", str(args.hardness_detail)]
         if args.segmentation is not None:
@@ -1618,6 +1669,7 @@ def main():
              fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package,
              map_id=args.map_id, display_name=args.display_name,
+             reachability=args.reachability,
              climate=args.climate, terrain=args.terrain,
              router=args.router, relief_target=args.relief_target,
              arc_detail=args.arc_detail,

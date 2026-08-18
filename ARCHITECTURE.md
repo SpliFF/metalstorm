@@ -726,6 +726,10 @@ Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl
 
 `mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
 
+#### Map reachability intent
+
+`mapinfo.lua → metalstorm = { reachability = "connected" | "split" }` is the map's own statement about whether armour can reach every start position from every other. The engine never reads it; `tools/mapgen/regions_from_map.py --verify` does, and judges the connectivity it measures off the passability mask against what the map declares. A split or island map is legal player content (PLAN-maps.md §2k), so the measurement alone is not a verdict — but the check is two-sided: an undeclared map that comes out split fails, and a map declaring `split` that comes out connected fails as a stale declaration. A start position with no passable ground near it at all is refused under both. `terragen/reachability.py` owns the vocabulary, the emitter every generated package writes, the parser, and the verdict; the intent is authored per map id in the generators (`archipelago.SHIPPED_REACHABILITY`, `meridian2.DECLARED_REACHABILITY`), never derived from the terrain a run produced. The sibling gate for machine-run wars is `scenariogen.gate_reachability`'s `mutual` flag.
+
 #### Music state machine
 
 `MusicStateTracker` samples per-tick combat-event counts into a 30-second ring buffer and derives state from sliding windows:

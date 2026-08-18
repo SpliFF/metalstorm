@@ -51,6 +51,13 @@ import struct
 import sys
 from collections import deque
 
+# `terragen.reachability` is stdlib-only on purpose (no numpy, no scipy), so
+# this stays runnable on a bare checkout. It owns the intent vocabulary, the
+# mapinfo emitter the generators write, the parser below, and the verdict rule —
+# one file, so the writer and the reader cannot drift.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from terragen import reachability as reach   # noqa: E402
+
 # --- Spring MoveDef classes, from data/games/metalstorm/.../moveinfo.tdf -----
 # (name, maxslope degrees, maxwaterdepth elmos)
 MOVE_CLASSES = {
@@ -82,6 +89,14 @@ def read_mapinfo(map_dir: str) -> dict:
             out[key] = float(m.group(1))
     if "minheight" not in out or "maxheight" not in out:
         raise SystemExit(f"{path}: could not read minheight/maxheight")
+    # The map's own claim about its armour realms — see terragen/reachability.py
+    # and PLAN-maps.md §2k. A map that says nothing declares "connected"; a map
+    # that says something unrecognised is an error with its own message, not a
+    # traceback and not a silent fall back to the strict reading.
+    try:
+        out["reachability"] = reach.parse_mapinfo(text)
+    except ValueError as e:
+        raise SystemExit(f"{path}: {e}")
     return out
 
 
@@ -538,8 +553,8 @@ def _nearest_passable_component(ok, comp, W, H, sx, sz, radius=64):
     return -1
 
 
-def verify_starts(ok, comp, W, H, starts):
-    """Can every start position physically reach every other?
+def verify_starts(ok, comp, W, H, starts, intent=reach.DEFAULT_INTENT):
+    """Can every start position physically reach every other — and was that the plan?
 
     Checked against the passability MASK, not against the emitted region graph.
     That distinction is the whole point: regions are coarse rectangles, and a
@@ -547,30 +562,49 @@ def verify_starts(ok, comp, W, H, starts):
     graph walk will happily route two armies "through" a cell they each only
     touch a different pocket of. Verifying on the graph reported Meridian Basin
     as fine — the exact map whose start positions provably cannot meet.
+
+    The MEASUREMENT is unchanged; the VERDICT is now the map's to make. Split
+    and island maps are legal player content (PLAN-maps.md §2k), so the pass/
+    fail comes from `terragen.reachability.verdict` against what the map's own
+    `mapinfo.lua` declares — and it fails a stale declaration too, i.e. a map
+    that claims a split it does not have.
     """
-    if len(starts) < 2:
-        return True, f"{len(starts)} start position(s) — nothing to connect", {}
     ids = {}
     for i, (sx, sz) in enumerate(starts):
         ids[i] = _nearest_passable_component(ok, comp, W, H, sx, sz)
     groups = {}
+    stranded = []
     for i, c in ids.items():
-        groups.setdefault(c, []).append(i)
-    stranded = [i for i, c in ids.items() if c < 0]
-    if stranded:
-        return False, f"start positions on impassable ground: {stranded}", ids
-    if len(groups) > 1:
-        parts = "; ".join(
-            f"component {c}: starts {sorted(v)}" for c, v in sorted(groups.items()))
-        return False, (f"start positions split across {len(groups)} disconnected "
-                       f"components — {parts}"), ids
-    return True, f"all {len(starts)} start positions in one component", ids
+        if c < 0:
+            stranded.append(i)
+        else:
+            groups.setdefault(c, []).append(i)
+    passed, msg = reach.verdict(intent, groups, stranded)
+    return passed, msg, ids
 
 
-def verify_graph(regions, ids, starts, cw, ch):
-    """Secondary check: the emitted graph should not contradict the mask."""
+def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
+    """Secondary check: the emitted graph should not contradict the mask.
+
+    Two claims, and only the first is a gate:
+
+      * every pair of starts the MASK puts in one component must be connected
+        by the graph. A graph that drops a route armour really has is a graph
+        the AI will not use.
+      * no pair of starts the mask puts in DIFFERENT components may be
+        connected by the graph. This one is reported, not failed, because every
+        shipped generated map violates it today: `build_regions` emits an edge
+        only where two cells share passable samples of the same component, but
+        a 4x4 grid cell routinely contains several components, so A-B (over
+        component 5) chained to B-C (over component 9) reads as a route from A
+        to C across two armour realms. That is Meridian Basin's original sin
+        reproduced by our own generator, it predates the §2k ruling, and fixing
+        it means splitting a region per component rather than per rectangle —
+        PLAN-maps.md M-track queue item 2. Until then the count is printed so
+        it cannot be mistaken for zero.
+    """
     if not regions or len(starts) < 2:
-        return True, "graph check skipped"
+        return True, "graph check skipped", 0
     by_key = {r["key"]: r for r in regions}
     cell_to_key = {r["_cell"]: r["key"] for r in regions}
     keys = []
@@ -583,18 +617,41 @@ def verify_graph(regions, ids, starts, cw, ch):
             if bd is None or d < bd:
                 best, bd = k, d
         keys.append(best)
-    seen = {keys[0]}
-    q = deque([keys[0]])
-    while q:
-        k = q.popleft()
-        for n in by_key[k]["neighbors"]:
-            if n not in seen:
-                seen.add(n)
-                q.append(n)
-    missing = sorted({k for k in keys if k not in seen})
+
+    def walk(src):
+        seen = {src}
+        q = deque([src])
+        while q:
+            k = q.popleft()
+            for n in by_key[k]["neighbors"]:
+                if n not in seen:
+                    seen.add(n)
+                    q.append(n)
+        return seen
+
+    reach_of = {k: walk(k) for k in set(keys)}
+    missing = []
+    crossed = []
+    for i in range(len(starts)):
+        for j in range(i + 1, len(starts)):
+            ci, cj = ids.get(i, -1), ids.get(j, -1)
+            linked = keys[j] in reach_of[keys[i]]
+            if ci < 0 or cj < 0:
+                continue                      # stranded: verify_starts owns it
+            if ci == cj and not linked:
+                missing.append((i, j))
+            elif ci != cj and linked:
+                crossed.append((i, j))
     if missing:
-        return False, f"graph leaves start regions unreachable: {missing}"
-    return True, "graph connects all start regions"
+        return False, (f"graph leaves same-component start pairs unreachable: "
+                       f"{missing}"), len(crossed)
+    if crossed:
+        return True, (f"graph connects all same-component start pairs, but "
+                      f"⚠ CLAIMS a route for {len(crossed)} pair(s) the mask "
+                      f"puts in different components: {crossed} — a region "
+                      f"rectangle spanning two components chains an edge "
+                      f"across an armour split (M-track queue item 2)"), len(crossed)
+    return True, "graph agrees with the mask on every start pair", 0
 
 
 # --------------------------------------------------------------------------
@@ -650,6 +707,16 @@ def main(argv=None):
     ap.add_argument("--verify", action="store_true",
                     help="read-only: exit non-zero if start positions cannot "
                          "reach each other. Writes nothing (implies --dry-run)")
+    ap.add_argument("--expect", default="auto",
+                    choices=("auto",) + reach.INTENTS,
+                    help="reachability intent to judge against. 'auto' "
+                         "(default) reads the map's own declaration from "
+                         "mapinfo.lua and treats an undeclared map as "
+                         "'connected'. Naming one here overrides that, for a "
+                         "map whose mapinfo we do not author — but a shipped "
+                         "map should DECLARE it, because a flag is per-run and "
+                         "the sweep in verify_scenario_maps.py has no way to "
+                         "pass a different one per map.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="overwrite a regions.lua written by a different "
@@ -695,8 +762,9 @@ def main(argv=None):
     regions, cols, rows, cw, ch_ = build_regions(
         hs, ok, comp, W, H, args.target_regions, starts, seed)
 
-    passed, msg, ids = verify_starts(ok, comp, W, H, starts)
-    gpassed, gmsg = verify_graph(regions, ids, starts, cw, ch_)
+    intent = (info["reachability"] if args.expect == "auto" else args.expect)
+    passed, msg, ids = verify_starts(ok, comp, W, H, starts, intent)
+    gpassed, gmsg, _crossed = verify_graph(regions, ids, starts, cw, ch_, intent)
 
     frac = 100.0 * npass / (W * H)
     biggest = 100.0 * max(sizes) / npass if npass else 0.0
@@ -704,6 +772,8 @@ def main(argv=None):
           f"largest component {biggest:.1f}% of passable")
     print(f"  grid {cols}x{rows} -> {len(regions)} regions, "
           f"{sum(len(r['neighbors']) for r in regions) // 2} edges")
+    src = "mapinfo" if args.expect == "auto" else "--expect"
+    print(f"  intent: reachability = \"{intent}\" (from {src})")
     print(f"  starts: {len(starts)}  terrain: {'PASS' if passed else 'FAIL'} — {msg}")
     print(f"  graph:  {'PASS' if gpassed else 'FAIL'} — {gmsg}")
     passed = passed and gpassed

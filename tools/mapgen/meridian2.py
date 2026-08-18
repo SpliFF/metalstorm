@@ -45,6 +45,8 @@ from terragen import erosion as ero
 from terragen import hydrology as hyd
 from terragen import noise as tn
 from terragen import package as pkg
+from terragen import passability as pas
+from terragen import reachability as reach
 from terragen import rivers as riv
 from terragen import roads as rd
 from terragen import selftest as stest
@@ -175,9 +177,21 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
     return h * (1 - w) + target * w
 
 
+# Meridian Basin is armour-SPLIT and that is authored (PLAN-maps.md §2k, user
+# ruling 2026-08-16, restated 2026-08-18). The scarp between `gulch_overlook_s`
+# and `east_bluffs_s` reads 44-75 degrees of side-hill across all 513 planning
+# columns (roads FIND 19), so the two halves are separate armour realms for
+# VEH and HEAVY; the ruling is "accept the terrain", explicitly NOT "soften the
+# scarp". The declaration is per-generator rather than per-`--id` because the
+# scarp comes from `meridian_layout.json`, which every variant carries — a
+# different --seed or --climate cannot connect it.
+DECLARED_REACHABILITY = reach.SPLIT
+
+
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
              no_package=False, climate="temperate",
-             map_id="meridian_basin", display_name="Meridian Basin"):
+             map_id="meridian_basin", display_name="Meridian Basin",
+             reachability=None):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -658,6 +672,11 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
               f"{MAX_HEIGHT:.0f} floor would have sheared "
               f"{int((h > MAX_HEIGHT).sum())} cells "
               f"({top - MAX_HEIGHT:.0f} elmos off the summit) into a flat top)")
+    if reachability is None:
+        reachability = DECLARED_REACHABILITY
+    reach.check(reachability)
+    print(f"reachability declared \"{reachability}\" for {map_id}:")
+    reach.report(pas.read_all(h, cell, starts), reachability)
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
@@ -666,6 +685,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
         seed=seed,
+        reachability=reachability,
     )
     # The 24-region contract and the civilian data are layout-derived, not
     # terrain-derived, so they are the same bytes for any seed or id — but a
@@ -754,6 +774,13 @@ def main():
                          "package), so only its terrain differs — vary "
                          "--seed/--climate")
     ap.add_argument("--name", dest="display_name", default="Meridian Basin")
+    ap.add_argument("--reachability", default=None, choices=reach.INTENTS,
+                    help="the map's own claim about its armour realms, written "
+                         "into mapinfo.lua and read by "
+                         "`regions_from_map.py --verify`. Defaults to "
+                         "\'split\' for every meridian variant: the severing "
+                         "scarp is in the layout contract (PLAN-maps "
+                         "\u00a72k).")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--with-features", action="store_true",
                     help="scatter the full vegetation set into "
@@ -783,6 +810,8 @@ def main():
                      "--preview-only/--no-package")
         passthrough = ["--seed", str(args.seed), "--climate", args.climate,
                        "--id", args.map_id, "--name", args.display_name]
+        if args.reachability is not None:
+            passthrough += ["--reachability", args.reachability]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -806,6 +835,7 @@ def main():
     generate(out, args.seed, fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package,
              climate=args.climate, map_id=args.map_id,
+             reachability=args.reachability,
              display_name=args.display_name)
 
 
