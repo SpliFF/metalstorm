@@ -104,6 +104,10 @@ import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { FrameProfiler } from './frame-profiler.js';
+import {
+    createEntityPhaseAccumulator, resetEntityPhaseAccumulator,
+    buildEntityPhaseReport,
+} from './entity-phase-profiler.js';
 import { EntityFxFence } from './entity-fx-fence.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
@@ -672,6 +676,21 @@ function gpUiTaxReset(): void {
     gpUiTax.frames = 0; gpUiTax.save = 0; gpUiTax.lua = 0;
     gpUiTax.restore = 0; gpUiTax.wipe = 0; gpUiTax.rml = 0;
 }
+/// PLAN-perf M27: measurement-only split of the `entity` phase into its own
+/// call list (interpolation tick / per-squad pose sync / squad update / backend
+/// flush / impostor flush / event drain / residual). OFF by default and gated
+/// on a boolean, so the unarmed frame pays nothing — M26's instrument set the
+/// precedent and the same reason applies: every future A/B on this loop would
+/// otherwise carry the clock calls. Arm/read through the entityBreakdownArm /
+/// entityBreakdownDump dispatch verbs (window.test.entityBreakdown*).
+let gpEbOn = false;
+const gpEb = createEntityPhaseAccumulator();
+/// Frame-scoped scratch: the phase's start stamp, and the squad-tick slices
+/// gpTickSquads measures on the render loop's behalf.
+let gpEbPhaseT0 = 0;
+let gpEbPose = 0;
+let gpEbUpdate = 0;
+let gpEbFlush = 0;
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
@@ -2243,11 +2262,16 @@ function gpTickSquads(dt: number): void {
             gpInstallSquadPassability(er, size.width, size.height);
         }
     }
+    // PLAN-perf M27: this loop is per-squad, per-frame render-adapter work
+    // OUTSIDE SquadManager.update() — exactly the population M26's breakdown
+    // could not see from inside the manager. Timed as its own slice.
+    const ebPose0 = gpEbOn ? performance.now() : 0;
     const H = Math.PI * 2 / 65535;
     for (const id of gpSquadIds) {
         const pose = er?.getEntityPose(id);
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
     }
+    if (gpEbOn) gpEbPose = performance.now() - ebPose0;
     // PLAN-perf M20: the squad system's reduced-detail member budget ranks
     // squads by distance to the camera, and the camera only exists out here.
     // Push it every frame (the policy itself re-ranks on its own slow cadence).
@@ -2262,15 +2286,20 @@ function gpTickSquads(dt: number): void {
             postLog(2, '[gp] squad module has no setViewPos — PLAN-perf M20 member budget disabled');
         }
     }
+    const ebUpd0 = gpEbOn ? performance.now() : 0;
     gpSquadSystem.update(dt);
+    if (gpEbOn) gpEbUpdate = performance.now() - ebUpd0;
     // PLAN-metalstorm-squad-performance.md §12c: the frame-time governor's cost
     // sample is update() + the backend flush, and the flush is owned out here —
     // update() cannot time it. Without this the ladder still works, it just
     // under-reads its own cost and escalates later than it should.
+    gpEbFlush = 0;
     if (gpSquadBackend) {
         const t0 = performance.now();
         gpSquadBackend.flush();
-        gpSquadSystem.recordFlush?.(performance.now() - t0);
+        const flushMs = performance.now() - t0;
+        gpSquadSystem.recordFlush?.(flushMs);
+        gpEbFlush = flushMs;   // M27: the flush clock is already taken, unarmed
     }
 }
 
@@ -2833,20 +2862,36 @@ export function gpInit(msg: GpInitToWorker): void {
         gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
+        // PLAN-perf M27: the phase's own start stamp. gpMark(0) already took
+        // one, but FrameProfiler owns it and does not hand it back.
+        if (gpEbOn) gpEbPhaseT0 = performance.now();
         // PLAN-latency L4.3: roll the lean's per-frame memo over and expire
         // leans whose hold + decay has run out. Must run before the entity
         // pass, which is what queries it (body and selection ring both).
         gpMotionLean?.beginFrame();
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
+        const ebT1 = gpEbOn ? performance.now() : 0;
         gpCtx.entityRenderer?.tick();
+        if (gpEbOn) gpEb.interp += performance.now() - ebT1;
         // PLAN-metalstorm-squads.md §6: drive the squad fan-out off the freshly
         // interpolated centroid poses, then flush member/wreck instances.
+        // The three squad slices are zeroed here, not inside gpTickSquads: it
+        // returns early when no squad module is loaded, and a stale slice
+        // would then be re-added every frame.
+        gpEbPose = 0; gpEbUpdate = 0; gpEbFlush = 0;
         gpTickSquads(dt);
+        if (gpEbOn) {
+            gpEb.squadPose += gpEbPose; gpEb.squadUpdate += gpEbUpdate;
+            gpEb.squadFlush += gpEbFlush;
+            gpEb.squadSum += gpSquadIds.size;
+        }
         // Flush this frame's Impostor-tier instances entityRenderer.tick()
         // just routed to impostorRenderer.addInstance() into thin-instance
         // buffers (PLAN-metalstorm-beta-units.md §2.1, engine ask B1).
+        const ebT2 = gpEbOn ? performance.now() : 0;
         gpCtx.impostorRenderer?.render(camera.position);
+        if (gpEbOn) gpEb.impostor += performance.now() - ebT2;
         // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
         // poses via setAimPose based on ground speed derived from position delta).
         gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
@@ -2859,6 +2904,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // than early on arrival. Drained after the cursor advanced (tick above)
         // and before projectileRenderer.tick() / the A3 mirror so a scheduled
         // impact removes its projectile from this frame's live snapshot.
+        const ebT3 = gpEbOn ? performance.now() : 0;
         if (gpPresentationClock && gpEventScheduler) {
             // PLAN-latency L2.2: invented Tier-C flights are parametrised by
             // the cursor, not by wall time. Push it before the drain so a
@@ -2880,6 +2926,7 @@ export function gpInit(msg: GpInitToWorker): void {
             // independently of its state).
             gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
         }
+        if (gpEbOn) gpEb.events += performance.now() - ebT3;
         // PLAN-latency L4.1: retire optimistic orders whose window has run out.
         // Deliberately on wall time, not the presentation cursor — an
         // unconfirmed order is a control-timeline artifact and its deadline is
@@ -2897,6 +2944,14 @@ export function gpInit(msg: GpInitToWorker): void {
             }
         }
         gpMark(1);  // entity
+        if (gpEbOn) {
+            // Total is the phase's own wall time, so `other` = total − slices
+            // is a residual and not an assumption: nothing in the phase can
+            // hide from the split.
+            gpEb.total += performance.now() - gpEbPhaseT0;
+            gpEb.entitySum += gpCtx.entityRenderer?.entityCount ?? 0;
+            gpEb.frames++;
+        }
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
         // A3 read-seam (PLAN-latency-impl.md L-pre.1): mirror the renderer's
@@ -4188,6 +4243,17 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const err = widgetProfileStop(rt);
             return err ? { error: err } : { ok: true };
         }
+        // — entity-phase cost split (PLAN-perf M27). Arming resets the
+        //   accumulator, so arm → run the window → dump gives that window's
+        //   own means, exactly like M26's setUpdateBreakdown. Measurement
+        //   only: disarm when the session ends, never ship armed. —
+        case 'entityBreakdownArm': {
+            gpEbOn = args[0] === undefined ? true : !!args[0];
+            resetEntityPhaseAccumulator(gpEb);
+            return { armed: gpEbOn };
+        }
+        case 'entityBreakdownDump':
+            return buildEntityPhaseReport(gpEb);
         case 'uiProfileDump': {
             const rt = getRuntime();
             const dump = rt ? widgetProfileDump(rt) : null;
