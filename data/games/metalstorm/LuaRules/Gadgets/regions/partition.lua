@@ -206,7 +206,8 @@ end
 --- Validate a map-authored region graph. Returns `true, nil` on success or
 --- `false, errors` (a list of strings) on failure. Checks: non-empty list,
 --- well-formed entries, vertices within map bounds, non-self-intersecting
---- polygons, unique keys, `"wilds"` reserved, symmetric neighbor references.
+--- polygons, an optional `centre` that is well-formed and in bounds, unique
+--- keys, `"wilds"` reserved, symmetric neighbor references.
 --- Full coverage is NOT required (gaps become "wilds").
 ---
 --- Defensive by contract (E2): malformed authored data — a non-table entry,
@@ -262,6 +263,22 @@ function M.validateGraph(regionsData, mapWidth, mapHeight)
             end
             if vertsOk and M.isSelfIntersecting(poly) then
                 errors[#errors + 1] = label .. ": self-intersecting polygon"
+            end
+
+            -- `centre` is optional (M9m): the point the region publishes as
+            -- itself. Only its bounds are checked, and the check mirrors
+            -- MapProcessor.cpp's exactly — the two validators have to agree on
+            -- which provider ends up active, or the client mirror would answer
+            -- ownership questions the sim never asked.
+            local centre = r.centre
+            if centre ~= nil then
+                if type(centre) ~= "table" or type(centre.x) ~= "number"
+                        or type(centre.z) ~= "number" then
+                    errors[#errors + 1] = label .. ": malformed centre"
+                elseif centre.x < 0 or centre.x > mapWidth
+                        or centre.z < 0 or centre.z > mapHeight then
+                    errors[#errors + 1] = label .. ": centre out of map bounds"
+                end
             end
 
             for _, nb in ipairs(r.neighbors or {}) do
@@ -343,6 +360,27 @@ function M.newGraphProvider(regionsData, mapWidth, mapHeight)
 
     local lookup = M.buildLookupGrid(regionsData, mapWidth, mapHeight)
 
+    -- Per-region bounding box, so a candidate can be rejected with four
+    -- compares instead of a whole point-in-polygon loop. The lookup cell is
+    -- 256 elmos and a region is kilometres, so most candidates a cell offers
+    -- are near-misses. It matters more since M9m: a region's polygon is its
+    -- component's coastline, ~64 vertices instead of 4 (up to ~400), and a
+    -- point that lands in a gap between coastlines used to walk every
+    -- candidate's full outline before answering "wilds". Answer-identical by
+    -- construction — a point outside a polygon's bounding box is outside the
+    -- polygon.
+    local bbox = {}
+    for _, r in ipairs(regionsData) do
+        local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+        for _, pt in ipairs(r.polygon) do
+            if pt.x < minX then minX = pt.x end
+            if pt.x > maxX then maxX = pt.x end
+            if pt.z < minZ then minZ = pt.z end
+            if pt.z > maxZ then maxZ = pt.z end
+        end
+        bbox[r.key] = { minX, maxX, minZ, maxZ }
+    end
+
     local function at(x, z)
         local cx = math.floor(x / lookup.cellSize)
         local cz = math.floor(z / lookup.cellSize)
@@ -353,7 +391,9 @@ function M.newGraphProvider(regionsData, mapWidth, mapHeight)
         -- NOT necessarily fully covered by it — an isolated polygon's edge
         -- can still cut through a cell with no other region nearby.
         for _, key in ipairs(cellRegions) do
-            if M.pointInPolygon(x, z, byKey[key].polygon) then
+            local bb = bbox[key]
+            if x >= bb[1] and x <= bb[2] and z >= bb[3] and z <= bb[4]
+                    and M.pointInPolygon(x, z, byKey[key].polygon) then
                 return key
             end
         end

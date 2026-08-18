@@ -334,6 +334,65 @@ describe("graph provider (point lookup)", function()
     end)
 end)
 
+describe("graph provider — clipped (M9m) region polygons", function()
+    -- A generated region's polygon is its component's coastline, not the leaf
+    -- rectangle: concave, many-vertexed, and it deliberately does NOT cover
+    -- everything inside its own bounding box. This is a C shape whose mouth
+    -- opens east — the "bay" is ground of another component, which must
+    -- resolve to wilds rather than to the region wrapped around it.
+    local c_shape = {
+        { key = 'bay_arm', neighbors = {}, centre = { x = 100, z = 100 },
+          polygon = {
+              {x=0,z=0}, {x=900,z=0}, {x=900,z=300}, {x=300,z=300},
+              {x=300,z=700}, {x=900,z=700}, {x=900,z=1000}, {x=0,z=1000},
+          } },
+    }
+
+    it("answers wilds for ground inside the bbox but outside the polygon", function()
+        local provider = Partition.newGraphProvider(c_shape, 4096, 4096)
+        assert.is_truthy(provider)
+        assert.are.equal('bay_arm', provider.at(100, 500))    -- the spine
+        assert.are.equal('bay_arm', provider.at(600, 100))    -- north arm
+        assert.are.equal('wilds', provider.at(600, 500))      -- the bay
+    end)
+
+    it("agrees with a bare point-in-polygon sweep everywhere", function()
+        -- The provider pre-filters candidates by bounding box before running
+        -- the polygon test. That is a speed change only, so a sweep of the
+        -- whole map must give the same answer as calling pointInPolygon
+        -- directly — including outside the bbox, where the filter fires.
+        local provider = Partition.newGraphProvider(c_shape, 4096, 4096)
+        for x = 25, 4000, 137 do
+            for z = 25, 4000, 149 do
+                local want = Partition.pointInPolygon(x, z, c_shape[1].polygon)
+                    and 'bay_arm' or 'wilds'
+                assert.are.equal(want, provider.at(x, z))
+            end
+        end
+    end)
+
+    it("accepts an optional centre and rejects one outside the map", function()
+        local ok = Partition.validateGraph(c_shape, 4096, 4096)
+        assert.is_true(ok)
+
+        local outside = {
+            { key = 'a', polygon = square(0, 0, 100, 100), neighbors = {},
+              centre = { x = 5000, z = 50 } },
+        }
+        local bad, errors = Partition.validateGraph(outside, 4096, 4096)
+        assert.is_false(bad)
+        assert.are.equal('a: centre out of map bounds', errors[1])
+
+        local malformed = {
+            { key = 'a', polygon = square(0, 0, 100, 100), neighbors = {},
+              centre = { x = 'nope' } },
+        }
+        local bad2, errors2 = Partition.validateGraph(malformed, 4096, 4096)
+        assert.is_false(bad2)
+        assert.are.equal('a: malformed centre', errors2[1])
+    end)
+end)
+
 describe("lookup grid", function()
     it("agrees with direct point-in-polygon queries on boundary cells", function()
         local regions = {

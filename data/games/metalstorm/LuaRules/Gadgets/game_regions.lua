@@ -223,7 +223,8 @@ local PUBLIC = { public = true }
 --- BOTH providers publish, through the identical `region_<key>_name/_x/_z`
 --- shape (PLAN-metalstorm-command-language.md §5):
 ---
----   * graph — the AUTHORED name and the polygon's vertex-average centroid.
+---   * graph — the AUTHORED name and the region's own `centre` when it ships
+---     one (M9m), else the polygon's vertex-average centroid.
 ---     Enough for a locate-ping and an "attack <region>" target, never a
 ---     point-in-region fill test (regions.js owns the exact partition geometry
 ---     from the map export).
@@ -252,12 +253,28 @@ local function publishRegionStatics()
         if key ~= "wilds" then
             local meta = provider.byKey[key]
             if meta and type(meta.polygon) == "table" and #meta.polygon > 0 then
-                local sx, sz = 0, 0
-                for _, v in ipairs(meta.polygon) do sx = sx + v.x; sz = sz + v.z end
-                local n = #meta.polygon
+                local cx, cz
+                local centre = meta.centre
+                if type(centre) == "table" and type(centre.x) == "number"
+                        and type(centre.z) == "number" then
+                    -- An AUTHORED centre wins. Since M9m a generated region's
+                    -- polygon is its component's coastline rather than a
+                    -- rectangle, and the vertex average of a coastline lands
+                    -- wherever the vertices are dense — routinely outside the
+                    -- region and often at sea. The generator knows a point that
+                    -- is inside and on the region's own passable ground, so it
+                    -- ships one; this is the locate-ping and the "attack
+                    -- <region>" target, so it has to be somewhere an order can
+                    -- actually be sent.
+                    cx, cz = centre.x, centre.z
+                else
+                    local sx, sz = 0, 0
+                    for _, v in ipairs(meta.polygon) do sx = sx + v.x; sz = sz + v.z end
+                    cx, cz = sx / #meta.polygon, sz / #meta.polygon
+                end
                 Spring.SetGameRulesParam('region_' .. key .. '_name', meta.name or key, PUBLIC)
-                Spring.SetGameRulesParam('region_' .. key .. '_x', sx / n, PUBLIC)
-                Spring.SetGameRulesParam('region_' .. key .. '_z', sz / n, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_x', cx, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_z', cz, PUBLIC)
             end
         end
     end

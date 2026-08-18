@@ -60,6 +60,14 @@ struct RegionRecord {
     std::string key;
     std::string name;
     std::vector<RegionPoint> polygon;
+    // The point the region publishes as itself (locate ping, "attack
+    // <region>"). Optional in mapdata/regions.lua: a map that ships none keeps
+    // the old behaviour, the polygon's vertex average, which game_regions.lua
+    // computes for itself. A generated region ships one because its polygon is
+    // its component's coastline (M9m) and the vertex average of a coastline is
+    // routinely outside the region.
+    bool hasCentre = false;
+    RegionPoint centre;
     float value = 0;
     std::vector<std::string> tags;
     std::vector<std::string> neighbors;
@@ -971,6 +979,14 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
                         }
                         lua_pop(L, 1); // polygon
 
+                        lua_getfield(L, -1, "centre");
+                        if (lua_istable(L, -1)) {
+                            r.centre.x = luaGetFloat(L, "x", 0);
+                            r.centre.z = luaGetFloat(L, "z", 0);
+                            r.hasCentre = true;
+                        }
+                        lua_pop(L, 1); // centre
+
                         lua_getfield(L, -1, "tags");
                         if (lua_istable(L, -1)) {
                             const int tn = static_cast<int>(lua_rawlen(L, -1));
@@ -1036,6 +1052,10 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
             if (RegionIsSelfIntersecting(r.polygon)) {
                 errors.push_back(r.key + ": self-intersecting polygon");
             }
+            if (r.hasCentre && (r.centre.x < 0 || r.centre.x > mapWidth ||
+                                r.centre.z < 0 || r.centre.z > mapHeight)) {
+                errors.push_back(r.key + ": centre out of map bounds");
+            }
             for (const auto& nb : r.neighbors) {
                 auto it = byKey.find(nb);
                 if (it == byKey.end()) {
@@ -1074,6 +1094,7 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
             rj["neighbors"] = r.neighbors;
             rj["polygon"] = nlohmann::json::array();
             for (const auto& pt : r.polygon) rj["polygon"].push_back({{"x", pt.x}, {"z", pt.z}});
+            if (r.hasCentre) rj["centre"] = {{"x", r.centre.x}, {"z", r.centre.z}};
             j["regions"].push_back(std::move(rj));
         }
         SLOG(SPRING_LOG_INFO, "%s: exported regions.json (graph, %zu regions)", meta.id.c_str(), regions.size());

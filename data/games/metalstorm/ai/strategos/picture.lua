@@ -595,6 +595,7 @@ end
 -- out-of-bounds vertices at export time).
 local function buildLookupGrid(regions, cellSize)
     local cells = {}
+    local bbox = {}
     for key, r in pairs(regions) do
         local polygon = r.polygon
         if polygon and #polygon > 0 then
@@ -606,6 +607,7 @@ local function buildLookupGrid(regions, cellSize)
                 if pt.z < minZ then minZ = pt.z end
                 if pt.z > maxZ then maxZ = pt.z end
             end
+            bbox[key] = { minX, maxX, minZ, maxZ }
             local cx0, cx1 = math.floor(minX / cellSize), math.floor(maxX / cellSize)
             local cz0, cz1 = math.floor(minZ / cellSize), math.floor(maxZ / cellSize)
             for cz = cz0, cz1 do
@@ -618,7 +620,7 @@ local function buildLookupGrid(regions, cellSize)
             end
         end
     end
-    return { cellSize = cellSize, cells = cells }
+    return { cellSize = cellSize, cells = cells, bbox = bbox }
 end
 
 -- Cached by object identity of the `regions` table it was built from. Since
@@ -653,7 +655,17 @@ function Picture.regionOf(x, z, regions)
     if candidates then
         for _, key in ipairs(candidates) do
             local r = regions[key]
-            if r and r.polygon and pointInPolygon(x, z, r.polygon) then
+            -- Reject a near-miss candidate on its bounding box before walking
+            -- its outline. Since M9m a generated region's polygon is its
+            -- component's coastline (~70 vertices, up to ~400) instead of a
+            -- 4-vertex rectangle, and on an archipelago half the map is
+            -- between coastlines — so the common answer is 'wilds', reached
+            -- only after every candidate has been walked in full. Same
+            -- pre-filter as regions/partition.lua; a point outside the bbox
+            -- is outside the polygon, so no answer changes.
+            local bb = r and cachedGrid.bbox[key]
+            if bb and x >= bb[1] and x <= bb[2] and z >= bb[3] and z <= bb[4]
+                    and r.polygon and pointInPolygon(x, z, r.polygon) then
                 return key
             end
         end

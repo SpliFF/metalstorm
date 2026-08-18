@@ -290,6 +290,268 @@ MIN_SPLIT_COMP_FRAC = 0.05        # ...and so is 5% of the cell's passable area
 MIN_PASS_FRAC = 0.04              # nothing traversable: not a place an army can be
 MIN_CROSSINGS = 3                 # a one-cell notch in a cliff is not a road
 
+# M9m: a region's polygon is its own component's FOOTPRINT inside the leaf,
+# rasterised on a lattice of CLIP_BLOCK samples (32 elmos). A leaf is a
+# rectangle and an island is not, so a rectangular polygon on an archipelago
+# claims ground of components the region cannot drive to — measured at 49 % of
+# all passable ground on the four mounds maps. Ground outside every polygon
+# resolves to "wilds", which is what the sim already says when it does not know.
+#
+# 32 elmos is the knee of the measured curve (PLAN-maps.md §2l): against the
+# 8-elmo sample lattice it keeps 98.4-99.5 % of a region's own ground and
+# leaves 0.4-0.9 % foreign ground enclosed, for ~70 vertices a region instead
+# of ~500 at 8 elmos. Finer buys tenths of a point and costs 8x the vertices,
+# which every point-in-polygon test in the sim, the AI and the client pays.
+CLIP_BLOCK = 4
+
+
+def _block_counts(ok, comp, W, c, k: int):
+    """Per-block tallies of the leaf's own component vs everything else.
+
+    Returns (own, other, bw, bh): two flat lists of counts over a bw x bh
+    lattice of k x k samples anchored at the leaf's top-left corner.
+    """
+    cid = c["comp"]
+    x0, x1, z0, z1 = c["x0"], c["x1"], c["z0"], c["z1"]
+    bw = max(1, -(-(x1 - x0) // k))
+    bh = max(1, -(-(z1 - z0) // k))
+    own = [0] * (bw * bh)
+    other = [0] * (bw * bh)
+    for z in range(z0, z1):
+        base = z * W
+        row = ((z - z0) // k) * bw
+        for x in range(x0, x1):
+            i = base + x
+            if not ok[i]:
+                continue
+            s = row + (x - x0) // k
+            if comp[i] == cid:
+                own[s] += 1
+            else:
+                other[s] += 1
+    return own, other, bw, bh
+
+
+def _largest_blob(inb, bw, bh):
+    """Largest 4-connected run of `inb`, holes filled, diagonal pinches fattened.
+
+    Three properties the consumers need, in order:
+
+      * ONE piece — `regions/partition.lua` gives a region ONE polygon, so a
+        component's footprint that falls into two pieces inside the leaf can
+        only publish the bigger one (the other becomes wilds, which is the
+        honest answer for ground this region cannot represent).
+      * NO holes — a rectilinear ring around a hole is a second loop, and a
+        single vertex list cannot express it. A filled hole is impassable
+        ground inside the polygon, which costs nothing: nothing stands there.
+      * NO diagonal pinch — two blocks meeting corner-to-corner make the
+        outline touch itself, and a self-touching polygon is what
+        `validateGraph` rejects (whole graph → silent grid fallback). Fattening
+        the pinch (adding one of the two orthogonal blocks) is the only repair
+        that keeps the boundary a simple loop.
+    """
+    seen = [False] * (bw * bh)
+    best = []
+    for s0 in range(bw * bh):
+        if not inb[s0] or seen[s0]:
+            continue
+        seen[s0] = True
+        stack, cur = [s0], []
+        while stack:
+            p = stack.pop()
+            cur.append(p)
+            y, x = divmod(p, bw)
+            for q, inside in ((p - 1, x > 0), (p + 1, x < bw - 1),
+                              (p - bw, y > 0), (p + bw, y < bh - 1)):
+                if inside and inb[q] and not seen[q]:
+                    seen[q] = True
+                    stack.append(q)
+        if len(cur) > len(best):
+            best = cur
+    blob = set(best)
+    if not blob:
+        return blob
+
+    def fill_holes():
+        outside = [False] * (bw * bh)
+        stack = []
+        for x in range(bw):
+            for p in (x, (bh - 1) * bw + x):
+                if p not in blob and not outside[p]:
+                    outside[p] = True
+                    stack.append(p)
+        for y in range(bh):
+            for p in (y * bw, y * bw + bw - 1):
+                if p not in blob and not outside[p]:
+                    outside[p] = True
+                    stack.append(p)
+        while stack:
+            p = stack.pop()
+            y, x = divmod(p, bw)
+            for q, inside in ((p - 1, x > 0), (p + 1, x < bw - 1),
+                              (p - bw, y > 0), (p + bw, y < bh - 1)):
+                if inside and q not in blob and not outside[q]:
+                    outside[q] = True
+                    stack.append(q)
+        for p in range(bw * bh):
+            if p not in blob and not outside[p]:
+                blob.add(p)
+
+    fill_holes()
+    # Fattening a pinch can create a hole and filling a hole can create a
+    # pinch, so alternate until neither fires. Both only ever ADD blocks, so
+    # this terminates (bounded by the lattice).
+    while True:
+        pinched = False
+        for p in list(blob):
+            y, x = divmod(p, bw)
+            for dx, dy in ((1, 1), (1, -1)):
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < bw and 0 <= ny < bh):
+                    continue
+                if (ny * bw + nx) not in blob:
+                    continue
+                a, b = y * bw + nx, ny * bw + x       # the two shared orthogonals
+                if a not in blob and b not in blob:
+                    blob.add(a)
+                    pinched = True
+        if not pinched:
+            break
+        fill_holes()
+    return blob
+
+
+def _trace_outline(blob, bw, bh):
+    """The blob's boundary as a closed rectilinear vertex ring, in blocks.
+
+    Walks the boundary edges of the block set (interior on the right), so the
+    result is a simple polygon with collinear runs merged. Requires the blob to
+    be one hole-free, pinch-free piece — `_largest_blob`'s contract.
+    """
+    nxt = {}
+    for p in blob:
+        y, x = divmod(p, bw)
+        if y == 0 or (p - bw) not in blob:
+            nxt[(x, y)] = (x + 1, y)
+        if x == bw - 1 or (p + 1) not in blob:
+            nxt[(x + 1, y)] = (x + 1, y + 1)
+        if y == bh - 1 or (p + bw) not in blob:
+            nxt[(x + 1, y + 1)] = (x, y + 1)
+        if x == 0 or (p - 1) not in blob:
+            nxt[(x, y + 1)] = (x, y)
+    if not nxt:
+        return []
+    start = min(nxt)
+    ring = [start]
+    cur = nxt[start]
+    while cur != start:
+        ring.append(cur)
+        cur = nxt[cur]
+    # Merge collinear runs: a rectilinear ring emits one vertex per lattice
+    # step otherwise, and every consumer pays for those in point-in-polygon.
+    out = []
+    n = len(ring)
+    for i in range(n):
+        px, pz = ring[i - 1]
+        cx, cz = ring[i]
+        qx, qz = ring[(i + 1) % n]
+        if (cx - px, cz - pz) != (qx - cx, qz - cz):
+            out.append((cx, cz))
+    return out
+
+
+def _dedupe_ring(ring):
+    """Drop repeated and collinear vertices from a closed ring."""
+    out = []
+    for pt in ring:
+        if not out or out[-1] != pt:
+            out.append(pt)
+    while len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    # Removing one vertex can leave its neighbours collinear, so sweep until
+    # the ring stops shrinking.
+    while True:
+        keep = []
+        n = len(out)
+        for i in range(n):
+            (px, pz), (cx, cz), (qx, qz) = out[i - 1], out[i], out[(i + 1) % n]
+            # Collinear (including a degenerate spur that doubles back) → drop.
+            if (cx - px) * (qz - cz) == (cz - pz) * (qx - cx):
+                continue
+            keep.append((cx, cz))
+        if len(keep) == len(out):
+            return keep
+        out = keep
+        if len(out) < 3:
+            return out
+
+
+def _clip_to_component(ok, comp, W, H, c, k: int = CLIP_BLOCK):
+    """The leaf's own-component footprint as a polygon, plus what it costs.
+
+    Returns `(polygon, centre, stats)` where `polygon` is a list of (x, z)
+    ELMO vertices (clamped to the map extent, `map_extent`), `centre` is an
+    (x, z) point inside it standing on the region's own passable ground, and
+    `stats` counts the samples the clip keeps, encloses wrongly and drops:
+    `(own_in, other_in, own_out)`.
+
+    `polygon` is empty when the component's footprint does not survive the
+    lattice — the caller drops such a leaf rather than shipping a region with
+    no ground.
+    """
+    own, other, bw, bh = _block_counts(ok, comp, W, c, k)
+    inb = [own[s] > 0 and own[s] >= other[s] for s in range(bw * bh)]
+    blob = _largest_blob(inb, bw, bh)
+    if not blob:
+        return [], None, (0, 0, sum(own))
+
+    own_in = sum(own[s] for s in blob)
+    other_in = sum(other[s] for s in blob)
+    own_out = sum(own) - own_in
+
+    mw, mh = map_extent(W, H)
+
+    def to_elmos(bx, bz):
+        return (min((c["x0"] + bx * k) * ELMOS_PER_SQUARE, mw),
+                min((c["z0"] + bz * k) * ELMOS_PER_SQUARE, mh))
+
+    # Clamping to the map extent can collapse two lattice steps onto one point
+    # (the last row/column of a 2049-sample map hangs one square off the map,
+    # `map_extent`), so the ring is de-duplicated AFTER the conversion and any
+    # vertex that has become collinear with its neighbours is dropped. A
+    # repeated vertex is a polygon that touches itself, which is what
+    # `validateGraph` rejects — and it rejects the WHOLE graph, silently
+    # falling the sim back to the 2048-elmo grid.
+    poly = _dedupe_ring([to_elmos(bx, bz) for bx, bz in _trace_outline(blob, bw, bh)])
+    if len(poly) < 3:
+        return [], None, (0, 0, sum(own))
+
+    # Centre: the region's published locate-ping and every "attack <region>"
+    # target. It CANNOT be the vertex average any more — averaging the
+    # vertices of a coastline outline lands wherever the vertices are dense,
+    # which for a concave region is routinely outside it and often at sea. So
+    # it is a real sample: the own-component passable sample nearest the
+    # blob's area centre.
+    cx = sum((s % bw) + 0.5 for s in blob) / len(blob)
+    cz = sum((s // bw) + 0.5 for s in blob) / len(blob)
+    cid = c["comp"]
+    best, bd = None, None
+    for z in range(c["z0"], c["z1"]):
+        base = z * W
+        bz = (z - c["z0"]) // k
+        for x in range(c["x0"], c["x1"]):
+            i = base + x
+            if not ok[i] or comp[i] != cid:
+                continue
+            bx = (x - c["x0"]) // k
+            if (bz * bw + bx) not in blob:
+                continue
+            d = (bx + 0.5 - cx) ** 2 + (bz + 0.5 - cz) ** 2
+            if bd is None or d < bd:
+                best, bd = (min(x * ELMOS_PER_SQUARE, mw),
+                            min(z * ELMOS_PER_SQUARE, mh)), d
+    return poly, best, (own_in, other_in, own_out)
+
 
 def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
     """Partition the map into regions and wire edges by passability.
@@ -416,8 +678,20 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
             if c["npass"] / c["n"] >= MIN_PASS_FRAC and c["comp"] >= 0]
     kept.sort(key=lambda c: (c["_fz0"], c["_fx0"]))
 
+    # Clip each leaf's polygon to its own component's footprint (M9m). A leaf
+    # whose footprint does not survive the lattice publishes nothing: a region
+    # with no ground of its own is a destination the AI can never occupy, which
+    # is the same reason MIN_PASS_FRAC drops an all-cliff cell above.
+    clipped = []
+    for c in kept:
+        poly, centre, stats = _clip_to_component(ok, comp, W, H, c)
+        if not poly or centre is None:
+            continue
+        c["_poly"], c["_centre"], c["_clip"] = poly, centre, stats
+        clipped.append(c)
+
     regions = []
-    for i, c in enumerate(kept):
+    for i, c in enumerate(clipped):
         key, name = name_for(i, seed)
         regions.append({
             "_cell": (c["_fx0"], c["_fz0"]), "_c": c, "key": key, "name": name,
@@ -538,7 +812,42 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
 
 
 def partition_purity(regions):
-    """How much passable ground a region's own component does NOT account for.
+    """What the emitted POLYGONS claim, against what their component owns.
+
+    Counted on the clipped polygons (M9m), not on the leaf rectangles: the
+    rectangle is only the search window now, and reporting its impurity would
+    describe a shape no consumer ever sees. Three quantities, because they are
+    three different statements:
+
+      * `own_in` — passable samples of the region's own component inside its
+        polygon. The graph is honest about these.
+      * `other_in` — samples of ANOTHER component still enclosed (a pocket
+        smaller than the clip lattice, or one the hole fill swallowed). These
+        are the remaining lie: a unit standing there reads as being in a
+        region whose neighbours it cannot reach.
+      * `own_out` — the region's own ground the clip dropped, plus every
+        sample of every component that no polygon covers. Not a lie: those
+        points resolve to "wilds", which is the sim saying it does not know.
+
+    Returns (impure_regions, other_in, own_out, own_in).
+    """
+    impure = other_in = own_out = own_in = 0
+    for r in regions:
+        c = r["_c"]
+        oi, xi, oo = c.get("_clip", (0, 0, 0))
+        own_in += oi
+        other_in += xi
+        own_out += oo
+        if xi:
+            impure += 1
+    return impure, other_in, own_out, own_in
+
+
+def _legacy_rect_purity(regions):
+    """The pre-M9m measurement: impurity of the leaf RECTANGLES.
+
+    Kept because it is the number every M9k/M9l note quotes (49.1 % on
+    skerry_reach), so the clip's effect is only readable against it.
 
     A leaf that still holds two components after the split floor is reached
     keeps only the dominant one: samples of the minority component inside it
@@ -570,20 +879,46 @@ def partition_purity(regions):
     return impure, orphan, notable, total
 
 
-def region_at(regions, sx, sz):
-    """The region whose rectangle contains a world position, or None.
+def point_in_polygon(x, z, poly) -> bool:
+    """Ray-casting containment, the same test `regions/partition.lua` runs.
 
-    Regions are a disjoint cover of the map, so containment is unambiguous —
-    which is what makes it the honest way to ask "which region is this start
-    in". Answering by nearest cell CENTRE instead (what the pre-component
-    partition did) can hand a start to a rectangle it does not stand in, and
-    on a split map that silently re-attaches it to the wrong component.
+    Duplicated deliberately rather than approximated: this tool decides which
+    region a start stands in, and the sim decides it again at runtime. Two
+    different tests would disagree at exactly the boundary cases the clip
+    creates (M9m), so the answer has to be the same algorithm.
     """
-    x = sx / ELMOS_PER_SQUARE
-    z = sz / ELMOS_PER_SQUARE
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, zi = poly[i]
+        xj, zj = poly[j]
+        if ((zi > z) != (zj > z)) and (x < (xj - xi) * (z - zi) / (zj - zi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def region_at(regions, sx, sz):
+    """The region whose POLYGON contains a world position, or None.
+
+    Polygons are disjoint (each lives inside its own leaf rectangle), so
+    containment is unambiguous — and since M9m they no longer cover the whole
+    map, so `None` is a real answer: the sim resolves such a point to "wilds".
+    Answering by nearest cell CENTRE instead (what the pre-component partition
+    did) can hand a start to a region it does not stand in, and on a split map
+    that silently re-attaches it to the wrong component.
+    """
     for r in regions:
         c = r.get("_c")
-        if c and c["x0"] <= x < c["x1"] and c["z0"] <= z < c["z1"]:
+        if not c:
+            continue
+        poly = c.get("_poly")
+        if poly is None:
+            x, z = sx / ELMOS_PER_SQUARE, sz / ELMOS_PER_SQUARE
+            if c["x0"] <= x < c["x1"] and c["z0"] <= z < c["z1"]:
+                return r
+        elif point_in_polygon(sx, sz, poly):
             return r
     return None
 
@@ -616,6 +951,38 @@ def _poly_elmos(c, W: int, H: int):
     return x0, x1, z0, z1
 
 
+def _region_polygon(c, W: int, H: int):
+    """A leaf's emitted polygon: the clip when it has one, else its rectangle.
+
+    The rectangle branch is not dead code — `build_regions` clips every leaf it
+    keeps, but the emitters are also called on hand-built region dicts (tests,
+    and any future authored source), and a region with no `_poly` still has to
+    emit a valid polygon rather than none at all.
+    """
+    poly = c.get("_poly")
+    if poly:
+        return list(poly)
+    x0, x1, z0, z1 = _poly_elmos(c, W, H)
+    return [(x0, z0), (x1, z0), (x1, z1), (x0, z1)]
+
+
+def _region_centre(c, W: int, H: int):
+    """The point the region publishes as itself (locate ping, `attack <region>`).
+
+    Emitted explicitly since M9m. `game_regions.lua` used to derive it as the
+    polygon's VERTEX AVERAGE, which is the rectangle centre for a rectangle and
+    meaningless for a coastline outline: the average sits wherever the vertices
+    are dense, which on a concave region is routinely outside the region and
+    often at sea. The clip knows a real answer — a passable sample of the
+    region's own component — so it emits one and the sim prefers it.
+    """
+    centre = c.get("_centre")
+    if centre:
+        return centre
+    x0, x1, z0, z1 = _poly_elmos(c, W, H)
+    return ((x0 + x1) / 2, (z0 + z1) / 2)
+
+
 def to_lua(regions, W, H):
     """Emit `mapdata/regions.lua` — the AUTHORED source, not the export.
 
@@ -638,9 +1005,8 @@ def to_lua(regions, W, H):
     ]
     for r in regions:
         c = r["_c"]
-        x0, x1, z0, z1 = _poly_elmos(c, W, H)
-        poly = ", ".join(f"{{x={x}, z={z}}}" for x, z in
-                         ((x0, z0), (x1, z0), (x1, z1), (x0, z1)))
+        poly = ", ".join(f"{{x={x}, z={z}}}" for x, z in _region_polygon(c, W, H))
+        cx, cz = _region_centre(c, W, H)
         tags = ", ".join(f'"{t}"' for t in r["tags"])
         nbrs = ", ".join(f'"{n}"' for n in sorted(r["neighbors"]))
         out += [
@@ -648,6 +1014,7 @@ def to_lua(regions, W, H):
             f'            key = "{r["key"]}",',
             f'            name = "{r["name"]}",',
             f"            polygon = {{ {poly} }},",
+            f"            centre = {{x={cx}, z={cz}}},",
             f"            value = {r['value']},",
             f"            tags = {{ {tags} }},",
             f"            neighbors = {{ {nbrs} }},",
@@ -661,17 +1028,14 @@ def to_json(regions, W, H, cw, ch, provider="graph"):
     out_regions = []
     for r in regions:
         c = r["_c"]
-        x0, x1, z0, z1 = _poly_elmos(c, W, H)
+        cx, cz = _region_centre(c, W, H)
         out_regions.append({
             "key": r["key"],
             "name": r["name"],
             "neighbors": sorted(r["neighbors"]),
-            "polygon": [
-                {"x": float(x0), "z": float(z0)},
-                {"x": float(x1), "z": float(z0)},
-                {"x": float(x1), "z": float(z1)},
-                {"x": float(x0), "z": float(z1)},
-            ],
+            "polygon": [{"x": float(x), "z": float(z)}
+                        for x, z in _region_polygon(c, W, H)],
+            "centre": {"x": float(cx), "z": float(cz)},
             "tags": r["tags"],
             "value": r["value"],
         })
@@ -771,11 +1135,24 @@ def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
     cell_to_key = {r["_cell"]: r["key"] for r in regions}
     keys = []
     homes = []
-    for sx, sz in starts:
+    homeless = []
+    # Only a graph whose regions carry CLIPPED polygons can answer "this point
+    # is in no region" — a hand-built region list (a test fixture, an authored
+    # graph read back without cells) has nothing to test containment against,
+    # and for those the nearest-cell fallback below is still the best guess.
+    clipped = any(r.get("_c", {}).get("_poly") for r in regions)
+    for si, (sx, sz) in enumerate(starts):
         home = region_at(regions, sx, sz)
         homes.append(home)
         if home is not None:
             keys.append(home["key"])
+            continue
+        if clipped:
+            # A polygon is its component's footprint, not the whole leaf, so
+            # "no containing region" is a real state — and for a START it is a
+            # defect: the sim files that army under "wilds", a bucket with no
+            # neighbours, and the AI plans nothing from it.
+            homeless.append(si)
             continue
         # No containing rectangle (a start outside every kept region, or a
         # caller passing regions with no `_c` at all): fall back to the
@@ -799,6 +1176,11 @@ def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
                     seen.add(n)
                     q.append(n)
         return seen
+
+    if homeless:
+        return False, (f"start(s) {homeless} stand outside every region polygon "
+                       f"— the sim resolves them to 'wilds', which has no "
+                       f"neighbours (PLAN-maps.md M-track, M9m)"), 0
 
     reach_of = {k: walk(k) for k in set(keys)}
     missing = []
@@ -853,8 +1235,8 @@ class DerivedGraph(NamedTuple):
     terrain_ok: bool
     graph_ok: bool
     messages: list           # the printed report, line by line
-    orphan_frac: float       # passable samples in a region of another component
-    notable_frac: float      # ...the part of that big enough to deserve a region
+    orphan_frac: float       # passable samples INSIDE a polygon of another component
+    notable_frac: float      # passable samples no polygon covers (they read "wilds")
 
 
 def derive_graph(hs, W, H, starts, map_id, target_regions=20,
@@ -889,19 +1271,28 @@ def derive_graph(hs, W, H, starts, map_id, target_regions=20,
 
     frac = 100.0 * npass / (W * H)
     biggest = 100.0 * max(sizes) / npass if npass else 0.0
-    impure, orphan, notable, in_regions = partition_purity(regions)
-    pct = (100.0 * orphan / in_regions) if in_regions else 0.0
-    npct = (100.0 * notable / in_regions) if in_regions else 0.0
+    impure, other_in, own_out, own_in = partition_purity(regions)
+    claimed = own_in + other_in
+    wilds = max(0, npass - claimed)
+    pct = (100.0 * other_in / claimed) if claimed else 0.0
+    npct = (100.0 * wilds / npass) if npass else 0.0
+    _rimp, rorphan, _rnot, rtotal = _legacy_rect_purity(regions)
+    rpct = (100.0 * rorphan / rtotal) if rtotal else 0.0
+    verts = sum(len(_region_polygon(r["_c"], W, H)) for r in regions)
     lines = [
         f"{map_id}: {W}x{H} samples, {mclass} passable {frac:.1f}% of map, "
         f"largest component {biggest:.1f}% of passable",
         f"  grid {cols}x{rows} -> {len(regions)} regions "
         f"(per rectangle x component), "
-        f"{sum(len(r['neighbors']) for r in regions) // 2} edges",
-        f"  partition: {impure} leaf/leaves still hold a second component; "
-        f"{orphan} passable sample(s) ({pct:.2f}%) sit in a region of "
-        f"another component, {notable} ({npct:.2f}%) of them in a pocket "
-        f"big enough to have deserved its own region",
+        f"{sum(len(r['neighbors']) for r in regions) // 2} edges, "
+        f"{verts} polygon vertices ({verts // max(1, len(regions))}/region)",
+        f"  attribution: {impure} region(s) still enclose ground of another "
+        f"component — {other_in} sample(s), {pct:.2f}% of everything the "
+        f"polygons claim (the rectangles they were clipped from claimed "
+        f"{rpct:.2f}%); {wilds} of the map's {npass} passable sample(s) "
+        f"({npct:.2f}%) are outside every polygon and resolve to wilds "
+        f"({own_out} of those are ground a region clipped off its own "
+        f"component)",
         f'  intent: reachability = "{intent}" (from {intent_source})',
         f"  starts: {len(starts)}  terrain: {'PASS' if passed else 'FAIL'} — {msg}",
         f"  graph:  {'PASS' if gpassed else 'FAIL'} — {gmsg}",

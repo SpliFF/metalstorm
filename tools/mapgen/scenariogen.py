@@ -174,6 +174,7 @@ from regions_from_map import (                            # noqa: E402
     _nearest_passable_component,
     components,
     passable_mask,
+    point_in_polygon,
     read_heightmap,
     read_map_row,
     read_mapinfo,
@@ -321,6 +322,8 @@ _REGION_RE = re.compile(
     r'key\s*=\s*"(?P<key>[^"]+)"\s*,\s*'
     r'name\s*=\s*"(?P<name>[^"]*)"\s*,\s*'
     r'polygon\s*=\s*\{(?P<poly>.*?)\}\s*,\s*'
+    r'(?:centre\s*=\s*\{\s*x\s*=\s*(?P<cx>-?[0-9.]+)\s*,\s*'
+    r'z\s*=\s*(?P<cz>-?[0-9.]+)\s*\}\s*,\s*)?'
     r'value\s*=\s*(?P<value>-?[0-9.]+)\s*,\s*'
     r'tags\s*=\s*\{(?P<tags>[^}]*)\}\s*,\s*'
     r'neighbors\s*=\s*\{(?P<nbrs>[^}]*)\}',
@@ -363,6 +366,8 @@ def read_region_graph(map_dir: str) -> list[dict]:
             "key": m.group("key"),
             "name": m.group("name"),
             "polygon": verts,
+            "centre": ((float(m.group("cx")), float(m.group("cz")))
+                       if m.group("cx") else None),
             "value": float(m.group("value")),
             "tags": re.findall(r'"([^"]*)"', m.group("tags")),
             "neighbors": re.findall(r'"([^"]*)"', m.group("nbrs")),
@@ -629,14 +634,23 @@ def read_convoy_routes(map_dir: str) -> list[dict]:
 
 
 def region_centre(region: dict) -> tuple[float, float]:
-    """The polygon's VERTEX AVERAGE — the exact quantity the sim publishes.
+    """The exact quantity the sim publishes as `region_<key>_x/z`.
 
-    game_regions.lua:226-231 computes `region_<key>_x/z` this way, and
-    game_scenario.lua's contestability check measures against those very
-    rulesParams. Any other notion of "centre" here would make this generator's
-    arithmetic disagree with the loader's, which is the difference between a
-    gate and a guess.
+    game_regions.lua's `publishRegionStatics` prefers the region's own
+    `centre` field and falls back to the polygon's VERTEX AVERAGE, so this
+    does the same, in the same order. game_scenario.lua's contestability check
+    measures against those very rulesParams, and any other notion of "centre"
+    here would make this generator's arithmetic disagree with the loader's —
+    the difference between a gate and a guess.
+
+    The `centre` field exists because M9m clipped a generated region's polygon
+    to its own component's coastline: the vertex average of a coastline is
+    wherever its vertices are dense, which for a concave region is routinely
+    outside the region and often at sea.
     """
+    centre = region.get("centre")
+    if centre:
+        return (float(centre[0]), float(centre[1]))
     n = len(region["polygon"])
     return (sum(v[0] for v in region["polygon"]) / n,
             sum(v[1] for v in region["polygon"]) / n)
@@ -966,9 +980,16 @@ def region_anchor(terrain: Terrain, region: dict,
     into "this region has no ground", hiding the one diagnosis that matters
     behind a vaguer one. The gate reports it instead, by name.
 
-    Scans outward from the polygon centroid on a fixed stride, so the answer is
-    a function of the terrain alone — no RNG, so two runs on one seed cannot
-    disagree about where a region "is".
+    Scans outward from the region's published centre on a fixed stride, so the
+    answer is a function of the terrain alone — no RNG, so two runs on one seed
+    cannot disagree about where a region "is".
+
+    Every candidate must be INSIDE the polygon, not merely inside its bounding
+    box. That was the same statement while regions were rectangles; since M9m a
+    generated region's polygon is its component's coastline, and a point in the
+    bounding box but outside the polygon belongs to another region or to wilds —
+    so the scenario would plant a town it says is in region X on ground the sim
+    files under Y.
     """
     cx, cz = region_centre(region)
     xs = [v[0] for v in region["polygon"]]
@@ -984,6 +1005,8 @@ def region_anchor(terrain: Terrain, region: dict,
         for dx, dz in sorted(ring):
             x, z = cx + dx, cz + dz
             if not (x0 <= x <= x1 and z0 <= z <= z1):
+                continue
+            if not point_in_polygon(x, z, region["polygon"]):
                 continue
             if not all(terrain.passable(x, z, c) for c in terrain.classes):
                 continue
