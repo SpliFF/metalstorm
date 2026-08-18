@@ -64,11 +64,15 @@ from terragen import vegetation as veg      # noqa: E402
 from terragen import yards as yd            # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
 import ms_defs                              # noqa: E402
+import regions_from_map as rfm             # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAME_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "data", "games",
                                         "metalstorm"))
 MAP_SIZE = 16384.0
+# The SMF's height range floor. Shared by the package config and the region
+# graph, which must quantise against the SAME range the map ships with.
+MIN_HEIGHT = -120.0
 SEED_DEFAULT = 20260730
 N_STARTS = 8
 SYNTH_REV = 4          # bump when synth_height changes — keys the erosion cache
@@ -628,6 +632,49 @@ def report_surface(h: np.ndarray, cellsize: float, label: str,
     return SurfaceReport(label, dv, relief, rr, an)
 
 
+# --------------------------------------------------------------------------
+# Region graph (PLAN-maps M9l)
+# --------------------------------------------------------------------------
+#
+# A free-form map has no authored gameplay skeleton, so until now it shipped no
+# `mapdata/regions.lua` at all — and `game_regions.lua` answers a missing file
+# with the fixed 2048-elmo GRID provider, whose regions carry NO neighbours.
+# The strategic AI reads exactly those neighbour lists as the map's movement
+# graph (`ai/strategos/picture.lua`), so on every terragen map it had no graph
+# to move on, and `scenariogen.py` refuses such a map outright ("run
+# regions_from_map.py on it first"). The graph is derived here, at generation
+# time, from the surface that ships — the same derivation `regions_from_map.py`
+# runs on the processed map, so re-running that tool afterwards reproduces the
+# file rather than renaming every region key under the scenarios that address
+# them.
+#
+# The base grid stays at the tool's default. It is NOT the granularity lever it
+# looks like: on the mounds archipelagos the leaf partition is impure at every
+# resolution tried (4x4 -> 118 regions / 49.1% of passable ground in a region of
+# another component; 16x16 -> 170 / 45.8%), because the largest armour
+# component is 9% of the passable area and a rectangle of any size spans several
+# islands. See PLAN-maps.md M9l.
+REGION_TARGET_DEFAULT = 20
+
+
+def build_region_graph(h, min_h, max_h, starts, map_id, intent,
+                       target_regions=REGION_TARGET_DEFAULT, log=print):
+    """Derive `mapdata/regions.lua` for the map about to be packaged.
+
+    Derived from `smf.shipped_heights`, not from `h`: the sim reads the map
+    back through the SMF's uint16, and deriving from the float surface would
+    put this file one quantisation step away from the one the same code
+    produces on the processed bytes.
+    """
+    hs = smf.shipped_heights(h, min_h, max_h).ravel().tolist()
+    H, W = h.shape
+    log("region graph:")
+    return rfm.derive_graph(hs, W, H, starts, map_id,
+                            target_regions=target_regions, intent=intent,
+                            intent_source="generator",
+                            log=lambda line: log("  " + line))
+
+
 # Which shipped maps are armour-split ON PURPOSE (PLAN-maps.md §2k, user ruling
 # 2026-08-16). Keyed by `--id` and authored here rather than measured, because a
 # declaration the generator derives from its own output can never disagree with
@@ -666,7 +713,9 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              connect: "bool | None" = None,
              start_connectivity: "bool | None" = None,
              raise_penalty: int = 1,
-             reachability: "str | None" = None):
+             reachability: "str | None" = None,
+             region_graph: bool = True,
+             target_regions: int = REGION_TARGET_DEFAULT):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -1428,6 +1477,24 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"reachability declared \"{reachability}\" for {map_id}:")
     reach.report(pas.read_all(h, cell, starts), reachability)
 
+    # The movement graph the strategic AI drives, derived from the packaged
+    # surface (see build_region_graph). `--no-region-graph` leaves the map on
+    # game_regions.lua's neighbourless 2048-elmo grid, which is what every
+    # terragen map shipped before M9l — keep it only for a map addressed by
+    # grid keys ("2:2"), never as a default.
+    regions_lua = None
+    if region_graph:
+        g = build_region_graph(h, MIN_HEIGHT, max_h, starts, map_id, reachability,
+                               target_regions=target_regions)
+        regions_lua = g.lua
+        if not g.passed:
+            # Not fatal: the terrain verdict is `reach.report`'s to make and it
+            # has already spoken. What is new here is the GRAPH agreeing with
+            # the mask — a graph that claims a route across an armour split is
+            # the M9j defect, and shipping one silently is how it survived.
+            print("CONTRACT FAIL: the derived region graph disagrees with the "
+                  "passability mask (see the report above)")
+
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
@@ -1439,7 +1506,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              f"Free-form archipelago (seed {seed}, {landmass:.0%} land, "
              f"{islands} islands, {climate} climate): "
              "island road nets, coastal towns, ruins.")),
-        min_height=-120.0, max_height=max_h,
+        min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
         seed=seed,
@@ -1453,6 +1520,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
+        regions_lua=regions_lua,
         roads_lua=pkg.emit_roads_lua(network, cell, rp, crossings=crossings,
                                      yards=yard_pads,
                                      refusals=crossing_refusals,
@@ -1608,6 +1676,22 @@ def main():
                          "\u00a72k); any other id defaults to \'connected\', "
                          "so a new map that strands its starts still fails the "
                          "gate.")
+    ap.add_argument("--region-graph", dest="region_graph",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="emit mapdata/regions.lua — the movement graph the "
+                         "strategic AI drives, derived from the packaged "
+                         "surface (PLAN-maps M9l). --no-region-graph leaves "
+                         "the map on game_regions.lua's 2048-elmo grid "
+                         "provider, whose regions have NO neighbours: keep it "
+                         "only for a map whose scenarios address regions by "
+                         "grid key (\"2:2\").")
+    ap.add_argument("--target-regions", dest="target_regions", type=int,
+                    default=REGION_TARGET_DEFAULT,
+                    help="size of the region graph's BASE grid; the emitted "
+                         "count is higher, since a rectangle spanning two "
+                         "armour components is subdivided. Not the granularity "
+                         "lever it looks like on an island map — see "
+                         "PLAN-maps M9l.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -1654,6 +1738,10 @@ def main():
                                else "--no-start-connectivity")
         if args.raise_penalty != 1:
             passthrough += ["--carve-raise-penalty", str(args.raise_penalty)]
+        if not args.region_graph:
+            passthrough.append("--no-region-graph")
+        if args.target_regions != REGION_TARGET_DEFAULT:
+            passthrough += ["--target-regions", str(args.target_regions)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -1677,7 +1765,9 @@ def main():
              aim_iterations=args.aim_iterations,
              connect=args.connect,
              start_connectivity=args.start_connectivity,
-             raise_penalty=args.raise_penalty)
+             raise_penalty=args.raise_penalty,
+             region_graph=args.region_graph,
+             target_regions=args.target_regions)
 
 
 if __name__ == "__main__":

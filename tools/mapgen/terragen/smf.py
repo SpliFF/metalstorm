@@ -33,6 +33,33 @@ def height_ceiling(top: float, floor: float = 0.0) -> float:
     return max(float(floor), float(np.ceil(top * 1.05 / 100.0) * 100.0))
 
 
+def quantize_levels(hm: np.ndarray, min_h: float, max_h: float) -> np.ndarray:
+    """The uint16 levels the SMF stores, without the clip report.
+
+    Split out of `quantize_heightmap` so a caller that needs the SHIPPED
+    surface rather than the file bytes (see `shipped_heights`) does not raise a
+    second copy of the clip warning for the same map.
+    """
+    scale = 65535.0 / (max_h - min_h)
+    return np.clip((np.clip(hm, min_h, max_h) - min_h) * scale + 0.5,
+                   0, 65535).astype("<u2")
+
+
+def shipped_heights(hm: np.ndarray, min_h: float, max_h: float) -> np.ndarray:
+    """The heights the SIM will read back, i.e. `hm` through the SMF's uint16.
+
+    A generator that derives anything from its own float surface derives it
+    from a surface no one else ever sees: the map ships quantised, and every
+    consumer (mapconverter's heightmap.bin, regions_from_map.py, the sim) reads
+    the quantised values back. The step is small — ~0.02 elmos on a 1320-elmo
+    range — but "small" is not "zero" for a slope threshold, and a region graph
+    that disagrees with the one the same tool derives from the shipped bytes
+    would rename regions on a reprocess. Derive from this, not from `hm`.
+    """
+    q = quantize_levels(hm, min_h, max_h).astype(np.float64)
+    return min_h + (max_h - min_h) / 65535.0 * q
+
+
 def quantize_heightmap(hm: np.ndarray, min_h: float, max_h: float) -> bytes:
     """Quantize float elmos to uint16 over [min_h, max_h].
 
@@ -54,9 +81,7 @@ def quantize_heightmap(hm: np.ndarray, min_h: float, max_h: float) -> bytes:
         print(f"WARNING: SMF height clip against "
               f"[{min_h:.0f}, {max_h:.0f}] — " + ", ".join(parts),
               file=sys.stderr)
-    scale = 65535.0 / (max_h - min_h)
-    q = np.clip((np.clip(hm, min_h, max_h) - min_h) * scale + 0.5, 0, 65535).astype("<u2")
-    return q.tobytes()
+    return quantize_levels(hm, min_h, max_h).tobytes()
 
 
 def encode_minimap_dxt1(minimap_rgb: np.ndarray) -> bytes:

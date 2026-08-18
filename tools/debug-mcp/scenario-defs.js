@@ -82,10 +82,12 @@ export function loadDefNames(projectRoot, gameId, kind) {
  *
  * Best-effort by construction: the authoritative graph is the live one
  * (`GG.Regions.Keys()`, game_scenario.lua:396-412), and a map processed since
- * this file was written can drift from it. Maps that deliberately ship no
- * `regions.lua` (green_flat_x34_v3, skerry_reach) use the 2048-elmo GRID
- * provider and address regions by grid key ("2:2") — for those this returns
- * null and the caller skips, which is correct: any string can be a grid key.
+ * this file was written can drift from it. A map that ships no `regions.lua`
+ * uses the 2048-elmo GRID provider and addresses regions by grid key ("2:2") —
+ * for those this returns null and the caller skips, which is correct: any
+ * string can be a grid key. Since PLAN-maps M9l every terragen map DOES ship a
+ * graph (archipelago.py emits it), so the grid-key case is now
+ * `green_flat_x34_v3` and the imported maps that were never regenerated.
  *
  * @returns {{keys: Set<string>, file: string}|null}
  */

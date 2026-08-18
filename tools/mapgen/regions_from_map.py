@@ -3,6 +3,12 @@
 regions_from_map.py — derive a Metalstorm region graph (`regions.json`) from a
 processed map's heightmap, for maps that ship no hand-authored layout.
 
+Since M9l `archipelago.py` calls `derive_graph` below at package time, so a
+free-form generated map ships its graph with the rest of the package and this
+tool is the way to REGENERATE one (or to derive one for an imported map that
+was never generated here). Both paths must agree byte for byte — see
+`derive_graph`.
+
 Why this exists: Metalstorm's strategic AI (`ai/strategos/picture.lua`) and the
 client overlay (`ui/lib/regions.js`) both read `regions.json` and treat its
 `neighbors` lists as the map's movement graph. Every imported Recoil map ships a
@@ -32,11 +38,13 @@ Usage:
 `--verify` IS READ-ONLY. It used to write `mapdata/regions.lua` + `regions.json`
 like a plain run and merely add an exit code on top, which meant "check whether
 this map is playable" silently *converted the map to the graph provider*. That
-is not hypothetical: `green_flat_x34_v3` and `skerry_reach` deliberately ship no
-`mapdata/regions.lua` so that `game_regions.lua` selects the 2048-elmo GRID
-provider, and `scenario_smoke_test.lua` addresses green_flat by grid key
-("2:2"). One verification sweep across every map gave both of them a 16-region
-named graph and broke those keys. A verifier that mutates what it inspects
+is not hypothetical: `green_flat_x34_v3` ships no `mapdata/regions.lua` so that
+`game_regions.lua` selects the 2048-elmo GRID provider, and
+`scenario_smoke_test.lua` addresses it by grid key ("2:2"). One verification
+sweep across every map gave it (and, then, `skerry_reach`) a 16-region named
+graph and broke those keys. `skerry_reach` is no longer such a map — M9l gave
+every terragen map a graph on purpose — but green_flat still is, and the next
+grid-keyed map will be too. A verifier that mutates what it inspects
 cannot be used to check anything, so `--verify` now implies `--dry-run`.
 """
 
@@ -50,6 +58,7 @@ import re
 import struct
 import sys
 from collections import deque
+from typing import NamedTuple
 
 # `terragen.reachability` is stdlib-only on purpose (no numpy, no scipy), so
 # this stays runnable on a bare checkout. It owns the intent vocabulary, the
@@ -831,6 +840,89 @@ def verify_graph(regions, ids, starts, cw, ch, intent=reach.DEFAULT_INTENT):
 
 
 # --------------------------------------------------------------------------
+# The one derivation — shared by this tool and by the generators
+# --------------------------------------------------------------------------
+
+
+class DerivedGraph(NamedTuple):
+    """Everything a caller needs to ship (or judge) a derived region graph."""
+    lua: str                 # mapdata/regions.lua text
+    json: dict               # regions.json document (MapProcessor's export)
+    regions: list            # raw region dicts (internal `_c` cells included)
+    passed: bool             # terrain verdict AND graph-vs-mask verdict
+    terrain_ok: bool
+    graph_ok: bool
+    messages: list           # the printed report, line by line
+    orphan_frac: float       # passable samples in a region of another component
+    notable_frac: float      # ...the part of that big enough to deserve a region
+
+
+def derive_graph(hs, W, H, starts, map_id, target_regions=20,
+                 mclass=DEFAULT_CLASS, intent=reach.DEFAULT_INTENT,
+                 intent_source="mapinfo", log=print) -> DerivedGraph:
+    """Derive the region graph from raw heightmap samples.
+
+    THE single derivation. A generator calls it with the surface it is about to
+    package (through `terragen.smf.shipped_heights` first, so it sees the
+    surface the map ships); `main()` below calls it with the samples read
+    back out of a processed map. Both must produce the same file, because both
+    paths are used on the same map: `archipelago.py` writes it at generation
+    time and this tool regenerates it in place afterwards. Two implementations
+    would drift, and the drift would surface as renamed region keys — which is
+    a dead scenario at GameStart (see `check_generator_ownership`).
+
+    `hs` is row-major, `(W*H)` float elmos; `starts` is a list of (x, z) in
+    elmos. Region names are seeded off `map_id`, so the map id is part of the
+    output, not decoration.
+    """
+    deg, depth = MOVE_CLASSES[mclass]
+    ok = passable_mask(hs, W, H, deg, depth)
+    comp, sizes = components(ok, W, H)
+    npass = sum(sizes)
+
+    seed = sum(ord(ch) for ch in map_id)
+    regions, cols, rows, cw, ch_ = build_regions(
+        hs, ok, comp, W, H, target_regions, starts, seed)
+
+    passed, msg, ids = verify_starts(ok, comp, W, H, starts, intent)
+    gpassed, gmsg, _crossed = verify_graph(regions, ids, starts, cw, ch_, intent)
+
+    frac = 100.0 * npass / (W * H)
+    biggest = 100.0 * max(sizes) / npass if npass else 0.0
+    impure, orphan, notable, in_regions = partition_purity(regions)
+    pct = (100.0 * orphan / in_regions) if in_regions else 0.0
+    npct = (100.0 * notable / in_regions) if in_regions else 0.0
+    lines = [
+        f"{map_id}: {W}x{H} samples, {mclass} passable {frac:.1f}% of map, "
+        f"largest component {biggest:.1f}% of passable",
+        f"  grid {cols}x{rows} -> {len(regions)} regions "
+        f"(per rectangle x component), "
+        f"{sum(len(r['neighbors']) for r in regions) // 2} edges",
+        f"  partition: {impure} leaf/leaves still hold a second component; "
+        f"{orphan} passable sample(s) ({pct:.2f}%) sit in a region of "
+        f"another component, {notable} ({npct:.2f}%) of them in a pocket "
+        f"big enough to have deserved its own region",
+        f'  intent: reachability = "{intent}" (from {intent_source})',
+        f"  starts: {len(starts)}  terrain: {'PASS' if passed else 'FAIL'} — {msg}",
+        f"  graph:  {'PASS' if gpassed else 'FAIL'} — {gmsg}",
+    ]
+    for line in lines:
+        log(line)
+
+    return DerivedGraph(
+        lua=to_lua(regions, W, H),
+        json=to_json(regions, W, H, cw, ch_),
+        regions=regions,
+        passed=passed and gpassed,
+        terrain_ok=passed,
+        graph_ok=gpassed,
+        messages=lines,
+        orphan_frac=pct / 100.0,
+        notable_frac=npct / 100.0,
+    )
+
+
+# --------------------------------------------------------------------------
 
 # This tool derives a region graph from the heightmap alone, so it invents
 # region keys (`amber_hook`, `wither_fen`, ...). A map whose gameplay skeleton
@@ -932,47 +1024,21 @@ def main(argv=None):
     else:
         starts = []
 
-    deg, depth = MOVE_CLASSES[args.mclass]
-    ok = passable_mask(hs, W, H, deg, depth)
-    comp, sizes = components(ok, W, H)
-    npass = sum(sizes)
-
-    seed = sum(ord(ch) for ch in map_id)
-    regions, cols, rows, cw, ch_ = build_regions(
-        hs, ok, comp, W, H, args.target_regions, starts, seed)
-
     intent = (info["reachability"] if args.expect == "auto" else args.expect)
-    passed, msg, ids = verify_starts(ok, comp, W, H, starts, intent)
-    gpassed, gmsg, _crossed = verify_graph(regions, ids, starts, cw, ch_, intent)
-
-    frac = 100.0 * npass / (W * H)
-    biggest = 100.0 * max(sizes) / npass if npass else 0.0
-    print(f"{map_id}: {W}x{H} samples, {args.mclass} passable {frac:.1f}% of map, "
-          f"largest component {biggest:.1f}% of passable")
-    impure, orphan, notable, in_regions = partition_purity(regions)
-    print(f"  grid {cols}x{rows} -> {len(regions)} regions "
-          f"(per rectangle x component), "
-          f"{sum(len(r['neighbors']) for r in regions) // 2} edges")
-    pct = (100.0 * orphan / in_regions) if in_regions else 0.0
-    npct = (100.0 * notable / in_regions) if in_regions else 0.0
-    print(f"  partition: {impure} leaf/leaves still hold a second component; "
-          f"{orphan} passable sample(s) ({pct:.2f}%) sit in a region of "
-          f"another component, {notable} ({npct:.2f}%) of them in a pocket "
-          f"big enough to have deserved its own region")
-    src = "mapinfo" if args.expect == "auto" else "--expect"
-    print(f"  intent: reachability = \"{intent}\" (from {src})")
-    print(f"  starts: {len(starts)}  terrain: {'PASS' if passed else 'FAIL'} — {msg}")
-    print(f"  graph:  {'PASS' if gpassed else 'FAIL'} — {gmsg}")
-    passed = passed and gpassed
-
-    doc = to_json(regions, W, H, cw, ch_)
+    g = derive_graph(hs, W, H, starts, map_id,
+                     target_regions=args.target_regions, mclass=args.mclass,
+                     intent=intent,
+                     intent_source=("mapinfo" if args.expect == "auto"
+                                    else "--expect"))
+    passed = g.passed
+    doc = g.json
     if not args.dry_run:
         mapdata = os.path.join(map_dir, "mapdata")
         os.makedirs(mapdata, exist_ok=True)
         lua_path = os.path.join(mapdata, "regions.lua")
         check_generator_ownership(lua_path, args.force)
         with open(lua_path, "w", encoding="utf-8") as f:
-            f.write(to_lua(regions, W, H))
+            f.write(g.lua)
         # regions.json is MapProcessor's export, not an input — but writing it
         # here too means the graph is live for the AI and the client overlay
         # without waiting for a map reprocess. A reprocess will regenerate it
