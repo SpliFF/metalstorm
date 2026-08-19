@@ -1173,15 +1173,64 @@ button.link-button:hover { background: none; color: #7fdcff; }
     color: #9fb3c8;
     font-size: 13px;
 }
-.world-detail {
+/* The right column. The width, the border and the scroll live here rather
+   than on `.world-detail` so that W8's stat panel and the POI detail share one
+   column and one scrollbar instead of fighting for the edge. */
+.world-side {
     width: 280px;
     flex: none;
-    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     border-left: 1px solid #22314a;
     background: #0f1626;
     overflow-y: auto;
+}
+.world-detail {
+    padding: 14px 16px;
     font-size: 13px;
 }
+/* PLAN-worldsim.md W8: the player's own stats — per-commander Authority, the
+   per-player Capacity budget, the derived Rank. Visually a card at the top of
+   the column so it does not read as part of whichever POI is selected. */
+.world-player {
+    padding: 12px 16px;
+    border-bottom: 1px solid #22314a;
+    background: #121b2e;
+    font-size: 13px;
+}
+.world-player h4 { margin: 0 0 8px; font-size: 14px; color: #8ad2ff; }
+.world-player-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.world-player-label { color: #9fb3c8; }
+.world-player-value { margin-left: auto; color: #ffd479; font-variant-numeric: tabular-nums; }
+.world-player-sub { color: #6f8299; font-size: 12px; margin-bottom: 8px; }
+/* The capacity budget as a bar: a budget is a proportion, and a number alone
+   makes the player do the division. */
+.world-capacity-bar {
+    position: relative;
+    height: 6px;
+    border-radius: 3px;
+    background: #22314a;
+    overflow: hidden;
+    margin: 2px 0 6px;
+}
+.world-capacity-fill { position: absolute; inset: 0 auto 0 0; background: #4a9eff; }
+.world-commanders { list-style: none; margin: 4px 0 0; padding: 0; }
+.world-commanders li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 0;
+    border-top: 1px solid #1b2942;
+}
+.world-commander-authority { margin-left: auto; color: #ffd479; font-variant-numeric: tabular-nums; }
+.world-commander-where { color: #6f8299; font-size: 12px; }
+.world-commander-loaned { color: #ffcf70; font-size: 11px; text-transform: uppercase; }
 .world-detail h4 { margin: 0 0 4px; font-size: 15px; color: #ffd479; }
 .world-detail-sub { color: #9fb3c8; margin-bottom: 10px; }
 .world-detail-empty { color: #6f8299; }

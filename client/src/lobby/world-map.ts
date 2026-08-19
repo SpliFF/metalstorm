@@ -641,3 +641,141 @@ function drawPois(
 /// against the basemap's own width: 1400px per map unit ≈ a 2800px-wide world,
 /// i.e. the player has zoomed past "whole Earth" on any ordinary window.
 export const fitScaleLabelThreshold = 1400;
+
+// ─────────────── the player stat panel (PLAN-worldsim.md W8) ───────────────
+//
+// Authority is per COMMANDER, Capacity is per PLAYER and Rank is derived on
+// read from holdings — the locked design of
+// PLAN-metalstorm-worldbuilding.md Captures 23/24/27. The shapes below mirror
+// `WorldStats::AttachMeStats`'s body exactly, and the parse drops anything
+// unusable rather than throwing, for the same reason `parseWorldGraph` does: a
+// lobby built before W8 answers `/api/world/me` without any of these keys, and
+// that must render as "no stats yet" rather than as a broken panel.
+
+/// One commander a player holds, as the panel shows it. A world ROW, not a
+/// unit — the battle-side commander is a different thing entirely.
+export interface WorldCommander {
+    id: string;
+    name: string;
+    factionId: string;
+    poiId: string;
+    state: string;
+    /// Decayed to now by the server. The number everything reads.
+    authority: number;
+    /// What the row stores, before decay — shown beside the live value so a
+    /// player can SEE the decay rather than suspect the display.
+    authorityStored: number;
+    loaned: boolean;
+}
+
+/// The order budget (Capture 12's per-real-24h ceiling).
+export interface WorldCapacity {
+    max: number;
+    spent: number;
+    available: number;
+    /// Real ms until the next recharge — real, not world: the ceiling protects
+    /// the player's day, so a world pause does not move it.
+    nextRechargeInMs: number;
+    rechargeHours: number;
+}
+
+/// Rank: derived, per player per faction, and reported with its terms so the
+/// number can be audited by the player it weights the votes of.
+export interface WorldRank {
+    factionId: string | null;
+    total: number;
+    commanderCount: number;
+    poiCount: number;
+    loanedCount: number;
+    terms: Record<string, number>;
+}
+
+export interface WorldPlayerStats {
+    /// W7's world authority — the founding gate's number, and NOT a
+    /// commander's Authority. Two different stats with one name in the design;
+    /// the panel labels them apart.
+    worldAuthority: number;
+    commanders: WorldCommander[];
+    capacity: WorldCapacity | null;
+    rank: WorldRank | null;
+}
+
+/// Parse the W8 half of `POST /api/world/me`. Null when the body carries none
+/// of it (a pre-W8 lobby), which the panel renders as absent rather than empty.
+export function parseWorldPlayerStats(json: unknown): WorldPlayerStats | null {
+    if (!json || typeof json !== 'object') return null;
+    const raw = json as Record<string, unknown>;
+    const hasStats = Array.isArray(raw.commanders) || !!raw.capacity || !!raw.rank;
+    if (!hasStats) return null;
+    const commanders: WorldCommander[] = [];
+    for (const item of (Array.isArray(raw.commanders) ? raw.commanders : []) as Record<string, unknown>[]) {
+        if (!item || typeof item.commanderId !== 'string' || !item.commanderId) continue;
+        commanders.push({
+            id: item.commanderId,
+            name: typeof item.name === 'string' && item.name ? item.name : item.commanderId,
+            factionId: typeof item.factionId === 'string' ? item.factionId : '',
+            poiId: typeof item.poiId === 'string' ? item.poiId : '',
+            state: typeof item.state === 'string' ? item.state : 'active',
+            authority: num(item.authority),
+            authorityStored: num(item.authorityStored),
+            loaned: item.loaned === true,
+        });
+    }
+    let capacity: WorldCapacity | null = null;
+    if (raw.capacity && typeof raw.capacity === 'object') {
+        const c = raw.capacity as Record<string, unknown>;
+        capacity = {
+            max: num(c.max),
+            spent: num(c.spent),
+            available: num(c.available),
+            nextRechargeInMs: num(c.nextRechargeInMs),
+            rechargeHours: num(c.rechargeHours, 24),
+        };
+    }
+    let rank: WorldRank | null = null;
+    if (raw.rank && typeof raw.rank === 'object') {
+        const r = raw.rank as Record<string, unknown>;
+        const terms: Record<string, number> = {};
+        if (r.terms && typeof r.terms === 'object') {
+            for (const [k, v] of Object.entries(r.terms as Record<string, unknown>))
+                if (typeof v === 'number' && Number.isFinite(v)) terms[k] = v;
+        }
+        rank = {
+            factionId: typeof r.factionId === 'string' && r.factionId ? r.factionId : null,
+            total: num(r.total),
+            commanderCount: num(r.commanderCount),
+            poiCount: num(r.poiCount),
+            loanedCount: num(r.loanedCount),
+            terms,
+        };
+    }
+    return { worldAuthority: num(raw.authority), commanders, capacity, rank };
+}
+
+/// A number, or `fallback` — `Number(null)` is 0 and `Number(undefined)` is
+/// NaN, and neither is a stat worth displaying.
+function num(v: unknown, fallback = 0): number {
+    return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+/// A REAL duration, for the capacity countdown. Deliberately not
+/// `formatWorldDuration`: that one reads a world-clock interval, which runs 24×
+/// faster, and formatting a real 4-hour wait with it would tell the player to
+/// come back in "4 days".
+export function formatRealDuration(ms: number): string {
+    if (!Number.isFinite(ms) || ms <= 0) return 'now';
+    const totalMin = Math.ceil(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    return `${m}m`;
+}
+
+/// Stats are display numbers, not currency: one decimal on anything small
+/// enough for it to matter and none above 100, so an Authority of 12.4 reads
+/// as 12.4 and a rank of 1284.3 reads as 1284.
+export function formatStat(value: number): string {
+    if (!Number.isFinite(value)) return '—';
+    if (Math.abs(value) >= 100) return Math.round(value).toString();
+    return (Math.round(value * 10) / 10).toString();
+}

@@ -16,6 +16,7 @@ import {
     parseWorldGraph, hitTestPoi, edgesFor, formatWorldDuration, formatLatLon,
     parseWorldClock, tickWorldClock, formatWorldClock, worldCalendarFromMs,
     drawWorld, WORLD_COLORS, poiOwnerColour,
+    parseWorldPlayerStats, formatRealDuration, formatStat,
     type MapView, type Viewport, type WorldPoi, type WorldCtx,
 } from './world-map';
 
@@ -463,5 +464,97 @@ describe('W7: faction ownership', () => {
         const strokes = r.calls.filter(c => c.op === 'stroke').map(c => c.stroke);
         expect(strokes).toContain(WORLD_COLORS.poiActiveRing);
         expect(strokes).toContain('#5b9bd5');
+    });
+});
+
+// ───────────── the player stat panel (PLAN-worldsim.md W8) ─────────────
+
+const ME_JSON = {
+    worldId: 'earth',
+    accountId: 7,
+    authority: 50,
+    canFound: false,
+    membership: { factionId: 'iron-order', role: 'founder', rank: 0 },
+    commanders: [
+        {
+            commanderId: 'vex-1', name: 'Vex', factionId: 'iron-order', poiId: 'paris',
+            state: 'active', authority: 12.5, authorityStored: 14, loaned: false,
+        },
+        {
+            commanderId: 'vex-2', name: 'Rell', factionId: 'iron-order', poiId: '',
+            state: 'active', authority: 3, authorityStored: 3, loaned: true, loanedTo: 9,
+        },
+    ],
+    capacity: { max: 40, spent: 10, available: 30, rechargedAt: 1000, nextRechargeInMs: 3_600_000, rechargeHours: 24 },
+    rank: {
+        factionId: 'iron-order', total: 47.5, commanderCount: 1, poiCount: 1, loanedCount: 1,
+        terms: { commanders: 10, commanderAuthority: 12.5, regions: 25, money: 0 },
+    },
+};
+
+describe('parsing the W8 player stats off POST /api/world/me', () => {
+    it('reads the three stats and keeps them apart', () => {
+        const s = parseWorldPlayerStats(ME_JSON)!;
+        // World authority (W7's founding-gate number) is NOT a commander's
+        // Authority — Capture 23 makes them separate stats and the panel must
+        // not merge them.
+        expect(s.worldAuthority).toBe(50);
+        expect(s.commanders.map(c => c.authority)).toEqual([12.5, 3]);
+        expect(s.capacity!.available).toBe(30);
+        expect(s.rank!.total).toBe(47.5);
+        expect(s.rank!.factionId).toBe('iron-order');
+    });
+
+    it('carries the loan flag and the decayed/stored pair', () => {
+        const s = parseWorldPlayerStats(ME_JSON)!;
+        expect(s.commanders[1].loaned).toBe(true);
+        // C27's exclusion is the server's to apply; the client only has to be
+        // able to SAY why the rank does not count it.
+        expect(s.rank!.loanedCount).toBe(1);
+        expect(s.commanders[0].authorityStored).toBe(14);
+    });
+
+    it('is null on a body that has no stats at all', () => {
+        // A lobby built before W8 answers /api/world/me without any of it. The
+        // panel must read that as absent, not as a player with zero of
+        // everything.
+        expect(parseWorldPlayerStats({ worldId: 'earth', authority: 50 })).toBeNull();
+        expect(parseWorldPlayerStats(null)).toBeNull();
+    });
+
+    it('drops unusable numbers rather than rendering NaN', () => {
+        const s = parseWorldPlayerStats({
+            authority: null,
+            commanders: [{ commanderId: 'a', authority: 'lots' }, { name: 'no id' }],
+            capacity: { max: 'wide', available: 5 },
+            rank: { total: undefined, terms: { good: 3, bad: 'no' } },
+        })!;
+        expect(s.worldAuthority).toBe(0);
+        expect(s.commanders.map(c => c.id)).toEqual(['a']);
+        expect(s.commanders[0].authority).toBe(0);
+        expect(s.capacity!.max).toBe(0);
+        expect(s.capacity!.rechargeHours).toBe(24);   // a stat with a real default
+        expect(s.rank!.total).toBe(0);
+        expect(s.rank!.terms).toEqual({ good: 3 });
+    });
+});
+
+describe('stat formatting', () => {
+    it('formats a REAL wait, not a world-clock one', () => {
+        // The capacity recharge is real hours (Capture 12 protects the
+        // player's day), so formatting it with the world-duration formatter
+        // would promise "4 days" for a four-hour wait.
+        expect(formatRealDuration(4 * 3_600_000)).toBe('4h');
+        expect(formatRealDuration(90 * 60_000)).toBe('1h 30m');
+        expect(formatRealDuration(0)).toBe('now');
+        expect(formatRealDuration(-5)).toBe('now');
+        expect(formatWorldDuration(4 * 3_600_000)).toBe('4h');
+    });
+
+    it('shows a decimal where it matters and none where it does not', () => {
+        expect(formatStat(12.44)).toBe('12.4');
+        expect(formatStat(1284.3)).toBe('1284');
+        expect(formatStat(0)).toBe('0');
+        expect(formatStat(NaN)).toBe('—');
     });
 });

@@ -116,6 +116,29 @@ struct WorldDefaults {
     int    factionNameMaxLen     = 32;
     int    factionNameMinLen     = 3;
 
+    // ── W8: the stat family's rates (Captures 23/24/27 + 12) ───────────────
+    // Resolved by `WorldStatRules::FromWorldConfig` (WorldStats.h), which
+    // documents what each one means. They live here so a world is seeded with
+    // them and an operator has one blob to tune.
+    double authorityPerVictory       = 12.0;
+    double authorityPerDefeat        = 3.0;
+    double authorityDecayPerWorldDay = 0.01;
+    double authorityFloor            = 1.0;
+    double commanderGrantAuthority   = 50.0;
+    double capacityBase              = 20.0;
+    double capacityPerCommanderAuthority = 0.10;
+    /// REAL hours, not world hours — Capture 12's ceiling protects the
+    /// player's day, so an admin world pause must not widen anybody's budget.
+    double capacityRechargeHours     = 24.0;
+    double capacityRechargeFraction  = 1.0;
+    double rankPerCommander          = 10.0;
+    double rankPerCommanderAuthority = 1.0;
+    double rankPerPoiHeld            = 25.0;
+    double rankPerArtifact           = 50.0;
+    double rankPerMoney              = 1.0;
+    double rankPerResource           = 1.0;
+    double rankPerUnit               = 2.0;
+
     nlohmann::json ToJson() const;
 };
 
@@ -175,6 +198,11 @@ struct WorldPoiEdgeRecord {
 /// INSERTs, never upserts, because the whole point is that rows accumulate
 /// across many wars fought at the same POI.
 struct WorldSettlementRecord {
+    /// The ledger row's own rowid, filled in on read and ignored on write.
+    /// W8's authority accrual keys its idempotence on it (`WorldStats.h`): two
+    /// identical wars at one POI are two awards, and re-reading either is
+    /// none, which only a per-ROW identity can express.
+    int64_t     settlementId = 0;
     std::string worldId;
     std::string poiId;
     /// The room the war was fought in. A label, not a join key — room ids

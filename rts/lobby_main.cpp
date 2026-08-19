@@ -22,6 +22,7 @@
 #include "Server/WarDirector.h"
 #include "Server/WorldDirector.h"
 #include "Server/WorldFactions.h"
+#include "Server/WorldStats.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
@@ -1233,6 +1234,10 @@ int main(int argc, char *argv[]) {
   // WorldDirector's, because the POI ownership column they write through is
   // added by that call.
   WorldFactions::EnsureTables(mapDb);
+  // PLAN-worldsim.md W8: the commander / authority-event tables and the two
+  // capacity columns added to W7's per-account row. After WorldFactions' for
+  // the same reason — the ALTER TABLE it runs needs that table to exist.
+  WorldStats::EnsureTables(mapDb);
   // Seed Earth on first boot, so a fresh lobby has a world to serve rather
   // than a 404 the client has to special-case. Idempotent, and guarded on "no
   // world exists at all": a lobby that already has a world never gets a second
@@ -4760,6 +4765,27 @@ int main(int argc, char *argv[]) {
         w ? w->config : nlohmann::json::object());
   };
 
+  /// The same, for PLAN-worldsim.md W8's rates — a separate resolver rather
+  /// than one fat struct, because the founding gate and the stat family are
+  /// tuned by different people at different times and neither should have to
+  /// know the other's keys.
+  auto worldStatRules = [mapDb](const std::string &worldId) {
+    const auto w = WorldDirector::Load(mapDb, worldId);
+    return WorldStatRules::FromWorldConfig(
+        w ? w->config : nlohmann::json::object());
+  };
+
+  /// The world clock in WORLD ms, which is the clock authority decay is
+  /// measured on (a paused world stops decaying). Falls back to 0 when the
+  /// world cannot be read — `CommanderAuthorityAt` treats a stamp ahead of
+  /// `now` as no elapsed time, so an unreadable clock freezes decay rather
+  /// than inventing a month of it.
+  auto worldNowWorldMs = [mapDb](const std::string &worldId) -> int64_t {
+    if (const auto reading = WorldDirector::ClockFor(mapDb, worldId, WorldNowRealMs()))
+      return reading->worldMs;
+    return 0;
+  };
+
   // GET /api/world/factions — the roster + the archetype catalogue + the
   // founding rules. Public: who holds what is map information, and the
   // "found a faction" form needs the sheets before there is a session doing
@@ -4785,7 +4811,8 @@ int main(int argc, char *argv[]) {
   // gate only sees headers on a POST, so a GET cannot carry the token.
   net.AddHttpPost(
       "/api/world/me", RouteAuth::TokenRequired,
-      [mapDb, &db, worldIdFromQuery, worldFactionRules](
+      [mapDb, &db, worldIdFromQuery, worldFactionRules, worldStatRules,
+       worldNowWorldMs](
           const std::string &, const std::string &,
           const HttpRequestHeaders &headers) -> HttpResponse {
         const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
@@ -4797,15 +4824,23 @@ int main(int argc, char *argv[]) {
         const std::string worldId = worldIdFromQuery("");
         if (worldId.empty())
           return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const auto user = db.FindUserById(uid);
         nlohmann::json body = WorldFactions::MeJson(
             mapDb, worldId, uid, worldFactionRules(worldId), WorldNowRealMs());
         // The account's battle side rides along so the client can explain a
         // side_mismatch before the player hits Join rather than after.
-        if (const auto user = db.FindUserById(uid);
-            user && user->factionId && !user->factionId->empty())
+        if (user && user->factionId && !user->factionId->empty())
           body["sideKey"] = *user->factionId;
         else
           body["sideKey"] = nullptr;
+        // PLAN-worldsim.md W8: the player panel's stats merged on top —
+        // commanders with their Authority, the Capacity budget, and the Rank
+        // derived from holdings. Merged HERE rather than inside MeJson for the
+        // reason AttachFactions is: each director answers for its own tables
+        // and the transport layer joins them (WorldStats.h).
+        body = WorldStats::AttachMeStats(
+            std::move(body), mapDb, worldId, uid, user ? user->username : std::string(),
+            worldStatRules(worldId), WorldNowRealMs(), worldNowWorldMs(worldId));
         return HttpAuth::JsonResponse(200, body.dump());
       });
 
@@ -4990,6 +5025,34 @@ int main(int argc, char *argv[]) {
         // as one, same convention as the pause route's `changed`.
         out["left"] = left;
         return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // ─────── PLAN-worldsim.md W8: the stat ledgers, read-only ───────
+  //
+  // GET /api/world/stats — the rates in force, every commander's Authority,
+  // and every faction's roster with each member's DERIVED Rank, ordered by
+  // it. Public for the reason the faction roster is: rank IS vote weight
+  // (Capture 24), and a vote weight nobody can audit is not a counterbalance.
+  //
+  // Read-only from the CLIENT's side. It does settle the authority ledger on
+  // the way past (`AccrueFromSettlements`), which is a write — but an
+  // idempotent one keyed on the settlement row, so it can neither
+  // double-award nor be driven by whoever calls the route. W8 ships no tick;
+  // W9 owns that.
+  net.AddHttpGet(
+      "/api/world/stats", RouteAuth::Public,
+      [mapDb, worldIdFromQuery, worldStatRules, worldNowWorldMs](
+          const std::string &url) -> HttpResponse {
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery(url);
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const nlohmann::json body = WorldStats::StatsJson(
+            mapDb, worldId, worldStatRules(worldId), WorldNowRealMs(),
+            worldNowWorldMs(worldId));
+        return HttpAuth::JsonResponse(200, body.dump());
       });
 
   // GET /api/games — list available games

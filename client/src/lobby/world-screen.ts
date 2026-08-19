@@ -26,7 +26,9 @@ import {
     drawWorld, fitView, clampView, panView, zoomView, wheelZoomFactor,
     hitTestPoi, parseWorldGraph, edgesFor, formatWorldDuration, formatLatLon,
     screenToLatLon, parseWorldClock, tickWorldClock, formatWorldClock, poiOwnerColour,
+    parseWorldPlayerStats, formatRealDuration, formatStat,
     type MapView, type Viewport, type WorldGraph, type WorldPoi, type WorldClock,
+    type WorldPlayerStats,
 } from './world-map.js';
 
 /// How often the World screen re-fetches `/api/world` while it is open, to
@@ -43,6 +45,12 @@ export interface WorldScreenDeps {
     /// The lobby's own GET helper — `LobbyUI.lobbyGet`, which answers null on
     /// a non-200 rather than throwing.
     get(path: string): Promise<any>;
+    /// The lobby's POST helper (`LobbyUI.lobbyPost`), which is how a
+    /// token-authenticated route is reached at all: the dispatch gate only sees
+    /// headers on a POST, so `/api/world/me` is a POST (see its handler in
+    /// rts/lobby_main.cpp). Optional — without a session there is no player
+    /// panel to draw, and the map itself is public.
+    post?(path: string, body?: Record<string, unknown>): Promise<any>;
     basemapUrl?: string;
     /// PLAN-worldsim.md W5's click-through: join the room a POI's live war is
     /// playing in. Optional so a caller that has not wired the lobby's own
@@ -76,6 +84,11 @@ export class WorldScreen {
     /// second — the server comment on `WorldStatusJson`'s ratio fields exists
     /// for exactly this.
     private clock: WorldClock | null = null;
+    /// PLAN-worldsim.md W8: this account's Authority / Capacity / Rank, or null
+    /// when there is no session, no `post` helper, or a lobby too old to answer
+    /// with them. Null hides the panel rather than drawing zeroes — a zero
+    /// rank and an absent one are different facts.
+    private stats: WorldPlayerStats | null = null;
     private clockTickTimer: ReturnType<typeof setInterval> | null = null;
     private clockResyncTimer: ReturnType<typeof setInterval> | null = null;
     /// The canvas the handlers are attached to. Identity, not a boolean: the
@@ -116,6 +129,7 @@ export class WorldScreen {
         this.loadBasemap();
         void this.refresh();
         void this.fetchClock();
+        void this.refreshStats();
         this.startClockTimers();
         // Layout has to have happened before `fitView` can know the canvas
         // size; a panel unhidden in this same tick still measures 0×0 in some
@@ -140,7 +154,7 @@ export class WorldScreen {
     /// does not shut the world map the player is reading.
     remount(): void {
         if (this.openState) this.open();
-        else this.renderDetail();
+        else { this.renderDetail(); this.renderStats(); }
     }
 
     /// Fetch the POI graph. Keeps whatever is already drawn on a failed fetch:
@@ -196,7 +210,13 @@ export class WorldScreen {
     private startClockTimers(): void {
         this.stopClockTimers();
         this.clockTickTimer = setInterval(() => this.renderClock(), 1000);
-        this.clockResyncTimer = setInterval(() => void this.fetchClock(), CLOCK_RESYNC_MS);
+        this.clockResyncTimer = setInterval(() => {
+            void this.fetchClock();
+            // The stats move on world events (a war settling accrues authority)
+            // and on the real clock (capacity recharges), so they resync on the
+            // same beat rather than on a timer of their own.
+            void this.refreshStats();
+        }, CLOCK_RESYNC_MS);
     }
 
     private stopClockTimers(): void {
@@ -366,6 +386,76 @@ export class WorldScreen {
     private hideTooltip(): void {
         const el = document.getElementById('world-tooltip');
         if (el) el.style.display = 'none';
+    }
+
+    /// Fetch the player panel's stats (PLAN-worldsim.md W8). Keeps whatever is
+    /// already drawn on a failed fetch, same rule as `refresh()`: a transient
+    /// 401 during a token refresh must not blank a panel the player is reading.
+    async refreshStats(): Promise<void> {
+        if (!this.deps.post) return;
+        const json = await this.deps.post('/api/world/me').catch(() => null);
+        const stats = parseWorldPlayerStats(json);
+        if (stats) this.stats = stats;
+        this.renderStats();
+    }
+
+    /// The player panel: Capacity (the budget they spend), Rank (the standing
+    /// their votes carry) and their commanders with each one's Authority.
+    ///
+    /// The order is deliberate and matches the design's own division of the
+    /// three: Capacity is what the player can DO today, Rank is what they are
+    /// worth inside their faction, and Authority belongs to individual
+    /// commanders — a per-commander number the panel must never present as a
+    /// single player stat (Capture 23's whole point is that they are separate).
+    private renderStats(): void {
+        const el = document.getElementById('world-player');
+        if (!el) return;
+        const s = this.stats;
+        if (!s) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        el.style.display = '';
+
+        const cap = s.capacity;
+        const capacity = cap
+            ? `<div class="world-player-row"><span class="world-player-label">Capacity</span>` +
+              `<span class="world-player-value">${formatStat(cap.available)} / ${formatStat(cap.max)}</span></div>` +
+              `<div class="world-capacity-bar"><div class="world-capacity-fill" ` +
+              `style="width:${cap.max > 0 ? Math.round(100 * Math.min(1, cap.available / cap.max)) : 0}%"></div></div>` +
+              `<div class="world-player-sub">Full again in ${esc(formatRealDuration(cap.nextRechargeInMs))}` +
+              ` · every ${formatStat(cap.rechargeHours)}h</div>`
+            : '';
+
+        const rank = s.rank;
+        const rankLine = rank
+            ? `<div class="world-player-row"><span class="world-player-label">Rank</span>` +
+              `<span class="world-player-value">${formatStat(rank.total)}</span></div>` +
+              `<div class="world-player-sub">` +
+              (rank.factionId
+                  ? `${rank.commanderCount} commander${rank.commanderCount === 1 ? '' : 's'} · ` +
+                    `${rank.poiCount} region${rank.poiCount === 1 ? '' : 's'}` +
+                    (rank.loanedCount > 0 ? ` · ${rank.loanedCount} on loan (excluded)` : '')
+                  : 'No faction — rank is standing inside one.') +
+              `</div>`
+            : '';
+
+        // W7's world authority, labelled as its own thing: it gates founding a
+        // faction and it is NOT a commander's Authority.
+        const worldAuthority =
+            `<div class="world-player-row"><span class="world-player-label">World authority</span>` +
+            `<span class="world-player-value">${formatStat(s.worldAuthority)}</span></div>`;
+
+        const poiNames = new Map(this.graph.pois.map(p => [p.id, p.name]));
+        const commanders = s.commanders.length
+            ? `<div class="world-detail-head">Commanders</div><ul class="world-commanders">` +
+              s.commanders.map(c => {
+                  const where = c.poiId ? (poiNames.get(c.poiId) ?? c.poiId) : 'unstationed';
+                  return `<li><span>${esc(c.name)}</span>` +
+                      `<span class="world-commander-where">${esc(where)}</span>` +
+                      (c.loaned ? `<span class="world-commander-loaned">loaned</span>` : '') +
+                      `<span class="world-commander-authority">${formatStat(c.authority)}</span></li>`;
+              }).join('') + `</ul>`
+            : `<div class="world-player-sub">No commanders yet — authority earns you one.</div>`;
+
+        el.innerHTML = `<h4>Your standing</h4>` + capacity + rankLine + worldAuthority + commanders;
     }
 
     private renderDetail(): void {

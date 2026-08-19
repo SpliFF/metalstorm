@@ -62,12 +62,34 @@ document.head.appendChild(style);
 document.getElementById('lobby-root')!.innerHTML = browserHtml
     .replace('{{account_name}}', 'preview');
 
+// PLAN-worldsim.md W8: the player panel's own fixture — the body
+// `WorldStats::AttachMeStats` builds. One commander stationed and one on loan,
+// so the screenshot carries the loan marker and the "excluded" rank line,
+// which are the two things a reader has to be able to see to trust the number.
+const ME = {
+    worldId: 'earth',
+    accountId: 7,
+    authority: 120,
+    canFound: true,
+    membership: { factionId: 'third-armoured', role: 'founder', rank: 0, name: 'Third Armoured', colour: '#5b9bd5' },
+    commanders: [
+        { commanderId: 'vex-1', name: 'Marshal Vex', factionId: 'third-armoured', poiId: 'paris', state: 'active', authority: 86.4, authorityStored: 92, loaned: false },
+        { commanderId: 'vex-2', name: 'Adjutant Rell', factionId: 'third-armoured', poiId: 'cairo', state: 'active', authority: 24, authorityStored: 24, loaned: true, loanedTo: 9 },
+    ],
+    capacity: { max: 28.6, spent: 11, available: 17.6, rechargedAt: 0, nextRechargeInMs: 3600000 * 6 + 60000 * 40, rechargeHours: 24 },
+    rank: {
+        factionId: 'third-armoured', total: 121.4, commanderCount: 1, poiCount: 1, loanedCount: 1,
+        terms: { commanders: 10, commanderAuthority: 86.4, regions: 25, money: 0, resources: 0, units: 0, artifacts: 0 },
+    },
+};
+
 const screen = new WorldScreen({
     get: async (path: string) => {
         if (path === '/api/world') return { worldId: 'earth', name: 'Earth', state: 'active' };
         if (path === '/api/world/pois') return POIS;
         return null;
     },
+    post: async (path: string) => (path === '/api/world/me' ? ME : null),
 });
 void screen.probe();
 screen.open();

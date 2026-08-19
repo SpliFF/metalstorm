@@ -2443,6 +2443,10 @@ export class LobbyUI {
         if (!btn) return;
         this.worldScreen ??= new WorldScreen({
             get: (path) => this.lobbyGet(path),
+            // PLAN-worldsim.md W8: the player panel's stats come from
+            // `/api/world/me`, which is a POST because the dispatch gate only
+            // sees the auth header on one.
+            post: (path, body) => this.lobbyPost(path, body ?? {}),
             // PLAN-worldsim.md W5's click-through: reuse the existing
             // `joinRoom` path the room browser's "Join" buttons already call
             // (`/api/rooms/join`) — the world layer never gets its own room

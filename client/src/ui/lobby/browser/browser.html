@@ -170,8 +170,15 @@
                 <div id="world-tooltip" class="world-tooltip" style="display:none"></div>
                 <div id="world-status" class="world-status" style="display:none"></div>
             </div>
-            <aside id="world-detail" class="world-detail">
-                <div class="world-detail-empty">Select a point of interest.</div>
+            <!-- The right column carries two panels, in this order because
+                 the player's own standing is what they came to check and the
+                 POI detail changes under it as they click around:
+                 PLAN-worldsim.md W8's stat panel, then W2's POI detail. -->
+            <aside class="world-side">
+                <div id="world-player" class="world-player" style="display:none"></div>
+                <div id="world-detail" class="world-detail">
+                    <div class="world-detail-empty">Select a point of interest.</div>
+                </div>
             </aside>
         </div>
         <div class="world-hint">Drag to pan · scroll to zoom · click a marker for detail</div>

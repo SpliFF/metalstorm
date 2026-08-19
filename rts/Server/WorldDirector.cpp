@@ -125,6 +125,22 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["foundFactionCost"]       = foundFactionCost;
     j["factionNameMaxLen"]      = factionNameMaxLen;
     j["factionNameMinLen"]      = factionNameMinLen;
+    j["authorityPerVictory"]       = authorityPerVictory;
+    j["authorityPerDefeat"]        = authorityPerDefeat;
+    j["authorityDecayPerWorldDay"] = authorityDecayPerWorldDay;
+    j["authorityFloor"]            = authorityFloor;
+    j["commanderGrantAuthority"]   = commanderGrantAuthority;
+    j["capacityBase"]              = capacityBase;
+    j["capacityPerCommanderAuthority"] = capacityPerCommanderAuthority;
+    j["capacityRechargeHours"]     = capacityRechargeHours;
+    j["capacityRechargeFraction"]  = capacityRechargeFraction;
+    j["rankPerCommander"]          = rankPerCommander;
+    j["rankPerCommanderAuthority"] = rankPerCommanderAuthority;
+    j["rankPerPoiHeld"]            = rankPerPoiHeld;
+    j["rankPerArtifact"]           = rankPerArtifact;
+    j["rankPerMoney"]              = rankPerMoney;
+    j["rankPerResource"]           = rankPerResource;
+    j["rankPerUnit"]               = rankPerUnit;
     return j;
 }
 
@@ -556,7 +572,7 @@ std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(
     std::vector<WorldSettlementRecord> out;
     if (!db || worldId.empty()) return out;
     static const char* kSql =
-        "SELECT world_id, poi_id, room_id, outcome, factions, recorded_at "
+        "SELECT world_id, poi_id, room_id, outcome, factions, recorded_at, rowid "
         "FROM world_settlement_ledger WHERE world_id=? "
         "ORDER BY recorded_at ASC, rowid ASC";
     sqlite3_stmt* stmt = nullptr;
@@ -571,6 +587,7 @@ std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(
         e.outcome     = ColText(stmt, 3);
         e.factions    = ColText(stmt, 4);
         e.recordedAt  = sqlite3_column_int64(stmt, 5);
+        e.settlementId = sqlite3_column_int64(stmt, 6);
         out.push_back(std::move(e));
     }
     sqlite3_finalize(stmt);
