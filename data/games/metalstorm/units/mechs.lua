@@ -33,13 +33,12 @@ return mk{
                 override = { transportsize = 2, transportbyenemy = false } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S3' },
                             [2] = { name = 'MS_MISSILE_AA_S2', onlytargetcategory = 'AIR' } },
-                -- fable_mech (DESIGN-MODEL-BUILDING.md §17): shipped
-                -- generated model, rigged biped with walk/idle/death clips
-                -- (PLAN-metalstorm-beta-units.md §2 beta roster: "Mech").
+                -- Own hull since 2026-08-20 (user ruling: purpose-made
+                -- ms_mechs_s3.gltf at the DESIGN-GUIDE scale; the fable_mech
+                -- objectname override is gone).
                 -- transportsize 3 + mass 1200: exactly at the airship's
                 -- transportmass cap — the heaviest liftable mech scale.
-                override = { objectname = 'fable_mech',
-                             transportsize = 3, transportbyenemy = false } },
+                override = { transportsize = 3, transportbyenemy = false } },
         [4] = { weapons = { [1] = { name = 'MS_RAILGUN_S3' },
                             [2] = { name = 'MS_AC_S3' },
                             [3] = { name = 'MS_FLAK_S2', onlytargetcategory = 'AIR' } },

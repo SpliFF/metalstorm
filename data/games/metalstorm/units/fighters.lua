@@ -41,11 +41,10 @@ return mk{
                             [2] = { name = 'MS_MISSILE_AA_S1',
                                     onlytargetcategory = 'AIR' } },
                 maxvelocity = 9.6,   -- 288 e/s ≈ BAR T1 fighter
-                -- fable_fighter (DESIGN-MODEL-BUILDING.md §24): shipped
-                -- generated model (PLAN-metalstorm-beta-units.md §2 beta
-                -- roster: "Fighter" = ms_fighters_s2).
-                override = { objectname = 'fable_fighter',
-                             collide = false, cruisealtitude = 125,
+                -- Own hull since 2026-08-20 (user ruling: purpose-made
+                -- ms_fighters_s2.gltf at the DESIGN-GUIDE 9 m span; the
+                -- fable_fighter objectname override is gone).
+                override = { collide = false, cruisealtitude = 125,
                              maxacc = 0.18, maxdec = 0.075,
                              turnradius = 64, airsightdistance = 950 } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S2' },
