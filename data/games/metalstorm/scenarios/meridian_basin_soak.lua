@@ -90,11 +90,13 @@ return {
     },
 
     sides = {
-        { faction = 'compact', team = 0 },
+        { faction = 'compact', team = 0,
+          departure = { x = 6600, z = 400, radius = 700 } },
         { faction = 'compact', team = 1 },
         { faction = 'compact', team = 2 },
         { faction = 'compact', team = 3 },
-        { faction = 'union',   team = 4 },
+        { faction = 'union',   team = 4,
+          departure = { x = 6600, z = 15984, radius = 700 } },
         { faction = 'union',   team = 5 },
         { faction = 'union',   team = 6 },
         { faction = 'union',   team = 7 },
@@ -135,6 +137,7 @@ return {
         { def = 'ms_scout_buggy', team = 0, x = 6900, z = 1400, facing = 'south', count = 2, spacing = 130,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_supply_truck', team = 0, x = 5900, z = 1400, facing = 'south', count = 1 },
+        { def = 'fable_airship', team = 0, x = 7200, z = 1400, facing = 'south' },
 
         { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
@@ -145,6 +148,7 @@ return {
         { def = 'ms_scout_buggy', team = 4, x = 6900, z = 14984, facing = 'north', count = 2, spacing = 130,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_supply_truck', team = 4, x = 5900, z = 14984, facing = 'north', count = 1 },
+        { def = 'fable_airship', team = 4, x = 7200, z = 14984, facing = 'north' },
 
         { def = 'ms_soldiers_s1', team = 8, x = 11584, z = 8192, facing = 'north', count = 6, spacing = 110 },
         { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 140 },
