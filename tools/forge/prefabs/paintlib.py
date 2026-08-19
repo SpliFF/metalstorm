@@ -70,12 +70,20 @@ def font(size):
 
 # ------------------------------------------------------------- stamps
 
-def team_panel(m, box, outline=None, width=2):
-    """Team-owned respray: full-R team mask + TEAMGREY diffuse underneath
-    (never bake team colour into diffuse)."""
+def team_panel(m, box, outline=None, width=2, base=None):
+    """Team-owned respray: full-R team mask + a neutral diffuse underneath
+    (never bake team colour into diffuse).
+
+    `base` is the diffuse fill under the mask. It defaults to TEAMGREY
+    (168,172,176), which is ~90% brighter than the usual gunmetal hull — and
+    because the impostor baker flat-shades each triangle from the diffuse at
+    its UV centroid, a TEAMGREY fill FLOODS large panels pale in the impostor
+    sheet. Pass a colour held near the model's own base grey for any panel
+    covering a big quad; six shipped models hand-rolled a local team_zone()
+    to do exactly this before `base=` existed."""
     b = nbox(*box)
     m.t.rectangle(b, fill=(255, 0, 0))
-    m.d.rectangle(b, fill=TEAMGREY)
+    m.d.rectangle(b, fill=base if base is not None else TEAMGREY)
     if outline is not None:
         m.d.rectangle(b, outline=shade(outline, 0.6), width=width)
 
