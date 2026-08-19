@@ -620,26 +620,39 @@ end
 ---     y = 0 over a channel measured 0.00 / 0.00 / 0.00 / 0.00. Without
 ---     floating the same four settled to -31.0 / -34.5 / -45.9 / -57.6.
 ---     Over DRY ground the clamp used to win and a chain stepped with the
----     terrain (the rail run measured 26.1 -> 40.8). **That is fixed as of
----     PLAN-maps §2j option C**: a def that publishes `customparams.deck_top`
----     (both spans do) is SEATED — the engine skips gravity and the up-clamp
----     for it, so the `y` passed here is held on dry ground as well as over
----     water. Passing `y` is still right, and now more so: it is used verbatim
----     for every segment rather than resampled per segment, which is what makes
----     the whole chain one level deck.
+---     terrain (the rail run measured 26.1 -> 40.8). PLAN-maps §2j option C
+---     fixed that by SEATING a def that publishes a positive
+---     `customparams.deck_top` — the engine skips gravity and the up-clamp for
+---     it. ⚠️ **§2j option A has since made `deck_top` ZERO for both spans**
+---     (the origin is now the deck, see features/bridges.lua), and the engine
+---     reads zero as "no deck declared", so NEITHER SPAN IS SEATED TODAY and
+---     `floating` is carrying the water case on its own again. Passing `y` is
+---     still right: it is used verbatim for every segment rather than
+---     resampled per segment, which is what makes the whole chain one level
+---     deck as long as the chain is over water.
 ---
----     `y` NAMES THE SPAN'S BASE, NOT ITS DECK. Both spans are authored origin
----     at the pier base, so the trafficable surface is `deck_top` above the `y`
----     given here (1.5 road, 3.8 rail — read it off
----     `FeatureDefs[def].deckHeight`, which the engine now publishes). To put a
----     deck ON a road at height h, stage at `h - deckHeight`. Nothing in this
----     file does that arithmetic for an author yet.
+---     `y` NAMES THE DECK. §2j option A re-authored both spans with y = 0 at
+---     the trafficable surface, so the `y` given here IS where the deck lands
+---     — no `deck_top` to add, and `FeatureDefs[def].deckHeight` reads 0 for
+---     both. To put a deck ON a road at height h, stage at h. (The general
+---     form is still `h - deckHeight`; it degenerates because deckHeight is 0.
+---     Nothing in this file does that arithmetic for an author, and while the
+---     shipped spans deck at their origin nothing needs to.)
+---
+---     ⚠️ WHAT THAT COSTS OVER WATER: staging at y = 0 now puts the deck AT
+---     the waterline rather than 1.5 above it. §2j priced this before A landed
+---     — the gap to a wading unit becomes the ford's depth instead of a flat
+---     1.5. Lifting the deck to a chosen freeboard means staging above zero,
+---     which takes the span out of water, which is where `floating` stops
+---     helping and seating would have to come back.
 ---
 ---     A MAP-placed span cannot be seated at a useful level and never could:
 ---     a featureplacer objectlist entry carries only name/x/z/rot, so
 ---     LoadFeaturesFromMap spawns it at the ground — and seating then holds it
 ---     on the bed it spawned on. This path is the only one that can lay a
----     level deck.
+---     level deck. (§2j option A is what a map-placed span DOES get: spawned
+---     at the ground with the origin on the deck, it decks at ground level
+---     instead of 1.5 above it. Level across uneven ground is still ours.)
 local function stageFeatures(features, knownFeatureDefs, landmarks)
     local created = {}
     knownFeatureDefs = knownFeatureDefs or buildKnownFeatureDefs()

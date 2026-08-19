@@ -8,7 +8,8 @@ spans exactly z -12 .. +12 at full width at both ends; truss end posts
 sit just inside the ends so chained segments pair posts cleanly.
 
 Single static `body` piece, no clips, no team.  Forward -Z, up +Y,
-ground Y=0, 1 u = 1 m.  Deterministic (no RNG in geometry).
+1 u = 1 m.  Deterministic (no RNG in geometry).  Shipped with y = 0 AT
+THE DECK (PLAN-maps.md §2j option A) — build_all() applies the shift.
 
 Usage: python3 gen_ms_road_bridge.py
 """
@@ -103,7 +104,13 @@ def build_body():
 
 
 def build_all():
-    return [dict(name='body', parent=-1, offset=(0, 0, 0), part=build_body())]
+    body = build_body()
+    # Origin at the deck, not the pier base — see L.DECK_ORIGIN_Y. Applied
+    # here, after build_body() has assigned every UV from the atlas zones
+    # (which project world y), so the shift moves geometry ONLY: the .bin's
+    # UV and normal blocks come out byte-identical to the pier-base export.
+    body.pos = [(x, y - L.DECK_ORIGIN_Y, z) for x, y, z in body.pos]
+    return [dict(name='body', parent=-1, offset=(0, 0, 0), part=body)]
 
 
 if __name__ == '__main__':

@@ -43,12 +43,23 @@ crossings published here are already the right places to raise.
 whose top IS the deck", is arithmetically impossible, not merely expensive:
 `CFeature::UpdatePosition` clamps a feature's y UP to `CGround::GetHeightReal`
 every tick and never down (Feature.cpp:570), so a span standing on ground `g`
-puts its deck at `g + deck_top` (1.5 for `ms_road_bridge`, measured off the
-shipped mesh, published as `customparams.deck_top`). Raise the ground under the
-crossing by `d` and BOTH the road surface and the deck rise by `d`: the gap is
-invariant under every earthwork this module could ever plan. The map's terrain
-levers here are real but they are about the ROUTE — how deep the ford is, how
-wide, whether the road should be there at all — never about the deck.
+puts its deck at `g + deck_top`. Raise the ground under the crossing by `d` and
+BOTH the road surface and the deck rise by `d`: the gap is invariant under
+every earthwork this module could ever plan. The map's terrain levers here are
+real but they are about the ROUTE — how deep the ford is, how wide, whether the
+road should be there at all — never about the deck.
+
+✅ **AND IT WAS CLOSED WHERE IT LIVED — IN THE MODEL** (§2j option A, landed
+2026-08-19). `deck_top` was 1.5 for `ms_road_bridge` and 3.8 for
+`ms_rail_bridge` because both meshes were authored origin-at-pier-base. Both
+have been re-exported with y = 0 ON the deck, so `customparams.deck_top` now
+reads **0** for both and `g + deck_top` is just `g`. Nothing in this module
+changes: the arithmetic above is still the reason a causeway was never the
+answer (§2j option B stays REJECTED), and the crossings published here are
+still about the route. What changed is that a span standing on ground `g` now
+decks AT `g` — including the map-placed case this module's caller cannot give
+a `y` to, which is the one case the engine-side seating (§2j option C) could
+never reach.
 """
 from __future__ import annotations
 
