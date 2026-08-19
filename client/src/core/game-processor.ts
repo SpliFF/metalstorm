@@ -50,9 +50,10 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
-import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
+import { EntityRenderer, setModelMaterialPort, setMemberModelMemo } from './entity-renderer.js';
 import {
     SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
+    setPoolCompaction, setPoolCompactionGate,
 } from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
@@ -220,6 +221,10 @@ let gpDirectiveCapture: DirectiveShapeCapture | null = null;
 /// — same visibility rule as standing orders). Cached so gp:selectOrgGroup
 /// can resolve a group id to its member roster without a round trip.
 let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
+/// True once this connection has received a ReplayState — i.e. it is talking
+/// to a replay server (PLAN-replay task 4b: a live game never sends one).
+/// Gates forwarding 403s to the playback bar.
+let gpSawReplayState = false;
 let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
@@ -1157,8 +1162,28 @@ function gpConnect(msg: GpInitToWorker): void {
             }
             postToMain({ type: 'gp:playerRoster', players });
         },
+        // Replay playback state (PLAN-replay task 4b). Forwarded verbatim to
+        // main, where the bar lives — it is DOM, and it has to survive a
+        // worker recycle. A live game never sends this, so a client that
+        // never receives one simply never shows a bar.
+        onReplayState: (state) => {
+            gpSawReplayState = true;
+            postToMain({ type: 'gp:replayState', state });
+        },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
-        onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
+        onServerError: (code, m) => {
+            postLog(4, `[gp] server error ${code}: ${m}`);
+            // PLAN-replay task 4b: a refused playback control comes back as a
+            // 403 with the reason. Console-only was not good enough — a
+            // watcher who clicks "seek backwards" and sees nothing happen has
+            // been given a dead button, which is precisely what the reason
+            // string exists to prevent. Only forwarded once this connection is
+            // known to be a replay (it has sent a ReplayState), so a live
+            // game's 403s do not raise a playback toast.
+            if (code === 403 && gpSawReplayState) {
+                postToMain({ type: 'gp:replayRefused', message: m });
+            }
+        },
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
@@ -2345,6 +2370,25 @@ export function gpInit(msg: GpInitToWorker): void {
          *  bounding info is recomputed. `squadBboxEvery(1)` restores the pre-M21
          *  every-flush refresh (the legacy arm); 15 is the shipped default. */
         squadBboxEvery: (n: number): number => setBboxRefreshEvery(n),
+        /** M24: A/B squad instance-pool compaction. `squadPoolCompact(false)`
+         *  restores the pre-M24 behaviour, where `freeSlot()` returned an index
+         *  to the free list but never lowered `highWater`, so a churned pool
+         *  kept uploading and drawing its dead slots forever; `true` is the
+         *  shipped default. Takes effect on the next flush, no reload needed —
+         *  but note that turning it back OFF cannot re-inflate a pool that has
+         *  already compacted, so an off-arm has to be re-grown by churn.
+         *  `squadPoolCompactGate(fraction, minDead)` moves the trigger;
+         *  `__squadBackend.poolOccupancy()` reads drawn/live/dead per pool. */
+        squadPoolCompact: (on: boolean): boolean => setPoolCompaction(on),
+        squadPoolCompactGate: (fraction: number, minDead?: number) =>
+            setPoolCompactionGate(fraction, minDead),
+        /** M22: A/B the memoised `getMemberModel`. `squadMemberModelMemo(false)`
+         *  restores the pre-M22 path, which rebuilt the piece list, a key string
+         *  per piece and a wrapper object on every call — once per MODEL-tier
+         *  member per frame; `true` is the shipped default. Camera-independent,
+         *  so it pays the same whether or not the view is moving. */
+        squadMemberModelMemo: (on: boolean): boolean =>
+            setMemberModelMemo(on),
         /** M18: A/B the pooled combat-FX shapes. `combatFxPooled(false)`
          *  restores the pre-M18 path where every tracer / puff / burst
          *  allocates its own Babylon mesh and its own draw call; `true` is the
@@ -4273,6 +4317,14 @@ export function gpHandlePlayerCommand(commandId: number, unitIds: number[], para
 /// same routing as gpHandleSelectOrgGroup above.
 export function gpHandleSelectionState(unitIds: number[]): void {
     gpCtx.selection?.setSelectionExternal(unitIds);
+}
+
+/// Replay playback control from the main-thread bar (PLAN-replay task 4b).
+/// Straight to the Connection: there is no worker-side state to keep in step,
+/// because the authoritative answer is the ReplayState broadcast that follows.
+export function gpHandleReplayControl(
+    action: number, speed?: number, frame?: number, povTeam?: number): void {
+    gpCtx.connection?.sendReplayControl(action, { speed, frame, povTeam });
 }
 
 /// Org panel row click → world selection (PLAN-macro-ui.md §1: selecting a

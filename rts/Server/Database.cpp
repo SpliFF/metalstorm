@@ -48,6 +48,14 @@ bool Database::Open(const std::string& path) {
     // Enable WAL mode for concurrent reads
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
+    // WAL allows concurrent readers but only ONE writer at a time, and the
+    // lobby now opens a second connection to this file for periodic
+    // maintenance (PLAN-long-uptime S9). Without a busy timeout the loser of
+    // a write race gets SQLITE_BUSY back immediately, which every call site
+    // here reports as an ordinary failure — a silently dropped write. Wait
+    // instead.
+    sqlite3_busy_timeout(db, 5000);
+
     CreateTables();
     SLOG(SPRING_LOG_INFO, "opened %s", path.c_str());
     return true;
@@ -150,12 +158,42 @@ void Database::CreateTables() {
                 nullptr, nullptr, nullptr);
         }
     }
+
+    // PLAN-metalstorm-lobby.md task 0: permanent faction allegiance. No
+    // NOT NULL/DEFAULT — nullable so a future guest/provisional account
+    // (§1a/§1b, not yet implemented) can hold an unset faction pre-upgrade.
+    // Real sign-up always supplies one; see HttpAuth::RegisterEndpoints.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        int probeRc = sqlite3_prepare_v2(db, "SELECT faction_id FROM users LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (probeRc != SQLITE_OK) {
+            sqlite3_exec(db, "ALTER TABLE users ADD COLUMN faction_id TEXT",
+                nullptr, nullptr, nullptr);
+        }
+    }
 }
 
+namespace {
+/// Read column `col` as a nullable TEXT, mapping SQL NULL to nullopt
+/// (as opposed to the empty-string mapping every other TEXT column in
+/// this file uses — those are all NOT NULL DEFAULT '', so the
+/// distinction never mattered until faction_id, the first genuinely
+/// nullable column).
+std::optional<std::string> ColumnOptionalText(sqlite3_stmt* stmt, int col) {
+    if (sqlite3_column_type(stmt, col) == SQLITE_NULL)
+        return std::nullopt;
+    const unsigned char* text = sqlite3_column_text(stmt, col);
+    return text ? std::optional<std::string>(reinterpret_cast<const char*>(text))
+                : std::optional<std::string>(std::string());
+}
+} // namespace
+
 int64_t Database::CreateUser(const std::string& username, const std::string& passwordHash,
-                             const std::string& role, bool isDev)
+                             const std::string& role, bool isDev,
+                             const std::optional<std::string>& factionId)
 {
-    const char* sql = "INSERT INTO users (username, password_hash, role, is_dev) VALUES (?, ?, ?, ?)";
+    const char* sql = "INSERT INTO users (username, password_hash, role, is_dev, faction_id) VALUES (?, ?, ?, ?, ?)";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -165,6 +203,10 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
     sqlite3_bind_text(stmt, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, role.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 4, isDev ? 1 : 0);
+    if (factionId)
+        sqlite3_bind_text(stmt, 5, factionId->c_str(), -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 5);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -176,7 +218,7 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
 }
 
 std::optional<UserRecord> Database::FindUser(const std::string& username) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev FROM users WHERE username = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id FROM users WHERE username = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -196,13 +238,14 @@ std::optional<UserRecord> Database::FindUser(const std::string& username) {
     user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
     user.isDev = sqlite3_column_int(stmt, 5) != 0;
+    user.factionId = ColumnOptionalText(stmt, 6);
 
     sqlite3_finalize(stmt);
     return user;
 }
 
 std::optional<UserRecord> Database::FindUserById(int64_t userId) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev FROM users WHERE id = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id FROM users WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -222,6 +265,7 @@ std::optional<UserRecord> Database::FindUserById(int64_t userId) {
     user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
     user.isDev = sqlite3_column_int(stmt, 5) != 0;
+    user.factionId = ColumnOptionalText(stmt, 6);
 
     sqlite3_finalize(stmt);
     return user;
@@ -332,6 +376,28 @@ bool Database::SetBannedByUsername(const std::string& username, bool banned, int
     return SetBanned(user->id, banned);
 }
 
+bool Database::SetFactionByUsername(const std::string& username, const std::string& factionId,
+                                    int64_t& userId)
+{
+    userId = 0;
+    auto user = FindUser(username);
+    if (!user)
+        return false;
+    userId = user->id;
+
+    const char* sql = "UPDATE users SET faction_id = ? WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, factionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, user->id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+}
+
 int Database::RevokeUserSessions(int64_t userId) {
     const char* sql = "DELETE FROM sessions WHERE user_id = ?";
     sqlite3_stmt* stmt = nullptr;
@@ -349,7 +415,7 @@ int Database::RevokeUserSessions(int64_t userId) {
 std::vector<UserRecord> Database::GetBannedUsers(int limit) {
     std::vector<UserRecord> out;
     const char* sql =
-        "SELECT id, username, password_hash, role, is_banned, is_dev "
+        "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id "
         "FROM users WHERE is_banned = 1 ORDER BY id DESC LIMIT ?";
     sqlite3_stmt* stmt = nullptr;
 
@@ -366,6 +432,7 @@ std::vector<UserRecord> Database::GetBannedUsers(int limit) {
         u.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
         u.isBanned = sqlite3_column_int(stmt, 4) != 0;
         u.isDev = sqlite3_column_int(stmt, 5) != 0;
+        u.factionId = ColumnOptionalText(stmt, 6);
         out.push_back(std::move(u));
     }
 
@@ -747,6 +814,33 @@ bool Database::CommandPresetExists(int64_t userId, const std::string& name) {
     return exists;
 }
 
+std::vector<std::pair<int, std::string>> Database::LatestGameExtraJson() {
+    std::vector<std::pair<int, std::string>> out;
+    // Joined to game_servers, not just to the newest metric row: game_metrics
+    // rows outlive the game that wrote them, so scanning them alone would keep
+    // re-reading every finished game's last row forever — the caller's
+    // per-room state would then never shrink, which is a poor outcome for the
+    // plan whose subject is containers that only grow.
+    const char* sql =
+        "SELECT m.room_id, m.extra_json FROM game_metrics m "
+        "JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics GROUP BY room_id) lm "
+        "  ON m.id = lm.mid "
+        "JOIN game_servers gs ON gs.room_id = m.room_id "
+        "WHERE m.extra_json <> ''";
+    sqlite3_stmt* stmt = nullptr;
+    // A lobby that has never hosted a game has no game_metrics table at all;
+    // prepare fails and that is the empty answer, not a failure to report.
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* t = sqlite3_column_text(stmt, 1);
+        out.emplace_back(sqlite3_column_int(stmt, 0),
+                         t ? reinterpret_cast<const char*>(t) : "");
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 int Database::CleanExpiredSessions(int maxAgeSeconds) {
     const char* sql =
         "DELETE FROM sessions WHERE created_at <= datetime('now', '-' || ? || ' seconds')";
@@ -760,4 +854,32 @@ int Database::CleanExpiredSessions(int maxAgeSeconds) {
     sqlite3_finalize(stmt);
 
     return sqlite3_changes(db);
+}
+
+/// Shared body for the two append-only-table sweeps below. `table` is a
+/// compile-time literal from this file only — never a caller-supplied string —
+/// because a table name cannot be a bound parameter.
+static int DeleteOlderThan(sqlite3* db, const char* table, int maxAgeSeconds) {
+    if (db == nullptr || maxAgeSeconds <= 0) return 0;
+
+    const std::string sql = std::string("DELETE FROM ") + table +
+        " WHERE created_at <= datetime('now', '-' || ? || ' seconds')";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_int(stmt, 1, maxAgeSeconds);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return sqlite3_changes(db);
+}
+
+int Database::CleanOldAuditEntries(int maxAgeSeconds) {
+    return DeleteOlderThan(db, "admin_audit", maxAgeSeconds);
+}
+
+int Database::CleanOldClientErrors(int maxAgeSeconds) {
+    return DeleteOlderThan(db, "client_errors", maxAgeSeconds);
 }

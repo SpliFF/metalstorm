@@ -269,6 +269,20 @@ export class TestHarness {
         void this.deps.workerCall('perfReset');
     }
 
+    /** Squad-system perf counters (PLAN-metalstorm-squad-performance.md §14
+     *  S0): per-tier squad/member counts, neighbour checks, matrix writes, and
+     *  EMA-smoothed grid-rebuild/step/flush timings from the live SquadManager.
+     *  The scenario-ladder recipe dumps this alongside perfDump() per rung. */
+    async squadPerf(): Promise<unknown> {
+        return this.deps.workerCall('squadPerf');
+    }
+
+    /** Reset the squad perf counters' EMA timing fields before a fresh
+     *  ladder rung (frame-scoped count fields don't need resetting). */
+    squadPerfReset(): void {
+        void this.deps.workerCall('squadPerfReset');
+    }
+
     /** PLAN-perf N1 — start a per-widget LuaUI cost profile: wraps every
      *  widget callin with a timing closure in the worker (widget-profiler.ts)
      *  and zeroes the gpRunUiPass fixed-tax accumulator. Adds ~2 Lua→JS clock

@@ -136,6 +136,47 @@ export const DEFAULT_CONFIG = {
   // the cap flip tier on every re-rank as the battle shuffles.
   lodMemberBudgetHysteresis: 0.1,
 
+  // --- Drawn-member budget / the `icon` tier (PLAN-perf M23) ---------------
+  // `lodFullMemberBudget` above caps how many members are STEERED. It does not
+  // cap how many are DRAWN: a `centroid` squad still pays the per-member floor
+  // (slot transform + ground sample + backend write — M21's cSlot/cGround/
+  // cWrite), and that floor is what `entity` is linear in over a 16x range
+  // (M19 Finding 5). This is the second threshold, on the same nearest-first
+  // ranking: once cumulative members pass `lodDrawnMemberBudget` the remaining
+  // squads drop to `icon` and are thinned to `iconMemberCount` members each.
+  //
+  // It caps FULL-DETAIL members (`full` + `centroid`) hard. It is deliberately
+  // NOT a cap on total drawn members: there is no tier below `icon`, so once
+  // enough squads are iconised the floor is squads x iconMemberCount and a
+  // budget that charged the marks against itself would simply stop thinning at
+  // an arbitrary point. The marks are the residue, reported as `iconMembers`.
+  //
+  // Set 0 to disable the second threshold entirely — the frame is then the
+  // post-M20 frame and `icon` goes back to being externally owned (nothing in
+  // the shipping client sets it). Must be >= lodFullMemberBudget to mean
+  // anything; a smaller value is ignored.
+  //
+  // 8 000 is measured (M23, XL900, 1920x1200): `entity` is linear in drawn
+  // members at 0.261 us each over 10 850 -> 6 889, so 8 000 buys ~2 000 fewer
+  // members for ~-0.38 ms of `entity` and only bites past ~690 sim units. It is
+  // deliberately NOT the aggressive setting: 5 500 (= the steering budget, the
+  // lowest legal value) buys ~-0.94 ms but iconises 430 of 780 squads, and the
+  // thinning is visible at a zoomed-out pose. The 2 500-member band between the
+  // two budgets is squads that keep their full roster while losing only their
+  // steering — the cheap demotion first, the visible one last.
+  //
+  // ⚠️ This is a per-machine number like `lodFullMemberBudget`, and it is
+  // currently under-valued by the backend: `freeSlot` never lowers a pool's
+  // `highWater`, so releasing a member frees its slot but the pool keeps
+  // uploading and drawing it. That is why a removed member is worth 0.261 us
+  // here and not the ~0.35 us/member floor M21 measured. Raise this once the
+  // pools compact (PLAN-perf M24).
+  lodDrawnMemberBudget: 8000,
+  // How many members an `icon` squad keeps. 0 is the pre-M23 behaviour (the
+  // squad disappears) and is measurement-only — it is the upper bound on what
+  // the tier can ever buy, not a shippable fidelity.
+  iconMemberCount: 3,
+
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.
   bigUnitWeight: 1.6,

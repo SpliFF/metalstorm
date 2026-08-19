@@ -54,6 +54,17 @@ struct ClientSession {
     /// Ignored when mode == Global.
     int spectatorVisibilityTeam = -1;
 
+    /// Player number a live spectator on a REPLAY server was admitted under
+    /// (replay::AllocSpectatorPlayerNum, the reserved 200+ range). -1 on every
+    /// other session. It cannot live in `clientPlayerNum` like a player's
+    /// does: a replay spectator is deliberately absent from that map and from
+    /// `playerHandler`, because a spectator visible to synced Lua at GameStart
+    /// mints rules params the recording never had (PLAN-replay §7.12). But the
+    /// playback controls still need a stable id to answer "are these buttons
+    /// yours" with, so it is kept here — on the session, which nothing synced
+    /// reads — rather than being re-derived.
+    int replaySpectatorPlayerNum = -1;
+
     /// Token-bucket rate limiting. Two buckets gate inbound commands:
     ///   - cmdMessageTokens: each PlayerCommand / PlayerCommandBatch
     ///     consumes 1. Refill rate `MSG_RATE_PER_SEC`, burst cap

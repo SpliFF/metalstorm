@@ -371,6 +371,18 @@ export interface GpSelectionStateToWorker {
     unitIds: number[];
 }
 
+/** Playback control for a replay server (PLAN-replay task 4b). The bar lives
+ *  on the main thread (it is DOM, and it must survive a worker recycle), the
+ *  connection lives in the worker, so the intent crosses here — the same shape
+ *  `gp:startBuildPlacement` uses. `action` mirrors `ReplayControlAction`. */
+export interface GpReplayControlToWorker {
+    type: 'gp:replayControl';
+    action: number;
+    speed?: number;
+    frame?: number;
+    povTeam?: number;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -398,6 +410,7 @@ export type GpMessageToWorker =
     | GpConsoleCommandToWorker
     | GpPlayerCommandToWorker
     | GpSelectionStateToWorker
+    | GpReplayControlToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker

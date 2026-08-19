@@ -1,4 +1,4 @@
-name: Headless — determinism pair-run
+name: Headless — determinism + replay verify
 #
 # PLAN-headless.md task 4: the CI regression that finally tests the "synced"
 # claim. Builds spring-server, then runs the PaperTanks-scale fixture
@@ -7,6 +7,21 @@ name: Headless — determinism pair-run
 # sequences frame-for-frame (tools/headless-batch/determinism-pair-run.mjs).
 # Any divergence between two runs of identical config+seed is a genuine
 # synced-state regression, not flake.
+#
+# PLAN-replay.md task 5 adds the second, strictly harder gate over the same
+# fixture: record the run's cause stream to a replay file, then re-execute the
+# recording and assert it reproduces its own embedded state-hash track. The
+# pair-run asks "same input, same output twice?"; the replay verify asks "does
+# re-feeding the RECORDED input reproduce the run?" — which additionally
+# covers journal completeness (an unrecorded synced input surfaces as a
+# divergence), record ordering and the .msr container round-trip.
+#
+# Both gates share the fixture, and the fixture now stages a real skirmish
+# army (modOptions.startunits). Before that it ran a game with literally zero
+# units for all 9000 frames, so both hash tracks folded an empty unit list and
+# neither gate could have caught a movement/collision/damage divergence
+# (PLAN-replay T2-c). The drivers reject a vacuous run up front rather than
+# reporting a green comparison over nothing.
 #
 # Runs on macos-14, same platform note as security-prod-gate.yml: this repo's
 # QUIC stack (ngtcp2/nghttp3) is wired to Homebrew pkg-config paths only, so
@@ -33,14 +48,36 @@ jobs:
   determinism:
     runs-on: macos-14
     steps:
+      # `submodules: recursive` is load-bearing, not hygiene. This job runs on
+      # macos-14 (arm64), where rts/System/simd_compat.h takes the
+      # `defined(__aarch64__)` branch and includes "lib/sse2neon/sse2neon.h" —
+      # which lives in the rts/lib/sse2neon submodule. A bare checkout leaves
+      # that directory empty, so every translation unit that reaches
+      # SpringThreading.h dies with "file not found". entt / nowide / cereal
+      # are needed by the same build for the same reason.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja ngtcp2 nghttp3 openssl@3
+          set -e
+          # Formula names are libngtcp2 / libnghttp3, NOT ngtcp2 / nghttp3 —
+          # the latter do not exist in homebrew-core, and every run of this
+          # workflow died here in ~20 s because of it. Keep them in sync with
+          # CMakeLists.txt's `foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl
+          # libnghttp3)` prefix probe, which is what actually has to find them.
+          brew install cmake ninja libngtcp2 libnghttp3 openssl@3
+          # The QUIC TLS path needs OpenSSL >= 3.5; the runner image ships its
+          # own openssl@3 and `brew install` is a no-op on an already-installed
+          # older one, so upgrade explicitly and print the version rather than
+          # failing later inside ngtcp2_crypto_ossl with a confusing error.
+          brew upgrade openssl@3 || true
+          "$(brew --prefix openssl@3)/bin/openssl" version
+          pkg-config --version
 
-      - name: Matrix-expansion unit test (pure, no build needed)
-        run: node tools/headless-batch/test/matrix.test.mjs
+      - name: headless-batch pure unit tests (no build needed)
+        run: make test-headless-batch
 
       - name: Configure + build spring-server
         run: |
@@ -52,3 +89,22 @@ jobs:
           node tools/headless-batch/determinism-pair-run.mjs \
             --server-bin build/debug/spring-server \
             --out-dir build/headless-determinism
+
+      - name: Fixture-replay verify (record -> re-execute -> pack -> re-execute)
+        run: |
+          node tools/headless-batch/replay-verify-run.mjs \
+            --server-bin build/debug/spring-server \
+            --out-dir build/replay-verify \
+            --pack
+
+      - name: Upload artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-determinism-artefacts
+          path: |
+            build/headless-determinism/*.json
+            build/replay-verify/*.json
+            build/replay-verify/*.msr
+          if-no-files-found: ignore
+          retention-days: 7

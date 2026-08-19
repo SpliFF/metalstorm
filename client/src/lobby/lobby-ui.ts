@@ -47,6 +47,10 @@ import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
 } from '../ui/lobby/loader.js';
+import {
+    describeReplayEntry, parseWatchFrame, type ReplayListing,
+} from './replay-browser.js';
+import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
 
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
@@ -56,6 +60,10 @@ interface RoomInfo {
     id: number; name: string; mapId: string;
     playerCount: number; maxPlayers: number;
     state: number; hasPassword: boolean; hostName: string;
+    /// PLAN-replay task 4c: set when this room is a live replay cast rather
+    /// than a game. Joining one goes through /api/replays/watch, not
+    /// /api/rooms/join — the watch route is what knows about the recording.
+    replayFile?: string;
 }
 
 interface RoomPlayerInfo {
@@ -94,6 +102,16 @@ interface AvailableAIInfo {
 /// One discovered game the lobby can host. Populated from
 /// GameListUpdate; drives the "create game" dropdown in the
 /// browser screen. The `id` is what RoomCreate.game_id carries.
+/// One faction declared by a game's gamedata/sidedata.lua, as surfaced by
+/// GET /api/factions/<gameId> (PLAN-metalstorm-lobby.md task 0). Drives the
+/// sign-up form's required faction picker.
+interface AvailableFactionInfo {
+    key: string;
+    name: string;
+    fullName: string;
+    description: string;
+}
+
 interface AvailableGameInfo {
     id: string;
     displayName: string;
@@ -233,6 +251,13 @@ export class LobbyUI {
     /// Distinct from '': that is an explicit "no scenario", which the
     /// server honours rather than overriding with the map default.
     private selectedScenarioId: string | null = null;
+    /// Factions the sign-up form can offer, fetched once when the login
+    /// screen renders (PLAN-metalstorm-lobby.md task 0). There is no game
+    /// selection at sign-up time — an account's faction isn't scoped to a
+    /// room — so this always asks GET /api/games first and uses whichever
+    /// game comes back first, same "first discovered game" convention the
+    /// create-room form falls back to via `selectedGameId`.
+    private availableFactions: AvailableFactionInfo[] = [];
 
     // ─── Public read-only accessors for debugging / automation ───
 
@@ -266,6 +291,19 @@ export class LobbyUI {
         this.container = document.getElementById('lobby') as HTMLDivElement;
         this.suppressed = suppressed;
         this.injectStyles();
+
+        // §5's digest deep-link: `?watch=<file>&frame=N` → watch that
+        // recording as soon as there is a session to watch it with. Held
+        // rather than fired here because the constructor usually runs before
+        // auto-login has resolved, and the watch route needs a token.
+        const params = new URLSearchParams(window.location.search);
+        const watchFile = params.get('watch');
+        if (watchFile) {
+            this.pendingWatch = {
+                file: watchFile,
+                frame: parseWatchFrame(params.get('frame')),
+            };
+        }
 
         // Try auto-login with saved session
         const savedUser = localStorage.getItem('springrts-username');
@@ -458,6 +496,7 @@ export class LobbyUI {
             playerCount: r.players?.length ?? 0, maxPlayers: 8,
             state: r.state ?? 0, hasPassword: false,
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
+            replayFile: r.replay_file,
         }));
 
         // Check if our current room still exists
@@ -571,17 +610,67 @@ export class LobbyUI {
             e.preventDefault();
             this.doLogin();
         };
+
+        // PLAN-metalstorm-lobby.md task 0: faction is a required, one-time
+        // sign-up choice — only shown once the user signals "new account"
+        // by filling the confirm-password field (the same signal doLogin()
+        // itself uses to decide login vs. register).
+        const pass2El = document.getElementById('login-pass2') as HTMLInputElement | null;
+        const groupEl = document.getElementById('login-faction-group');
+        const selectEl = document.getElementById('login-faction') as HTMLSelectElement | null;
+        const descEl = document.getElementById('login-faction-desc');
+        if (pass2El && groupEl) {
+            pass2El.oninput = () => groupEl.classList.toggle('hidden', pass2El.value === '');
+        }
+        if (selectEl && descEl) {
+            selectEl.onchange = () => {
+                const f = this.availableFactions.find(x => x.key === selectEl.value);
+                descEl.textContent = f ? f.description : '';
+            };
+        }
+        this.fetchFactionsForSignup();
+    }
+
+    /// Populate the sign-up faction picker. Hardcoded to Metalstorm, not
+    /// "whichever game comes first" — the lobby can discover several game
+    /// folders (this dev tree also carries archived BAR/ZK/papertanks
+    /// content), and `/api/games` is not guaranteed to list Metalstorm
+    /// first (verified: alphabetical, `bar` sorts before `metalstorm`).
+    /// accounts.faction_id is Metalstorm's account model specifically
+    /// (PLAN-metalstorm-lobby.md task 0), not a generic pick-the-first-game
+    /// abstraction — same reasoning as the server's `factionRegistry` scope
+    /// (rts/lobby_main.cpp).
+    private async fetchFactionsForSignup(): Promise<void> {
+        try {
+            const factions = await this.lobbyGet('/api/factions/metalstorm');
+            if (!Array.isArray(factions) || factions.length === 0) return;
+            this.availableFactions = factions;
+
+            const selectEl = document.getElementById('login-faction') as HTMLSelectElement | null;
+            if (!selectEl) return;
+            for (const f of factions) {
+                const opt = document.createElement('option');
+                opt.value = f.key;
+                opt.textContent = f.fullName || f.name;
+                selectEl.appendChild(opt);
+            }
+        } catch {
+            // Sign-up faction choice degrades to "no factions offered" —
+            // login (not register) still works with an empty picker.
+        }
     }
 
     private async doLogin(): Promise<void> {
         const user = (document.getElementById('login-user') as HTMLInputElement).value.trim();
         const pass = (document.getElementById('login-pass') as HTMLInputElement).value;
         const pass2 = (document.getElementById('login-pass2') as HTMLInputElement).value;
+        const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
         const msgEl = document.getElementById('login-msg')!;
 
         if (!user) { msgEl.textContent = 'Enter a username'; return; }
         if (!pass) { msgEl.textContent = 'Enter a password'; return; }
         if (pass2 && pass !== pass2) { msgEl.textContent = 'Passwords do not match'; return; }
+        if (pass2 && !faction) { msgEl.textContent = 'Choose a faction'; return; }
 
         msgEl.textContent = 'Connecting...';
         msgEl.className = 'msg';
@@ -599,7 +688,7 @@ export class LobbyUI {
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: user, password: pass }),
+                    body: JSON.stringify({ username: user, password: pass, faction }),
                 });
             }
 
@@ -753,6 +842,118 @@ export class LobbyUI {
         // handler that updates `selectedGameId`.
         this.renderGameOptions();
         this.renderRoomList();
+        this.wireReplayPanel();
+    }
+
+    // ===================== REPLAYS (PLAN-replay task 4c) =====================
+
+    /// Cached rows from the last `/api/replays/list`. Null until the first
+    /// fetch resolves; an empty array means "this lobby records, and has
+    /// nothing yet", which is a different screen from "this lobby does not
+    /// record" (that one hides the button entirely).
+    private replays: ReplayListing[] | null = null;
+    /// Set from `?watch=<file>[&frame=N]` at construction and consumed once a
+    /// browser screen exists. Deferred rather than fired immediately because a
+    /// deep link usually arrives before login has finished.
+    private pendingWatch: { file: string; frame: number } | null = null;
+
+    private wireReplayPanel(): void {
+        const btn = document.getElementById('show-replays-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('replay-panel');
+        if (!btn || !panel) return;
+        btn.onclick = () => {
+            const showing = panel.style.display !== 'none';
+            panel.style.display = showing ? 'none' : 'block';
+            if (!showing) void this.refreshReplays();
+        };
+        // Probe once per browser render so the button only appears on a lobby
+        // that is actually recording. A pending deep link opens the panel
+        // itself, so the probe doubles as the deep link's trigger.
+        void this.refreshReplays().then(() => {
+            if (this.replays === null) return;
+            btn.style.display = '';
+            const pending = this.pendingWatch;
+            if (pending) {
+                this.pendingWatch = null;
+                void this.watchReplay(pending.file, pending.frame);
+            }
+        });
+    }
+
+    /// Fetch the replay list. Leaves `this.replays` null — and the button
+    /// hidden — when the lobby is not recording (the route 404s).
+    private async refreshReplays(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/replays/list');
+            if (!resp || !Array.isArray(resp.replays)) { this.replays = null; return; }
+            this.replays = resp.replays as ReplayListing[];
+        } catch {
+            this.replays = null;
+        }
+        this.renderReplayList();
+    }
+
+    private renderReplayList(): void {
+        const el = document.getElementById('replay-list');
+        if (!el) return;
+        const list = this.replays ?? [];
+        if (list.length === 0) {
+            el.innerHTML = '<div class="empty-state">No replays recorded yet.</div>';
+            return;
+        }
+        el.innerHTML = list.map(r => {
+            const m = describeReplayEntry(r);
+            return renderTemplate(this.templates.browserReplayEntry, {
+                file: this.esc(r.file),
+                title: this.esc(m.title),
+                outcome: this.esc(m.outcome),
+                players: this.esc(m.players),
+                detail: this.esc(m.detail),
+                watch_label: m.watchLabel,
+                disabled_attr: m.disabled ? ' disabled' : '',
+            });
+        }).join('');
+
+        el.querySelectorAll('.watch-btn:not([disabled])').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                void this.watchReplay(btn.getAttribute('data-file')!);
+            };
+        });
+    }
+
+    /**
+     * Ask the lobby to serve a recording, and adopt the room it returns.
+     *
+     * The response is an ordinary room JSON with a `game_server_port` — which
+     * is the entire point of making a replay a real room. Handing it to
+     * `updateCurrentRoomFromJson` runs the same Loading→connect path a player
+     * takes out of the room screen, so nothing about entering a game forks for
+     * replays. (4a and 4b were both verified by hand-injecting exactly this
+     * object; this route is what produces it for real.)
+     *
+     * `frame` is NOT sent to the lobby. A replay server told to seek at launch
+     * fast-forwards with its network loop stalled and the watcher's connection
+     * times out before it can attach — so the start frame is published for the
+     * replay bar to send as an ordinary seek once it is attached, through 4b's
+     * control channel. See the watch route in lobby_main.cpp.
+     */
+    async watchReplay(file: string, frame = 0): Promise<void> {
+        setDeepLinkSeekFrame(frame);
+        const resp = await this.lobbyPost('/api/replays/watch', { file });
+        if (!resp || resp.error) {
+            const msg = resp?.error ?? 'could not start a replay server';
+            console.error(`[lobby] watch '${file}' failed: ${msg}`);
+            const el = document.getElementById('replay-list');
+            if (el) {
+                const note = document.createElement('div');
+                note.className = 'replay-error';
+                note.textContent = `Could not watch ${file}: ${msg}`;
+                el.prepend(note);
+            }
+            return;
+        }
+        console.log(`[lobby] watching '${file}' in room ${resp.id} on port ${resp.game_server_port}`);
+        this.updateCurrentRoomFromJson(resp);
     }
 
     /// Repopulate the `<select id="game-select">` inside the
@@ -989,11 +1190,14 @@ export class LobbyUI {
         }
 
         el.innerHTML = this.rooms.map(r => {
-            const detail =
-                `${r.mapId ? this.esc(r.mapId) : '<em>No map</em>'} · ` +
-                `${r.playerCount}/${r.maxPlayers} players · ` +
-                `Host: ${this.esc(r.hostName)}`;
-            const joinLabel = r.state >= 5 ? 'Ended'
+            const detail = r.replayFile
+                ? `replay · ${this.esc(r.replayFile)} · ` +
+                  `${r.playerCount} watching`
+                : `${r.mapId ? this.esc(r.mapId) : '<em>No map</em>'} · ` +
+                  `${r.playerCount}/${r.maxPlayers} players · ` +
+                  `Host: ${this.esc(r.hostName)}`;
+            const joinLabel = r.replayFile ? 'Join cast'
+                : r.state >= 5 ? 'Ended'
                 : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
             // A room already Loading/Active auto-spectates anyone not on its
             // original roster (RoomManager::JoinRoom's isActive branch) — the
@@ -1001,7 +1205,7 @@ export class LobbyUI {
             // the explicit Spectate button only adds value pre-game (Filling),
             // where the default Join would claim a player slot instead
             // (PLAN-metalstorm-onboarding.md §4).
-            const spectateHtml = (r.state < 3 && r.state < 5)
+            const spectateHtml = (!r.replayFile && r.state < 3 && r.state < 5)
                 ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
                 : '';
             return renderTemplate(this.templates.browserRoomEntry, {
@@ -1017,7 +1221,14 @@ export class LobbyUI {
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
-                this.joinRoom(parseInt(btn.getAttribute('data-id')!));
+                const id = parseInt(btn.getAttribute('data-id')!);
+                const room = this.rooms.find(r => r.id === id);
+                // A replay cast is joined through the watch route, which knows
+                // how to attach a second spectator to a server that is already
+                // playing a file (§5 casting). /api/rooms/join would put the
+                // watcher in the room without ever telling the replay server.
+                if (room?.replayFile) { void this.watchReplay(room.replayFile); return; }
+                this.joinRoom(id);
             };
         });
         el.querySelectorAll('.spectate-btn').forEach(btn => {

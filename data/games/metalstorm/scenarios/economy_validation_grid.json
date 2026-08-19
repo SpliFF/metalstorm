@@ -10,10 +10,12 @@
     "seed": [1001, 1002, 1003, 1004]
   },
 
+  "comment_map_rebind": "map/scenario rebound 2026-08-06 by the metalstorm-scenario-maps lane. `meridian_basin_beta` (PLAN-economy-grid.md defect B2) was never a real map id — it was the working name for the beta map that shipped as `meridian_basin`. That map is itself unplayable: its start positions sit in three disconnected components of the VEH/HEAVY passability mask, so armour cannot reach its own victory objective (PLAN-metalstorm-wars.md §7.6). PLAN-economy-grid.md §3's decision to 'run the existing meridian_basin.lua scenario' is therefore void — that scenario is retired. The grid now targets the replacement showcase war. The economy lane still owns whether this map's 7168-elmo square and 16-region graph suit its matrix; this rebind only removes the dangling reference.",
+
   "baseConfig": {
-    "map": "meridian_basin_beta",
+    "map": "scorched_crossing_v2.4",
     "game": "metalstorm",
-    "scenario": "balance_arena_standard",
+    "scenario": "crossing_standoff",
 
     "comment_slots": "Slots are generated from matrix variables — see batch driver",
     "aiSlots_template": [

@@ -600,6 +600,17 @@ end
 ---
 --- Stamped only on a charge that was ACCEPTED — a refused directive moves
 --- nothing, so crediting its author would be attribution for work not done.
+---
+--- GROUP-SCOPED ONLY, and that is the design, not a gap (objectives §5.1,
+--- endtoend D24). A group-scoped directive's cost basis is Σ
+--- authority_cost_base over the WHOLE roster, so crediting the whole roster at
+--- charge time is crediting exactly what was paid for. A condition/area-scoped
+--- directive (groupID 0) has no roster to stamp and pays only a flat
+--- administrative fee for a standing intent, so its author is attached per
+--- unit at DECOMPOSITION instead — the engine hands the author to
+--- GiveCommand and game_authority_charge.lua's AllowCommand hook stamps
+--- there. Hence the groupID == 0 early return below: not a missing case, the
+--- other case.
 local function stampCommander(teamID, groupID, playerID)
     if not playerID or not groupID or groupID == 0 then return end
     for _, unitID in ipairs(groupMembers(teamID, groupID) or {}) do
@@ -663,6 +674,10 @@ end
 --- Kept as a distinct entry point (rather than routing through
 --- ChargeDirective) because the legacy StandingOrderCreate wire message
 --- has no groupID/requestedStrength fields to normalise into that call.
+---
+--- Deliberately does not stamp `last_commander`: like a condition-scoped
+--- directive it has no roster at create time, so its author is attached per
+--- unit at decomposition (objectives §5.1) — see stampCommander above.
 function GG.Authority.ChargeStandingOrder(playerID, teamID, orderType)
     local classMod = CostSpec.order_class.standing or 1.0
     local cost = Formula.cost(CostSpec.base_k, 1, 1.0, classMod, costScale)

@@ -57,6 +57,12 @@ struct StandingOrderConditions {
 struct StandingOrder {
     uint32_t id = 0;
     int      team = -1;
+    /// The playerNum that created (and was charged for) this order, or -1 when
+    /// unattributed. Handed to GiveCommand at decomposition so game Lua's
+    /// AllowCommand hook can stamp `last_commander` — PLAN-metalstorm-
+    /// objectives.md §5.1 (endtoend D24). A standing order has no roster at
+    /// create time, so this is the only point its author can reach a unit.
+    int      authorPlayerId = -1;
     StandingOrderType type = StandingOrderType::DefendArea;
     uint8_t  priority = 0;
     /// Type-specific params. Schema:
@@ -92,11 +98,35 @@ public:
     void SetChangeNotifier(StandingOrderChangeNotifier cb) { changeNotifier = std::move(cb); }
 
     /// Create a new standing order owned by `team`. Returns the new
-    /// order ID. `currentFrame` is stamped into createdAtFrame and used
-    /// to compute expiresAtFrame from `expiresInFrames` (0 = no expiry).
+    /// order ID, or **0** if `team` is already at the per-team cap.
+    /// `currentFrame` is stamped into createdAtFrame and used
+    /// to compute expiresAtFrame from `expiresInFrames` (0 = "no caller
+    /// deadline", which now means the default TTL rather than "forever" —
+    /// see SetDefaultTtlFrames).
+    /// `authorPlayerId` is the charged player (see StandingOrder::authorPlayerId);
+    /// -1 leaves the order unattributed.
     uint32_t Create(int team, StandingOrderType type, uint8_t priority,
                     std::vector<float> params, StandingOrderConditions cond,
-                    uint32_t expiresInFrames, uint32_t currentFrame);
+                    uint32_t expiresInFrames, uint32_t currentFrame,
+                    int authorPlayerId = -1);
+
+    /// PLAN-long-uptime S6. The audit found this container "throttled, not
+    /// bounded": expiry only ever fired if the *client* passed
+    /// `expires_in_frames > 0`, and every UI path passes 0. Over a weeks-long
+    /// campaign a team accumulates orders for the life of the game.
+    ///
+    /// `SetDefaultTtlFrames` supplies the deadline the caller omitted; 0
+    /// restores the old never-expires behaviour. `SetPerTeamCap` is the hard
+    /// bound — Create refuses past it rather than letting the vector grow.
+    /// Both are settable from a modoption so a scenario that genuinely wants
+    /// permanent directives can say so explicitly.
+    void SetDefaultTtlFrames(uint32_t frames) { defaultTtlFrames = frames; }
+    void SetPerTeamCap(size_t cap) { perTeamCap = cap; }
+    uint32_t GetDefaultTtlFrames() const { return defaultTtlFrames; }
+    size_t GetPerTeamCap() const { return perTeamCap; }
+
+    /// Live order count owned by `team` (cap accounting + metrics).
+    size_t CountTeamOrders(int team) const;
 
     /// Update an existing order. Returns false if the order doesn't
     /// exist or `team` doesn't match the order's owner (cross-team
@@ -128,6 +158,13 @@ private:
     std::vector<StandingOrder> orders;
     uint32_t nextId = 1;
     StandingOrderChangeNotifier changeNotifier;
+
+    /// S6 bounds. 30 frames/s → 108000 frames = 1 hour of sim time, long
+    /// enough that a directive outlives any engagement a player set it up for
+    /// and short enough that a forgotten one does not outlive the campaign.
+    /// 64 orders/team is ~8× the busiest observed live board.
+    uint32_t defaultTtlFrames = 108000;
+    size_t perTeamCap = 64;
 
     void NotifyChange(int team) {
         if (changeNotifier) changeNotifier(team);

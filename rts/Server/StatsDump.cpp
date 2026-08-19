@@ -5,8 +5,10 @@
 
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 
 #include <nlohmann/json.hpp>
 
@@ -104,6 +106,13 @@ nlohmann::json SnapshotToJson(const Snapshot& s) {
         {"simFps", s.simFps},
         {"rssKb", s.rssKb},
         {"luaHeapKb", s.luaHeapKb},
+        // Re-parsed rather than rebuilt so the soak dump and `extra_json`
+        // cannot drift apart: GrowthCounters owns the key names, this file
+        // owns where they sit. A parse of a string this process just produced
+        // cannot fail, but `parse(..., false)` keeps a future change to that
+        // from throwing out of a dump written on a run's last tick.
+        {"growth", nlohmann::json::parse(growth::CountersToJson(s.growth), nullptr, false)},
+        {"dbBytes", s.dbBytes},
         {"teams", teams},
         {"weapons", weapons},
     };
@@ -143,6 +152,51 @@ bool WriteDumpFile(const std::string& path, const FinalDump& dump, std::string& 
         err = std::string("stats dump write failed: ") + e.what();
         return false;
     }
+}
+
+bool ReadHashTrack(const std::string& path,
+                   std::vector<std::pair<int64_t, uint64_t>>& out,
+                   std::string& err) {
+    out.clear();
+    std::ifstream f(path);
+    if (!f) {
+        err = "cannot open stats dump: " + path;
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        err = "stats dump is not valid JSON: " + path;
+        return false;
+    }
+    if (!j.contains("snapshots") || !j["snapshots"].is_array()) {
+        err = "stats dump has no snapshots array: " + path;
+        return false;
+    }
+    for (const auto& s : j["snapshots"]) {
+        if (!s.is_object() || !s.contains("frame") || !s.contains("stateHash"))
+            continue;
+        const int64_t frame = s["frame"].get<int64_t>();
+        uint64_t hash = 0;
+        if (s["stateHash"].is_string()) {
+            const std::string hex = s["stateHash"].get<std::string>();
+            hash = std::strtoull(hex.c_str(), nullptr, 16);
+        } else if (s["stateHash"].is_number_unsigned()) {
+            // Tolerated for hand-written fixtures, but note the precision trap
+            // in the header comment: this branch cannot represent every hash.
+            hash = s["stateHash"].get<uint64_t>();
+        } else {
+            err = "stats dump snapshot has a non-string stateHash: " + path;
+            return false;
+        }
+        out.emplace_back(frame, hash);
+    }
+    if (out.empty()) {
+        err = "stats dump contains no usable snapshots: " + path;
+        return false;
+    }
+    return true;
 }
 
 int64_t GetRssKb() {

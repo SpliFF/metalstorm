@@ -1,0 +1,12 @@
+{
+  "axes": [
+    {
+      "path": "modOptions.objective_density",
+      "values": ["normal", "dense"]
+    },
+    {
+      "path": "modOptions.build_time_scale",
+      "values": ["1.0", "0.05"]
+    }
+  ]
+}

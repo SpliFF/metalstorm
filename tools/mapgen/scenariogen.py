@@ -23,6 +23,16 @@ this area (Meridian Basin: two armies in different connected components, a war
 that could not be fought) was caused by grading connectivity on the region
 GRAPH instead of on the mask, so the mask is the arbiter here too.
 
+...and it does not lay out STREETS. `place_cluster` below scatters buildings on
+rings around a region anchor, which is the right shape for an outpost or an
+extraction site and the wrong one for a town. `town_planner.py` (same directory,
+lane `town-planner`) plans street-and-lot town graphs off the same terrain —
+`town_planner.SiteProbe.from_terrain` takes the `Terrain` built here, so a
+planner run and a scenario run grade identical ground identically. Nothing in
+this file consumes it yet: T1 delivers the graph and its debug dump, and
+staging units from that graph is a later step. Until then the two are
+alternatives, chosen by size — see `town_planner.min_radius_for`.
+
 FIVE INVARIANTS. A generated scenario that violates any of these is a bug, not
 a variation, and the generator refuses to write the file rather than shipping it:
 

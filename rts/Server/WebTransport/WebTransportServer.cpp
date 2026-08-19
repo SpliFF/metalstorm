@@ -1475,12 +1475,14 @@ void WebTransportServer::ReloadCert() { impl_->forceReload.store(true); }
 
 void WebTransportServer::SendStream(ClientID clientId, StreamClass cls,
                                     const uint8_t* data, size_t len, uint32_t lane) {
+    if (outboundSuppressed_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(impl_->txMutex);
     impl_->pendingTx.push_back({clientId, false, cls, lane, std::vector<uint8_t>(data, data + len)});
 }
 
 void WebTransportServer::BroadcastStream(StreamClass cls, const uint8_t* data, size_t len,
                                          uint32_t lane) {
+    if (outboundSuppressed_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(impl_->txMutex);
     impl_->pendingTx.push_back({0, true, cls, lane, std::vector<uint8_t>(data, data + len)});
 }

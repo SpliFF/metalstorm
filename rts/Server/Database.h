@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct sqlite3;
@@ -22,6 +23,15 @@ struct UserRecord {
     /// True for accounts minted by `/api/rooms/direct` (no password ever
     /// set — the account exists only to hold a pre-authorised session).
     bool isDev = false;
+    /// Permanent faction allegiance (PLAN-metalstorm-lobby.md §1a/§1b/§7.1),
+    /// e.g. "compact" / "union" — matches a key from the game's
+    /// gamedata/sidedata.lua (FactionData::Discover). Set once at
+    /// registration and immutable thereafter in the normal flow; nullopt
+    /// only for a not-yet-upgraded guest/provisional account (guest
+    /// accounts themselves are not implemented yet — see PLAN-lobby.md
+    /// §7.1 guest→upgrade). The only normal-flow writer is CreateUser;
+    /// SetFactionByUsername exists solely for the audited admin override.
+    std::optional<std::string> factionId;
 };
 
 class Database {
@@ -38,8 +48,16 @@ public:
     /// Create a user. Returns the new user ID, or 0 on failure (duplicate username).
     /// `isDev` marks accounts minted by `/api/rooms/direct` for a manifest
     /// username that doesn't exist yet — never set for normal registration.
+    /// `factionId` is the permanent faction choice from the sign-up form
+    /// (PLAN-metalstorm-lobby.md task 0); the HTTP register handler
+    /// validates it against the game's declared factions before calling
+    /// this, so by the time it reaches here it is trusted. Left nullopt for
+    /// paths that aren't the real sign-up form (dev/test auto-register,
+    /// `/api/rooms/direct` manifest accounts) — those accounts are not
+    /// normal player registrations.
     int64_t CreateUser(const std::string& username, const std::string& passwordHash,
-                       const std::string& role = "player", bool isDev = false);
+                       const std::string& role = "player", bool isDev = false,
+                       const std::optional<std::string>& factionId = std::nullopt);
 
     /// Look up a user by username. Returns nullopt if not found.
     std::optional<UserRecord> FindUser(const std::string& username);
@@ -86,6 +104,21 @@ public:
     /// so the caller can revoke sessions + audit with the id.
     bool SetBannedByUsername(const std::string& username, bool banned, int64_t& userId);
 
+    /// Privileged override of a user's permanent faction
+    /// (PLAN-metalstorm-lobby.md §1b: "exceptional reassignment ...
+    /// support/admin only ... audited"). There is deliberately no
+    /// player-facing setter for this — CreateUser's `factionId` parameter
+    /// is the only normal-flow write, and it only ever goes from unset to
+    /// set (a fresh registration), never reassigns an existing account.
+    /// Callers of this override are expected to pair it with
+    /// LogAudit(...) and, per §1b, clear the account's per-war bindings
+    /// (not implemented here — no per-war binding storage exists yet;
+    /// tracked by PLAN-metalstorm-lobby §5.1/task 4). Returns true if a
+    /// row was updated (false if the user doesn't exist). Out-param
+    /// `userId` receives the affected id (0 if not found).
+    bool SetFactionByUsername(const std::string& username, const std::string& factionId,
+                              int64_t& userId);
+
     /// Delete every session belonging to a user (immediate logout). Paired
     /// with SetBanned() so a ban ejects a currently-connected player from the
     /// lobby auth path. Returns the number of sessions deleted.
@@ -98,6 +131,15 @@ public:
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
     int CleanExpiredSessions(int maxAgeSeconds = 86400);
+
+    /// PLAN-long-uptime S8 / T2a-4: retention for the two append-only tables
+    /// the S9 sweep left behind. Both are written on every admin action and
+    /// every client crash report and neither had a DELETE anywhere, so on a
+    /// long-lived lobby they only grow. Deleted by `created_at`, which both
+    /// tables default to CURRENT_TIMESTAMP. Returns rows deleted.
+    /// Call from a maintenance connection, not from `db` — see §8.2.
+    int CleanOldAuditEntries(int maxAgeSeconds = 90 * 86400);
+    int CleanOldClientErrors(int maxAgeSeconds = 30 * 86400);
 
     /// Append an entry to the admin_audit log (PLAN-security-hardening task
     /// 6). Every admin-role action — exec, restart, GM verbs (rollback/
@@ -238,6 +280,29 @@ public:
     /// the save route distinguish "update" (always allowed) from "create"
     /// (capped) without an extra round trip.
     bool CommandPresetExists(int64_t userId, const std::string& name);
+
+    /// Raw handle, for modules that own their own tables and statements
+    /// (GameStateStore's game_snapshots, GameServersDb's game_servers) rather
+    /// than adding a method here per query. Null until Open() succeeds.
+    ///
+    /// Callers using it off the main thread rely on SQLite's default
+    /// serialized threading mode; they must also serialise their own
+    /// multi-statement transactions, since sharing a handle means sharing the
+    /// connection's single transaction scope.
+    sqlite3* Handle() const { return db; }
+    /// PLAN-long-uptime task 3: `(room_id, extra_json)` from the newest
+    /// `game_metrics` row of every room with a **live game server**. Rooms
+    /// whose newest row carries an empty `extra_json` are omitted — there is
+    /// nothing to scan — and so are rooms whose server has exited, whose
+    /// metric rows outlive them.
+    ///
+    /// Lives on Database rather than being a raw query in the lobby loop for
+    /// the §8.2 reason: the maintenance thread must not touch the handle the
+    /// route handlers use, and the only handle it legitimately owns is this
+    /// object's. `game_metrics` is created by the *game* server, so a lobby
+    /// that has never hosted a game has no such table; that is not an error
+    /// and yields an empty result.
+    std::vector<std::pair<int, std::string>> LatestGameExtraJson();
 
 private:
     void CreateTables();

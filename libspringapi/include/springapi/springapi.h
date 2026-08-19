@@ -45,8 +45,24 @@ AuthResult login(const std::string& serverUrl,
                  const std::string& username, const std::string& password);
 
 /// Register a new account. Auto-logs in on success.
+///
+/// `faction` is **optional at this layer, with passthrough semantics**: when
+/// non-empty it is sent as the request's `faction` field, and when empty the
+/// field is omitted from the body entirely. libspringapi is a transport for
+/// the HTTP API, not a policy layer — whether a faction is required is the
+/// *server's* rule and it is game-scoped, not universal (the lobby validates
+/// against a registry built only from Metalstorm's gamedata/sidedata.lua, so
+/// a lobby that doesn't serve Metalstorm has no valid faction to send). Making
+/// the parameter mandatory here would hardcode one deployment's policy and
+/// leave callers of every other deployment with nothing legal to pass.
+///
+/// Against a server that does require one, omitting it yields
+/// `success == false` with `error == "faction is required"`; an out-of-registry
+/// key yields `error == "unknown faction"`. Query the valid keys with
+/// `httpGet(serverUrl + "/api/factions/<gameId>")`.
 AuthResult registerUser(const std::string& serverUrl,
-                        const std::string& username, const std::string& password);
+                        const std::string& username, const std::string& password,
+                        const std::string& faction = "");
 
 /// Execute a command in a scope on a game server (via HTTP POST /api/exec).
 /// Requires a token from login().

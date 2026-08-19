@@ -9,15 +9,18 @@
  */
 
 #include "Server/Database.h"
+#include "Server/GrowthCounters.h"
 #include "Server/GameServersDb.h"
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
+#include "Server/ReplayFile.h"
 #include "Server/RoomManager.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/CacheControl.h"
 #include "Server/DevBuildGate.h"
+#include "Server/FactionData.h"
 #include "Server/GameDiscovery.h"
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
@@ -379,6 +382,35 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// AutoAssignStartPositions before this function to fill in any
 /// -1 values, so a well-formed handoff always carries a concrete
 /// slot assignment per team.
+/// `--replay-dir <dir>`: when set, every game server the lobby spawns is given
+/// a `--journal-file <dir>/room-<id>.msr` and records its own cause stream
+/// (PLAN-replay task 2). Off by default — recording is a per-deployment choice,
+/// not something a dev lobby should start doing silently — and file-scope
+/// rather than an twelfth spawnGameServer parameter for the same reason
+/// CacheControl::IsNoCache() is: it is a process-wide operator setting, not a
+/// property of the room being started.
+static std::string gReplayDir;
+
+/// Rooms that are WATCHING a replay rather than hosting a game (PLAN-replay
+/// task 4c), roomId → the `.msr` basename being served.
+///
+/// A replay room is a real room on purpose: 4a and 4b both had to be verified
+/// by hand-injecting a synthetic room object into the client, because a room is
+/// already the only thing that carries a `game_server_port` to a browser and
+/// the only thing whose lifecycle kills a server when the last person leaves.
+/// Making the lobby produce a genuine one means the whole join → play → leave
+/// path is the path players already use, and §5's "casting = one replay server,
+/// many spectators" falls out of JoinRoom's existing behaviour rather than
+/// needing a second concept.
+///
+/// The map is what the rest of the lobby consults to tell the two apart: the
+/// room browser labels them, and the health loop DELETES a replay room whose
+/// server exited instead of recycling it for another game (a replay room has no
+/// next game — the recording ran out).
+/// (`unordered_map` rather than `map`: `rts/Map/` shadows the `<map>` header on
+/// a case-insensitive filesystem, so it cannot be included here at all.)
+static std::unordered_map<uint32_t, std::string> gReplayRooms;
+
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
     const std::string &mapId, const std::string &dbPath,
@@ -390,7 +422,18 @@ static GameServerInstance spawnGameServer(
     // PLAN-security-hardening.md task 5 (G3): forwarded from the lobby's own
     // --wt-cert/--wt-key to every spawned spring-server, so an operator
     // configures the prod cert once at the lobby instead of per room.
-    const std::string &wtCertPath = "", const std::string &wtKeyPath = "") {
+    const std::string &wtCertPath = "", const std::string &wtKeyPath = "",
+    // PLAN-replay task 4c: when set, this server RE-EXECUTES the named `.msr`
+    // instead of hosting a live game. The replay file is its own launch spec
+    // (map, game, modoptions, roster, AI slots all come out of the header), so
+    // every argument that describes the world is deliberately NOT passed — the
+    // engine treats an explicit flag as an override, and overriding here would
+    // silently turn a playback into a divergence experiment.
+    //
+    // Deliberately NO `--replay-seek`: a start frame is a control a watcher
+    // sends, never a launch option. See the watch route for the live evidence.
+    const std::string &replayFile = "") {
+  const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
   inst.port = findFreePort(9100, 0, excludedPorts);
@@ -453,6 +496,24 @@ static GameServerInstance spawnGameServer(
     modOptArgStorage.push_back(key + "=" + value);
   }
 
+  // Replay recording (PLAN-replay). One file per room; the port disambiguates
+  // rooms reusing an id across a lobby restart. Created here rather than in the
+  // child so a directory that cannot be made is reported by the lobby instead
+  // of vanishing into a forked process's log.
+  std::string replayPathStorage;
+  if (!gReplayDir.empty() && !isReplay) {
+    std::error_code ec;
+    std::filesystem::create_directories(gReplayDir, ec);
+    if (ec) {
+      SLOG(SPRING_LOG_WARNING, "--replay-dir '%s' is not usable (%s) — room %u "
+           "will not be recorded",
+           gReplayDir.c_str(), ec.message().c_str(), roomId);
+    } else {
+      replayPathStorage = gReplayDir + "/room-" + std::to_string(roomId) + "-p" +
+                          std::to_string(inst.port) + ".msr";
+    }
+  }
+
   pid_t pid = fork();
   if (pid == 0) {
     // Child process — redirect stdout/stderr to log file
@@ -490,14 +551,20 @@ static GameServerInstance spawnGameServer(
     argv.push_back(portStr.c_str());
     argv.push_back("--room");
     argv.push_back(roomStr.c_str());
-    argv.push_back("--game");
-    argv.push_back(gameId.c_str());
-    if (!gameVersion.empty()) {
-      argv.push_back("--game-version");
-      argv.push_back(gameVersion.c_str());
+    if (!isReplay) {
+      argv.push_back("--game");
+      argv.push_back(gameId.c_str());
+      if (!gameVersion.empty()) {
+        argv.push_back("--game-version");
+        argv.push_back(gameVersion.c_str());
+      }
+      argv.push_back("--map");
+      argv.push_back(mapId.c_str());
     }
-    argv.push_back("--map");
-    argv.push_back(mapId.c_str());
+    // --db is passed on BOTH paths and is not optional on a replay: the
+    // recorded auths take their identity from the stream (§7.10), but the
+    // *live* spectator watching still authenticates its own session token
+    // against this database like any other client.
     argv.push_back("--db");
     argv.push_back(dbPath.c_str());
     if (!wtCertPath.empty() && !wtKeyPath.empty()) {
@@ -506,17 +573,26 @@ static GameServerInstance spawnGameServer(
       argv.push_back("--wt-key");
       argv.push_back(wtKeyPath.c_str());
     }
-    for (const auto &spec : playerArgStorage) {
-      argv.push_back("--player");
-      argv.push_back(spec.c_str());
-    }
-    for (const auto &spec : aiArgStorage) {
-      argv.push_back("--ai");
-      argv.push_back(spec.c_str());
-    }
-    for (const auto &spec : modOptArgStorage) {
-      argv.push_back("--modoption");
-      argv.push_back(spec.c_str());
+    if (isReplay) {
+      argv.push_back("--replay");
+      argv.push_back(replayFile.c_str());
+    } else {
+      for (const auto &spec : playerArgStorage) {
+        argv.push_back("--player");
+        argv.push_back(spec.c_str());
+      }
+      for (const auto &spec : aiArgStorage) {
+        argv.push_back("--ai");
+        argv.push_back(spec.c_str());
+      }
+      for (const auto &spec : modOptArgStorage) {
+        argv.push_back("--modoption");
+        argv.push_back(spec.c_str());
+      }
+      if (!replayPathStorage.empty()) {
+        argv.push_back("--journal-file");
+        argv.push_back(replayPathStorage.c_str());
+      }
     }
     if (devBuildAcknowledged)
       argv.push_back(DevBuildGate::kFlag);
@@ -537,10 +613,15 @@ static GameServerInstance spawnGameServer(
   } else if (pid > 0) {
     inst.pid = pid;
     inst.state = GameServerInstance::Starting;
-    SLOG(SPRING_LOG_NOTICE,
-         "spawned game server pid=%d port=%d for room %u "
-         "(%zu players, %zu AI)",
-         pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
+    if (isReplay)
+      SLOG(SPRING_LOG_NOTICE,
+           "spawned REPLAY server pid=%d port=%d for room %u (%s)", pid,
+           inst.port, roomId, replayFile.c_str());
+    else
+      SLOG(SPRING_LOG_NOTICE,
+           "spawned game server pid=%d port=%d for room %u "
+           "(%zu players, %zu AI)",
+           pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
   } else {
     SLOG(SPRING_LOG_ERROR, "fork failed");
     inst.state = GameServerInstance::Crashed;
@@ -662,6 +743,8 @@ int main(int argc, char *argv[]) {
       wtCertPath = argv[++i];
     } else if (arg == "--wt-key" && i + 1 < argc) {
       wtKeyPath = argv[++i];
+    } else if (arg == "--replay-dir" && i + 1 < argc) {
+      gReplayDir = argv[++i];
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
@@ -954,6 +1037,32 @@ int main(int argc, char *argv[]) {
     auto it = scenariosByGame.find(gameId);
     return (it == scenariosByGame.end()) ? kNone : it->second;
   };
+  // --- Per-game faction discovery (PLAN-metalstorm-lobby.md task 0) ---
+  // gamedata/sidedata.lua factions, keyed by game id for the war-browser-
+  // style /api/games/<id>/factions route. A game with no sidedata.lua (or
+  // an empty one, e.g. papertanks) simply gets an empty vector — valid,
+  // not an error.
+  std::unordered_map<std::string, std::vector<FactionData::FactionInfo>> factionsByGame;
+  for (const auto &g : availableGames)
+    factionsByGame[g.id] = FactionData::Discover(g.folderPath);
+
+  // Registration's faction registry is scoped to Metalstorm specifically,
+  // not a union across every game folder this lobby happens to serve.
+  // accounts.faction_id is Metalstorm's account model (this plan is
+  // PLAN-metalstorm-lobby.md, not a generic multi-game abstraction) — a
+  // leftover BAR/ZK/papertanks sidedata.lua (verified live: ZK ships a real
+  // one, `{key:"robots", ...}`) would otherwise leak an unrelated faction
+  // namespace into Metalstorm registration. Same "Metalstorm needs its own
+  // rule" shape as GameOverState::IsEliminationEligible's `gameId !=
+  // "metalstorm"` carve-out. Revisit if this lobby ever hosts a second game
+  // with its own real faction registration.
+  std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+  {
+    auto it = factionsByGame.find("metalstorm");
+    if (it != factionsByGame.end())
+      for (const auto &f : it->second)
+        factionRegistry.emplace(f.key, f);
+  }
 
   // --- Game server instances ---
   std::unordered_map<uint32_t, GameServerInstance>
@@ -1425,7 +1534,7 @@ int main(int argc, char *argv[]) {
 #endif // !SPRING_PROD
 
   // --- HTTP auth endpoints ---
-  HttpAuth::RegisterEndpoints(net, db);
+  HttpAuth::RegisterEndpoints(net, db, factionRegistry);
 
   // Version endpoint — clients use this to get the build stamp for
   // cache-busting
@@ -1671,7 +1780,7 @@ int main(int argc, char *argv[]) {
               "       st.ready, st.client_count, "
               "       m.frame, m.tick_p95_us, m.frames_behind, m.entity_count, "
               "       m.sim_fps, m.uptime_sec, m.db_size_bytes, "
-              "m.snapshot_age_sec "
+              "m.snapshot_age_sec, m.extra_json "
               "FROM game_servers gs "
               "LEFT JOIN game_status st ON st.room_id = gs.room_id "
               "LEFT JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics "
@@ -1708,19 +1817,44 @@ int main(int argc, char *argv[]) {
               g["uptime_sec"] = colInt(13);
               g["db_size_bytes"] = colInt(14);
               g["snapshot_age_sec"] = colInt(15);
-              // Engine-sourced alarm badges (economy/long-uptime Lua
-              // counters land here once that Stage-7 Lua exists).
+              // Lobby-evaluated badges: these read columns the lobby already
+              // has and need no cooperation from the game server.
               nlohmann::json alarms = nlohmann::json::array();
               const std::string state = colTxt(5);
               if (sqlite3_column_type(s, 10) != SQLITE_NULL &&
                   sqlite3_column_int(s, 10) > 60)
-                alarms.push_back({{"label", "lag"}, {"crit", true}});
+                alarms.push_back(
+                    {{"label", "lag"}, {"crit", true}, {"detail", "frames behind"}});
               if (sqlite3_column_type(s, 14) != SQLITE_NULL &&
                   sqlite3_column_int64(s, 14) > 1024LL * 1024 * 1024)
-                alarms.push_back({{"label", "db"}, {"crit", false}});
+                alarms.push_back(
+                    {{"label", "db"}, {"crit", false}, {"detail", "db over 1 GiB"}});
               if (state == "crashed")
-                alarms.push_back({{"label", "crashed"}, {"crit", true}});
+                alarms.push_back(
+                    {{"label", "crashed"}, {"crit", true}, {"detail", "server exited"}});
+              // PLAN-long-uptime task 3: the growth alarms are evaluated by
+              // the game server (it is the only process that can see a Lua
+              // heap or an id pool) and ride the metric row's extra_json. The
+              // lobby merges rather than re-derives — thresholds live in one
+              // place, next to the counters they apply to.
+              const std::string extraJson = colTxt(16);
+              std::vector<growth::Alarm> growthAlarms;
+              growth::ParseAlarms(extraJson, growthAlarms);
+              for (const auto &a : growthAlarms)
+                alarms.push_back({{"label", a.label},
+                                  {"crit", a.crit},
+                                  {"detail", a.detail}});
               g["alarms"] = alarms;
+              // The raw counters too, so the drill-down can chart growth
+              // without a second round trip. Absent (not zeroed) when the row
+              // predates this or the gather found nothing.
+              if (!extraJson.empty()) {
+                nlohmann::json extra =
+                    nlohmann::json::parse(extraJson, nullptr, false);
+                if (!extra.is_discarded() && extra.is_object() &&
+                    extra.contains("growth"))
+                  g["growth"] = extra["growth"];
+              }
               games.push_back(std::move(g));
             }
           }
@@ -1757,12 +1891,13 @@ int main(int argc, char *argv[]) {
           sqlite3_stmt *s = nullptr;
           const char *sql =
               "SELECT frame, taken_at, resolution, tick_p95_us, frames_behind, "
-              "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes "
+              "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes, "
+              "extra_json "
               "FROM game_metrics WHERE room_id=? ORDER BY id DESC LIMIT 200";
           if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(s, 1, roomId);
             while (sqlite3_step(s) == SQLITE_ROW) {
-              timeline.push_back({
+              nlohmann::json row = {
                   {"frame", sqlite3_column_int(s, 0)},
                   {"taken_at", sqlite3_column_int64(s, 1)},
                   {"resolution",
@@ -1774,7 +1909,20 @@ int main(int argc, char *argv[]) {
                   {"sim_fps", sqlite3_column_double(s, 7)},
                   {"uptime_sec", sqlite3_column_int64(s, 8)},
                   {"db_size_bytes", sqlite3_column_int64(s, 9)},
-              });
+              };
+              // PLAN-long-uptime task 3: hoist the growth counters to the top
+              // level of the row so the drill-down charts a series rather than
+              // re-parsing a string per point. Rows written before this
+              // existed (and hourly-downsampled rows, which carry the
+              // *promoted* raw row's extra_json) simply have no `growth` key.
+              if (const auto *t = sqlite3_column_text(s, 10)) {
+                const nlohmann::json extra = nlohmann::json::parse(
+                    reinterpret_cast<const char *>(t), nullptr, false);
+                if (!extra.is_discarded() && extra.is_object() &&
+                    extra.contains("growth"))
+                  row["growth"] = extra["growth"];
+              }
+              timeline.push_back(std::move(row));
             }
           }
           if (s)
@@ -1875,6 +2023,48 @@ int main(int argc, char *argv[]) {
           return HttpAuth::JsonResponse(
               404, R"({"ok":false,"error":"no such user"})");
         db.LogAudit(uid, uname, "unban", target, "");
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
+
+  // POST /api/admin/set-faction {username, faction} — privileged, audited
+  // override of a user's permanent faction (PLAN-metalstorm-lobby.md §1b:
+  // "exceptional reassignment ... support/admin only ... audited"). There
+  // is deliberately no equivalent player-facing route — faction is
+  // immutable in the normal flow; POST /api/auth/register is the only
+  // other writer, and it only ever sets an unset value on a brand-new
+  // account. `faction` is validated against the same factionRegistry the
+  // registration route uses, so an admin can't type a typo'd key any
+  // more than a new player could.
+  net.AddHttpPost(
+      "/api/admin/set-faction", RouteAuth::AdminOnly,
+      [&db, &factionRegistry,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string target =
+            j.is_discarded() ? "" : j.value("username", std::string(""));
+        const std::string faction =
+            j.is_discarded() ? "" : j.value("faction", std::string(""));
+        if (target.empty() || faction.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"username and faction required"})");
+        if (factionRegistry.find(faction) == factionRegistry.end())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"unknown faction"})");
+        int64_t targetId = 0;
+        if (!db.SetFactionByUsername(target, faction, targetId))
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such user"})");
+        // §1b: an admin faction reassignment "clears the account's
+        // per-war bindings" — no per-war binding store exists yet
+        // (PLAN-metalstorm-lobby §5.1/task 4 is unimplemented), so
+        // there is nothing to clear today. Tracked in that task's scope,
+        // not silently dropped: audit the override now regardless.
+        db.LogAudit(uid, uname, "set_faction", target, "faction=" + faction);
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
       });
 
@@ -2478,6 +2668,12 @@ int main(int argc, char *argv[]) {
       j["game_server_port"] = room->gameServerPort;
     if (room->persistent)
       j["persistent"] = true;
+    // PLAN-replay task 4c: a replay room reaches the client through exactly the
+    // same JSON as a game room — that is the whole reason it IS a room — but
+    // the browser must not offer to "join" one as a player, so it says which
+    // recording it is serving.
+    if (auto rit = gReplayRooms.find(room->id); rit != gReplayRooms.end())
+      j["replay_file"] = rit->second;
     return j.dump();
   };
 
@@ -3124,6 +3320,41 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, json);
       });
 
+  // GET /api/factions/* — list the factions a game declares in
+  // gamedata/sidedata.lua (PLAN-metalstorm-lobby.md task 0), per game id.
+  // The sign-up form fetches /api/factions/metalstorm specifically to
+  // render the required faction picker with lore text; POST
+  // /api/auth/register validates the chosen `faction` key against
+  // factionRegistry, which is scoped to Metalstorm only (see its
+  // declaration above) — not this per-game route's generic game→factions
+  // map, which stays available for any game that ships one.
+  net.AddHttpGet(
+      "/api/factions/*", RouteAuth::Public,
+      [&factionsByGame](const std::string &url) -> HttpResponse {
+        std::string gameId = url.substr(std::string("/api/factions/").size());
+        if (gameId.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
+
+        auto it = factionsByGame.find(gameId);
+        if (it == factionsByGame.end())
+          return HttpAuth::JsonResponse(404, R"({"error":"game not found"})");
+
+        std::string json = "[";
+        bool first = true;
+        for (const auto &f : it->second) {
+          if (!first)
+            json += ",";
+          first = false;
+          json += "{\"key\":\"" + HttpAuth::JsonEscape(f.key) + "\"" +
+                  ",\"name\":\"" + HttpAuth::JsonEscape(f.name) + "\"" +
+                  ",\"fullName\":\"" + HttpAuth::JsonEscape(f.fullName) + "\"" +
+                  ",\"description\":\"" + HttpAuth::JsonEscape(f.description) +
+                  "\"}";
+        }
+        json += "]";
+        return HttpAuth::JsonResponse(200, json);
+      });
+
   // GET /api/games/<id>/resources.json — Spring's gamedata/resources.lua
   // parsed and serialised as JSON. The client uses the
   // `graphics.projectiletextures` map (and friends) to turn weapon
@@ -3354,6 +3585,9 @@ int main(int argc, char *argv[]) {
                  "room %u abandoned, killed game server pid %d", rid,
                  gsIt->second.pid);
           }
+          // A replay room's last watcher leaving ends the cast — the same
+          // abandon rule a game room already has (PLAN-replay task 4c).
+          gReplayRooms.erase(rid);
           rooms.DeleteRoom(rid);
         }
 
@@ -3876,6 +4110,264 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, resp.dump());
       });
 
+  // ─────────────── Replay browser (PLAN-replay.md task 4c) ───────────────
+  //
+  // T4a-2, stated in §7.13: "the lobby has no replay-serving surface at all —
+  // it can record (--replay-dir) and it can spawn game servers, but it cannot
+  // enumerate what it recorded and has no path that spawns a
+  // `spring-server --replay`." These two routes are that surface. Both 404
+  // when --replay-dir is unset, because with no directory there is nothing to
+  // browse and nothing to serve — an operator who never turned recording on
+  // should not be told the feature is broken.
+
+  /// Resolve a client-supplied replay name to a path inside gReplayDir.
+  ///
+  /// The name is matched against the directory listing rather than
+  /// concatenated onto it. That is deliberately stricter than sanitising the
+  /// string: a name that is not one of the files we just enumerated cannot be
+  /// served, so no amount of `..`, absolute paths, symlink games or unicode
+  /// separators reaches the filesystem. The cost is one directory scan per
+  /// watch request, which is nothing next to spawning a process.
+  auto resolveReplayFile = [](const std::string &name,
+                              std::string &pathOut) -> bool {
+    if (gReplayDir.empty() || name.empty())
+      return false;
+    std::error_code ec;
+    for (const auto &entry :
+         std::filesystem::directory_iterator(gReplayDir, ec)) {
+      if (ec)
+        return false;
+      if (!entry.is_regular_file(ec))
+        continue;
+      if (entry.path().extension() != ".msr")
+        continue;
+      if (entry.path().filename().string() == name) {
+        pathOut = entry.path().string();
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /// One listing row. `LoadSummary` is the cheap read — header, trailer,
+  /// outcome and block counts, with the record stream walked but never
+  /// decoded — so listing a directory of long campaign segments costs a pass
+  /// over their framing rather than the memory to hold every match.
+  auto replayToJson = [&](const replay::Summary &s) -> nlohmann::json {
+    nlohmann::json j;
+    j["file"] = std::filesystem::path(s.path).filename().string();
+    j["bytes"] = s.fileBytes;
+    if (!s.ok) {
+      // Kept in the list rather than dropped: a replay the lobby cannot open
+      // is an operator-visible fact, and a silently shorter list is how a
+      // corrupt recording goes unnoticed for a month.
+      j["ok"] = false;
+      j["error"] = s.error;
+      return j;
+    }
+    j["ok"] = true;
+    j["game"] = s.header.gameId;
+    j["game_version"] = s.header.gameVersion;
+    j["map"] = s.header.mapId;
+    j["room_id"] = s.header.roomId;
+    j["recorded_at"] = s.header.recordedAt;
+    j["modified_at"] = s.modifiedAtUnix;
+    j["start_frame"] = s.header.startFrame;
+    j["end_frame"] = s.EndFrame();
+    j["truncated"] = s.truncated;
+    j["codec"] = replay::CodecName(s.codec);
+    j["records"] = s.recordCount;
+    j["hash_points"] = s.hashPointCount;
+    // A viewer needs to know a backward seek is impossible before it clicks
+    // (§7.15 T4b-1); this is the fact the playback bar's refusal rests on.
+    j["checkpoints"] = s.checkpointCount;
+    j["players"] = nlohmann::json::array();
+    for (const auto &p : s.header.players)
+      j["players"].push_back(
+          {{"username", p.username}, {"team", p.team}, {"start_pos", p.startPos}});
+    j["ai_slots"] = nlohmann::json::array();
+    for (const auto &a : s.header.aiSlots)
+      j["ai_slots"].push_back(
+          {{"ai_id", a.aiId}, {"team", a.team}, {"start_pos", a.startPos}});
+    j["modoptions"] = nlohmann::json::object();
+    for (const auto &[k, v] : s.header.modOptions)
+      j["modoptions"][k] = v;
+    // §5's fourth listing column. `declared=false` reads as "no result" and
+    // covers two cases that are the same statement to a viewer: a recording
+    // that predates the outcome block, and a game that never finished.
+    j["outcome"] = nlohmann::json::object();
+    j["outcome"]["declared"] = s.outcome.declared;
+    if (s.outcome.declared) {
+      j["outcome"]["frame"] = s.outcome.frame;
+      j["outcome"]["winning_ally_teams"] = s.outcome.winningAllyTeams;
+    }
+    // Whether this recording already has a live cast to join (§5 casting).
+    for (const auto &[rid, f] : gReplayRooms) {
+      if (f == j["file"].get<std::string>()) {
+        j["watching_room"] = rid;
+        break;
+      }
+    }
+    return j;
+  };
+
+  // POST /api/replays/list — what has been recorded.
+  //
+  // A POST for a read, because a GET has to be: `HttpGetHandler` never
+  // receives an Authorization header, so NetworkServer degrades every
+  // non-Public GET to loopback-only (see RouteAuth's note in
+  // NetworkServer.h). A replay list names players and rooms, so it wants real
+  // token auth, and real token auth means POST today.
+  net.AddHttpPost(
+      "/api/replays/list", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        if (requireAuth(headers) <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (gReplayDir.empty())
+          return HttpAuth::JsonResponse(
+              404,
+              R"({"error":"this lobby is not recording replays - no --replay-dir is set"})");
+        nlohmann::json resp;
+        resp["dir"] = gReplayDir;
+        resp["replays"] = nlohmann::json::array();
+        for (const auto &s : replay::ListDirectory(gReplayDir))
+          resp["replays"].push_back(replayToJson(s));
+        return HttpAuth::JsonResponse(200, resp.dump());
+      });
+
+  // POST /api/replays/watch {"file": "..."} — watch one.
+  //
+  // Returns a room, in the same JSON every other room route returns, because
+  // the client already knows how to turn "a room with a game_server_port and
+  // state Loading" into a connected game. A second caller for a recording
+  // already being watched JOINS the existing room instead of spawning a
+  // second server — that is §5's "casting = one replay server, many
+  // spectators", and it is also what makes 4b's controller/succession rule
+  // reachable from the lobby at all.
+  //
+  // THERE IS NO START-FRAME PARAMETER, and that is a finding rather than an
+  // omission. §5's deep link is `watch?game=X&frame=N`, and the obvious
+  // implementation — pass `--replay-seek N` to the server being spawned — was
+  // built, run, and does not work: the launch-time seek is an *uncapped*
+  // fast-forward (no checkpoints, so it re-executes every frame from the
+  // start) and the server does not service its QUIC connections while it runs.
+  // Observed live at frame 2000 of a 6150-frame recording: the watcher's
+  // handshake sat unanswered for the whole fast-forward, its WebTransport
+  // timed out ("Connection lost"), and it came back as a client the deck no
+  // longer recognised as the controller — so the deep link produced a playback
+  // bar with every button dead. The frame therefore travels as a
+  // `ReplayControl::Seek` from the watcher once it has attached (4b's channel,
+  // which already reports "seeking…" and refuses honestly), which is also the
+  // more correct model: a start frame is a request to a cast, not a property
+  // of the server serving it.
+  net.AddHttpPost(
+      "/api/replays/watch", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        if (gReplayDir.empty())
+          return HttpAuth::JsonResponse(
+              404,
+              R"({"error":"this lobby is not recording replays - no --replay-dir is set"})");
+
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        const std::string file = j.value("file", "");
+
+        std::string path;
+        if (!resolveReplayFile(file, path))
+          return HttpAuth::JsonResponse(
+              404, R"({"error":"no such replay in this lobby's replay dir"})");
+
+        // Refuse a file we cannot read BEFORE forking: a replay server given
+        // an unreadable file exits immediately, and the room it left behind
+        // would read to a player as "the game crashed" rather than "this
+        // recording is broken".
+        const replay::Summary sum = replay::LoadSummary(path);
+        if (!sum.ok)
+          return HttpAuth::JsonResponse(
+              422, "{\"error\":\"" + HttpAuth::JsonEscape(sum.error) + "\"}");
+
+        // Already being cast? Join that room rather than starting a rival
+        // server over the same file.
+        for (const auto &[rid, f] : gReplayRooms) {
+          if (f != file)
+            continue;
+          auto gsIt = gameServers.find(rid);
+          if (gsIt == gameServers.end() || !isProcessAlive(gsIt->second.pid))
+            break; // stale entry; the health loop will clear it, spawn anew
+          if (!rooms.JoinRoom(rid, static_cast<uint32_t>(userId), 0,
+                              user->username, "", /*asSpectator=*/true))
+            return HttpAuth::JsonResponse(
+                403, R"({"error":"cannot join the cast for this replay"})");
+          SLOG(SPRING_LOG_NOTICE, "'%s' joined the cast of '%s' (room %u)",
+               user->username.c_str(), file.c_str(), rid);
+          broadcastRooms();
+          return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(rid)));
+        }
+
+        // One watcher may only be in one room; leaving is implicit, same as
+        // the direct-start path treats it.
+        if (auto *prior = findPlayerRoom(static_cast<uint32_t>(userId))) {
+          const uint32_t priorId = prior->id;
+          if (rooms.LeaveRoom(priorId, static_cast<uint32_t>(userId)) ==
+              LeaveResult::Abandoned) {
+            auto gsIt = gameServers.find(priorId);
+            if (gsIt != gameServers.end()) {
+              kill(gsIt->second.pid, SIGTERM);
+              removeGameServer(priorId);
+              gameServers.erase(gsIt);
+            }
+            gReplayRooms.erase(priorId);
+            rooms.DeleteRoom(priorId);
+          }
+        }
+
+        // The room's map/game come out of the RECORDING's header, not from a
+        // caller-supplied field: they are what the client preloads content
+        // for, and a mismatch there is a black screen rather than an error.
+        const uint32_t roomId = rooms.CreateRoom(
+            "▶ " + file, sum.header.mapId, sum.header.gameId, /*maxPlayers=*/8,
+            /*password=*/"", static_cast<uint32_t>(userId), 0, user->username,
+            /*persistent=*/false);
+        gReplayRooms[roomId] = file;
+
+        std::unordered_set<int> busyPorts;
+        for (const auto &[rid, gi] : gameServers)
+          if (gi.pid > 0 && isProcessAlive(gi.pid))
+            busyPorts.insert(gi.port);
+        auto inst = spawnGameServer(
+            roomId, sum.header.gameId, sum.header.gameVersion, sum.header.mapId,
+            dbPath, /*playerRoster=*/{}, /*aiSlots=*/{}, /*modOptions=*/{},
+            busyPorts, devBuildAcknowledged, wtCertPath, wtKeyPath, path);
+        if (inst.state == GameServerInstance::Crashed) {
+          gReplayRooms.erase(roomId);
+          rooms.DeleteRoom(roomId);
+          return HttpAuth::JsonResponse(
+              500, R"({"error":"could not start a replay server"})");
+        }
+        gameServers[roomId] = inst;
+        persistGameServer(inst);
+
+        GameRoom *room = rooms.GetRoom(roomId);
+        room->gameServerPort = inst.port;
+        // Loading, not Active: the health loop promotes it once the server
+        // publishes game_status.ready, exactly as it does for a live game. The
+        // client's connect-retry already tolerates the gap.
+        rooms.SetRoomState(roomId, ERoomState::Loading);
+
+        db.LogAudit(userId, user->username, "replay_watch", file,
+                    "room=" + std::to_string(roomId));
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
+      });
+
 #undef HTTP_ROOM_AUTH
 
   // --direct <manifest.json>: create one standing room at boot, driven
@@ -3919,6 +4411,21 @@ int main(int argc, char *argv[]) {
 
   SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
 
+  // --- Periodic maintenance connection (PLAN-long-uptime S9) ---
+  // The expired-session sweep below has to run from this thread, and it must
+  // NOT run through `db`: the HTTP route handlers use that handle unguarded
+  // from the NetworkServer thread, and macOS's system libsqlite3 hands out
+  // NOMUTEX handles, so sharing it across threads is a data race on the
+  // handle rather than mere lock contention. A second connection to the same
+  // WAL file is safe by construction (and `Database::Open` gives it a busy
+  // timeout, which is what makes the two writers coexist).
+  Database maintenanceDb;
+  const bool haveMaintenanceDb = maintenanceDb.Open(dbPath);
+  if (!haveMaintenanceDb)
+    SLOG(SPRING_LOG_ERROR,
+         "maintenance db connection failed — expired sessions will not be "
+         "swept while this lobby runs");
+
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
   int errorPruneTick = 0;
@@ -3934,6 +4441,86 @@ int main(int argc, char *argv[]) {
         SLOG(SPRING_LOG_NOTICE,
              "pruned %d client error report(s) older than %d days", pruned,
              clientErrorRetentionDays);
+  int sessionSweepTick = 0;
+  // PLAN-long-uptime task 3 (§3): the durable record of a growth alarm.
+  // Per-room, the set of alarm labels this lobby has already written an audit
+  // row for. The fleet view already *shows* live alarms off the same JSON;
+  // this exists so an alarm that trips at 03:00 and clears before anyone looks
+  // still leaves a trace, and so the drill-down's audit trail — which is where
+  // an operator reconstructs what happened to a long game — carries it.
+  //
+  // §3 asks for a `game_events` entry. That table does not exist and §7.3
+  // struck it from S3 for the same reason; `admin_audit` is the table the
+  // dashboard already reads, so the alarm lands there with userId 0 (no human
+  // took this action) and username "system".
+  // (unordered_map, not map: `rts/Map/` shadows the `<map>` header on macOS.)
+  int alarmScanTick = 0;
+  std::unordered_map<int, std::set<std::string>> knownRoomAlarms;
+  while (keepRunning.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Scan for growth-alarm transitions (~every 60 s at 10 Hz). Matched to the
+    // game server's own metric cadence deliberately: the scan only ever looks
+    // at the *newest* row per room, so any slower cadence silently skips rows
+    // and the audit trail becomes a sample of the transitions rather than a
+    // record of them. Cost is one indexed join over the live rooms per minute.
+    if (haveMaintenanceDb && ++alarmScanTick >= 600) {
+      alarmScanTick = 0;
+      std::set<int> seenRooms;
+      for (const auto &[roomId, extraJson] : maintenanceDb.LatestGameExtraJson()) {
+        seenRooms.insert(roomId);
+        std::vector<growth::Alarm> alarms;
+        growth::ParseAlarms(extraJson, alarms);
+        std::set<std::string> now;
+        for (const auto &a : alarms)
+          now.insert(a.label);
+        auto &known = knownRoomAlarms[roomId];
+        for (const auto &a : alarms) {
+          if (known.count(a.label))
+            continue;
+          maintenanceDb.LogAudit(0, "system",
+                                 a.crit ? "alarm_crit" : "alarm_warn",
+                                 "room=" + std::to_string(roomId), a.detail);
+          SLOG(SPRING_LOG_WARNING, "room %d growth alarm [%s]: %s", roomId,
+               a.label.c_str(), a.detail.c_str());
+        }
+        for (const auto &label : known) {
+          if (!now.count(label))
+            maintenanceDb.LogAudit(0, "system", "alarm_clear",
+                                   "room=" + std::to_string(roomId), label);
+        }
+        known = std::move(now);
+      }
+      // Forget rooms whose game has ended — otherwise this map is itself an
+      // unbounded container in a lobby that stays up for weeks, which would
+      // be a poor look for the plan it implements.
+      for (auto it = knownRoomAlarms.begin(); it != knownRoomAlarms.end();)
+        it = seenRooms.count(it->first) ? std::next(it)
+                                        : knownRoomAlarms.erase(it);
+    }
+
+    // Sweep expired sessions (~hourly at 10 Hz). PLAN-long-uptime S9: the
+    // sweep existed but ran exactly once, at start-up, so a lobby that stays
+    // up for the weeks this plan set exists for swept once and never again —
+    // `sessions` then grew one row per login for the lifetime of the process.
+    if (haveMaintenanceDb && ++sessionSweepTick >= 36000) {
+      sessionSweepTick = 0;
+      const int swept = maintenanceDb.CleanExpiredSessions(86400);
+      if (swept > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d expired session(s)", swept);
+
+      // PLAN-long-uptime T2a-4: `sessions` was the only one of the three
+      // retention-free tables the S9 sweep covered. `admin_audit` and
+      // `client_errors` are append-only and were never deleted from at all,
+      // so they ride the same cadence and the same connection. Windows differ
+      // by what the row is for: audit is a compliance trail (90 d), a crash
+      // report stops being actionable long before that (30 d — the window
+      // client_errors' own schema comment already promised and never got).
+      const int audit = maintenanceDb.CleanOldAuditEntries(90 * 86400);
+      const int errs = maintenanceDb.CleanOldClientErrors(30 * 86400);
+      if (audit > 0 || errs > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d audit + %d client-error row(s)", audit,
+             errs);
     }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
@@ -3943,8 +4530,10 @@ int main(int argc, char *argv[]) {
       reapTick = 0;
       auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
       if (!reaped.empty()) {
-        for (uint32_t rid : reaped)
+        for (uint32_t rid : reaped) {
           removeGameServer(rid); // safety
+          gReplayRooms.erase(rid);
+        }
         SLOG(SPRING_LOG_NOTICE, "reaped %zu abandoned room(s)", reaped.size());
         broadcastRooms();
       }
@@ -3959,6 +4548,21 @@ int main(int argc, char *argv[]) {
           removeGameServer(roomId);
           SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                roomId, inst.pid);
+
+          // PLAN-replay task 4c: a replay room has no next game. Its server
+          // exits when the recording runs out, and recycling it to Filling
+          // would leave a room in the browser that offers to start a match
+          // nobody configured. Delete it instead — the recording is still on
+          // disk and watching it again spawns a fresh server.
+          if (auto rit = gReplayRooms.find(roomId); rit != gReplayRooms.end()) {
+            SLOG(SPRING_LOG_NOTICE,
+                 "replay room %u closed — '%s' played out", roomId,
+                 rit->second.c_str());
+            gReplayRooms.erase(rit);
+            rooms.DeleteRoom(roomId);
+            broadcastRooms();
+            continue;
+          }
 
           // Recycle the room: transition back to Filling,
           // clear ready flags, zero gameServerPort, drop

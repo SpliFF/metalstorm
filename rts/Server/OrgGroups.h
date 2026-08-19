@@ -176,6 +176,14 @@ struct Directive {
     uint32_t id = 0;
     int      team = -1;
     uint32_t groupId = 0;
+    /// The playerNum that created (and was charged for) this directive, or -1
+    /// for an unattributed create (gadget-internal / no clientPlayerNum entry).
+    /// Handed to GiveCommand at decomposition so game Lua's AllowCommand hook
+    /// can stamp `last_commander` on each unit the directive actually moves —
+    /// PLAN-metalstorm-objectives.md §5.1 (endtoend D24). A condition-scoped
+    /// directive has no roster at create time, so this is the only point at
+    /// which its author can be attached to a unit.
+    int      authorPlayerId = -1;
     DirectiveType type = DirectiveType::Defend;
     uint8_t  priority = 0;
     OrderShape shape = OrderShape::Point;
@@ -203,11 +211,13 @@ public:
     /// Create a directive. `conditions.orgGroup` is forced to `groupId`.
     /// Returns the new directive id. If a group is named, it is marked as
     /// currently executing this directive.
+    /// `authorPlayerId` is the charged player (see Directive::authorPlayerId);
+    /// -1 leaves the directive unattributed.
     uint32_t Create(int team, DirectiveType type, uint8_t priority, OrderShape shape,
                     std::vector<float> params, StandingOrderConditions cond,
                     uint32_t groupId, uint32_t requestedStrength,
                     std::string phasesJson, uint32_t expiresInFrames,
-                    uint32_t currentFrame);
+                    uint32_t currentFrame, int authorPlayerId = -1);
 
     /// Update an existing directive wholesale. Cross-team returns false.
     /// The scoping group is immutable (recreate to re-scope).

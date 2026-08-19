@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace headless {
@@ -37,6 +38,12 @@ enum class StopReason {
     LuaCondition,   // synced-Lua predicate returned truthy
     LuaError,       // synced-Lua predicate raised / failed to compile (E3)
     WallCeiling,    // --max-wall-min hard ceiling hit (E4, outermost guard)
+    // Replay-only terminal states (PLAN-replay task 2). Not produced by
+    // EvaluateStop — a replay's end is a property of the recorded stream, not
+    // of the stop-condition matrix — but they share this enum so the stats
+    // dump's `status` field can say what actually happened.
+    ReplayEnd,      // the recorded stream ran out at its recorded end frame
+    ReplayAborted,  // a record the re-execution could not honestly reproduce
 };
 
 // The requested stop conditions (from the config's `headless.stopAt` block).
@@ -78,6 +85,18 @@ struct Config {
     std::string map;
     std::string game;
     std::vector<AiSlot> aiSlots;
+
+    // Room modoptions, the same key=value pairs `--modoption` carries. A
+    // headless fixture that wants a game's synced gadgets configured (start
+    // armies, chicken mode, multipliers) had no way to say so before: the
+    // manifest is supposed to be a complete launch spec, and modoptions were
+    // the one part of it only a CLI flag could supply. Parsed in declaration
+    // order and applied by server_main only for keys `--modoption` did not
+    // already set, so an explicit flag still wins (same precedence as
+    // map/game/aiSlots). Values are strings on the wire — CGameSetup stores
+    // them as strings and Spring.GetModOptions() hands them to Lua as strings —
+    // so JSON numbers/bools are coerced rather than rejected.
+    std::vector<std::pair<std::string, std::string>> modOptions;
 };
 
 // Observed sim state at the current tick, fed to EvaluateStop.

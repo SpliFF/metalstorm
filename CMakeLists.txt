@@ -414,6 +414,18 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/ScenarioDb.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
+    # PLAN-long-uptime task 3: the growth alarms are evaluated game-side and
+    # ride game_metrics.extra_json; the lobby links the same module purely to
+    # parse them back out for the fleet view, so the JSON shape has exactly
+    # one definition. Pure — nlohmann and <cstdlib>, no sim, no sqlite.
+    rts/Server/GrowthCounters.cpp
+    # PLAN-replay task 4c: the lobby reads .msr headers to list replays and to
+    # refuse an unreadable one before forking a server for it. ReplayFile is
+    # deliberately free of the sim and the wire schema, so this pulls in only
+    # SyncedInputJournal's record type and zlib (already linked).
+    rts/Server/ReplayFile.cpp
+    rts/Server/SyncedInputJournal.cpp
+    rts/Server/FactionData.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
@@ -496,13 +508,19 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/RulesParamKeyDict.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/FactionData.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GrowthCounters.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameStateStore.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

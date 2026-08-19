@@ -4,6 +4,7 @@
 #include "NetworkServer.h"
 #include "ContentServer.h"
 #include "Database.h"
+#include "FactionData.h"
 #include "LuaExecEngine.h"
 #include "HttpAuth.h"
 #include "PathTraversal.h"
@@ -21,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
 
 #define LOG_SECTION "server"
 
@@ -244,7 +246,21 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     content.Init(net, contentRoots);
 
     // --- HTTP auth + exec endpoints ---
-    HttpAuth::RegisterEndpoints(net, ctx.db);
+    // PLAN-metalstorm-lobby.md task 0: this game server instance is scoped
+    // to a single game (contentRoots[0], when present, is server_main's
+    // `gamePath`), so unlike the lobby's per-process registry spanning many
+    // games, this one is just that game's declared factions. `static`
+    // because HttpAuth::RegisterEndpoints captures it by reference into
+    // route handlers that outlive this function call — a plain local would
+    // dangle the moment RegisterGameHttpRoutes returns.
+    static const std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry = [&contentRoots] {
+        std::unordered_map<std::string, FactionData::FactionInfo> reg;
+        if (!contentRoots.empty())
+            for (const auto& f : FactionData::Discover(contentRoots[0]))
+                reg.emplace(f.key, f);
+        return reg;
+    }();
+    HttpAuth::RegisterEndpoints(net, ctx.db, factionRegistry);
 
     // Restart-in-place: re-exec this binary with the same argv.
     // Clients get a GameRestarting message before the connection drops.

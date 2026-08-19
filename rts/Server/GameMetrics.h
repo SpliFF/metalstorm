@@ -43,6 +43,13 @@ public:
     /// (cheap ring insert, no allocation after Init).
     void SampleTick(int64_t tickUs);
 
+    /// Would the next MaybeWrite actually write? Lets a caller skip gathering
+    /// expensive `extraJson` inputs 1799 frames out of 1800 — the
+    /// PLAN-long-uptime growth counters walk the spawn-generation table and
+    /// every team's rulesParams map, which is fine once a minute and is not
+    /// fine every sim frame.
+    bool DueForWrite() const;
+
     /// Called every server-loop iteration. Writes a metric row + runs the
     /// downsample/prune when `cadenceSec` has elapsed since the last write;
     /// a no-op otherwise. `simRunning` = the sim actually ticked this window

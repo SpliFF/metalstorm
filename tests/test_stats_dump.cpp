@@ -137,6 +137,50 @@ TEST_CASE("BuildDumpJson: schema round-trips through nlohmann::json") {
     CHECK(s["weapons"][0]["kills"] == 6);
 }
 
+// PLAN-long-uptime task 4: a soak sample carries every §1 growth surface, not
+// just RSS. The report keys off `growth.*` and `dbBytes` by name, so this
+// pins the placement — the key names themselves are GrowthCounters' contract
+// and are pinned in test_growth_counters.cpp.
+TEST_CASE("BuildDumpJson: a snapshot carries the growth counters and the db size") {
+    FinalDump dump;
+    dump.status = "frame-limit";
+
+    Snapshot snap;
+    snap.frame = 86400 * 30;
+    snap.gameSeconds = 86400.0;
+    snap.dbBytes = 1048576;
+    snap.growth.rulesParams = 237;
+    snap.growth.paramKeys = 175;
+    snap.growth.unitIdsUsed = 100;
+    snap.growth.unitIdsMax = 32000;
+    snap.growth.unitSpawns = 412;
+    snap.growth.standingOrders = 3;
+    snap.growth.players = 2;
+    snap.growth.playersMax = 251;
+    dump.snapshots.push_back(snap);
+
+    auto j = nlohmann::json::parse(BuildDumpJson(dump));
+    const auto& s = j["snapshots"][0];
+    REQUIRE(s.contains("growth"));
+    CHECK(s["growth"]["rules_params"] == 237);
+    CHECK(s["growth"]["param_keys"] == 175);
+    CHECK(s["growth"]["unit_ids_used"] == 100);
+    CHECK(s["growth"]["unit_spawns"] == 412);
+    CHECK(s["growth"]["standing_orders"] == 3);
+    CHECK(s["growth"]["players_max"] == 251);
+    CHECK(s["dbBytes"] == 1048576);
+
+    // The growth object is present even when nothing was gathered: the report
+    // has to tell "an old binary wrote no field" apart from "a live game
+    // measured zero", and only a present-but-zero object says the latter.
+    FinalDump bare;
+    bare.snapshots.push_back(Snapshot());
+    auto b = nlohmann::json::parse(BuildDumpJson(bare));
+    REQUIRE(b["snapshots"][0].contains("growth"));
+    CHECK(b["snapshots"][0]["growth"]["rules_params"] == 0);
+    CHECK(b["snapshots"][0]["dbBytes"] == 0);
+}
+
 TEST_CASE("BuildDumpJson: empty snapshots list is valid JSON") {
     FinalDump dump;
     dump.status = "wall-ceiling";

@@ -56,6 +56,18 @@ int CPlayerHandler::Player(const std::string& name) const
 	return -1;
 }
 
+int CPlayerHandler::HumanPlayer(const std::string& name) const
+{
+	for (const CPlayer& player: players) {
+		if (player.isAI)
+			continue;
+		if (player.name == name)
+			return player.playerNum;
+	}
+
+	return -1;
+}
+
 void CPlayerHandler::PlayerLeft(int id, unsigned char reason)
 {
 	Player(id)->active = false;

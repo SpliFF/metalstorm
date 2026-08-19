@@ -42,6 +42,70 @@ const AUTH_PASS = process.env.SPRING_PASS || 'admin';
 // --- Auth token cache ---
 let authToken = process.env.SPRING_TOKEN || '';
 
+// --- Registration ---
+//
+// POST /api/auth/register requires a `faction` key (PLAN-metalstorm-lobby
+// task 0) and validates it against a registry the lobby builds from
+// *Metalstorm's* gamedata/sidedata.lua only — deliberately not a union across
+// every game the lobby serves (rts/lobby_main.cpp, `factionRegistry`). So the
+// valid keys are exactly what GET /api/factions/metalstorm returns, and asking
+// the server beats hardcoding a key that a sidedata.lua edit can invalidate.
+//
+// This matters more than it looks: every register call here is a *fallback*
+// that only fires when login failed, so on the shared dev DB — where the usual
+// accounts already exist — it never runs. It runs on a fresh DB or a
+// never-before-seen username, which is exactly what the spring-test and
+// game-browser-test skills do.
+let cachedFactionKey; // undefined = not looked up yet; '' = server wants none
+async function resolveFaction() {
+    if (cachedFactionKey !== undefined) return cachedFactionKey;
+    if (process.env.SPRING_FACTION) {
+        cachedFactionKey = process.env.SPRING_FACTION;
+        return cachedFactionKey;
+    }
+    try {
+        const r = await fetch(`${LOBBY_URL}/api/factions/metalstorm`);
+        if (r.ok) {
+            const list = await r.json();
+            // A lobby that doesn't serve Metalstorm has an empty registration
+            // registry, in which case there is no faction it would accept and
+            // sending one would 400 "unknown faction". Send nothing.
+            cachedFactionKey = (Array.isArray(list) && list[0]?.key) || '';
+        } else {
+            cachedFactionKey = '';
+        }
+    } catch {
+        cachedFactionKey = '';
+    }
+    return cachedFactionKey;
+}
+
+// Register an account. Returns { ok, token, error } — `error` carries the
+// server's own message ("faction is required", "username already taken", ...)
+// so callers can report why instead of an opaque "auth failed".
+async function registerAccount(username, password) {
+    const faction = await resolveFaction();
+    const body = { username, password };
+    if (faction) body.faction = faction;
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const text = await resp.text();
+        if (resp.ok) {
+            let token = '';
+            try { token = JSON.parse(text).token || ''; } catch { /* not JSON */ }
+            if (token) return { ok: true, token, error: '' };
+            return { ok: false, token: '', error: `register ${resp.status} returned no token: ${text}` };
+        }
+        return { ok: false, token: '', error: `register ${resp.status}: ${text}` };
+    } catch (e) {
+        return { ok: false, token: '', error: `register request failed: ${e.message}` };
+    }
+}
+
 // `force` clears any cached token first. Game/lobby session rows live in
 // data/spring-server.db and are wiped on a DB reset/migration or expire after
 // 24h; a long-lived MCP process otherwise keeps serving a dead token and every
@@ -62,17 +126,11 @@ async function ensureAuth(force = false) {
         }
     } catch { /* fall through */ }
     // Try register if login failed
-    try {
-        const resp = await fetch(`${LOBBY_URL}/api/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
-        });
-        if (resp.ok) {
-            const data = await resp.json();
-            if (data.token) { authToken = data.token; return authToken; }
-        }
-    } catch { /* fall through */ }
+    const reg = await registerAccount(AUTH_USER, AUTH_PASS);
+    if (reg.ok) { authToken = reg.token; return authToken; }
+    // Callers of ensureAuth() only get a token or '' — surface the reason on
+    // stderr so a failed bootstrap isn't silent.
+    console.error(`[spring-debug] auth failed for "${AUTH_USER}": ${reg.error}`);
     return '';
 }
 
@@ -1148,21 +1206,32 @@ async function executeTool(name, args) {
 
             // Authenticate as the requested user (separate from MCP's
             // long-lived admin session — startGame requires the host).
+            // Login first, register as the fallback for a username that
+            // doesn't exist yet (fresh DB, or a caller-supplied `username`).
             let userToken = '';
-            for (const path of ['/api/auth/login', '/api/auth/register']) {
-                try {
-                    const r = await fetch(`${LOBBY_URL}${path}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username, password }),
-                    });
-                    if (r.ok) {
-                        const j = await r.json();
-                        if (j.token) { userToken = j.token; break; }
-                    }
-                } catch { /* try next */ }
+            let authError = '';
+            try {
+                const r = await fetch(`${LOBBY_URL}/api/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+                const text = await r.text();
+                if (r.ok) {
+                    try { userToken = JSON.parse(text).token || ''; } catch { /* not JSON */ }
+                }
+                if (!userToken) authError = `login ${r.status}: ${text}`;
+            } catch (e) {
+                authError = `login request failed: ${e.message}`;
             }
-            if (!userToken) return `Auth failed for user "${username}".`;
+            if (!userToken) {
+                const reg = await registerAccount(username, password);
+                if (reg.ok) userToken = reg.token;
+                else authError += `; ${reg.error}`;
+            }
+            // Report the server's own message — a bare "auth failed" hid a
+            // 400 "faction is required" for the whole of task 0.
+            if (!userToken) return `Auth failed for user "${username}" — ${authError}`;
 
             const authHdr = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${userToken}` };
 

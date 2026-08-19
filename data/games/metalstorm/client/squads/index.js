@@ -48,6 +48,7 @@ export { buildSlots, slotToWorld } from './formation.js';
 export { createPatchSet, patchToWorld } from './patches.js';
 export { BigUnitRepulsor, isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
 export { createPassability } from './passability.js';
+export { computeTier, screenPxFor, createLodState, LOD_FULL, LOD_CENTROID, LOD_ICON } from './lod.js';
 export { MOVEMENT_PROFILES, profileFor } from './movement-profiles.js';
 
 /**

@@ -153,6 +153,14 @@ export class Squad {
     // Declared here, not bolted on from the manager, so every Squad keeps one
     // hidden class — this object is the hot one in the entity phase.
     this._lodD2 = 0;
+    // `icon`-tier bookkeeping (PLAN-perf M23). `_iconAlive` is the aliveCount
+    // the current icon roster was elected against; a mismatch means casualties
+    // have landed since and the mark must be re-elected (the elected member may
+    // be the one that just died — see `_applyIconVisibility`). -1 = "re-elect
+    // unconditionally". `_iconOrder` is the members sorted innermost-slot-first,
+    // built once per squad because the slot table never changes.
+    this._iconAlive = -1;
+    this._iconOrder = null;
     this._spawned = false;
 
     // Transport (PLAN-metalstorm-squad-transport.md §2): a client-only
@@ -319,8 +327,9 @@ export class Squad {
   get lod() { return this._lod; }
 
   /** full ↔ centroid keeps instances (just stops/starts steering, §9);
-   *  full ↔ icon releases/rebuilds them (Pitfall #2) — aliveCount is
-   *  untouched either way (Pitfall #3), only visual instances come and go. */
+   *  full ↔ icon thins them to the `iconMemberCount` mark (Pitfall #2) —
+   *  aliveCount is untouched either way (Pitfall #3), only visual instances
+   *  come and go. */
   set lod(value) {
     if (value === this._lod) return;
     const prev = this._lod;
@@ -328,21 +337,75 @@ export class Squad {
     if (!this._spawned) return;
     // Air holds its cruise altitude in `_updateCentroid` by replaying each
     // member's altitude *relative to the squad centroid*, because there is no
-    // ground to sample it back from. Snapshot it on the way down.
-    if (value === 'centroid' && this.profile.steerer === 'air') {
+    // ground to sample it back from. Snapshot it on the way down — for `icon`
+    // too, which reaches `_updateCentroid` by the same branch and whose mark
+    // would otherwise replay a stale (or never-set) offset.
+    if (value !== 'full' && this.profile.steerer === 'air') {
       for (const m of this.members) if (m.alive && !m.released) m.centroidDy = m.y - this.cy;
     }
-    if (prev !== 'icon' && value === 'icon') this._releaseInstances();
-    else if (prev === 'icon' && value !== 'icon') this._rebuildInstances();
+    if (value === 'icon') this._applyIconVisibility();
+    else if (prev === 'icon') this._rebuildInstances();
   }
 
+  /** The `icon` art tier (PLAN-perf M23). The tier exists to cut *total member
+   *  count*, which is what `entity` is linear in (M19 Finding 5) — but before
+   *  M23 it did that by releasing every instance, i.e. the squad vanished. It
+   *  instead keeps `cfg.iconMemberCount` members: the squad still reads as a
+   *  formation in the squad's own art, at a per-squad cost instead of a
+   *  per-member one.
+   *
+   *  Why "thin the roster" and not a new icon sprite: an icon squad is by
+   *  construction one of the farthest on screen, where a member is already a
+   *  ~2 px billboard off the def's baked impostor atlas. Reusing that atlas
+   *  needs no new asset and no backend change; a purpose-drawn strategic mark
+   *  is PLAN-macro-map.md's design to own, not this track's.
+   *
+   *  The mark is elected innermost-slot-first because the formation core is
+   *  exactly what `_selectVictims`' fallback ladder keeps alive longest, so
+   *  the elected members are the ones least likely to be shot out from under
+   *  the tier. They are NOT exempt from casualties (that would break the
+   *  monotonic aliveCount invariant) — when one dies, `_updateCentroid`
+   *  notices aliveCount moved and re-elects. */
+  _applyIconVisibility() {
+    this._iconAlive = this.aliveCount;
+    const keep = Math.max(0, this.cfg.iconMemberCount | 0);
+    // Slots never change, so this ordering is built once per squad.
+    this._iconOrder ??= this.members.slice()
+      .sort((a, b) => slotDist2(this.slots[a.slot]) - slotDist2(this.slots[b.slot]));
+    let shown = 0;
+    for (const m of this._iconOrder) {
+      if (!m.alive) continue;
+      if (shown < keep) {
+        if (m.released) this._rebuildMember(m);
+        shown++;
+      } else if (!m.released) {
+        this._releaseMember(m);
+      }
+    }
+  }
+
+  _releaseMember(m) {
+    this.backend.releaseMember(m.handle);
+    m.handle = -1;
+    m.released = true;
+  }
+
+  _rebuildMember(m) {
+    slotToWorld(this.slots[m.slot], this.cx, this.cz, this.heading, _slotW);
+    m.x = _slotW.x; m.z = _slotW.z;
+    m.y = this.backend.groundHeight(m.x, m.z);
+    m.handle = this.backend.createMember(this.id, m.slot, m.visual);
+    m.released = false;
+  }
+
+  /** Release EVERY member's instance (transport LOADED, §2) — distinct from
+   *  the `icon` tier's partial release above. */
   _releaseInstances() {
     for (const m of this.members) {
       if (!m.alive || m.released) continue;
-      this.backend.releaseMember(m.handle);
-      m.handle = -1;
-      m.released = true;
+      this._releaseMember(m);
     }
+    this._iconAlive = -1;   // any icon roster this dropped must be re-elected
   }
 
   /** Re-entering `full`/`centroid` rebuilds exactly the still-alive members
@@ -350,11 +413,7 @@ export class Squad {
   _rebuildInstances() {
     for (const m of this.members) {
       if (!m.alive || !m.released) continue;
-      slotToWorld(this.slots[m.slot], this.cx, this.cz, this.heading, _slotW);
-      m.x = _slotW.x; m.z = _slotW.z;
-      m.y = this.backend.groundHeight(m.x, m.z);
-      m.handle = this.backend.createMember(this.id, m.slot, m.visual);
-      m.released = false;
+      this._rebuildMember(m);
     }
   }
 
@@ -631,6 +690,7 @@ export class Squad {
       m.handle = this.backend.createMember(this.id, m.slot, m.visual);
       m.released = false;
     }
+    this._iconAlive = -1;   // un-released everything; re-elect if still `icon`
   }
 
   /** Per-frame transport driver, called from update() before the normal
@@ -1058,6 +1118,12 @@ export class Squad {
    *  never on screen; it would have been the moment a producer was wired, and
    *  M20 wires one. The member budget in squad-manager.js is that producer. */
   _updateCentroid() {
+    // `icon` roster maintenance (M23): one integer compare per squad per frame.
+    // aliveCount is monotonic non-increasing and every kill path updates it, so
+    // this catches a mark member being shot out regardless of which path (burst,
+    // staggered drain, cascade) did the killing — without any of them having to
+    // know the tier exists.
+    if (this._lod === 'icon' && this._iconAlive !== this.aliveCount) this._applyIconVisibility();
     const s = Math.sin(this.heading), c = Math.cos(this.heading);
     const air = this.profile.steerer === 'air';
     // Squad-level displacement drives the gait for every member: one add each,

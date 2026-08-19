@@ -88,8 +88,37 @@ local TRUST_DECAY_TICK_FRAMES    = Trust.DECAY_PERIOD_FRAMES
 -- ============================================================
 -- Registry state
 -- ============================================================
-local proposals    = {}      -- id -> proposal
+local proposals    = {}      -- id -> proposal (LIVE only, see the archive below)
 local nextId       = 1
+
+-- Resolved-proposal archive (PLAN-long-uptime S4/S3). Same defect and same
+-- policy as game_objectives.lua: the retention loop below cleared a resolved
+-- proposal's rulesParams and left `proposals[id]` itself referenced forever,
+-- so every offer, counter and pact a campaign ever saw stayed on the synced
+-- heap. Resolved proposals move to a ring-capped archive when their retention
+-- window ends; `lookupProposal` reads across both.
+local ARCHIVE_CAP   = 256
+local archive       = {}      -- id -> resolved proposal, at most ARCHIVE_CAP live
+local archiveRing   = {}      -- slot -> id
+local archiveSlot   = 0
+
+local function archiveProposal(id)
+    local p = proposals[id]
+    if not p then return end
+    proposals[id] = nil
+    archiveSlot = (archiveSlot % ARCHIVE_CAP) + 1
+    local evicted = archiveRing[archiveSlot]
+    if evicted then archive[evicted] = nil end
+    archiveRing[archiveSlot] = id
+    archive[id] = p
+end
+
+--- Proposal by id whether live or recently resolved; nil once it has aged out
+--- of the archive.
+local function lookupProposal(id)
+    return proposals[id] or archive[id]
+end
+
 local activeList    = {}      -- ids in {offered,countered,active} — walked each tick
 local activeIndex   = {}
 local pendingClear  = {}      -- ids awaiting resolve-retention param clearing
@@ -636,7 +665,9 @@ function GG.Parley.Withdraw(id, byTeam)
 end
 
 function GG.Parley.Get(id)
-    return proposals[id]
+    -- Falls through to the S4 archive, so a just-resolved proposal is still
+    -- readable for as long as the archive holds it.
+    return lookupProposal(id)
 end
 
 -- ============================================================
@@ -772,7 +803,12 @@ function gadget:GameFrame(frame)
         local id = pendingClear[i]
         local p = proposals[id]
         if not p or (frame - (p.resolvedFrame or frame)) >= RESOLVE_RETENTION_FRAMES then
-            if p then clearPublished(p) end
+            -- S4: clearing the params was only half of it — archive the
+            -- proposal itself so the heap stops holding every resolved offer.
+            if p then
+                clearPublished(p)
+                archiveProposal(id)
+            end
             table.remove(pendingClear, i)
         end
     end

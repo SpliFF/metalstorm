@@ -54,8 +54,15 @@ TEST_CASE("the classifier's tag mirror matches the generated enum") {
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_Ping) == WireClass::Unsynced);
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ChatSend) == WireClass::Ignored);
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_LogIngest) == WireClass::Ignored);
+    // Replay playback controls (task 4b). `Ignored` is a load-bearing
+    // classification, not a leftover: journalling a control that changes which
+    // frame the FEED is at would put "pause" into the cause stream and replay
+    // it back at the next watcher. If someone ever moves this to Synced or
+    // Setup they have to delete this line to do it.
+    CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ReplayControl) == WireClass::Ignored);
+    CHECK_FALSE(ShouldRecordClientPayload(SpringWeb::ClientPayload_ReplayControl));
     // The last tag today. If this fails the union grew — extend the mirror.
-    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_GroupPosture);
+    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_ReplayControl);
     CHECK_FALSE(IsKnownClientPayload(
         static_cast<uint8_t>(SpringWeb::ClientPayload_MAX) + 1));
 }
@@ -79,6 +86,11 @@ TEST_CASE("every verb the server actually applies is recorded") {
         SpringWeb::ClientPayload_GroupDirectiveRemove,
         SpringWeb::ClientPayload_GroupPosture,
         SpringWeb::ClientPayload_AuthRequest,
+        // The C1 gate an AuthRequest is inadmissible without. Dropping it made
+        // every replayed human authentication bounce on "no valid handshake"
+        // — the game then ran on with no human player and diverged at the
+        // GameStart roster check (PLAN-replay §7.10, seen on a real recording).
+        SpringWeb::ClientPayload_Handshake,
     };
     for (auto v : mustRecord) {
         INFO("verb: " << SpringWeb::EnumNameClientPayload(v));
@@ -94,7 +106,6 @@ TEST_CASE("every verb the server actually applies is recorded") {
         SpringWeb::ClientPayload_PathRequest,
         SpringWeb::ClientPayload_PathRequestCancel,
         SpringWeb::ClientPayload_LuaUIMsg,
-        SpringWeb::ClientPayload_Handshake,
     };
     for (auto v : mustNotRecord) {
         INFO("verb: " << SpringWeb::EnumNameClientPayload(v));
@@ -112,7 +123,7 @@ TEST_CASE("a synced input is recorded exactly once, frame- and phase-correct") {
     rec.BeginTick(42);
     const uint8_t wire[] = {1, 2, 3, 4};
     CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 7,
-                                  wire, sizeof(wire)));
+                                  /*clientId=*/11, wire, sizeof(wire)));
 
     REQUIRE(j.Records().size() == 1);
     const Record& r = j.Records()[0];
@@ -121,6 +132,10 @@ TEST_CASE("a synced input is recorded exactly once, frame- and phase-correct") {
     CHECK(r.kind == InputKind::ClientMessage);
     CHECK(r.subKind == SpringWeb::ClientPayload_PlayerCommand);
     CHECK(r.playerId == 7);
+    // The transport id survives into the record: replay re-feeds each wire
+    // message under its recorded connection so the session layer it re-enters
+    // tracks the same identities it did live (PLAN-replay task 2).
+    CHECK(r.clientId == 11);
     CHECK(r.payload.size() == sizeof(wire));
     CHECK(r.payload[3] == 4);
     CHECK(rec.Stats().recorded == 1);
@@ -136,9 +151,9 @@ TEST_CASE("unsynced verbs are counted but never stored") {
 
     const uint8_t wire[] = {9};
     CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_ViewportUpdate,
-                                        0, wire, sizeof(wire)));
+                                        0, 1, wire, sizeof(wire)));
     CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping,
-                                        0, wire, sizeof(wire)));
+                                        0, 1, wire, sizeof(wire)));
     CHECK(j.Records().empty());
     CHECK(rec.Stats().seen == 2);
     CHECK(rec.Stats().skipped == 2);
@@ -157,7 +172,7 @@ TEST_CASE("one record per synced-input class, each landing in its own phase") {
 
     rec.BeginTick(100);
     const uint8_t wire[] = {1};
-    rec.RecordClientMessage(SpringWeb::ClientPayload_LuaRulesMsg, 3, wire, 1);
+    rec.RecordClientMessage(SpringWeb::ClientPayload_LuaRulesMsg, 3, 5, wire, 1);
 
     rec.SetPhase(TickPhase::Disconnect);
     rec.RecordDisconnect(3, /*reason=*/3);
@@ -219,7 +234,7 @@ TEST_CASE("seq is a total order even when the frame does not advance") {
     const uint8_t wire[] = {1};
     for (int tick = 0; tick < 4; ++tick) {
         rec.BeginTick(0);                        // paused: frame never moves
-        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1);
+        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1);
     }
 
     REQUIRE(j.Records().size() == 4);
@@ -260,7 +275,7 @@ TEST_CASE("ring truncation is counted, never silent") {
 
     const uint8_t wire[] = {1};
     for (int i = 0; i < 5; ++i)
-        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1);
+        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1);
 
     CHECK(j.Records().size() == 3);
     CHECK(j.Dropped() == 2);
@@ -280,8 +295,8 @@ TEST_CASE("with no journal attached the funnel still classifies and counts") {
     CHECK_FALSE(rec.Enabled());
 
     const uint8_t wire[] = {1};
-    CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1));
-    CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping, 1, wire, 1));
+    CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1));
+    CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping, 1, 1, wire, 1));
     CHECK(rec.Stats().recorded == 1);
     CHECK(rec.Stats().appended == 0);
     CHECK(rec.Stats().skipped == 1);
@@ -289,4 +304,88 @@ TEST_CASE("with no journal attached the funnel still classifies and counts") {
     const std::string audit = FormatAudit(rec.Stats());
     CHECK(audit.find("recorded=1") != std::string::npos);
     CHECK(audit.find("appended=0") != std::string::npos);
+}
+
+// ─────────────── T2-a: the recorded identity resolution ──────────────────
+
+TEST_CASE("an auth identity round-trips every field it is the authority for") {
+    // Each field here is one the replay cannot re-derive: userId and role come
+    // from the accounts DB, and username comes from the DB too on a token
+    // reconnect (the wire AuthRequest carries none). A field silently lost in
+    // the codec is a replay that authorises the wrong player.
+    syncedinput::AuthIdentity in;
+    in.userId    = 0x0102030405060708LL;
+    in.username  = "e2e_north";
+    in.role      = "admin";
+    in.team      = 4;
+    in.playerNum = 3;
+    in.spectator = false;
+
+    const std::vector<uint8_t> blob = syncedinput::EncodeAuthIdentity(in);
+    syncedinput::AuthIdentity out;
+    REQUIRE(syncedinput::DecodeAuthIdentity(blob, out));
+    CHECK(out.userId    == in.userId);
+    CHECK(out.username  == in.username);
+    CHECK(out.role      == in.role);
+    CHECK(out.team      == in.team);
+    CHECK(out.playerNum == in.playerNum);
+    CHECK(out.spectator == in.spectator);
+
+    // Spectators differ only in the flag and the role, and both must survive:
+    // the role string is what CanCommandTeam keys off.
+    syncedinput::AuthIdentity spec;
+    spec.userId = 7; spec.username = "watcher"; spec.role = "spectator";
+    spec.team = -1; spec.playerNum = 5; spec.spectator = true;
+    syncedinput::AuthIdentity specOut;
+    REQUIRE(syncedinput::DecodeAuthIdentity(
+        syncedinput::EncodeAuthIdentity(spec), specOut));
+    CHECK(specOut.spectator);
+    CHECK(specOut.role == "spectator");
+    CHECK(specOut.team == -1);
+}
+
+TEST_CASE("a short or truncated identity payload is refused, not half-decoded") {
+    // A half-decoded identity is worse than none: it would hand the replay a
+    // plausible username with a wrong team. Every prefix must fail.
+    syncedinput::AuthIdentity in;
+    in.userId = 42; in.username = "north"; in.role = "player";
+    in.team = 0; in.playerNum = 1;
+    const std::vector<uint8_t> blob = syncedinput::EncodeAuthIdentity(in);
+    for (size_t n = 0; n < blob.size(); ++n) {
+        std::vector<uint8_t> prefix(blob.begin(), blob.begin() + n);
+        syncedinput::AuthIdentity out;
+        CHECK_FALSE(syncedinput::DecodeAuthIdentity(prefix, out));
+    }
+    syncedinput::AuthIdentity ok;
+    CHECK(syncedinput::DecodeAuthIdentity(blob, ok));
+}
+
+TEST_CASE("the identity resolution is recorded against its connection") {
+    // It has to key on the CONNECTION, not the player number: the AuthRequest
+    // that produced it was sent before the client owned a player number at all.
+    Recorder rec;
+    MemoryJournal j;
+    rec.SetJournal(&j);
+    rec.BeginTick(-1);
+
+    syncedinput::AuthIdentity id;
+    id.userId = 91; id.username = "north"; id.role = "player";
+    id.team = 0; id.playerNum = 2;
+    CHECK(rec.RecordAuthIdentity(77, id));
+
+    REQUIRE(j.Records().size() == 1);
+    const Record& r = j.Records().front();
+    CHECK(r.kind == InputKind::AuthIdentity);
+    CHECK(r.clientId == 77u);
+    CHECK(r.playerId == 2);
+    CHECK(r.frame == -1);        // pre-GameStart, like the AuthRequest itself
+    CHECK(r.phase == TickPhase::Inbound);
+
+    syncedinput::AuthIdentity back;
+    REQUIRE(syncedinput::DecodeAuthIdentity(r.payload, back));
+    CHECK(back.username == "north");
+    CHECK(back.userId == 91);
+
+    CHECK(std::string(InputKindName(InputKind::AuthIdentity)) == "auth-identity");
+    CHECK(FormatAudit(rec.Stats()).find("auth-identity=1") != std::string::npos);
 }

@@ -80,11 +80,14 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Server/UnitLifecycleCollector.h"
 #include "Server/FeatureLifecycleCollector.h"
 #include "Server/UnitCommandCollector.h"
+#include "Server/StandingOrders.h"
+#include "Game/GameSetup.h"
 #include "Lua/LuaScriptContext.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaGaia.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 
 
@@ -276,6 +279,30 @@ void CSimulation::InitSubsystems(bool hasMap)
     projectileHandler.Init();
     statisticalCombatManager.Init();
     damageFieldManager.Init();
+
+    // PLAN-long-uptime S6: bound the standing-order container. Read here
+    // because modoptions are final by the time subsystems init (server_main
+    // applies both the launch options and, on a replay, the recorded header's
+    // — so a re-execution configures itself identically). Both options are
+    // opt-out: 0 restores the pre-bound behaviour for a scenario that wants
+    // permanent directives, and says so in the setup rather than by accident.
+    {
+        const auto& opts = CGameSetup::GetModOptions();
+        const auto readOpt = [&opts](const char* key, long fallback) -> long {
+            const auto it = opts.find(key);
+            if (it == opts.end()) return fallback;
+            char* end = nullptr;
+            const long v = std::strtol(it->second.c_str(), &end, 10);
+            if (end == it->second.c_str() || v < 0) return fallback;
+            return v;
+        };
+        standingOrders.SetDefaultTtlFrames(static_cast<uint32_t>(
+            readOpt("standingorder_default_ttl_frames",
+                    standingOrders.GetDefaultTtlFrames())));
+        standingOrders.SetPerTeamCap(static_cast<size_t>(
+            readOpt("standingorder_per_team_cap",
+                    static_cast<long>(standingOrders.GetPerTeamCap()))));
+    }
 
     // --- Map-dependent subsystems ---
     if (hasMap) {

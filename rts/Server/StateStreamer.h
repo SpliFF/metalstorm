@@ -3,9 +3,13 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 #include "Lua/LuaRulesParams.h"
+#include "AI/AICommandQueue.h"
+
+#include "Server/RulesParamKeyDict.h"
 
 struct GameServerContext;
 
@@ -22,6 +26,15 @@ public:
 
     void Tick(int frameNum);
 
+    /// PLAN-long-uptime §3 (S1) growth metrics. Assigned interned ids,
+    /// excluding the reserved id 0. Monotone between compactions, so pairing
+    /// it with the revision below is what distinguishes "the dictionary is
+    /// growing" from "compaction is running and it is still growing".
+    size_t KeyDictionarySize() const {
+        return idToKey.empty() ? 0 : idToKey.size() - 1;
+    }
+    uint32_t KeyDictionaryRev() const { return keyDictionaryRev; }
+
 private:
     void CheckWinCondition(int frameNum);
     void ReannounceGameOver();
@@ -33,6 +46,10 @@ private:
     void StreamBuildActivity(int frameNum);
     void EvaluateStandingOrders(int frameNum);
     void TickAI(int frameNum);
+    /// Apply one batch of AI commands. Shared by the live drain and the replay
+    /// feed so both go through the identical manager calls + charge callins
+    /// (PLAN-replay task 2).
+    void ApplyAICommands(const std::vector<AICommand>& cmds);
     void BroadcastCombatEvents(int frameNum);
     void BroadcastEntityDeaths(int frameNum);
     void BroadcastSensorUpdates(int frameNum);
@@ -52,6 +69,14 @@ private:
     uint16_t InternKey(const std::string& key);
     void SendKeyDictionary(int clientId);
 
+    /// PLAN-long-uptime S1: rebuild the interned-key dictionary from the keys
+    /// that are still live, dropping ids nothing references any more, and bump
+    /// keyDictionaryRev so every session re-syncs. `liveKeys` must be the
+    /// complete set of keys any message on this tick can name — a key that is
+    /// live but missing from the set would be re-interned to a *different* id
+    /// than the one a client already holds. Returns true if it compacted.
+    bool CompactKeyDictionary(const std::unordered_set<std::string>& liveKeys);
+
     GameServerContext& ctx;
 
     // Rules-param wire producer baselines (BroadcastRulesParams). We diff the
@@ -66,6 +91,13 @@ private:
     std::unordered_map<std::string, uint16_t> keyToId;  // string key → interned ID
     std::vector<std::string> idToKey;                   // ID → string (0 reserved)
     uint32_t keyDictionaryRev = 1;                      // incremented on dictionary change
+    // S1 compaction bookkeeping. The dictionary is append-only within a tick;
+    // the question "how many of these ids are dead?" is only worth asking
+    // occasionally, because answering it walks every live param map.
+    uint32_t keyDictTickCounter = 0;
+    static constexpr uint32_t kKeyDictCompactPeriodTicks = 9000;  // ~5 min at 30 Hz
+    static constexpr size_t   kKeyDictCompactMinDead = 512;       // absolute floor
+    static constexpr size_t   kKeyDictCompactMinDeadPct = 25;     // and ≥25% dead
     uint32_t gameParamsRev = 0;                         // generation counter for game params
     std::vector<uint32_t> teamParamsRev;                // per-team generation counters
 

@@ -90,6 +90,9 @@ export { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from './spring-
 export { ProjectileTrajectoryReason } from './spring-web/projectile-trajectory-reason.js';
 export { ReconnectRequest, ReconnectRequestT } from './spring-web/reconnect-request.js';
 export { ReconnectResponse, ReconnectResponseT } from './spring-web/reconnect-response.js';
+export { ReplayControl, ReplayControlT } from './spring-web/replay-control.js';
+export { ReplayControlAction } from './spring-web/replay-control-action.js';
+export { ReplayState, ReplayStateT } from './spring-web/replay-state.js';
 export { ResourceUpdate, ResourceUpdateT } from './spring-web/resource-update.js';
 export { RoomAIInfo, RoomAIInfoT } from './spring-web/room-aiinfo.js';
 export { RoomAISlot, RoomAISlotT } from './spring-web/room-aislot.js';
