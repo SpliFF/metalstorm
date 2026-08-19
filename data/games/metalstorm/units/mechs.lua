@@ -11,11 +11,7 @@ return mk{
                 description = 'Recon walker pack' },
         [2] = { weapons = { [1] = { name = 'MS_AC_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S3' },
-                            [2] = { name = 'MS_MISSILE_AA_S2' } },
-                -- fable_mech (DESIGN-MODEL-BUILDING.md §17): shipped
-                -- generated model, rigged biped with walk/idle/death clips
-                -- (PLAN-metalstorm-beta-units.md §2 beta roster: "Mech").
-                override = { objectname = 'fable_mech' } },
+                            [2] = { name = 'MS_MISSILE_AA_S2' } } },
         [4] = { weapons = { [1] = { name = 'MS_RAILGUN_S3' },
                             [2] = { name = 'MS_AC_S3' },
                             [3] = { name = 'MS_FLAK_S2' } },
