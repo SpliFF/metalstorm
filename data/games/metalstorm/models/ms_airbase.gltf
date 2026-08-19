@@ -1,0 +1,533 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_airbase",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "base",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "tower",
+   "children": [
+    3
+   ],
+   "mesh": 1,
+   "translation": [
+    17.0,
+    0.0,
+    10.5
+   ]
+  },
+  {
+   "name": "dish",
+   "mesh": 2,
+   "translation": [
+    0.0,
+    13.55,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2088,
+   "type": "VEC3",
+   "min": [
+    -19.75,
+    0.0,
+    -13.75
+   ],
+   "max": [
+    19.75,
+    10.300000190734863,
+    13.75
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2088,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2088,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3108,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1368,
+   "type": "VEC3",
+   "min": [
+    -1.899999976158142,
+    0.0,
+    -1.899999976158142
+   ],
+   "max": [
+    1.899999976158142,
+    14.050000190734863,
+    1.899999976158142
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1368,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1368,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1992,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3",
+   "min": [
+    -1.2999999523162842,
+    -0.15000000596046448,
+    -0.1599999964237213
+   ],
+   "max": [
+    1.2999999523162842,
+    0.949999988079071,
+    0.06363961100578308
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 72,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    8.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 25056,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 25056,
+   "byteLength": 25056,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 50112,
+   "byteLength": 16704,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 66816,
+   "byteLength": 12432,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 79248,
+   "byteLength": 16416,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 95664,
+   "byteLength": 16416,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 112080,
+   "byteLength": 10944,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 123024,
+   "byteLength": 7968,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 130992,
+   "byteLength": 576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 131568,
+   "byteLength": 576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132144,
+   "byteLength": 384,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132528,
+   "byteLength": 288,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132816,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132836,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 132916,
+   "uri": "ms_airbase.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_airbase_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_airbase_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_airbase_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_airbase_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_airbase_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_airbase",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 14.5,
+   "midpos": [
+    0.0,
+    7.25,
+    0.0
+   ],
+   "mins": [
+    -19.75,
+    0.0,
+    -13.75
+   ],
+   "maxs": [
+    19.75,
+    14.5,
+    13.75
+   ],
+   "radius": 25.1334,
+   "pieces": [
+    {
+     "name": "base",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -19.75,
+      0.0,
+      -13.75
+     ],
+     "maxs": [
+      19.75,
+      10.3,
+      13.75
+     ]
+    },
+    {
+     "name": "tower",
+     "parent": 0,
+     "offset": [
+      17.0,
+      0.0,
+      10.5
+     ],
+     "mins": [
+      -1.9,
+      0.0,
+      -1.9
+     ],
+     "maxs": [
+      1.9,
+      14.05,
+      1.9
+     ]
+    },
+    {
+     "name": "dish",
+     "parent": 1,
+     "offset": [
+      0.0,
+      13.55,
+      0.0
+     ],
+     "mins": [
+      -1.3,
+      -0.15,
+      -0.16
+     ],
+     "maxs": [
+      1.3,
+      0.95,
+      0.06364
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 3,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
