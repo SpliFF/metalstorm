@@ -1,3 +1,20 @@
+// Metalstorm move classes. `speedmodclass` is an ENGINE SLOT INDEX, not a
+// free label: rts/Sim/MoveTypes/MoveDefHandler.h SpeedModClass is
+// Tank=0, KBot=1, Hover=2, Ship=3. The slot picks BOTH the mapinfo
+// terrainTypes.moveSpeeds field the class reads (tank/kbot/hover/ship) AND
+// the speed-mod curve CMoveMath::GetPosSpeedMod applies -- Ship gets
+// ShipSpeedMod (flat 1.0 wherever it floats), everything else gets a GROUND
+// curve with a slope term and a depth penalty.
+//
+// SHIP/SUB were declared 1 (KBot) until 2026-08-19 and so read a ground
+// speed-mod: a boat in 29 elmos of water ran at 1/(1+0.1*29) = 0.26 of its
+// maxSpeed and steered for the shallows. PLAN-maps.md 2e.1/2o, option C.
+//
+// INFANTRY is still 2 (Hover) and is still mis-declared -- it takes
+// HoverSpeedMod rather than GroundSpeedMod for slope. That is a separate
+// measured milestone (PLAN-maps.md 2o: "B for infantry later"); do not
+// change it here without one.
+
 [CLASS0]
 {
     name=INFANTRY;
@@ -38,7 +55,7 @@
     footprintz=4;
     minwaterdepth=12;
     crushstrength=200;
-    speedmodclass=1;
+    speedmodclass=3;
 }
 
 [CLASS4]
@@ -48,5 +65,5 @@
     footprintz=3;
     minwaterdepth=20;
     crushstrength=100;
-    speedmodclass=1;
+    speedmodclass=3;
 }
