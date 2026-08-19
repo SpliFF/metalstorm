@@ -21,14 +21,17 @@ import { WorldScreen } from './world-screen.js';
 const POIS = {
     worldId: 'earth',
     pois: [
-        { id: 'reykjavik', name: 'Skerry Reach', lat: 64.15, lon: -21.94, kind: 'outpost', mapId: 'skerry_reach', tags: ['arctic', 'coastal'], config: {} },
-        { id: 'paris', name: 'Randtown', lat: 48.86, lon: 2.35, kind: 'settlement', mapId: 'meridian_basin', tags: ['temperate', 'contested'], config: {} },
-        { id: 'cairo', name: 'Dune Reach', lat: 30.04, lon: 31.24, kind: 'depot', mapId: 'dune_reach', tags: ['arid'], config: {} },
-        { id: 'novosibirsk', name: 'Frost Reach', lat: 55.03, lon: 82.92, kind: 'settlement', mapId: 'frost_reach', tags: ['boreal'], config: {} },
-        { id: 'manaus', name: 'Verdant Shoals', lat: -3.12, lon: -60.02, kind: 'settlement', mapId: 'verdant_shoals', tags: ['jungle'], config: {} },
-        { id: 'perth', name: 'Techno Lands', lat: -31.95, lon: 115.86, kind: 'foundry', mapId: 'techno_lands', tags: ['industrial'], config: {} },
-        { id: 'ushuaia', name: 'Pools of Ilys', lat: -54.8, lon: -68.3, kind: 'relay', mapId: null, tags: ['remote'], config: {} },
-        { id: 'honolulu', name: 'Crossing Standoff', lat: 21.31, lon: -157.86, kind: 'waystation', mapId: 'crossing_standoff', tags: ['oceanic'], config: {} },
+        { id: 'reykjavik', name: 'Skerry Reach', lat: 64.15, lon: -21.94, kind: 'outpost', mapId: 'skerry_reach', battleStatus: 'quiet', warRoomId: null, tags: ['arctic', 'coastal'], config: {} },
+        // PLAN-worldsim.md W5: one active and one staging POI in the fixture,
+        // so the screenshot proves the two new marker states are drawn, not
+        // just parsed.
+        { id: 'paris', name: 'Randtown', lat: 48.86, lon: 2.35, kind: 'settlement', mapId: 'meridian_basin', battleStatus: 'active', warRoomId: 7, tags: ['temperate', 'contested'], config: {} },
+        { id: 'cairo', name: 'Dune Reach', lat: 30.04, lon: 31.24, kind: 'depot', mapId: 'dune_reach', battleStatus: 'staging', warRoomId: 12, tags: ['arid'], config: {} },
+        { id: 'novosibirsk', name: 'Frost Reach', lat: 55.03, lon: 82.92, kind: 'settlement', mapId: 'frost_reach', battleStatus: 'quiet', warRoomId: null, tags: ['boreal'], config: {} },
+        { id: 'manaus', name: 'Verdant Shoals', lat: -3.12, lon: -60.02, kind: 'settlement', mapId: 'verdant_shoals', battleStatus: 'quiet', warRoomId: null, tags: ['jungle'], config: {} },
+        { id: 'perth', name: 'Techno Lands', lat: -31.95, lon: 115.86, kind: 'foundry', mapId: 'techno_lands', battleStatus: 'quiet', warRoomId: null, tags: ['industrial'], config: {} },
+        { id: 'ushuaia', name: 'Pools of Ilys', lat: -54.8, lon: -68.3, kind: 'relay', mapId: null, battleStatus: 'quiet', warRoomId: null, tags: ['remote'], config: {} },
+        { id: 'honolulu', name: 'Crossing Standoff', lat: 21.31, lon: -157.86, kind: 'waystation', mapId: 'crossing_standoff', battleStatus: 'quiet', warRoomId: null, tags: ['oceanic'], config: {} },
     ],
     edges: [
         { from: 'reykjavik', to: 'paris', transitWorldMs: 3600000 * 18, kind: 'sea', bidirectional: true, config: {} },

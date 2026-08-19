@@ -21,6 +21,7 @@
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
 #include "Server/WorldDirector.h"
+#include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
@@ -4631,7 +4632,7 @@ int main(int argc, char *argv[]) {
 
   // GET /api/world/pois — the POI graph (nodes + edges) for one world.
   net.AddHttpGet("/api/world/pois", RouteAuth::Public,
-                 [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+                 [mapDb, worldIdFromQuery, &rooms](const std::string &url) -> HttpResponse {
                    if (!mapDb)
                      return HttpAuth::JsonResponse(
                          503, R"({"error":"world_database_unavailable"})");
@@ -4643,8 +4644,25 @@ int main(int argc, char *argv[]) {
                    // arrays: a young world genuinely has none until the W3
                    // seeder runs, and the map UI must draw an empty Earth
                    // rather than an error.
-                   return HttpAuth::JsonResponse(
-                       200, WorldDirector::WorldPoisJson(mapDb, worldId).dump());
+                   //
+                   // PLAN-worldsim.md W5: merge each POI's battle marker
+                   // state on top. This is a READ-ONLY join at the transport
+                   // layer — WorldDirector never touches `war*` tables (see
+                   // its header note), so the live-war list is assembled
+                   // here from WarDirector + RoomManager and handed to the
+                   // pure WorldWarLinkage.h merge, exactly the same
+                   // "director builds the body, handler is transport only"
+                   // split the rest of this route follows.
+                   std::vector<RoomBattleInfo> battles;
+                   for (const auto &war : WarDirector::ListLive(mapDb)) {
+                     if (const GameRoom *room = rooms.GetRoom(war.roomId)) {
+                       battles.push_back(
+                           RoomBattleInfo{room->id, room->mapId, war.state});
+                     }
+                   }
+                   nlohmann::json body = AttachBattleStatus(
+                       WorldDirector::WorldPoisJson(mapDb, worldId), battles);
+                   return HttpAuth::JsonResponse(200, body.dump());
                  });
 
   // POST /api/world/pause — Capture 11's admin global pause (PLAN-worldsim.md

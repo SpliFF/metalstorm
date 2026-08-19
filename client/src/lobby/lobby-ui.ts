@@ -2441,7 +2441,14 @@ export class LobbyUI {
     private wireWorldPanel(): void {
         const btn = document.getElementById('show-world-btn') as HTMLButtonElement | null;
         if (!btn) return;
-        this.worldScreen ??= new WorldScreen({ get: (path) => this.lobbyGet(path) });
+        this.worldScreen ??= new WorldScreen({
+            get: (path) => this.lobbyGet(path),
+            // PLAN-worldsim.md W5's click-through: reuse the existing
+            // `joinRoom` path the room browser's "Join" buttons already call
+            // (`/api/rooms/join`) — the world layer never gets its own room
+            // entry point, it only points at the one that exists.
+            onJoinRoom: (roomId) => { this.worldScreen?.close(); void this.joinRoom(roomId); },
+        });
         const world = this.worldScreen;
         btn.onclick = () => world.toggle();
         // The browser screen replaces its markup on every room-list render, so

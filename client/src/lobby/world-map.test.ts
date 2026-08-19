@@ -160,6 +160,10 @@ const POIS_JSON = {
     pois: [
         { id: 'a', name: 'Randtown', lat: 48.86, lon: 2.35, kind: 'settlement', mapId: 'meridian_basin', tags: ['temperate'], config: {} },
         { id: 'b', name: 'Skerry', lat: -33.87, lon: 151.21, kind: 'outpost', mapId: null, tags: [], config: {} },
+        // A third POI carrying a live war, for the W5 parse/draw assertions —
+        // kept separate from 'a' so the existing quiet-vs-playable assertion
+        // above is untouched by W5's addition.
+        { id: 'c', name: 'Skerry Reach', lat: 10, lon: 10, kind: 'settlement', mapId: 'skerry_reach', battleStatus: 'active', warRoomId: 7, tags: [], config: {} },
         { id: 'bad', name: 'Nowhere', lat: 999, lon: 0, kind: '', mapId: null, tags: [], config: {} },
         { id: 'nan', name: 'NaN', lat: null, lon: 3, kind: '', mapId: null, tags: [], config: {} },
     ],
@@ -174,7 +178,7 @@ describe('parsing GET /api/world/pois', () => {
     it('keeps the good rows and drops the unplottable ones', () => {
         const g = parseWorldGraph(POIS_JSON)!;
         expect(g.worldId).toBe('earth');
-        expect(g.pois.map(p => p.id)).toEqual(['a', 'b']);
+        expect(g.pois.map(p => p.id)).toEqual(['a', 'b', 'c']);
         // An out-of-range POI is not merely ugly: drawn, it is a dot on Earth
         // indistinguishable from a real place.
         expect(g.pois.find(p => p.id === 'bad')).toBeUndefined();
@@ -191,6 +195,22 @@ describe('parsing GET /api/world/pois', () => {
         expect(g.pois.find(p => p.id === 'a')!.mapId).toBe('meridian_basin');
         expect(g.pois.find(p => p.id === 'b')!.mapId).toBeNull();
         expect(parseWorldGraph({ pois: [{ id: 'x', lat: 0, lon: 0, mapId: '' }] })!.pois[0].mapId).toBeNull();
+    });
+
+    it('W5: carries battleStatus and warRoomId, defaulting to quiet/null', () => {
+        const g = parseWorldGraph(POIS_JSON)!;
+        expect(g.pois.find(p => p.id === 'c')!.battleStatus).toBe('active');
+        expect(g.pois.find(p => p.id === 'c')!.warRoomId).toBe(7);
+        expect(g.pois.find(p => p.id === 'a')!.battleStatus).toBe('quiet');
+        expect(g.pois.find(p => p.id === 'a')!.warRoomId).toBeNull();
+    });
+
+    it('W5: rejects an unrecognised battleStatus rather than trusting it', () => {
+        const g = parseWorldGraph({
+            pois: [{ id: 'x', lat: 0, lon: 0, battleStatus: 'winning', warRoomId: 'nope' }],
+        })!;
+        expect(g.pois[0].battleStatus).toBe('quiet');
+        expect(g.pois[0].warRoomId).toBeNull();
     });
 
     it('answers null for a body that is not a POI listing', () => {
@@ -336,6 +356,15 @@ describe('drawWorld', () => {
         const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
         expect(fills).toContain(WORLD_COLORS.poiPlayable);   // 'a' has a map
         expect(fills).toContain(WORLD_COLORS.poi);           // 'b' does not
+    });
+
+    it('W5: draws an active-battle POI red with a ring, independent of hover/select', () => {
+        const r = recordingCtx();
+        drawWorld(r.ctx, { graph, view, viewport: VIEWPORT, basemap: null });
+        const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
+        expect(fills).toContain(WORLD_COLORS.poiActive);
+        const strokes = r.calls.filter(c => c.op === 'stroke').map(c => c.stroke);
+        expect(strokes).toContain(WORLD_COLORS.poiActiveRing);
     });
 
     it('labels only the selected/hovered POI at world zoom', () => {

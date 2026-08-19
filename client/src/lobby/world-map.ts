@@ -52,6 +52,14 @@ export interface WorldPoi {
     /// server sends null rather than "" precisely so this stays a branch on
     /// "is this place enterable" (W5 turns it into a click-through).
     mapId: string | null;
+    /// PLAN-worldsim.md W5: the live-war marker state, from
+    /// `AttachBattleStatus` (rts/Server/WorldWarLinkage.h). Always "quiet" for
+    /// a POI with no `mapId` — the world layer never invents a battle for a
+    /// world-only region.
+    battleStatus: 'quiet' | 'staging' | 'active';
+    /// The room a click-through joins, or null when `battleStatus` is
+    /// "quiet". Read-only: W5 does not write anything back through it.
+    warRoomId: number | null;
     tags: string[];
     config: Record<string, unknown>;
 }
@@ -228,6 +236,10 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
             lat, lon,
             kind: typeof item.kind === 'string' ? item.kind : '',
             mapId: typeof item.mapId === 'string' && item.mapId ? item.mapId : null,
+            battleStatus: item.battleStatus === 'staging' || item.battleStatus === 'active'
+                ? item.battleStatus : 'quiet',
+            warRoomId: typeof item.warRoomId === 'number' && Number.isFinite(item.warRoomId)
+                ? item.warRoomId : null,
             tags: Array.isArray(item.tags) ? item.tags.filter(t => typeof t === 'string') as string[] : [],
             config: (item.config && typeof item.config === 'object')
                 ? item.config as Record<string, unknown> : {},
@@ -388,6 +400,15 @@ export const WORLD_COLORS = {
     edgeOneWay: 'rgba(255, 190, 120, 0.55)',
     poi: '#8ad2ff',
     poiPlayable: '#ffd479',
+    /// PLAN-worldsim.md W5's other two marker states. Staging keeps the
+    /// playable amber family (a war is gathering, not yet a fight) but with
+    /// a pulsing ring so it reads as "something is happening here" at a
+    /// glance; active goes to red, the one colour nothing else on the map
+    /// uses, so a live battle is never mistaken for a plain POI colour.
+    poiStaging: '#ffd479',
+    poiStagingRing: 'rgba(255, 212, 121, 0.85)',
+    poiActive: '#ff5c5c',
+    poiActiveRing: 'rgba(255, 92, 92, 0.85)',
     poiHover: '#ffffff',
     poiSelected: '#ffffff',
     poiLabel: 'rgba(233, 242, 250, 0.92)',
@@ -506,10 +527,22 @@ function drawPois(
         // A POI that stages a battle map is a place you can be sent to; one
         // that does not is scenery with a name. Two colours, because that
         // distinction is the first question a player asks of a marker.
-        ctx.fillStyle = poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi;
+        ctx.fillStyle = poi.battleStatus === 'active' ? WORLD_COLORS.poiActive
+            : poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi;
         ctx.beginPath();
         ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
         ctx.fill();
+        // A live or gathering war gets its own ring, independent of
+        // hover/select — the battle marker must read at a glance without the
+        // player's cursor anywhere near it.
+        if (poi.battleStatus !== 'quiet') {
+            ctx.strokeStyle = poi.battleStatus === 'active'
+                ? WORLD_COLORS.poiActiveRing : WORLD_COLORS.poiStagingRing;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
+            ctx.stroke();
+        }
         if (selected || hovered) {
             ctx.strokeStyle = selected ? WORLD_COLORS.poiSelected : WORLD_COLORS.poiHover;
             ctx.lineWidth = selected ? 2 : 1.5;

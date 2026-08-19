@@ -44,6 +44,12 @@ export interface WorldScreenDeps {
     /// a non-200 rather than throwing.
     get(path: string): Promise<any>;
     basemapUrl?: string;
+    /// PLAN-worldsim.md W5's click-through: join the room a POI's live war is
+    /// playing in. Optional so a caller that has not wired the lobby's own
+    /// `joinRoom` yet still gets a working map — the detail panel just omits
+    /// the button when this is unset, same as `showTooltip` omits the "battle
+    /// map" line for a world-only POI.
+    onJoinRoom?(roomId: number): void;
 }
 
 /// Escape for the detail panel. POI names come from a seeder today and from
@@ -334,7 +340,9 @@ export class WorldScreen {
         const el = document.getElementById('world-tooltip');
         if (!el) return;
         const where = formatLatLon(poi.lat, poi.lon);
-        const what = poi.mapId ? 'battle map' : 'world only';
+        const what = poi.battleStatus === 'active' ? 'battle in progress'
+            : poi.battleStatus === 'staging' ? 'war staging'
+            : poi.mapId ? 'battle map' : 'world only';
         el.innerHTML = `<strong>${esc(poi.name)}</strong><span>${esc(where)} · ${what}</span>`;
         el.style.display = '';
         el.style.left = `${at.x + 14}px`;
@@ -376,10 +384,20 @@ export class WorldScreen {
                 `<span class="world-edge-time">${esc(formatWorldDuration(edge.transitWorldMs))}</span></li>`;
         }).join('');
         const tags = poi.tags.map(t => `<span class="world-tag">${esc(t)}</span>`).join('');
-        // The map link is deliberately NOT a join button: W5 owns the
-        // click-through to a room, and a dead-looking button now would promise
-        // something this milestone cannot do.
-        const map = poi.mapId
+        // PLAN-worldsim.md W5: the map line now reflects the live marker
+        // state, and a POI with a live war gets a join button — the ONLY
+        // write this milestone performs is the existing `/api/rooms/join`
+        // call the room browser already makes; nothing world-scoped is
+        // written back.
+        const map = poi.warRoomId !== null
+            ? `<div class="world-detail-map world-detail-map-${esc(poi.battleStatus)}">` +
+              `${poi.battleStatus === 'active' ? 'Battle in progress' : 'War staging'} on ` +
+              `<code>${esc(poi.mapId ?? '')}</code></div>` +
+              (this.deps.onJoinRoom
+                  ? `<button type="button" id="world-join-war-btn" data-room-id="${poi.warRoomId}">` +
+                    `${poi.battleStatus === 'active' ? 'Watch / join battle' : 'Go to staging room'}</button>`
+                  : '')
+            : poi.mapId
             ? `<div class="world-detail-map">Battle map: <code>${esc(poi.mapId)}</code></div>`
             : '<div class="world-detail-map world-detail-dim">No battle map — world only.</div>';
         el.innerHTML =
@@ -391,6 +409,11 @@ export class WorldScreen {
             (links
                 ? `<div class="world-detail-head">Transit (world time)</div><ul class="world-links">${links}</ul>`
                 : '<div class="world-detail-head world-detail-dim">No transit links.</div>');
+        const joinBtn = document.getElementById('world-join-war-btn') as HTMLButtonElement | null;
+        if (joinBtn && this.deps.onJoinRoom) {
+            const roomId = Number(joinBtn.dataset.roomId);
+            joinBtn.onclick = () => this.deps.onJoinRoom!(roomId);
+        }
     }
 
     destroy(): void {

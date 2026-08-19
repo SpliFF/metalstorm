@@ -1189,6 +1189,22 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .world-detail-head { margin: 12px 0 6px; color: #9fb3c8; font-weight: 600; }
 .world-detail-map { margin-top: 8px; }
 .world-detail-map code { color: #8ad2ff; }
+/* PLAN-worldsim.md W5: the two live-war marker states, matching
+   world-map.ts's WORLD_COLORS.poiStaging / poiActive. */
+.world-detail-map-staging { color: #ffd479; }
+.world-detail-map-active { color: #ff5c5c; }
+#world-join-war-btn {
+    display: block;
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #1d2b45;
+    border: 1px solid #3a4d70;
+    border-radius: 6px;
+    color: #e9f2fa;
+    font-size: 12px;
+    cursor: pointer;
+}
+#world-join-war-btn:hover { background: #26385a; }
 .world-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .world-tag {
     padding: 2px 7px;
