@@ -25,6 +25,7 @@
 #include "Server/WorldFactions.h"
 #include "Server/WorldStats.h"
 #include "Server/WorldStaging.h"
+#include "Server/WorldNotifications.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
@@ -1801,6 +1802,28 @@ int main(int argc, char *argv[]) {
     return gChatTickets.Redeem(SSETickets::TicketFromQuery(query),
                                static_cast<int64_t>(std::time(nullptr)));
   });
+
+  // PLAN-worldsim.md W11: staging alerts. `gWorldNotifications` is the seam —
+  // every staging transition (commit, cancel, the materialisation sweep)
+  // calls `Publish` and knows nothing about delivery. Today exactly one sink
+  // is subscribed: push over the lobby's already-identified chat SSE channel
+  // (reused rather than a new channel — `NetworkServer::SetSSESubscriberResolver`
+  // is one global resolver, and the chat dock's stream is already open
+  // whenever a logged-in browser has the lobby up, W2's "in-game clients have
+  // no room SSE" note aside), restricted to `WorldNotificationRecipients` so
+  // an account not holding anything at the POI gets nothing. A LATER
+  // milestone (Discord, web push) adds a second `Subscribe` here.
+  static WorldNotificationBus gWorldNotifications;
+  gWorldNotifications.Subscribe(
+      [&net, chatStreamChannel, mapDb](const WorldNotificationEvent &ev) {
+        if (!mapDb) return;
+        const auto recipients = WorldNotificationRecipients(
+            mapDb, ev.worldId, ev.attackerFactionId, ev.defenderFactionId,
+            ev.poiId);
+        if (recipients.empty()) return;
+        net.SendSSETo(chatStreamChannel, recipients,
+                      WorldNotificationToJson(ev).dump(), "world-staging");
+      });
 
   // Maps endpoint — full metadata from SQLite
   net.AddHttpGet(
@@ -5135,6 +5158,24 @@ int main(int argc, char *argv[]) {
         out["joined"]  = result.joined;
         out["staging"] = WorldStaging::StagingJson(result.staging,
                                                    worldNowWorldMs(worldId));
+
+        // PLAN-worldsim.md W11: only a FRESH window is "staging opened" — a
+        // late commitment joining an already-open one (§7.2) is not a new
+        // alert, it is the same window the first alert already named.
+        if (!result.joined) {
+          const auto poi = WorldDirector::LoadPoi(mapDb, worldId, req.poiId);
+          WorldNotificationEvent ev;
+          ev.worldId            = worldId;
+          ev.poiId              = req.poiId;
+          ev.poiName            = poi ? poi->name : req.poiId;
+          ev.kind                = WorldNotificationKind::StagingOpened;
+          ev.attackerFactionId  = req.attackerFactionId;
+          ev.defenderFactionId  = poi ? poi->ownerFactionId : std::string();
+          ev.stagingId           = result.staging.stagingId;
+          ev.worldMs             = result.staging.openedAtWorldMs;
+          gWorldNotifications.Publish(ev);
+        }
+
         SLOG(SPRING_LOG_NOTICE,
              "world staging: faction '%s' committed %d transport(s)/%d squad(s) "
              "at POI '%s' (%s, window %lld world-ms)",
@@ -5156,7 +5197,7 @@ int main(int argc, char *argv[]) {
   // not exist would be a lie the map already contradicts.
   net.AddHttpPost(
       "/api/world/staging/cancel", RouteAuth::TokenRequired,
-      [mapDb, &db, worldIdFromQuery](
+      [mapDb, &db, worldIdFromQuery, worldNowWorldMs](
           const std::string &, const std::string &body,
           const HttpRequestHeaders &headers) -> HttpResponse {
         const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
@@ -5181,6 +5222,19 @@ int main(int argc, char *argv[]) {
           return HttpAuth::JsonResponse(403, R"({"error":"not_your_commitment"})");
 
         const bool cancelled = WorldStaging::Cancel(mapDb, stagingId, WorldNowRealMs());
+        if (cancelled) {
+          const auto poi = WorldDirector::LoadPoi(mapDb, worldId, row->poiId);
+          WorldNotificationEvent ev;
+          ev.worldId           = worldId;
+          ev.poiId             = row->poiId;
+          ev.poiName           = poi ? poi->name : row->poiId;
+          ev.kind              = WorldNotificationKind::StagingCancelled;
+          ev.attackerFactionId = row->attackerFactionId;
+          ev.defenderFactionId = poi ? poi->ownerFactionId : std::string();
+          ev.stagingId         = stagingId;
+          ev.worldMs           = worldNowWorldMs(worldId);
+          gWorldNotifications.Publish(ev);
+        }
         nlohmann::json out;
         out["ok"] = true;
         // Not an error: cancelling a window that already closed is a no-op
@@ -8494,6 +8548,16 @@ int main(int argc, char *argv[]) {
              WorldStaging::DueStagings(mapDb, w.worldId, rules, reading->worldMs)) {
           uint32_t roomId = 0;
           std::string err;
+          // PLAN-worldsim.md W11: "staging closes" — loaded once here rather
+          // than threaded out of `materialiseStaging`/`MarkAttemptFailed`,
+          // the same re-read-at-the-call-site habit W6's settlement hook
+          // uses, because the sweep is the one place already holding both a
+          // world handle and (about to) a war handle.
+          const auto poiForNotice = WorldDirector::LoadPoi(mapDb, w.worldId, row.poiId);
+          const std::string poiNameForNotice =
+              poiForNotice ? poiForNotice->name : row.poiId;
+          const std::string defenderForNotice =
+              poiForNotice ? poiForNotice->ownerFactionId : std::string();
           if (materialiseStaging(row, roomId, err)) {
             // The room id is a LABEL on the world row, never a join key back
             // into a `war*` table (hard boundary 1) — the same thing W6's
@@ -8502,6 +8566,16 @@ int main(int argc, char *argv[]) {
             SLOG(SPRING_LOG_NOTICE,
                  "world staging %lld at POI '%s' materialised as room %u",
                  static_cast<long long>(row.stagingId), row.poiId.c_str(), roomId);
+            WorldNotificationEvent ev;
+            ev.worldId            = w.worldId;
+            ev.poiId              = row.poiId;
+            ev.poiName            = poiNameForNotice;
+            ev.kind               = WorldNotificationKind::StagingMaterialised;
+            ev.attackerFactionId  = row.attackerFactionId;
+            ev.defenderFactionId  = defenderForNotice;
+            ev.stagingId          = row.stagingId;
+            ev.worldMs            = reading->worldMs;
+            gWorldNotifications.Publish(ev);
           } else {
             WorldStaging::MarkAttemptFailed(mapDb, row.stagingId, err, rules,
                                             nowReal);
@@ -8510,6 +8584,22 @@ int main(int argc, char *argv[]) {
                  "(attempt %d/%d): %s",
                  static_cast<long long>(row.stagingId), row.poiId.c_str(),
                  row.attempts + 1, rules.materialiseMaxAttempts, err.c_str());
+            // Only the TERMINAL failure is "staging closed" — an attempt that
+            // will retry next sweep is not a close, and alerting on every
+            // retry would spam the exact players who most need to trust the
+            // channel (the ones with a stake in the POI).
+            if (row.attempts + 1 >= rules.materialiseMaxAttempts) {
+              WorldNotificationEvent ev;
+              ev.worldId            = w.worldId;
+              ev.poiId              = row.poiId;
+              ev.poiName            = poiNameForNotice;
+              ev.kind               = WorldNotificationKind::StagingFailed;
+              ev.attackerFactionId  = row.attackerFactionId;
+              ev.defenderFactionId  = defenderForNotice;
+              ev.stagingId          = row.stagingId;
+              ev.worldMs            = reading->worldMs;
+              gWorldNotifications.Publish(ev);
+            }
           }
         }
       }

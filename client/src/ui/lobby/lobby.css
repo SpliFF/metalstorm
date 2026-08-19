@@ -1095,6 +1095,43 @@ button.link-button:hover { background: none; color: #7fdcff; }
 }
 .war-notice-dismiss:hover { color: #e6e8ec; }
 
+/* PLAN-worldsim.md W11: the staging toast. Same card as .war-notice (right
+   side rather than left, so the two can be up at once without overlapping —
+   a war coming back and a staging window opening are unrelated news). */
+.staging-notice {
+    position: fixed;
+    right: 1.5rem;
+    bottom: 1.5rem;
+    z-index: 140;
+    max-width: 22rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: #161a22;
+    border: 1px solid #2a3140;
+    border-left-width: 3px;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    color: #e6e8ec;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+}
+.staging-notice-good { border-left-color: #7fd4a8; }
+.staging-notice-wait { border-left-color: #e0c67a; }
+.staging-notice-bad  { border-left-color: #d9a06a; }
+.staging-notice-detail { color: #b4bccb; font-size: 12px; line-height: 1.35; }
+.staging-notice-dismiss {
+    align-self: flex-end;
+    background: none;
+    border: 0;
+    color: #7a8496;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+.staging-notice-dismiss:hover { color: #e6e8ec; }
+
 /* ---- World screen (PLAN-worldsim.md W2) ----
    An overlay, not a panel in the flow: a strategic map is only readable at
    size, and the browser screen's column would give it about 300px of height.
@@ -1231,6 +1268,30 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .world-commander-authority { margin-left: auto; color: #ffd479; font-variant-numeric: tabular-nums; }
 .world-commander-where { color: #6f8299; font-size: 12px; }
 .world-commander-loaned { color: #ffcf70; font-size: 11px; text-transform: uppercase; }
+
+/* PLAN-worldsim.md W11: staging alerts, the standing list. Same card shape as
+   .world-player (it sits directly below it in the column) but its rows carry
+   the war-notice colour split (good/wait/bad) rather than a stat — an alert
+   is news, not a number. */
+.world-notifications {
+    padding: 12px 16px;
+    border-bottom: 1px solid #22314a;
+    background: #121b2e;
+    font-size: 12px;
+}
+.world-notifications h4 { margin: 0 0 8px; font-size: 14px; color: #8ad2ff; }
+.world-notice-list { list-style: none; margin: 0; padding: 0; }
+.world-notice-row {
+    padding: 6px 0 6px 8px;
+    border-top: 1px solid #1b2942;
+    border-left: 2px solid transparent;
+    color: #b4bccb;
+    line-height: 1.35;
+}
+.world-notice-row:first-child { border-top: none; }
+.world-notice-good { border-left-color: #7fd4a8; }
+.world-notice-wait { border-left-color: #e0c67a; }
+.world-notice-bad  { border-left-color: #d9a06a; }
 .world-detail h4 { margin: 0 0 4px; font-size: 15px; color: #ffd479; }
 .world-detail-sub { color: #9fb3c8; margin-bottom: 10px; }
 .world-detail-empty { color: #6f8299; }

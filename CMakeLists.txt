@@ -488,6 +488,13 @@ set(LOBBY_SERVER_SOURCES
     # the same reason as the rest: a staging row is world-scoped and the war
     # it becomes is created by the EXISTING lobby machinery at the call site.
     rts/Server/WorldStaging.cpp
+    # PLAN-worldsim.md W11: staging alerts — the notification vocabulary, the
+    # recipient computation (attacker/defender faction members ∪ commanders
+    # garrisoned at the POI) and the in-process pub/sub seam a later
+    # Discord/web-push milestone subscribes a second sink to. Lobby-only,
+    # same reason as the rest: it reads world_factions/world_commanders and
+    # sends nothing itself.
+    rts/Server/WorldNotifications.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -672,6 +679,11 @@ if(TEST_SOURCES)
         # the pure instigation rule and window sizing with no db at all, and
         # the store/sweep against the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldStaging.cpp
+        # PLAN-worldsim.md W11: staging alerts — test_world_notifications.cpp
+        # drives the headline/JSON shape, the recipient union and the bus
+        # against the same in-memory-db pattern (WorldFactions/WorldStats
+        # tables, no lobby, no sim).
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldNotifications.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

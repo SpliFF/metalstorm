@@ -31,6 +31,10 @@ import {
     type WorldStagingEntry,
     type WorldPlayerStats,
 } from './world-map.js';
+import {
+    pushNotice, stagingNoticeClass,
+    type WorldStagingNotice, type WorldStagingNoticeEvent,
+} from './world-notifications.js';
 
 /// How often the World screen re-fetches `/api/world` while it is open, to
 /// resync the locally-ticked clock (an admin pause elsewhere, a server
@@ -110,6 +114,12 @@ export class WorldScreen {
     /// with them. Null hides the panel rather than drawing zeroes — a zero
     /// rank and an absent one are different facts.
     private stats: WorldPlayerStats | null = null;
+    /// PLAN-worldsim.md W11: staging alerts this session has received, newest
+    /// first, capped by `pushNotice`. Kept here rather than in `LobbyUI` so
+    /// the list survives a browser re-render the same way `stats`/`selected`
+    /// do — `remount()` re-renders it, it does not rebuild it.
+    private notices: WorldStagingNotice[] = [];
+    private noticeNextId = 1;
     private clockTickTimer: ReturnType<typeof setInterval> | null = null;
     private clockResyncTimer: ReturnType<typeof setInterval> | null = null;
     /// The canvas the handlers are attached to. Identity, not a boolean: the
@@ -165,6 +175,7 @@ export class WorldScreen {
         void this.fetchClock();
         void this.refreshStats();
         this.startClockTimers();
+        this.renderNotices();
         // Layout has to have happened before `fitView` can know the canvas
         // size; a panel unhidden in this same tick still measures 0×0 in some
         // browsers, and a fit computed against 0 gives scale 1 and an empty
@@ -188,7 +199,16 @@ export class WorldScreen {
     /// does not shut the world map the player is reading.
     remount(): void {
         if (this.openState) this.open();
-        else { this.renderDetail(); this.renderStats(); }
+        else { this.renderDetail(); this.renderStats(); this.renderNotices(); }
+    }
+
+    /// PLAN-worldsim.md W11: a `world-staging` SSE event landed. `lobby-ui.ts`
+    /// calls this after (optionally) toasting it — the list is this screen's
+    /// half of the alert, the toast is `lobby-ui.ts`'s, and both read the same
+    /// parsed event so they can never disagree about what happened.
+    pushStagingNotice(ev: WorldStagingNoticeEvent): void {
+        this.notices = pushNotice(this.notices, ev, this.noticeNextId++, Date.now());
+        this.renderNotices();
     }
 
     /// Fetch the POI graph. Keeps whatever is already drawn on a failed fetch:
@@ -499,6 +519,22 @@ export class WorldScreen {
             : `<div class="world-player-sub">No commanders yet — authority earns you one.</div>`;
 
         el.innerHTML = `<h4>Your standing</h4>` + capacity + rankLine + worldAuthority + commanders;
+    }
+
+    /// PLAN-worldsim.md W11: the notification list. Hidden entirely rather
+    /// than shown empty — same rule `renderStats` follows for `#world-player`
+    /// — because a player with no alerts yet should see no more of this panel
+    /// than a player on a lobby too old to carry the routes at all.
+    private renderNotices(): void {
+        const el = document.getElementById('world-notifications');
+        if (!el) return;
+        if (!this.notices.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        el.style.display = '';
+        el.innerHTML = `<h4>Staging alerts</h4><ul class="world-notice-list">` +
+            this.notices.map(n =>
+                `<li class="world-notice-row world-notice-${stagingNoticeClass(n.kind)}">` +
+                `${esc(n.headline)}</li>`
+            ).join('') + `</ul>`;
     }
 
     private renderDetail(): void {

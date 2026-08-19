@@ -15,6 +15,7 @@ import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import { formatDigest } from './war-digest';
 import { noticeFor, parseWarStateEvent } from './war-notice';
+import { parseWorldStagingEvent, stagingNoticeClass, type WorldStagingNoticeEvent } from './world-notifications';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
     warStateBadge, formatYourWar,
@@ -255,6 +256,13 @@ export class LobbyUI {
     /// the war list the player is being told to look at.
     private warNotice: HTMLElement | null = null;
     private warNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+    /// PLAN-worldsim.md W11: the staging toast. A separate element/timer pair
+    /// from `warNotice` above rather than a shared one — a war coming back
+    /// and a staging window opening are unrelated news, and the two must be
+    /// able to stand on screen at once instead of one silently replacing the
+    /// other.
+    private stagingNotice: HTMLElement | null = null;
+    private stagingNoticeTimer: ReturnType<typeof setTimeout> | null = null;
     private myPlayerId = 0;
     /// This account's permanent faction, from the `faction` field every auth
     /// response now carries (login / register / validate — PLAN-endtoend.md
@@ -1580,6 +1588,41 @@ export class LobbyUI {
         this.warNotice = null;
     }
 
+    /// PLAN-worldsim.md W11's toast, built the same way `renderWarNotice` is
+    /// and for the same reasons (survives a browser re-render, must stand
+    /// over the room screen too). The World screen's own notification list
+    /// (`WorldScreen.pushStagingNotice`) is the same event, rendered a second
+    /// way, not a second source of truth — `lobby-ui.ts`'s SSE handler is the
+    /// one place both are fed from.
+    private renderStagingNotice(ev: WorldStagingNoticeEvent): void {
+        this.dismissStagingNotice();
+        const el = document.createElement('div');
+        el.className = `staging-notice staging-notice-${stagingNoticeClass(ev.kind)}`;
+        el.id = 'staging-notice';
+        const detail = document.createElement('div');
+        detail.className = 'staging-notice-detail';
+        detail.textContent = ev.headline;
+        const close = document.createElement('button');
+        close.className = 'staging-notice-dismiss';
+        close.textContent = 'Dismiss';
+        close.onclick = () => this.dismissStagingNotice();
+        el.append(detail, close);
+        document.body.appendChild(el);
+        this.stagingNotice = el;
+        // Same 30s the war notice uses — long enough to read, short enough
+        // that a stale alert about a window that already moved on is gone.
+        this.stagingNoticeTimer = setTimeout(() => this.dismissStagingNotice(), 30000);
+    }
+
+    private dismissStagingNotice(): void {
+        if (this.stagingNoticeTimer !== null) {
+            clearTimeout(this.stagingNoticeTimer);
+            this.stagingNoticeTimer = null;
+        }
+        this.stagingNotice?.remove();
+        this.stagingNotice = null;
+    }
+
     showBrowser(): void {
         // Suppressed (scenario/direct boot): stay off screen and, crucially,
         // do not null currentRoom — the runner's setCurrentRoomFromJson wiring
@@ -2011,6 +2054,19 @@ export class LobbyUI {
         // told to its channel as a system line instead. Both directions
         // arrive: the mute, and the lift, without which an
         // until-lifted banner would stand for the rest of the session.
+        // PLAN-worldsim.md W11: staging alerts. Reuses this stream rather
+        // than opening a second one — see `WorldNotificationBus`'s comment
+        // in `lobby_main.cpp` for why. Unlike `war-state` above, no
+        // client-side "is this mine" filter is needed: the server already
+        // restricted delivery to `WorldNotificationRecipients` (attacker
+        // faction, defender faction, garrisoned commanders), so an event
+        // that arrives here has already been addressed to this account.
+        es.addEventListener('world-staging', (e: MessageEvent) => {
+            const ev = parseWorldStagingEvent(e.data);
+            if (!ev) return;
+            this.renderStagingNotice(ev);
+            this.worldScreen?.pushStagingNotice(ev);
+        });
         es.addEventListener('moderation', (e: MessageEvent) => {
             let ev: any;
             try { ev = JSON.parse(e.data); } catch { return; }
