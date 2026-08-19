@@ -46,6 +46,7 @@ import {
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
     type MapDimensions, type FogDarkening, type TerrainMeshGroup,
 } from './terrain.js';
+import { TerrainPageStreaming } from './terrain-page-streaming.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
     loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
@@ -436,6 +437,10 @@ let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// PLAN-maps M4: the terrain is a chunk grid sharing one material, not a
 /// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
 let gpTerrain: TerrainMeshGroup | null = null;
+/// PLAN-maps.md §1.2.1 streaming v2 vertical slice. Opt-in via the
+/// `__terrainPages` debug handle only — the shipped source is synthetic
+/// (one hue per pyramid level); the real page producer is lane queue item 2.
+let gpTerrainPages: TerrainPageStreaming | null = null;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
@@ -2657,6 +2662,39 @@ export function gpInit(msg: GpInitToWorker): void {
         combatFxPooled: (on: boolean): boolean =>
             gpCombatFX?.setPooled(on) ?? false,
     };
+    // PLAN-maps.md §1.2.1: streaming v2 vertical slice, synthetic pages (one
+    // hue per pyramid level) — the fallback chain and cross-fade on screen
+    // before any real map bytes exist. Opt-in only; nothing enables this in
+    // normal play. From the main DevTools console:
+    //   window.__gp('__terrainPages.enable()')        // cache + shader up
+    //   window.__gp('__terrainPages.plugin(false)')   // A/B arm: shader off
+    //   window.__gp('__terrainPages.stats()')         // residency counters
+    //   window.__gp('__terrainPages.disable()')       // full teardown
+    (globalThis as Record<string, unknown>).__terrainPages = {
+        enable: (): string => {
+            if (gpTerrainPages) return 'already enabled';
+            if (!gpScene || !gpTerrain || !gpMapData) return 'no map loaded';
+            try {
+                gpTerrainPages = new TerrainPageStreaming(
+                    gpScene, gpTerrain, gpMapData);
+                return 'enabled';
+            } catch (e) {
+                return `failed: ${e}`;
+            }
+        },
+        disable: (): string => {
+            if (!gpTerrainPages) return 'not enabled';
+            gpTerrainPages.dispose(gpTerrain);
+            gpTerrainPages = null;
+            return 'disabled';
+        },
+        /** ⚠ toggles `isEnabled` (not `enabled`) and returns whether a plugin
+         *  was actually found — a false here means the A/B never armed. */
+        plugin: (on: boolean): boolean =>
+            gpTerrainPages?.setPluginEnabled(gpTerrain, on) ?? false,
+        stats: (): unknown => gpTerrainPages?.getStats() ?? null,
+    };
+
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts
     //   window.__gp('__featureLod.set({impostorDistance: 800})')
@@ -3934,6 +3972,8 @@ export function gpShutdown(): void {
     gpWheelSpin = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
+    gpTerrainPages?.dispose(gpTerrain);
+    gpTerrainPages = null;
     gpTerrain = null;
     gpDeformTerrain = null;
     gpMapData = null;

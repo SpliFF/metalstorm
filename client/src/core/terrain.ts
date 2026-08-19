@@ -47,6 +47,11 @@ import {
 } from './terrain-splat-plugin.js';
 import type { TerrainDetailMode } from './terrain-splat-plugin.js';
 import type { MapWaterAbsorption } from './map-lighting.js';
+import {
+    TerrainPageSamplePlugin, attachTerrainPageSample,
+} from './terrain-page-plugin.js';
+import type { PageSampleGeometry } from './terrain-page-plugin.js';
+import type { BaseTexture } from '@babylonjs/core';
 
 const SQUARE_SIZE = 8;
 const TILE_PIXELS = 32;
@@ -1269,11 +1274,13 @@ function applyTerrainDiffuseTexture(
     const prevPlugin = findDecalOverlayPlugin(prev);
     const prevWater = findWaterAbsorptionPlugin(prev);
     const prevSplat = findTerrainSplatPlugin(prev);
+    const prevPages = findTerrainPagePlugin(prev);
     terrain.setMaterial(mat);
     prev?.dispose();
     reattachDecalOverlay(mat, prevPlugin);
     reattachWaterAbsorption(mat, prevWater);
     reattachTerrainSplat(mat, prevSplat);
+    reattachTerrainPageSample(mat, prevPages);
 }
 
 /** Locate the DecalOverlayPlugin attached to a material, if any (first
@@ -1615,6 +1622,67 @@ export function setTerrainDetailPluginEnabled(
     return found;
 }
 
+/** Locate the TerrainPageSamplePlugin on a material (first sub-material for a
+ *  MultiMaterial — all pages share one page cache). */
+function findTerrainPagePlugin(
+    mat: Material | null,
+): TerrainPageSamplePlugin | undefined {
+    let m: Material | null = mat;
+    if (m instanceof MultiMaterial) m = m.subMaterials.find((s) => !!s) ?? null;
+    return m && m.pluginManager
+        ? (m.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+            ?.find((p): p is TerrainPageSamplePlugin =>
+                p instanceof TerrainPageSamplePlugin)
+        : undefined;
+}
+
+/** Re-attach the page-sample plugin after a material swap (shares the page
+ *  array + table textures — the cache behind them is untouched). Carries the
+ *  enabled state so a disabled A/B arm does not come back on. */
+function reattachTerrainPageSample(
+    mat: StandardMaterial, prev: TerrainPageSamplePlugin | undefined,
+): void {
+    if (!prev || !prev.atlasTexture || !prev.tableTexture) return;
+    const plugin = attachTerrainPageSample(
+        mat, prev.atlasTexture, prev.tableTexture, prev.geometry);
+    plugin.isEnabled = prev.isEnabled;
+}
+
+/** Attach the streaming page-sample plugin (PLAN-maps.md §1.2.1) to every
+ *  StandardMaterial the terrain currently carries. Survives later material
+ *  swaps via the reattach calls in applyTerrainDiffuseTexture /
+ *  applyPagedTextures. Idempotent. */
+export function attachTerrainPageSampleToTerrain(
+    terrain: TerrainMeshGroup,
+    atlas: BaseTexture, table: BaseTexture, geometry: PageSampleGeometry,
+): boolean {
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainPagePlugin(m)) {
+            attachTerrainPageSample(m, atlas, table, geometry);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
+/** Enable/disable the streaming page-sample plugin on every terrain material
+ *  — the streaming A/B arm. ⚠ The property is `isEnabled`, not `enabled`;
+ *  returns whether any plugin was found + toggled so a zero-delta reading
+ *  can be distinguished from a toggle that never took (M8i). */
+export function setTerrainPagePluginEnabled(
+    terrain: TerrainMeshGroup | null, on: boolean,
+): boolean {
+    let found = false;
+    for (const mat of terrain?.materials ?? []) {
+        const plugin = findTerrainPagePlugin(mat);
+        if (!plugin) continue;
+        plugin.isEnabled = on;
+        found = true;
+    }
+    return found;
+}
+
 /** Attach the underwater terrain-absorption tint (Recoil SMF
  *  `SMF_WATER_ABSORPTION`) to a terrain mesh's material(s) — handles both the
  *  single-material and paged MultiMaterial forms, and survives later material
@@ -1660,6 +1728,7 @@ function applyPagedTextures(
     const prevPlugin = findDecalOverlayPlugin(prevMat);
     const prevWater = findWaterAbsorptionPlugin(prevMat);
     const prevSplat = findTerrainSplatPlugin(prevMat);
+    const prevPages = findTerrainPagePlugin(prevMat);
 
     const numPages = atlas.pagesX * atlas.pagesZ;
     const pageOf = (cu: number, cv: number): number => {
@@ -1734,6 +1803,7 @@ function applyPagedTextures(
         reattachDecalOverlay(mat, prevPlugin);
         reattachWaterAbsorption(mat, prevWater);
         reattachTerrainSplat(mat, prevSplat);
+        reattachTerrainPageSample(mat, prevPages);
         multi.subMaterials[p] = mat;
     }
     terrain.setMaterial(multi);

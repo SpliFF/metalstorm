@@ -139,6 +139,12 @@ export class TerrainPageCache {
     private readonly resident = new Map<number, ResidentEntry>();
     private readonly freeLayers: number[] = [];
     private readonly inflight = new Map<number, AbortController>();
+    /** Keys whose loads must never be camera-cancelled (the pinned root).
+     *  Found live, not in a test: the root is requested at construction and
+     *  is never part of any frame's desired set, so without this exemption
+     *  the FIRST `update` aborts it and the fallback chain's "always
+     *  terminates in something resident" invariant is never established. */
+    private readonly pinnedKeys = new Set<number>();
     /** The most recent frame's desired keys. Read at *admission* time, not at
      *  request time: a load that started three frames ago must be judged
      *  against where the camera is now, or it can evict a page the current
@@ -230,7 +236,7 @@ export class TerrainPageCache {
         // rule: the request that matters is the one for where the camera is
         // now, and an abort frees a connection slot immediately.
         for (const [key, ctrl] of this.inflight) {
-            if (!wanted.has(key)) {
+            if (!wanted.has(key) && !this.pinnedKeys.has(key)) {
                 ctrl.abort();
                 this.inflight.delete(key);
                 this.stats.aborted++;
@@ -274,6 +280,7 @@ export class TerrainPageCache {
     }
 
     private startLoad(id: PageId, key: number, pinned = false): void {
+        if (pinned) this.pinnedKeys.add(key);
         const ctrl = new AbortController();
         this.inflight.set(key, ctrl);
         this.opts.source.load(id, ctrl.signal).then((bytes) => {

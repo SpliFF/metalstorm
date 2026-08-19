@@ -69,6 +69,18 @@ describe('TerrainPageCache residency', () => {
         expect(cache.layerOf(ROOT)).toBeGreaterThanOrEqual(0);
     });
 
+    it('never camera-cancels the pinned root load — the first update must '
+        + 'not abort it (found live: the root is never in any desired set)', async () => {
+        const { cache, source } = makeCache();
+        // First frame arrives before the root has landed, wanting only fine
+        // pages. The not-wanted cancel sweep must exempt the pinned root.
+        cache.update([want({ level: 0, x: 3, z: 3 })], 0);
+        expect(source.pending.has(keyOf(ROOT))).toBe(true);
+        expect(cache.getStats().aborted).toBe(0);
+        await source.deliver(ROOT); await settle();
+        expect(cache.layerOf(ROOT)).toBeGreaterThanOrEqual(0);
+    });
+
     it('never evicts the pinned root, even when every layer is contested', async () => {
         const { cache, source } = makeCache(2, 8);
         await source.deliver(ROOT); await settle();
