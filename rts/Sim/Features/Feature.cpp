@@ -3,6 +3,7 @@
 #include "Feature.h"
 #include "FeatureDef.h"
 #include "FeatureDefHandler.h"
+#include "FeatureSeating.h"
 #include "FeatureMemPool.h"
 #include "FeatureHandler.h"
 #include "Game/GlobalUnsynced.h"
@@ -546,6 +547,17 @@ bool CFeature::UpdateVelocity(
 	return ((speed.x * movMask.x) != 0.0f || (speed.z * movMask.z) != 0.0f);
 }
 
+bool CFeature::IsSeated() const
+{
+	return (def != nullptr && FeatureSeating::IsSeated(def->deckHeight));
+}
+
+float CFeature::GetDeckLevel() const
+{
+	return (def != nullptr) ? FeatureSeating::DeckLevel(pos.y, def->deckHeight) : pos.y;
+}
+
+
 bool CFeature::UpdatePosition()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -557,6 +569,22 @@ bool CFeature::UpdatePosition()
 		speed = (moveCtrl.velVector += moveCtrl.accVector);
 		if (speed.SqLength() != 0.0f)
 			UpdateQuadFieldPosition(speed);
+	} else if (IsSeated()) {
+		// PLAN-maps.md §2j option C: a def that declares a deck height is
+		// SEATED — it holds the y it was staged at rather than being floated up
+		// to the ground by the clamp below, which is what makes a chain of
+		// spans lay a LEVEL deck instead of a staircase down the bed under it.
+		// No gravity either: a span that falls to the bed and is then clamped
+		// back up is the same staircase by another route.
+		//
+		// The clamp is the only thing skipped, so a seated span can stand with
+		// its piers below ground where an abutment buries them — which is the
+		// whole point, since the deck is `deckHeight` above the origin and the
+		// origin is at the pier base. See Sim/Features/FeatureSeating.h.
+		CWorldObject::SetVelocity(ZeroVector);
+
+		if (!pos.IsInBounds())
+			Move(pos.cClampInBounds(), false);
 	} else {
 		const float3 dragAccel = GetDragAccelerationVec(mapInfo->atmosphere.fluidDensity, mapInfo->water.fluidDensity, 1.0f, 0.1f);
 		const float3 gravAccel = UpVector * mapInfo->map.gravity;
@@ -568,7 +596,7 @@ bool CFeature::UpdatePosition()
 		// vertical movement
 		Move((speed * UpVector) * moveCtrl.movementMask, true);
 		// adjusting vertical speed won't help if the ground moved and buried us
-		Move(UpVector * (std::max(CGround::GetHeightReal(pos.x, pos.z), pos.y) - pos.y), true);
+		Move(UpVector * (FeatureSeating::SettleHeight(pos.y, CGround::GetHeightReal(pos.x, pos.z), def->deckHeight) - pos.y), true);
 
 		// clamp final position
 		if (!pos.IsInBounds()) {

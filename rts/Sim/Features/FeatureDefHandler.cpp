@@ -3,6 +3,7 @@
 #include "FeatureDefHandler.h"
 
 #include "FeatureDef.h"
+#include "FeatureSeating.h"
 #include "Lua/LuaParser.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -152,6 +153,13 @@ FeatureDef* CFeatureDefHandler::CreateFeatureDef(const LuaTable& fdTable, const 
 
 	// custom parameters table
 	fdTable.SubTable("customParams").GetMap(fd.customParams);
+
+	// PLAN-maps.md §2j option C. Resolved AFTER customParams is read, because
+	// the already-published `customparams.deck_top` is the fallback source —
+	// the content shipped that number (features/bridges.lua, per def: 1.5 road
+	// / 3.8 rail) before the engine could read it, and a parallel constant here
+	// would be free to disagree with it silently.
+	fd.deckHeight = FeatureSeating::ResolveDeckHeight(fdTable.GetFloat("deckHeight", 0.0f), fd.customParams);
 
 	return &fd;
 }

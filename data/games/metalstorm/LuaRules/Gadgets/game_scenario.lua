@@ -619,12 +619,27 @@ end
 ---     waterline stays there and the chain reads level: four road spans at
 ---     y = 0 over a channel measured 0.00 / 0.00 / 0.00 / 0.00. Without
 ---     floating the same four settled to -31.0 / -34.5 / -45.9 / -57.6.
----     Over DRY ground the clamp still wins and a chain steps with the terrain
----     (the rail run measured 26.1 -> 40.8) — a level deck over a dry ravine
----     needs terrain shaped to carry it, or the deck-height engine work noted
----     in features/bridges.lua. Passing `y` is still right: it is used verbatim
----     for every segment rather than resampled per segment, which is what keeps
----     the water case level.
+---     Over DRY ground the clamp used to win and a chain stepped with the
+---     terrain (the rail run measured 26.1 -> 40.8). **That is fixed as of
+---     PLAN-maps §2j option C**: a def that publishes `customparams.deck_top`
+---     (both spans do) is SEATED — the engine skips gravity and the up-clamp
+---     for it, so the `y` passed here is held on dry ground as well as over
+---     water. Passing `y` is still right, and now more so: it is used verbatim
+---     for every segment rather than resampled per segment, which is what makes
+---     the whole chain one level deck.
+---
+---     `y` NAMES THE SPAN'S BASE, NOT ITS DECK. Both spans are authored origin
+---     at the pier base, so the trafficable surface is `deck_top` above the `y`
+---     given here (1.5 road, 3.8 rail — read it off
+---     `FeatureDefs[def].deckHeight`, which the engine now publishes). To put a
+---     deck ON a road at height h, stage at `h - deckHeight`. Nothing in this
+---     file does that arithmetic for an author yet.
+---
+---     A MAP-placed span cannot be seated at a useful level and never could:
+---     a featureplacer objectlist entry carries only name/x/z/rot, so
+---     LoadFeaturesFromMap spawns it at the ground — and seating then holds it
+---     on the bed it spawned on. This path is the only one that can lay a
+---     level deck.
 local function stageFeatures(features, knownFeatureDefs, landmarks)
     local created = {}
     knownFeatureDefs = knownFeatureDefs or buildKnownFeatureDefs()

@@ -356,6 +356,13 @@ static bool InitParamMap()
 
 	ADD_FLOAT("mass", fd.mass);
 
+	// PLAN-maps.md §2j option C: height of the trafficable deck above the
+	// model origin, 0 when the def declares none. Published here so placement
+	// code can compute a staging y from a wanted deck level
+	// (y = deckLevel - deckHeight) instead of re-parsing customparams.deck_top
+	// as a string, which is where the number came from.
+	ADD_FLOAT("deckHeight", fd.deckHeight);
+
 	ADD_INT("xsize", fd.xsize);
 	ADD_INT("zsize", fd.zsize);
 
