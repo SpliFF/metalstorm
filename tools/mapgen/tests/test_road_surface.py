@@ -402,12 +402,13 @@ class TypemapAndBake(unittest.TestCase):
         self.assertEqual(int(muddy[..., 1].sum()), int(plain[..., 1].sum()))
 
     def test_a_submerged_deck_cell_is_not_road_but_a_ford(self):
-        # R3: the multiplier is read by whatever move class the typemap value
-        # names, and Metalstorm declares SHIP/SUB in the engine's KBot slot
-        # (gamedata/moveinfo.tdf `speedmodclass = 1`), so a submerged deck cell
-        # would hand a BOAT the road multiplier — skerry_reach ships 930 of
-        # them and sundered_arc 2 162. It is also simply wrong that a ford is
-        # as fast as the road it interrupts.
+        # R3: a ford is not as fast as the road it interrupts — that is the
+        # rule, and since 2026-08-19 it is the only reason for it. It used to
+        # double as the mitigation for SHIP/SUB being declared in the engine's
+        # KBot slot (`speedmodclass = 1`), which had a boat over a submerged
+        # deck cell reading the ROAD multiplier; that declaration is now 3
+        # (Ship) and boats read `shipSpeed` = 1.0. The behaviour asserted here
+        # is unchanged either way.
         # the trunk runs along z = 500 (half-res rows 30-31); flood one x window
         # of it so the SAME link is submerged in one place and dry in another
         self.height[58:70, 80:134] = -5.0

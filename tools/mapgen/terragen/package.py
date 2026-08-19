@@ -167,18 +167,21 @@ def write_package(
     src = road_mask if road_class is None else road_class
     typemap = (src[np.ix_(ri, ci)]).astype(np.uint8)
 
-    # R3: a SUBMERGED deck cell is not road, it is a ford. Two reasons, one of
-    # them a live defect:
-    #   * realism — you do not get a road's speed bonus while driving through
-    #     the water crossing it;
-    #   * Metalstorm's `gamedata/moveinfo.tdf` declares SHIP/SUB with
-    #     `speedmodclass = 1`, which is the engine's KBot slot
-    #     (MoveDefHandler.h SpeedModClass), so a boat reads `kbotSpeed` off
-    #     whatever terrain type is under it. Skerry Reach ships 930 submerged
-    #     deck cells and Sundered Arc 2 162, so without this a boat sailing
-    #     over a ford would take the ROAD multiplier. Fixing the mis-declared
-    #     move classes is a separate gameplay call (PLAN-maps §2e.1); zeroing
-    #     the class here is correct on its own terms either way.
+    # R3: a SUBMERGED deck cell is not road, it is a ford. The reason is
+    # realism and it is the whole reason: you do not get a road's speed bonus
+    # while driving through the water crossing it.
+    #
+    # This rule was ALSO once the mitigation for a live defect — Metalstorm
+    # declared SHIP/SUB with `speedmodclass = 1`, the engine's KBot slot
+    # (MoveDefHandler.h SpeedModClass), so a boat read `kbotSpeed` off
+    # whatever terrain type was under it and a boat over a submerged deck
+    # cell would have taken the ROAD multiplier. That declaration was fixed
+    # to 3 (Ship) on 2026-08-19 (PLAN-maps §2e.1/§2o option C), so the
+    # mitigation is spent: a boat now reads `shipSpeed`, which this emitter
+    # writes as 1.0 on every surface class. The rule STAYS on the realism
+    # argument, unchanged and with the same output — Skerry Reach's 930
+    # submerged deck cells and Sundered Arc's 2 162 are still zeroed, and no
+    # map needed re-shipping for the move-class fix.
     typemap[height[np.ix_(ri, ci)] <= cfg.water_level] = 0
 
     metalmap = np.full((half_h, half_w), cfg.metal_value, dtype=np.uint8)
