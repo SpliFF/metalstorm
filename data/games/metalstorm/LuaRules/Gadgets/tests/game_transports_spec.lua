@@ -124,9 +124,9 @@ describe("§3.3 arrival validation", function()
 end)
 
 -- ============================================================
-describe("§7.7 capacity is counted in scale tiers", function()
+describe("§7.7 heavy costs more slots than light", function()
 
-    it("lets a capacity-2 airship lift two s1 squads", function()
+    it("lets a capacity-4 airship lift two s1 squads (2 slots each)", function()
         local world, g = mock.new(scenario({
             arrivals = { arrival({ cargo = { { def = 'ms_soldiers_s1', count = 2 } } }) },
         }))
@@ -134,22 +134,22 @@ describe("§7.7 capacity is counted in scale tiers", function()
         assert.are.equal(0, world.rp('war_arrival_invalid'))
     end)
 
-    it("refuses one s3 formation on a capacity-2 airship (3 slots > 2)", function()
+    it("refuses three s1 squads on the same airship (6 slots > 4)", function()
         local world, g = mock.new(scenario({
-            arrivals = { arrival({ cargo = { { def = 'ms_mech_s3', count = 1 } } }) },
+            arrivals = { arrival({ cargo = { { def = 'ms_soldiers_s1', count = 3 } } }) },
         }))
         g:GameStart()
         assert.are.equal(1, world.rp('war_arrival_invalid'))
-        assert.is_true(world.echoed('scale-tier cost'))
+        assert.is_true(world.echoed('slot(s)'))
     end)
 
-    it("charges an s2 squad two slots regardless of its member count", function()
-        -- One s2 item is 2 slots, so two of them exactly fill the capacity-4
-        -- landing ship and three overflow it. Squads stay ONE cargo item; only
-        -- the slot cost scales (§7.7).
+    it("charges a heavier item more, whatever its member count", function()
+        -- One s3 item is 4 slots — it fills the capacity-4 landing ship on its
+        -- own, where an s2 (3 slots) leaves room for nothing else either.
+        -- Squads stay ONE cargo item; only the slot cost scales (§7.7).
         local ok = mock.new(scenario({
             arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',
-                                   cargo = { { def = 'ms_tank_s2', count = 2 } } }) },
+                                   cargo = { { def = 'ms_mech_s3', count = 1 } } }) },
         }))
         local gOK = _G.gadget
         gOK:GameStart()
@@ -157,7 +157,7 @@ describe("§7.7 capacity is counted in scale tiers", function()
 
         local over = mock.new(scenario({
             arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',
-                                   cargo = { { def = 'ms_tank_s2', count = 3 } } }) },
+                                   cargo = { { def = 'ms_tank_s2', count = 2 } } }) },
         }))
         local gOver = _G.gadget
         gOver:GameStart()
@@ -608,5 +608,191 @@ describe("snapshot round-trip (PLAN-persistence 1d-b)", function()
         -- The still-pending wave must still fly.
         world.run(g, 3000)
         assert.are.equal(2, #world.attaches)
+    end)
+end)
+
+-- ============================================================
+-- §7.10 / objectives §10.3 — the seam the objectives layer reads.
+--
+-- These accessors exist so that a transport-native escort objective
+-- (objectives/escort.lua, objectives/generator.lua's transport rule) can be
+-- built with NO map content at all: the departure zone, the live carriers and
+-- the wave currently on the map are all facts this gadget already knows.
+-- ============================================================
+describe("§7.10 the objectives seam", function()
+
+    it("publishes a side's departure zone under the unified name extractArea", function()
+        local world, g = mock.new(scenario())
+        g:GameStart()
+        -- Same circle §3.4 calls the departure zone, in the objectives' area
+        -- shape (`r`, not `radius`) — one rectangle of ground, not two
+        -- hand-copied coordinate pairs that can silently diverge.
+        local area = GG.Transports.ExtractArea(1)
+        assert.are.equal(1000, area.x)
+        assert.are.equal(1000, area.z)
+        assert.are.equal(500, area.r)
+    end)
+
+    it("has no extract area for a side that never got one", function()
+        local scn = scenario()
+        scn.units = {}                      -- no staged force -> no centroid -> no default
+        scn.sides[2].departure = nil
+        local world, g = mock.new(scn)
+        g:GameStart()
+        assert.is_nil(GG.Transports.ExtractArea(1))
+    end)
+
+    it("lists a team's live carriers, and only carriers", function()
+        local world, g = mock.new(scenario())
+        g:GameStart()
+        local t1 = world.spawn(mock.AIRSHIP, 1, 9000, 9000)
+        local t2 = world.spawn(mock.AIRSHIP, 1, 9100, 9000)
+        world.spawn(mock.SOLDIERS_S1, 1, 9200, 9000)
+        local live = GG.Transports.LiveTransports(1)
+        table.sort(live)
+        assert.are.same({ t1, t2 }, live)
+        assert.are.equal(0, #GG.Transports.LiveTransports(0))
+    end)
+
+    it("reports the wave that is on the map right now, and forgets it once unloaded", function()
+        local world, g = mock.new(scenario({ arrivals = { arrival() } }))
+        g:GameStart()
+        world.run(g, 330)                   -- past eta = 300
+        local inbound = GG.Transports.InFlightArrivals()
+        assert.are.equal(1, #inbound)
+        assert.are.equal('union_wave_1', inbound[1].arrivalID)
+        assert.are.equal(1, inbound[1].team)
+        assert.are.equal(9000, inbound[1].dropZone.x)
+        assert.is_not_nil(world.units[inbound[1].transportID])
+
+        -- Fly it in and let it unload; the objective subject is then the cargo
+        -- on the ground, not a wave in the air. (The engine does the unload;
+        -- model it the way the §3.3 execution cases above do, by clearing the
+        -- manifest once the UNLOAD_UNITS order has been issued.)
+        world.moveTo(inbound[1].transportID, 9000, 9000)
+        world.run(g, 600)
+        for _, a in ipairs(world.attaches) do Spring.UnitDetach(a.cargoID) end
+        world.run(g, 700)
+        assert.are.equal(0, #GG.Transports.InFlightArrivals())
+    end)
+
+    it("does not report a wave that has not entered the map yet", function()
+        -- §7.2: the schedule is fixed at staging and is not a player-facing
+        -- object. An objective pointing at ground a wave will reach in four
+        -- minutes is an objective pointing at nothing.
+        local world, g = mock.new(scenario({ arrivals = { arrival({ eta = 9000 }) } }))
+        g:GameStart()
+        world.run(g, 300)
+        assert.are.equal(0, #GG.Transports.InFlightArrivals())
+    end)
+
+    it("increments the withdrawal ledger BEFORE destroying the carrier", function()
+        -- Load-bearing ordering. DestroyUnit runs UnitDestroyed synchronously
+        -- in the other gadgets, and one observer is escort.lua's transport
+        -- form asking this very counter "did that carrier leave, or was it
+        -- killed?". Answer it after the fact and the side's own successful
+        -- withdrawal reads as a failed escort.
+        local world, g = mock.new(scenario())
+        g:GameStart()
+        local realDestroy = Spring.DestroyUnit
+        local ledgerAtDestroy = {}
+        Spring.DestroyUnit = function(id, selfd, reclaimed)
+            ledgerAtDestroy[#ledgerAtDestroy + 1] = world.trp(1, 'ms_withdrawn_1_transports')
+            return realDestroy(id, selfd, reclaimed)
+        end
+
+        local t = world.spawn(mock.AIRSHIP, 1, 1000, 1000)
+        world.load(t, world.spawn(mock.SOLDIERS_S1, 1, 1000, 1000))
+        world.run(g, 120)
+        Spring.DestroyUnit = realDestroy
+
+        assert.are.equal(2, #ledgerAtDestroy)          -- cargo, then the carrier
+        for _, seen in ipairs(ledgerAtDestroy) do
+            assert.are.equal(1, seen)
+        end
+    end)
+end)
+
+-- ============================================================
+-- Regressions found by running an actual war (headless
+-- `crossing_standoff`, 2026-08-19). Each of these shipped green under the
+-- mock and was wrong on the board, which is why they are pinned by name.
+-- ============================================================
+describe("what a live war found", function()
+
+    it("does not withdraw a carrier that is only passing through the zone", function()
+        -- The strategos's region-scoped directives swept each side's parked
+        -- carrier up with the force standing in its landing zone and flew it
+        -- across the map. The route crossed the exit, and the side lost its
+        -- only way home — empty, two minutes in, for a reason no player could
+        -- have seen. §3.4 always said "ORDERED INTO its departure zone".
+        local world, g = mock.new(scenario())
+        g:GameStart()
+        local t = world.spawn(mock.AIRSHIP, 1, 1000, 1000)
+        world.setVelocity(t, 2.0, 0)                  -- cruising, not arriving
+        world.run(g, 300)
+        assert.is_not_nil(world.units[t])
+        assert.is_nil(world.trp(1, 'ms_withdrawn_1_transports'))
+
+        world.setVelocity(t, 0, 0)                    -- came to rest: that is a departure
+        world.run(g, 400)
+        assert.is_nil(world.units[t])
+        assert.are.equal(1, world.trp(1, 'ms_withdrawn_1_transports'))
+    end)
+
+    it("says so when the engine refuses cargo the arrival declared", function()
+        -- Spring.UnitAttach reports a refusal by doing nothing at all — no
+        -- error, no return value, no log line. Metalstorm's whole roster was
+        -- untransportable (gamedata/modrules.lua's transportability block, and
+        -- INFANTRY's speedmodclass 2), so every wave delivered an empty
+        -- transport and nothing anywhere said so.
+        local world, g = mock.new(scenario({ arrivals = { arrival() } }))
+        g:GameStart()
+        local realAttach = Spring.UnitAttach
+        Spring.UnitAttach = function() end            -- the engine, refusing
+        world.run(g, 320)
+        Spring.UnitAttach = realAttach
+        assert.is_true(world.echoed('cargo unit(s) aboard'))
+    end)
+
+    it("keeps a wave whose cargo never boarded flying to its drop zone", function()
+        -- "Empty" is not the same question as "arrived". Clearing the wave the
+        -- moment nothing is aboard hands the carrier to the departure poll
+        -- while it is still sitting on its own entry point — which, for a side
+        -- whose entry is near its exit, withdraws the transport seconds after
+        -- it arrived.
+        local scn = scenario({ arrivals = { arrival({ entry = { x = 1000, z = 1000 } }) } })
+        local world, g = mock.new(scn)
+        g:GameStart()
+        local realAttach = Spring.UnitAttach
+        Spring.UnitAttach = function() end
+        world.run(g, 400)
+        Spring.UnitAttach = realAttach
+        -- The entry point is inside team 1's departure zone (1000, 1000, r500)
+        -- and the carrier is empty — but it has not reached the drop zone, so
+        -- it is still a wave, not a withdrawal asset.
+        assert.is_nil(world.trp(1, 'ms_withdrawn_1_transports'))
+        local t = nil
+        for id, u in pairs(world.units) do
+            if u.defID == mock.AIRSHIP and u.team == 1 then t = id end
+        end
+        assert.is_not_nil(t)
+    end)
+
+    it("prices a slot the way the engine does, not the way the plan guessed", function()
+        -- §7.7 asked for cost to rise with scale and it does — but the ENGINE
+        -- charges `xsize / 2` per passenger, so an s1 squad costs 2 slots, not
+        -- 1. A gadget-private slot model that disagrees approves waves the
+        -- engine silently truncates: measured, a "2 of 2" wave put one squad
+        -- aboard. The validator must predict the engine or it validates
+        -- nothing.
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ cargo = { { def = 'ms_soldiers_s1', count = 2 } } }) },
+        }))
+        g:GameStart()
+        -- Two s1 squads is 4 slots — exactly the airship's real capacity, and
+        -- NOT the 2 the plan's scale-tier numbering predicted.
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+        assert.are.equal(2, GG.Transports.SlotCost('ms_soldiers_s1'))
     end)
 end)

@@ -229,3 +229,60 @@ describe("Meridian Basin Scenario", function()
         end
     end)
 end)
+
+-- ============================================================
+-- Transports (PLAN-metalstorm-transports.md §3.2, §7.1). This file is the
+-- CONTRASTING case to crossing_standoff_scenario_spec.lua: two factions
+-- fighting over the neutral band in front of their OWN towns are home, not
+-- expeditionary, and §7.1 says stranding is an expeditionary property only.
+-- ============================================================
+describe("Meridian Basin — transports", function()
+    local scn
+
+    before_each(function()
+        scn = dofile('scenarios/meridian_basin.lua')
+    end)
+
+    it("stages a parked carrier for each of the two armies", function()
+        local carriers = {}
+        for _, u in ipairs(scn.units) do
+            if u.def == 'fable_airship' then carriers[u.team] = u end
+        end
+        assert.is_not_nil(carriers[0])
+        assert.is_not_nil(carriers[4])
+        assert.is_nil(carriers[0].orders)   -- §3.2: staged-as-arrived
+        assert.is_nil(carriers[4].orders)
+    end)
+
+    it("flags NO side expeditionary — both own home ground on this map", function()
+        -- The repair §7.1 makes to §3.7's guard. Flag a home defender and
+        -- `war_side_stranded` fires on it from frame 60 for the whole war,
+        -- which is a guard that cries wolf and therefore is not a guard.
+        for _, side in ipairs(scn.sides) do
+            assert.is_nil(side.expeditionary,
+                'side ' .. side.faction .. ' holds regions here and is not expeditionary')
+        end
+    end)
+
+    it("still gives the two staged armies an exit — withdrawal is not gated on it", function()
+        -- §3.4 applies to everyone: extracting materiel by transport is how
+        -- value leaves ANY battle, expeditionary or not.
+        local carriers = {}
+        for _, u in ipairs(scn.units) do
+            if u.def == 'fable_airship' then carriers[u.team] = u end
+        end
+        local withExit = 0
+        for _, side in ipairs(scn.sides) do
+            local d = side.departure
+            if d then
+                withExit = withExit + 1
+                local c = carriers[side.team]
+                assert.is_not_nil(c, 'team ' .. side.team .. ' has an exit but no carrier')
+                local dx, dz = c.x - d.x, c.z - d.z
+                assert.is_true(math.sqrt(dx * dx + dz * dz) > d.radius,
+                    'the parked carrier of team ' .. side.team .. ' sits in its own exit')
+            end
+        end
+        assert.are.equal(2, withExit)
+    end)
+end)

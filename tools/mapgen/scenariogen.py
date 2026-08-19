@@ -272,6 +272,22 @@ ARMY_RING_SEATS = 8
 ARMY_RING_RADIUS = 260
 ARMY_RING_STEP = 130
 
+# The one carrier a land map can hold. ms_landing_ship is movementclass SHIP
+# and this generator has no water placement, so the sea lane stays unstaged
+# until T7's navigable-water audit says a shipped map has a route
+# (PLAN-metalstorm-transports.md §3.8/§7.11).
+CARRIER_DEF = "fable_airship"
+
+# §3.4's departure zone, which the objectives layer calls `extractArea` under
+# the §7.10 unification (objectives/escort.lua's header carries the reasoning).
+# DEPARTURE_RADIUS matches game_transports.lua's DEFAULT_DEPARTURE_RADIUS;
+# CLEARANCE is how far outside it the side's own parked carrier must sit, and
+# MIN_RADIUS is the point below which a zone is too small to fly into and the
+# emitter says nothing rather than authoring a trap.
+DEPARTURE_RADIUS = 700
+DEPARTURE_CLEARANCE = 200
+DEPARTURE_MIN_RADIUS = 300
+
 # --- planned towns (town-planner T4) ---------------------------------------
 # A `town` cluster is no longer a ring of scattered buildings: it is a street
 # graph with lots, a wall, buildings that front the streets and a population
@@ -2696,6 +2712,8 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # gate_no_two_units_share_a_spot has always graded, so the placer and the
     # gate now ask the same question instead of the gate catching the placer.
     all_army_points: list[tuple[int, int, object]] = []
+    side_carriers: list[tuple[int, int]] = []
+    side_departures: list[dict | None] = []
     for i, (r, (ax, az)) in enumerate(zip(side_regions, side_anchors)):
         n_total, sum_x, sum_z, speed_min = 0, 0.0, 0.0, math.inf
         # Fan the roster's entries around the landing zone so a `count`-spread
@@ -2806,6 +2824,77 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         if n_total == 0:
             raise Rejected(f"{map_id}: side {i} staged no mobile units.")
         force.append((sum_x / n_total, sum_z / n_total, speed_min))
+
+        # --- the side's carrier (PLAN-metalstorm-transports.md §3.2) --------
+        # A side's transports are PART OF ITS DECLARED STAGED FORCE, parked
+        # where they set down. Not a frame-0 drive-in: serially unloading an
+        # army at the top of the match adds latency and failure modes and buys
+        # only theatre, which is the opening-pacing lesson endtoend D20 spent
+        # seven fires learning. The fiction survives — the lift IS there, which
+        # is what the battle's instigation clause needs the board to say — and
+        # what changes materially is that a transport-less side becomes a
+        # DECLARED choice (a raid with no way home) rather than an accident.
+        #
+        # It is deliberately given NO opening order. There is no auto-withdraw
+        # macro (§3.4: "withdrawal is a mechanic, not a menu"), so the player
+        # loads it, protects it and flies it out; an opening FIGHT would send a
+        # side's only way home into the battle on frame 0.
+        #
+        # Placed at the landing-zone anchor, with the roster fanned around it
+        # from ARMY_RING_RADIUS outward — so the centre is the one spot the fan
+        # leaves empty — and then graded by the same clearance the roster is,
+        # because "air unit" is not a licence to spawn inside a shipyard.
+        cf = facts[CARRIER_DEF]
+        cx0, cz0 = int(ax), int(az)
+
+        def carrier_ok(px: int, pz: int) -> bool:
+            if not all(b.clears(px, pz) for b in all_buildings):
+                return False
+            return not _too_close(px, pz, cf, all_cluster_units + all_army_points)
+
+        if not carrier_ok(cx0, cz0):
+            placed_carrier = False
+            for rad in range(ARMY_RING_STEP, ARMY_RING_STEP * 12, ARMY_RING_STEP):
+                for k in range(12):
+                    ang = math.tau * k / 12
+                    px = int(ax + math.cos(ang) * rad)
+                    pz = int(az + math.sin(ang) * rad)
+                    if carrier_ok(px, pz):
+                        cx0, cz0, placed_carrier = px, pz, True
+                        break
+                if placed_carrier:
+                    break
+            if not placed_carrier:
+                raise Rejected(
+                    f"{map_id}: side {i}'s landing zone ('{r['key']}') has "
+                    f"nowhere clear to park its {CARRIER_DEF} — the side would "
+                    f"open with no way to withdraw anything from this battle "
+                    f"(PLAN-metalstorm-transports.md §3.2).")
+        all_army_points.append((cx0, cz0, cf))
+        units.append({"def": CARRIER_DEF, "team": i, "x": cx0, "z": cz0,
+                      "facing": "south", "count": 1, "spacing": 0})
+        side_carriers.append((cx0, cz0))
+
+        # --- and the exit it flies to (§3.4, named `extractArea` by the
+        # objectives layer under the §7.10 unification) ---------------------
+        # The nearest map edge to the landing zone: you leave the way you came.
+        # NOT the staging centroid — a departure zone drawn over a side's own
+        # parked carrier deletes it on the first poll after frame 60, which is
+        # a mechanic that reads to a player as a crash. The radius is therefore
+        # clamped to stay clear of the carrier AND inside the map, which is
+        # what makes this safe on a small map where the anchor is close to an
+        # edge; a zone that shrinks below DEPARTURE_MIN_RADIUS is dropped
+        # entirely and game_transports falls back to its own default.
+        map_w = (terrain.W - 1) * ELMOS_PER_SQUARE
+        map_h = (terrain.H - 1) * ELMOS_PER_SQUARE
+        edges = [(ax, 0.0, az), (map_w - ax, map_w, az),
+                 (az, ax, 0.0), (map_h - az, ax, map_h)]
+        _d, ex_, ez_ = min(edges, key=lambda e: e[0])
+        gap = math.hypot(cx0 - ex_, cz0 - ez_)
+        radius = int(min(DEPARTURE_RADIUS, gap - DEPARTURE_CLEARANCE))
+        side_departures.append(
+            {"x": int(ex_), "z": int(ez_), "radius": radius}
+            if radius >= DEPARTURE_MIN_RADIUS else None)
 
     # --- the victory objective's timing (§7 gate 3) -------------------------
     # Mirrors game_scenario.lua's checkVictoryIsContestable exactly — same
@@ -3107,7 +3196,8 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
                     hostile_team, sides, not_before, hold, townships,
-                    frontage_entries, layby_entries, convoy_routes), meta
+                    frontage_entries, layby_entries, convoy_routes,
+                    side_departures), meta
 
 
 # ==========================================================================
@@ -3150,7 +3240,8 @@ def regenerate_flags(meta) -> list[str]:
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
              hostile_team, sides, not_before, hold, townships=(),
-             frontage_entries=(), layby_entries=(), convoy_routes=()) -> str:
+             frontage_entries=(), layby_entries=(), convoy_routes=(),
+             side_departures=()) -> str:
     L: list[str] = []
     add = L.append
 
@@ -3327,10 +3418,29 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     add("    -- side below is staged an army in `units`, which is what makes")
     add("    -- ScenarioDiscovery resolve it with staged == true — a side with no")
     add("    -- army is a room slot that starts with nothing (endtoend D19).")
+    add("    -- Every playable side here is EXPEDITIONARY (transports §7.1): a")
+    add("    -- generated war is two forces SENT to a map, landing on zones the")
+    add("    -- generator picked for them, not two garrisons standing in their own")
+    add("    -- towns. The flag is what gates `ms_stranded_<team>` and the")
+    add("    -- `war_side_stranded` guard — both of which exist only for a force")
+    add("    -- that arrived by transport and can therefore be trapped, and both")
+    add("    -- of which cry wolf forever if a home defender carries it.")
+    add("    --")
+    add("    -- `departure` is §3.4's withdrawal zone (the objectives layer calls")
+    add("    -- the same circle `extractArea` — §7.10). Nearest map edge to the")
+    add("    -- landing zone: you leave the way you came, and its radius is")
+    add("    -- clamped clear of the carrier parked in `units` below, because a")
+    add("    -- departure zone drawn over your own transport deletes it on the")
+    add("    -- first poll after frame 60.")
     add("    sides = {")
     for i in range(sides):
+        d = side_departures[i] if i < len(side_departures) else None
+        dep = ""
+        if d:
+            dep = (f",\n          departure = {{ x = {d['x']}, z = {d['z']}, "
+                   f"radius = {d['radius']} }}")
         add(f"        {{ faction = {_lua_str(PLAYABLE_FACTIONS[i % len(PLAYABLE_FACTIONS)])}, "
-            f"team = {i} }},")
+            f"team = {i}, expeditionary = true{dep} }},")
     if any(c["owner"] == hostile_team for c in clusters):
         add(f"        -- Team {hostile_team} is an NPC faction holding the fortified")
         add("        -- clusters (see `ai` below). Every non-Gaia team is its own")

@@ -227,13 +227,19 @@ def _read_scaled_class(path: str) -> dict[str, UnitFacts]:
     return out
 
 
-def _read_flat_class(path: str) -> dict[str, UnitFacts]:
-    """units/civilians.lua and units/civvehicles.lua — plain literal defs."""
+def _read_flat_class(path: str, prefix: str = "ms_") -> dict[str, UnitFacts]:
+    """units/civilians.lua and units/civvehicles.lua — plain literal defs.
+
+    `prefix` is how a top-level entry is told from a stray local. It defaults
+    to the roster's own `ms_` namespace; `fable_airship.lua` is read with its
+    own name because the one carrier a generated war stages is a `fable_*`
+    showcase def rather than a scale-class member (see _CARRIER_FILES).
+    """
     with open(path, encoding="utf-8") as fh:
         text = _strip_comments(fh.read())
     out = {}
     for name, body in _split_top_level_entries(text).items():
-        if not name.startswith("ms_"):
+        if not name.startswith(prefix):
             continue
         fx = _num(body, "footprintx", 2)
         fz = _num(body, "footprintz", 2)
@@ -283,14 +289,29 @@ _SCALED_FILES = ("staticdefense.lua", "soldiers.lua", "tanks.lua",
 # template name a def that can never be sited.
 _FLAT_FILES = ("civilians.lua", "civvehicles.lua", "irregulars.lua",
                "logistics.lua", "recon_vehicles.lua", "command_vehicles.lua")
+# The carrier. Read despite being a `fable_*` showcase def and despite being
+# air, because since PLAN-metalstorm-transports.md §3.2 a generated war STAGES
+# one per side: a side's transports are part of its declared staged force, so
+# being transport-less at GameStart is a choice a scenario makes rather than an
+# accident. It is the only lift a land map can hold — ms_landing_ship is
+# movementclass SHIP and the generator has no water placement — which is why
+# transports.lua is still absent from this list.
+#
+# Being in the catalog is the point, not a side effect: it puts the carrier
+# under the same gates as every other staged def (nothing spawns inside a
+# yardmap, no two units share a spot, --coverage really does stage one of
+# everything) instead of smuggling it past them.
+_CARRIER_FILES = (("fable_airship.lua", "fable_airship"),)
 
 
 def load(game_dir: str) -> dict[str, UnitFacts]:
     """Every def the scenario generator may emit, keyed by def name.
 
     `game_dir` is data/games/metalstorm. Only the def families the generator
-    places are read — the fable_*/wz_* baseline models and the naval/air
-    classes are not scenario-generator content.
+    places are read — the wz_* baseline models and the naval classes are not
+    scenario-generator content. The one exception is `fable_airship`, which a
+    generated war now stages per side as that side's carrier
+    (PLAN-metalstorm-transports.md §3.2); see _CARRIER_FILES.
     """
     units = os.path.join(game_dir, "units")
     facts: dict[str, UnitFacts] = {}
@@ -300,6 +321,8 @@ def load(game_dir: str) -> dict[str, UnitFacts]:
         facts.update(_read_scaled_class(os.path.join(units, f)))
     for f in _FLAT_FILES:
         facts.update(_read_flat_class(os.path.join(units, f)))
+    for f, prefix in _CARRIER_FILES:
+        facts.update(_read_flat_class(os.path.join(units, f), prefix=prefix))
     return facts
 
 

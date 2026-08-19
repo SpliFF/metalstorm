@@ -8,20 +8,26 @@
 -- Narrowly scoped to this gadget's Spring surface, not a shared framework.
 --
 -- The unit defs below are the REAL shipped values (units/fable_airship.lua,
--- units/transports.lua, units/_builder.lua's ms_scale) rather than in-range
--- placeholders, for the same reason train_mock.lua uses real footprints: the
--- §7.7 slot arithmetic is only an honest guard if the numbers it divides are
--- the ones the game ships.
+-- units/transports.lua, units/_builder.lua's footprint curve) rather than
+-- in-range placeholders, for the same reason train_mock.lua uses real
+-- footprints: the §7.7 slot arithmetic is only an honest guard if the numbers
+-- it divides are the ones the game ships. `xsize` in particular is load-
+-- bearing — it is what the ENGINE charges capacity against
+-- (`transportCapacityUsed += xsize / 2`, Sim/Units/Unit.cpp:2684), and a mock
+-- that omitted it let this gadget's own slot model drift away from the
+-- engine's until a live war put one of a wave's two squads aboard.
 
 local M = {}
 
 -- Def ids. Carriers first, then cargo at each scale tier.
-M.AIRSHIP      = 2001   -- fable_airship:   capacity 2, is_transport
+M.AIRSHIP      = 2001   -- fable_airship:   capacity 4, is_transport
 M.LANDING_SHIP = 2002   -- ms_landing_ship: capacity 4, is_transport
 M.TROOP_CAR    = 2003   -- fable_train_troop: capacity 4, is_transport
-M.SOLDIERS_S1  = 2010   -- ms_scale 1
-M.TANK_S2      = 2011   -- ms_scale 2
-M.MECH_S3      = 2012   -- ms_scale 3
+-- _builder.lua gives a class `baseFootprint + (s - 1)` and the engine doubles
+-- it into xsize, so a slot cost is s1 = 2, s2 = 3, s3 = 4, s4 = 5.
+M.SOLDIERS_S1  = 2010   -- footprint 2 -> 2 slots
+M.TANK_S2      = 2011   -- footprint 3 -> 3 slots
+M.MECH_S3      = 2012   -- footprint 4 -> 4 slots
 M.BUNKER       = 2013   -- speed 0: a building, never "committed force"
 
 M.NAME = {
@@ -43,18 +49,19 @@ local function buildUnitDefs()
             id = id, name = M.NAME[id],
             speed = opts.speed or 0,
             transportCapacity = opts.capacity or 0,
+            xsize = opts.xsize or 0,
             customParams = opts.cp or {},
         }
     end
-    def(M.AIRSHIP, { speed = 60, capacity = 2,
+    def(M.AIRSHIP, { speed = 60, capacity = 4, xsize = 16,
                      cp = { is_transport = '1', transport_links = 'link1,link2' } })
-    def(M.LANDING_SHIP, { speed = 60, capacity = 4,
+    def(M.LANDING_SHIP, { speed = 60, capacity = 4, xsize = 8,
                           cp = { is_transport = '1', transport_links = 'link1,link2,link3,link4' } })
-    def(M.TROOP_CAR, { speed = 54, capacity = 4, cp = { is_transport = '1' } })
-    def(M.SOLDIERS_S1, { speed = 40, cp = { ms_scale = '1' } })
-    def(M.TANK_S2, { speed = 50, cp = { ms_scale = '2' } })
-    def(M.MECH_S3, { speed = 45, cp = { ms_scale = '3' } })
-    def(M.BUNKER, { speed = 0, cp = { ms_scale = '2' } })
+    def(M.TROOP_CAR, { speed = 54, capacity = 4, xsize = 6, cp = { is_transport = '1' } })
+    def(M.SOLDIERS_S1, { speed = 40, xsize = 4, cp = { ms_scale = '1' } })
+    def(M.TANK_S2, { speed = 50, xsize = 6, cp = { ms_scale = '2' } })
+    def(M.MECH_S3, { speed = 45, xsize = 8, cp = { ms_scale = '3' } })
+    def(M.BUNKER, { speed = 0, xsize = 6, cp = { ms_scale = '2' } })
     return defs
 end
 
@@ -111,6 +118,15 @@ function M.new(scenario)
     function world.moveTo(id, x, z)
         local u = world.units[id]
         if u then u.x, u.z = x, z end
+    end
+
+    --- Put a unit IN MOTION. `moveTo` teleports a unit and leaves it at rest,
+    --- which is what most cases want; this is for the cases that turn on the
+    --- difference between a transport that has come to rest somewhere and one
+    --- that is merely passing through it (§3.4's departure gate).
+    function world.setVelocity(id, vx, vz)
+        local u = world.units[id]
+        if u then u.vx, u.vz = vx, vz end
     end
 
     --- Load `cargoID` onto `transportID` the way a player LOAD order would.
@@ -273,6 +289,11 @@ function M.new(scenario)
                 end
             end
             world.transporterOf[cargoID] = nil
+        end,
+        ValidUnitID = function(id) return world.units[id] ~= nil end,
+        GetUnitHealth = function(id)
+            if world.units[id] == nil then return nil end
+            return 100, 100
         end,
         GiveOrderToUnit = function(unitID, cmdID, params, opts)
             world.orders[#world.orders + 1] =

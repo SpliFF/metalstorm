@@ -141,7 +141,7 @@ local WITHDRAW_FRACTION = 0.5
 local scheduled = {}        -- id -> arrival spec (validated, team resolved)
 local pending = {}          -- array of scheduled ids not yet spawned, eta-sorted
 local inFlight = {}         -- transportID -> { arrivalID, cargo = {unitID...}, unloadedAt }
-local departureZones = {}   -- team -> { x, z, radius }
+local departureZones = {}   -- team -> { x, z, radius } (== objectives' extractArea, §7.10)
 local expeditionary = {}    -- team -> true (§7.1)
 local committed = {}        -- team -> committed force, in cargo units
 local withdrawnUnits = {}   -- team -> count
@@ -193,21 +193,38 @@ local function unitIsTransport(unitID)
     return defID ~= nil and defIsTransport(UnitDefs[defID])
 end
 
---- §7.7: a cargo item's SLOT COST is its def's scale tier (s1 = 1 … s4 = 4),
---- read off `customparams.ms_scale` (units/_builder.lua writes it for every
---- roster def). A squad is still ONE cargo item regardless of member count —
---- that was settled in PLAN-archive/PLAN-metalstorm-squad-transport.md and is
---- unchanged; what §7.7 changes is only how many SLOTS the one item costs.
+--- §7.7's SLOT COST — but computed the way the ENGINE computes it, which is
+--- the whole reason this function exists rather than a constant 1.
 ---
---- Reasoning, so a later session can argue with it rather than guess: a 40-man
---- s4 formation and a 4-man s1 squad costing the same slot made heavy armies
---- free to extract, which is backwards. Heavy is what you should struggle to
---- get out, and that is now the main economic tension of withdrawal.
+--- CUnit::AttachUnit accrues `transportCapacityUsed += unit->xsize /
+--- SPRING_FOOTPRINT_SCALE` and CanTransport refuses once that reaches the
+--- carrier's `transportCapacity` (Sim/Units/Unit.cpp:2586,2684). So a slot is
+--- one footprint unit, and a def's cost is its `footprintX`.
 ---
---- Defs with no ms_scale (the hand-written one-offs — fable_airship,
---- ms_landing_ship, the train cars) cost 1.
+--- §7.7 asked for cost to rise with scale, and it does: units/_builder.lua
+--- gives a class `baseFootprint + (s - 1)`, so an s1 squad costs 2 slots and
+--- an s4 formation costs 5. The plan's own numbering (s1 = 1 … s4 = 4) was a
+--- DIFFERENT scale for the same monotone idea, and the difference was not
+--- academic — measured on a headless `crossing_standoff`, a wave this file
+--- had validated as "2 slots of 2" put ONE of its two squads aboard, because
+--- the engine charged 4. A gadget-private slot model that disagrees with the
+--- engine does not validate anything; it approves waves the engine silently
+--- truncates, which is the exact failure §3.3 wrote "validated against the
+--- manifest at LOAD time, not trusted" to prevent. The engine's arithmetic
+--- wins, and §7.7's intent (heavy is what you struggle to extract) survives
+--- intact under it.
+---
+--- A squad is still ONE cargo item regardless of member count — that was
+--- settled in PLAN-archive/PLAN-metalstorm-squad-transport.md and is
+--- unchanged; what changes is only how many SLOTS the one item costs.
+---
+--- Defs with no footprint fall back to `ms_scale`, then to 1.
 local function slotCost(def)
     if not def then return 1 end
+    local fp = tonumber(def.xsize)
+    if fp and fp > 0 then return math.max(1, math.floor(fp / 2)) end
+    fp = tonumber(def.footprintX or def.footprintx)
+    if fp and fp > 0 then return math.floor(fp) end
     local cp = def.customParams or def.customparams or {}
     local scale = tonumber(cp.ms_scale)
     if scale and scale >= 1 then return math.floor(scale) end
@@ -332,7 +349,7 @@ local function validateArrival(scn, spec)
     local capacity = slotCapacity(carrier)
     if slots > capacity then
         return nil, string.format(
-            'cargo needs %d slot(s) (scale-tier cost, §7.7) but %s carries %d',
+            'cargo needs %d slot(s) (footprint cost, the engine\'s own arithmetic — §7.7) but %s carries %d',
             slots, defName, capacity)
     end
 
@@ -416,7 +433,25 @@ local function spawnArrival(a)
         { a.dropZone.x, Spring.GetGroundHeight(a.dropZone.x, a.dropZone.z), a.dropZone.z }, 0)
 
     a.cargoUnits = #cargoIDs
-    inFlight[transportID] = { arrivalID = a.id, cargo = cargoIDs, unloadOrderedAt = nil }
+    inFlight[transportID] = { arrivalID = a.id, cargo = cargoIDs,
+                              unloadOrderedAt = nil, reachedDrop = false }
+
+    -- §3.7's "made loud", applied to the one step that can fail silently.
+    -- Spring.UnitAttach refuses a passenger the def cannot carry (footprint vs
+    -- transportsize, mass, a link piece the model does not have) and says so
+    -- only by not attaching it — no error, no return value. An arrival whose
+    -- cargo never got aboard still flies its route and still "unloads", so
+    -- without this line the wave lands empty and the squads it was carrying
+    -- stand on the entry point for the rest of the war.
+    local aboard = Spring.GetUnitIsTransporting(transportID) or {}
+    if #aboard ~= #cargoIDs then
+        Spring.Echo(string.format(
+            '[game_transports] WARNING: arrival "%s" got %d of %d cargo unit(s) ' ..
+            'aboard its %s — the engine refused the rest (footprint vs ' ..
+            'transportsize, mass, or a missing transport_links piece). They will ' ..
+            'be ordered from the entry point instead of the drop zone.',
+            a.id, #aboard, #cargoIDs, a.def))
+    end
     Spring.Echo(string.format(
         '[game_transports] arrival "%s": %s + %d cargo unit(s) for team %d entering at (%d, %d)',
         a.id, a.def, #cargoIDs, a.team, a.entry.x, a.entry.z))
@@ -434,7 +469,20 @@ local function serviceInFlight(frame)
             inFlight[transportID] = nil                 -- died or was cancelled in transit
         else
             local aboard = Spring.GetUnitIsTransporting(transportID) or {}
-            if #aboard == 0 then
+            local atDrop = dist2(x, z, a.dropZone.x, a.dropZone.z)
+                           <= ARRIVE_RADIUS * ARRIVE_RADIUS
+            if atDrop then f.reachedDrop = true end
+
+            -- "Empty" is NOT the same question as "arrived", and conflating
+            -- them is how a wave deletes itself. An arrival whose attach was
+            -- refused (see the WARNING at spawn) is empty from its first frame,
+            -- and clearing it here would hand the carrier to §3.4's departure
+            -- poll while it is still sitting on its own entry point — which,
+            -- for a side whose entry is near its departure zone, withdraws the
+            -- transport empty, seconds after it arrived, for no reason a player
+            -- could ever see. So a wave stops being a wave only once it has
+            -- REACHED THE DROP ZONE.
+            if f.reachedDrop and #aboard == 0 then
                 -- Unloaded. Apply the declared order to everything that arrived
                 -- and stop tracking; the transport is now an ordinary §3.4
                 -- withdrawal asset and target (Capture 5: it STAYS on the field).
@@ -442,13 +490,22 @@ local function serviceInFlight(frame)
                     local cmd = CMD[a.order.cmd or 'FIGHT'] or CMD.FIGHT
                     local ox = tonumber(a.order.x) or a.dropZone.x
                     local oz = tonumber(a.order.z) or a.dropZone.z
+                    local oy = Spring.GetGroundHeight(ox, oz)
                     for _, cid in ipairs(f.cargo) do
-                        Spring.GiveOrderToUnit(cid, cmd,
-                            { ox, Spring.GetGroundHeight(ox, oz), oz }, 0)
+                        -- Guarded: a passenger can die between the wave
+                        -- spawning and the wave landing (a carrier shot down
+                        -- takes its cargo with it, and an unloaded squad can
+                        -- be killed on the drop zone). GiveOrderToUnit on a
+                        -- dead id is a hard Lua error, which removes THIS
+                        -- gadget for the rest of the war — the whole battle
+                        -- lifecycle lost to one unlucky death.
+                        if Spring.ValidUnitID(cid) and Spring.GetUnitHealth(cid) then
+                            Spring.GiveOrderToUnit(cid, cmd, { ox, oy, oz }, 0)
+                        end
                     end
                 end
                 inFlight[transportID] = nil
-            elseif dist2(x, z, a.dropZone.x, a.dropZone.z) <= ARRIVE_RADIUS * ARRIVE_RADIUS then
+            elseif atDrop and #aboard > 0 then
                 local vx, _, vz = Spring.GetUnitVelocity(transportID)
                 local speed = math.sqrt((vx or 0) ^ 2 + (vz or 0) ^ 2)
                 if speed <= MAX_UNLOAD_SPEED
@@ -512,22 +569,49 @@ local function depart(transportID, teamID)
     -- of what is left rather than of what left — which silently zeroes the
     -- world layer's settlement input.
     local carried = #aboard
-    for _, cid in ipairs(aboard) do
-        Spring.DestroyUnit(cid, false, true)     -- no wreck, no death FX
-    end
-    Spring.DestroyUnit(transportID, false, true)
 
+    -- LEDGER FIRST, THEN THE DESTRUCTION, and the order is load-bearing.
+    -- DestroyUnit runs UnitDestroyed synchronously in every other gadget, and
+    -- one of those observers is objectives/escort.lua's transport form, which
+    -- asks exactly this counter "did that carrier LEAVE, or was it killed?".
+    -- Incrementing afterwards answers "killed" for the one frame in which the
+    -- question is asked, which fails the escort the side just won.
     withdrawnUnits[teamID] = (withdrawnUnits[teamID] or 0) + carried
     withdrawnTransports[teamID] = (withdrawnTransports[teamID] or 0) + 1
     Spring.SetTeamRulesParam(teamID, 'ms_withdrawn_' .. teamID .. '_units',
                              withdrawnUnits[teamID], PUBLIC_LOS)
     Spring.SetTeamRulesParam(teamID, 'ms_withdrawn_' .. teamID .. '_transports',
                              withdrawnTransports[teamID], PUBLIC_LOS)
+
+    for _, cid in ipairs(aboard) do
+        Spring.DestroyUnit(cid, false, true)     -- no wreck, no death FX
+    end
+    Spring.DestroyUnit(transportID, false, true)
     Spring.Echo(string.format(
         '[game_transports] team %d withdrew a transport with %d unit(s) ' ..
         '(%d unit(s) / %d transport(s) out so far, of %d committed)',
         teamID, carried, withdrawnUnits[teamID], withdrawnTransports[teamID],
         committed[teamID] or 0))
+end
+
+--- A DEPARTURE IS A DELIBERATE ACT, not a fly-through, and the speed gate is
+--- what makes that true. §3.4's own wording is "a loaded transport ORDERED
+--- INTO its departure zone departs" — a carrier crossing the zone on its way
+--- somewhere else was never meant to leave.
+---
+--- This is not hypothetical tidiness. On a headless `crossing_standoff` with
+--- two strategos brains, the AI's region-scoped directives swept each side's
+--- parked carrier up with the rest of the force standing in its landing zone
+--- and flew it across the map; the route crossed the exit, and the side lost
+--- its only way home, empty, about two minutes into the war, for a reason no
+--- player could ever have seen. Requiring the carrier to have COME TO REST in
+--- the zone (the same MAX_UNLOAD_SPEED gate an arrival's unload uses — a
+--- transport still moving is not "arrived") costs an intentional withdrawal
+--- nothing: you fly there, you stop, you are gone on the next poll.
+local function transportHasSettled(unitID)
+    local vx, _, vz = Spring.GetUnitVelocity(unitID)
+    local speed = math.sqrt((vx or 0) ^ 2 + (vz or 0) ^ 2)
+    return speed <= MAX_UNLOAD_SPEED
 end
 
 local function serviceDepartures()
@@ -537,7 +621,8 @@ local function serviceDepartures()
         -- the zone is a few hundred elmos on a 16k map.
         local near = Spring.GetUnitsInCylinder(zone.x, zone.z, zone.radius, teamID) or {}
         for _, unitID in ipairs(near) do
-            if unitIsTransport(unitID) and inFlight[unitID] == nil then
+            if unitIsTransport(unitID) and inFlight[unitID] == nil
+               and transportHasSettled(unitID) then
                 depart(unitID, teamID)
             end
         end
@@ -804,6 +889,14 @@ function GG.Transports.ScheduleArrival(spec)
     return a.id
 end
 
+--- The slot cost of one cargo item of `defName` — the engine's arithmetic,
+--- exposed so a scenario author, a test or the world layer can ask the same
+--- question the load-time validator asks instead of re-deriving it.
+function GG.Transports.SlotCost(defName)
+    if knownDefs == nil then buildDefTables() end
+    return slotCost(defByName[defName])
+end
+
 function GG.Transports.IsTransport(defID)
     return defIsTransport(UnitDefs[defID])
 end
@@ -813,6 +906,57 @@ function GG.Transports.Committed(teamID) return committed[teamID] or 0 end
 
 function GG.Transports.Withdrawn(teamID)
     return withdrawnUnits[teamID] or 0, withdrawnTransports[teamID] or 0
+end
+
+--- THE EXIT ZONE, under its unified name (§7.10 / objectives §10.3).
+---
+--- §3.4 calls this a side's "departure zone"; `objectives/extract.lua` calls
+--- the same circle `extractArea`, and `objectives/escort.lua` used to call it
+--- `destArea`. One idea, three names, drifting apart. `extractArea` wins — the
+--- full reasoning lives in escort.lua's header, and this accessor is the seam
+--- that makes the two halves literally the same rectangle of ground rather
+--- than two hand-copied coordinate pairs that can silently diverge.
+---
+--- Returns `{ x, z, r }` in the objectives' area shape (note `r`, not
+--- `radius`), or nil for a side with no zone.
+function GG.Transports.ExtractArea(teamID)
+    local z = departureZones[teamID]
+    if not z then return nil end
+    return { x = z.x, z = z.z, r = z.radius }
+end
+
+--- Every live carrier this team owns. The objectives generator's transport
+--- rule escorts these out (§10.5); a nil/empty answer is the honest one for a
+--- side that has none, not an error.
+function GG.Transports.LiveTransports(teamID)
+    local out = {}
+    for _, unitID in ipairs(Spring.GetTeamUnits(teamID) or {}) do
+        if unitIsTransport(unitID) then out[#out + 1] = unitID end
+    end
+    return out
+end
+
+--- Arrivals that are on the map RIGHT NOW and have not finished unloading —
+--- the "defend an arrival point" half of §10.5's rule. Each entry is
+--- `{ transportID, arrivalID, team, dropZone = { x, z } }`.
+---
+--- Deliberately only the in-flight ones, not the whole schedule: an objective
+--- to defend a wave that has not entered the map yet would point at empty
+--- ground for minutes, and §7.2 keeps the schedule out of players' hands
+--- anyway.
+function GG.Transports.InFlightArrivals()
+    local out = {}
+    for transportID, f in pairs(inFlight) do
+        local a = scheduled[f.arrivalID]
+        if a then
+            out[#out + 1] = {
+                transportID = transportID, arrivalID = a.id, team = a.team,
+                dropZone = { x = a.dropZone.x, z = a.dropZone.z },
+            }
+        end
+    end
+    table.sort(out, function(l, r) return l.transportID < r.transportID end)
+    return out
 end
 
 function GG.Transports.IsExpeditionary(teamID) return expeditionary[teamID] == true end

@@ -44,7 +44,13 @@ return {
         canguard = true,
         -- transport
         canload = 1,
-        transportcapacity = 2,
+        -- FOUR, not two, and the unit is "footprint", not "passenger": the
+        -- engine charges `xsize / 2` per passenger (Sim/Units/Unit.cpp:2684),
+        -- so an s1 squad (footprint 2) costs 2 slots. `2` therefore meant ONE
+        -- passenger, not the two cradles the model has and the comment above
+        -- describes — measured on a headless arrival that loaded 1 of 2 squads.
+        -- 4 = the two cradles the model actually ships.
+        transportcapacity = 4,
         transportsize = 3,
         transportmass = 1200,
         loadingradius = 160,
