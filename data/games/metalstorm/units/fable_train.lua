@@ -105,6 +105,9 @@ return {
         },
         customparams = {
             train_role = 'troop',
+            -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and
+            -- gadgets key off to recognise a carrier. No per-consumer def lists.
+            is_transport = '1',
             flame_visual = 'weapon2',
             -- T4: Loaded squads fire from sides (bowtie pattern via AllowWeaponTargetCheck)
             fire_platform_bowtie = 'true',
@@ -128,6 +131,9 @@ return {
         },
         customparams = {
             train_role = 'cargo',
+            -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and
+            -- gadgets key off to recognise a carrier. No per-consumer def lists.
+            is_transport = '1',
             -- T5: Loaded vehicles fire from sides (bowtie pattern via AllowWeaponTargetCheck)
             fire_platform_bowtie = 'true',
         },

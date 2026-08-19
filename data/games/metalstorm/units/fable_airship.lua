@@ -51,6 +51,9 @@ return {
         releaseheld = true,
         customparams = {
             ms_class = 'fable_showcase',
+            -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and
+            -- gadgets key off to recognise a carrier. No per-consumer def lists.
+            is_transport = '1',
             squad_size = '1',
             transport_links = 'link1,link2',   -- QueryTransport attach pieces
             generator = 'Claude Fable 5 (tools/fable-model-forge)',
