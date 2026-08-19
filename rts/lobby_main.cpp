@@ -20,6 +20,9 @@
 #include "Server/RoomManager.h"
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
+#include "Server/WorldDirector.h"
+#include "Server/WorldWarLinkage.h"
+#include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1216,6 +1219,34 @@ int main(int argc, char *argv[]) {
   // and migrated additively rather than dropped for the same reason as the
   // bindings above: a row here is the only copy of the thing.
   WarDirector::EnsureTables(mapDb);
+
+  // worlds / world_pois / world_poi_edges / world_pause_ledger — the WORLD
+  // layer (PLAN-worldsim.md W1, WorldDirector.h). The layer ABOVE the war
+  // tables above, and strictly separate from them: everything here is keyed by
+  // `world_id`, nothing by `room_id`, because a war is one battle and a world
+  // is the persistent thing battles happen inside. Additively migrated for the
+  // same reason as the bindings above — a row here is the only copy of the
+  // world, and its epoch is what the world clock is computed from.
+  WorldDirector::EnsureTables(mapDb);
+  // Seed Earth on first boot, so a fresh lobby has a world to serve rather
+  // than a 404 the client has to special-case. Idempotent, and guarded on "no
+  // world exists at all": a lobby that already has a world never gets a second
+  // one, and an existing world's epoch is never rewritten (that would move the
+  // world clock for everyone who has ever looked at it).
+  if (mapDb) {
+    const std::string seededWorld =
+        WorldDirector::SeedDefaultWorld(mapDb, WorldNowRealMs());
+    if (seededWorld.empty())
+      SLOG(SPRING_LOG_ERROR,
+           "world layer: no world could be seeded or loaded — /api/world will "
+           "answer 404 until a world row exists");
+    else
+      // PLAN-worldsim.md W3: grow the POI graph from the Randtown register,
+      // honouring the world's own poiBudget* knobs. Idempotent and additive
+      // (see WorldMapSeeder.h) — safe to call on every boot, including one
+      // where the world already has every registry POI.
+      WorldMapSeeder::SeedFromRegistry(mapDb, seededWorld, WorldNowRealMs());
+  }
 
   // war_slot_reservations — the last seat on a side, held for the join that is
   // on its way (PLAN-metalstorm-wars.md §4, task 2). Created here rather than
@@ -4554,6 +4585,143 @@ int main(int argc, char *argv[]) {
                    return HttpAuth::JsonResponse(200, json);
                  });
 
+  // ── The world layer, read-only (PLAN-worldsim.md W1) ────────────────────
+  // Both bodies are built by WorldDirector so they are testable without a
+  // socket (tests/test_world_director.cpp); these two handlers are the
+  // transport and nothing else. Public, like /api/rooms and /api/maps: the
+  // world map is the game's shop window, and nothing here is per-account.
+  //
+  // `?world=<id>` selects a world; without it the lobby answers for its
+  // primary (oldest active) world.
+  const auto worldIdFromQuery = [mapDb](const std::string &url) -> std::string {
+    // The query string is per-request thread-local state on NetworkServer, so
+    // it is read here rather than passed in.
+    const std::string qs = NetworkServer::CurrentQueryString();
+    const std::string key = "world=";
+    const size_t at = qs.find(key);
+    if (at != std::string::npos) {
+      const size_t from = at + key.size();
+      const size_t to = qs.find('&', from);
+      std::string id = qs.substr(from, to == std::string::npos ? to : to - from);
+      if (!id.empty())
+        return id;
+    }
+    (void)url;
+    return WorldDirector::PrimaryWorldId(mapDb);
+  };
+
+  // GET /api/world — the world clock + meta.
+  net.AddHttpGet("/api/world", RouteAuth::Public,
+                 [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+                   if (!mapDb) {
+                     // D33: never answer a faulted handle with a plausible
+                     // empty world — a client that believed it would show a
+                     // stopped clock and blame the world, not the database.
+                     return HttpAuth::JsonResponse(
+                         503, R"({"error":"world_database_unavailable"})");
+                   }
+                   const std::string worldId = worldIdFromQuery(url);
+                   if (worldId.empty())
+                     return HttpAuth::JsonResponse(
+                         404, R"({"error":"no_world"})");
+                   const nlohmann::json body = WorldDirector::WorldStatusJson(
+                       mapDb, worldId, WorldNowRealMs());
+                   const int status = body.contains("error") ? 404 : 200;
+                   return HttpAuth::JsonResponse(status, body.dump());
+                 });
+
+  // GET /api/world/pois — the POI graph (nodes + edges) for one world.
+  net.AddHttpGet("/api/world/pois", RouteAuth::Public,
+                 [mapDb, worldIdFromQuery, &rooms](const std::string &url) -> HttpResponse {
+                   if (!mapDb)
+                     return HttpAuth::JsonResponse(
+                         503, R"({"error":"world_database_unavailable"})");
+                   const std::string worldId = worldIdFromQuery(url);
+                   if (worldId.empty())
+                     return HttpAuth::JsonResponse(
+                         404, R"({"error":"no_world"})");
+                   // An existing world with no POIs answers 200 with empty
+                   // arrays: a young world genuinely has none until the W3
+                   // seeder runs, and the map UI must draw an empty Earth
+                   // rather than an error.
+                   //
+                   // PLAN-worldsim.md W5: merge each POI's battle marker
+                   // state on top. This is a READ-ONLY join at the transport
+                   // layer — WorldDirector never touches `war*` tables (see
+                   // its header note), so the live-war list is assembled
+                   // here from WarDirector + RoomManager and handed to the
+                   // pure WorldWarLinkage.h merge, exactly the same
+                   // "director builds the body, handler is transport only"
+                   // split the rest of this route follows.
+                   std::vector<RoomBattleInfo> battles;
+                   for (const auto &war : WarDirector::ListLive(mapDb)) {
+                     if (const GameRoom *room = rooms.GetRoom(war.roomId)) {
+                       battles.push_back(
+                           RoomBattleInfo{room->id, room->mapId, war.state});
+                     }
+                   }
+                   nlohmann::json body = AttachBattleStatus(
+                       WorldDirector::WorldPoisJson(mapDb, worldId), battles);
+                   return HttpAuth::JsonResponse(200, body.dump());
+                 });
+
+  // POST /api/world/pause — Capture 11's admin global pause (PLAN-worldsim.md
+  // W4). This writes ONLY the world-clock's pause ledger (the durable half
+  // that already existed: WorldDirector::OpenPause/ClosePause). Battle
+  // orchestration — pausing every running game server so the two clocks stop
+  // together — is DELIBERATELY still a stub: nothing here touches
+  // `gameServers` or any room. A global pause today freezes world-clock
+  // progression only; in-flight battles keep running at their own pace until
+  // that orchestration is designed (see PLAN-worldsim.md's Notes / gap log).
+  // Body: {"action":"pause"|"resume","reason"?:string}. World selection is
+  // the same `?world=` query param the GETs use.
+  net.AddHttpPost(
+      "/api/world/pause", RouteAuth::AdminOnly,
+      [mapDb, requireLobbyAdmin, worldIdFromQuery](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid = 0;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const std::string action = j.value("action", std::string("pause"));
+        const std::string reason = j.value("reason", std::string());
+        const int64_t now = WorldNowRealMs();
+
+        bool changed = false;
+        if (action == "pause") {
+          changed = WorldDirector::OpenPause(mapDb, worldId, now, reason, uname);
+        } else if (action == "resume") {
+          changed = WorldDirector::ClosePause(mapDb, worldId, now);
+        } else {
+          return HttpAuth::JsonResponse(
+              400,
+              R"({"error":"bad_action","detail":"action must be \"pause\" or \"resume\""})");
+        }
+
+        // `changed=false` is not an error — pausing an already-paused world
+        // (or resuming a running one) is a no-op, reported as such rather
+        // than as a failure; see OpenPause/ClosePause's own reasoning.
+        const nlohmann::json status =
+            WorldDirector::WorldStatusJson(mapDb, worldId, now);
+        nlohmann::json out;
+        out["ok"] = true;
+        out["changed"] = changed;
+        out["clock"] = status.contains("clock") ? status["clock"]
+                                                 : nlohmann::json::object();
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
   // GET /api/games — list available games
   net.AddHttpGet(
       "/api/games", RouteAuth::Public,
@@ -7589,6 +7757,32 @@ int main(int argc, char *argv[]) {
              WarStateToString(step->from), WarStateToString(step->to),
              WarTerminalReasonToString(step->reason),
              step->archived ? " — archived, digest emitted" : "");
+
+        // PLAN-worldsim.md W6: the settlement write-back stub. Same chokepoint
+        // as the war-over digest above (fires exactly once per archival, for
+        // the same reason — `AdvanceWarLifecycle` reports `archived` on only
+        // the one sweep that made the transition). Guarded: a room whose map
+        // is not any world's POI (not yet seeded, or a world-only scenario)
+        // settles nowhere, and that is not an error.
+        if (step->archived) {
+          if (const GameRoom* room = rooms.GetRoom(war.roomId)) {
+            if (const auto poi = WorldDirector::PoiForMap(mapDb, room->mapId)) {
+              WorldSettlementRecord rec;
+              rec.worldId = poi->worldId;
+              rec.poiId   = poi->poiId;
+              rec.roomId  = war.roomId;
+              rec.outcome = WarTerminalReasonToString(step->reason);
+              // The sim's own verdict, when there is one — see WarOutcome.h:
+              // an ending the sim never saw (operator retire, season end)
+              // legitimately has no `war_outcome` row and settles with no
+              // faction named.
+              if (const auto outcome = WarOutcomeDb::Load(mapDb, war.roomId))
+                rec.factions = outcome->winnerFactions;
+              rec.recordedAt = now;
+              WorldDirector::RecordSettlement(mapDb, rec);
+            }
+          }
+        }
       }
     }
 

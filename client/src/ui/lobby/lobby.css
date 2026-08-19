@@ -1094,3 +1094,138 @@ button.link-button:hover { background: none; color: #7fdcff; }
     padding: 4px 6px;
 }
 .war-notice-dismiss:hover { color: #e6e8ec; }
+
+/* ---- World screen (PLAN-worldsim.md W2) ----
+   An overlay, not a panel in the flow: a strategic map is only readable at
+   size, and the browser screen's column would give it about 300px of height.
+   Fixed to the viewport so it covers the lobby while the room list underneath
+   keeps updating. */
+
+.world-panel {
+    position: fixed;
+    inset: 24px;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    background: #0b1220;
+    border: 1px solid #2a3a55;
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+.world-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #22314a;
+}
+.world-head h3 { margin: 0; font-size: 15px; flex: 1; }
+.world-head #world-title { color: #8ad2ff; }
+/* PLAN-worldsim.md W4: the world date/time widget. Monospace so the digits
+   don't jitter the layout as they tick once a minute. */
+.world-clock {
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9fb3c8;
+    white-space: nowrap;
+}
+.world-clock.paused { color: #ffcf70; }
+.world-body { flex: 1; display: flex; min-height: 0; }
+/* The wrap is the positioning context for the tooltip, and the canvas is
+   sized by flex rather than by attributes — `world-screen.ts` copies the CSS
+   box into the backing store on every resize, which is what keeps the map
+   sharp AND the hit-test aligned (they are the same mismatch). */
+.world-canvas-wrap { position: relative; flex: 1; min-width: 0; }
+.world-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #0b1a2b;
+    cursor: grab;
+}
+.world-canvas:active { cursor: grabbing; }
+.world-tooltip {
+    position: absolute;
+    pointer-events: none;
+    padding: 6px 9px;
+    background: rgba(10, 16, 28, 0.92);
+    border: 1px solid #2a3a55;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #e9f2fa;
+    white-space: nowrap;
+    display: flex;
+    flex-direction: column;
+}
+.world-tooltip span { color: #9fb3c8; }
+.world-status {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    max-width: 70%;
+    padding: 10px 14px;
+    text-align: center;
+    background: rgba(10, 16, 28, 0.85);
+    border: 1px solid #2a3a55;
+    border-radius: 6px;
+    color: #9fb3c8;
+    font-size: 13px;
+}
+.world-detail {
+    width: 280px;
+    flex: none;
+    padding: 14px 16px;
+    border-left: 1px solid #22314a;
+    background: #0f1626;
+    overflow-y: auto;
+    font-size: 13px;
+}
+.world-detail h4 { margin: 0 0 4px; font-size: 15px; color: #ffd479; }
+.world-detail-sub { color: #9fb3c8; margin-bottom: 10px; }
+.world-detail-empty { color: #6f8299; }
+.world-detail-dim { color: #6f8299; }
+.world-detail-head { margin: 12px 0 6px; color: #9fb3c8; font-weight: 600; }
+.world-detail-map { margin-top: 8px; }
+.world-detail-map code { color: #8ad2ff; }
+/* PLAN-worldsim.md W5: the two live-war marker states, matching
+   world-map.ts's WORLD_COLORS.poiStaging / poiActive. */
+.world-detail-map-staging { color: #ffd479; }
+.world-detail-map-active { color: #ff5c5c; }
+#world-join-war-btn {
+    display: block;
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #1d2b45;
+    border: 1px solid #3a4d70;
+    border-radius: 6px;
+    color: #e9f2fa;
+    font-size: 12px;
+    cursor: pointer;
+}
+#world-join-war-btn:hover { background: #26385a; }
+.world-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.world-tag {
+    padding: 2px 7px;
+    background: #17233a;
+    border-radius: 10px;
+    color: #9fb3c8;
+    font-size: 11px;
+}
+.world-links { list-style: none; margin: 0; padding: 0; }
+.world-links li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 5px 0;
+    border-bottom: 1px solid #1a2439;
+}
+.world-edge-kind { color: #6f8299; font-size: 11px; }
+.world-edge-time { margin-left: auto; color: #8ad2ff; }
+.world-hint {
+    padding: 8px 16px;
+    border-top: 1px solid #22314a;
+    color: #6f8299;
+    font-size: 12px;
+}

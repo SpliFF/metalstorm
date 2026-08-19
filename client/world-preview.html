@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!--
+  world-preview.html — the World screen, without a lobby (PLAN-worldsim.md W2).
+
+  Deliberately NOT a rollup input in vite.config.ts: this page is served by the
+  dev server and never built, exactly like a test fixture that happens to be
+  HTML. It exists because the milestone's verification needs a SCREENSHOT — a
+  DOM assertion is blind to CSS, and the one thing a canvas cannot be checked
+  by is querySelector — and standing up a lobby, an account and a seeded world
+  to photograph one panel would test the login flow instead of the map.
+
+  It renders the SHIPPED markup (`ui/lobby/browser/browser.html`) with the
+  SHIPPED stylesheet and the real `WorldScreen`, over a fixture POI graph in
+  place of `GET /api/world/pois`. The only thing it fakes is the server.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>World screen preview</title>
+    <style>
+        html, body { margin: 0; height: 100%; background: #070c16; color: #e9f2fa;
+                     font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="lobby-root"></div>
+    <script type="module" src="/src/lobby/world-preview.ts"></script>
+</body>
+</html>
