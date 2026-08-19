@@ -15,7 +15,7 @@ import {
     fitScale, fitView, clampView, panView, zoomView, wheelZoomFactor,
     parseWorldGraph, hitTestPoi, edgesFor, formatWorldDuration, formatLatLon,
     parseWorldClock, tickWorldClock, formatWorldClock, worldCalendarFromMs,
-    drawWorld, WORLD_COLORS,
+    drawWorld, WORLD_COLORS, poiOwnerColour,
     type MapView, type Viewport, type WorldPoi, type WorldCtx,
 } from './world-map';
 
@@ -387,5 +387,81 @@ describe('drawWorld', () => {
         // A leaked dash would put dots through every subsequent stroke in the
         // lobby's canvas, not just this map's.
         expect(dashes[dashes.length - 1]).toBe('[]');
+    });
+});
+
+// ─────────────────────── PLAN-worldsim.md W7 ───────────────────────────────
+
+const OWNED_JSON = {
+    worldId: 'earth',
+    pois: [
+        { id: 'a', name: 'Randtown', lat: 48.86, lon: 2.35, kind: 'settlement', mapId: 'meridian_basin', owner: 'third-armoured', tags: [], config: {} },
+        { id: 'b', name: 'Skerry', lat: -33.87, lon: 151.21, kind: 'outpost', mapId: null, owner: null, tags: [], config: {} },
+        // Held by a faction the `factions` map has never heard of — a faction
+        // dissolved between the two halves of one response.
+        { id: 'c', name: 'Ashfall', lat: 10, lon: 10, kind: 'ruin', mapId: null, owner: 'ghosts', tags: [], config: {} },
+        // Held AND on fire: the two facts must both survive.
+        { id: 'd', name: 'Skerry Reach', lat: -10, lon: -10, kind: 'settlement', mapId: 'skerry_reach', owner: 'third-armoured', battleStatus: 'active', warRoomId: 7, tags: [], config: {} },
+    ],
+    edges: [],
+    factions: {
+        'third-armoured': { name: 'Third Armoured', colour: '#5b9bd5', archetype: 'order', state: 'active' },
+        'house-verendi': { name: 'House Verendi', colour: 'red; background:url(x)', archetype: 'dynasty', state: 'active' },
+    },
+};
+
+describe('W7: faction ownership', () => {
+    it('parses owners and the faction badge map', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        expect(g.pois.find(p => p.id === 'a')!.owner).toBe('third-armoured');
+        expect(g.pois.find(p => p.id === 'b')!.owner).toBeNull();
+        expect(g.factions['third-armoured'].name).toBe('Third Armoured');
+        expect(g.factions['third-armoured'].colour).toBe('#5b9bd5');
+    });
+
+    it('drops a colour that is not exactly #rrggbb rather than handing it to fillStyle', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        expect(g.factions['house-verendi'].colour).toBe('');
+    });
+
+    it('answers an empty faction map for a lobby built before W7', () => {
+        const g = parseWorldGraph(POIS_JSON)!;
+        expect(g.factions).toEqual({});
+        expect(g.pois[0].owner).toBeNull();
+    });
+
+    it('falls back to a held colour for an owner it has no badge for', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const byId = (id: string) => g.pois.find(p => p.id === id)!;
+        expect(poiOwnerColour(byId('a'), g)).toBe('#5b9bd5');
+        // Unowned is null — the caller falls back to playable/world-only.
+        expect(poiOwnerColour(byId('b'), g)).toBeNull();
+        // Owned by an unknown faction is still OWNED: the id is proof.
+        expect(poiOwnerColour(byId('c'), g)).toBe(WORLD_COLORS.poiOwnedFallback);
+    });
+
+    it("paints an owned POI in its owner's colour, over the playable colour", () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const r = recordingCtx();
+        drawWorld(r.ctx, { graph: g, view: fitView(VIEWPORT), viewport: VIEWPORT, basemap: null });
+        const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
+        expect(fills).toContain('#5b9bd5');
+        expect(fills).toContain(WORLD_COLORS.poiOwnedFallback);
+        // 'a' is playable AND owned, and no other POI here is playable-and-
+        // unowned, so the playable colour must be gone entirely.
+        expect(fills).not.toContain(WORLD_COLORS.poiPlayable);
+        // 'b' is unowned and world-only.
+        expect(fills).toContain(WORLD_COLORS.poi);
+    });
+
+    it('keeps a battle red and gives the owner an outer band', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const r = recordingCtx();
+        drawWorld(r.ctx, { graph: g, view: fitView(VIEWPORT), viewport: VIEWPORT, basemap: null });
+        const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
+        expect(fills).toContain(WORLD_COLORS.poiActive);
+        const strokes = r.calls.filter(c => c.op === 'stroke').map(c => c.stroke);
+        expect(strokes).toContain(WORLD_COLORS.poiActiveRing);
+        expect(strokes).toContain('#5b9bd5');
     });
 });

@@ -21,6 +21,7 @@
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
 #include "Server/WorldDirector.h"
+#include "Server/WorldFactions.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
@@ -1228,6 +1229,10 @@ int main(int argc, char *argv[]) {
   // same reason as the bindings above — a row here is the only copy of the
   // world, and its epoch is what the world clock is computed from.
   WorldDirector::EnsureTables(mapDb);
+  // PLAN-worldsim.md W7: the faction / membership / authority tables. After
+  // WorldDirector's, because the POI ownership column they write through is
+  // added by that call.
+  WorldFactions::EnsureTables(mapDb);
   // Seed Earth on first boot, so a fresh lobby has a world to serve rather
   // than a 404 the client has to special-case. Idempotent, and guarded on "no
   // world exists at all": a lobby that already has a world never gets a second
@@ -4660,8 +4665,16 @@ int main(int argc, char *argv[]) {
                            RoomBattleInfo{room->id, room->mapId, war.state});
                      }
                    }
-                   nlohmann::json body = AttachBattleStatus(
-                       WorldDirector::WorldPoisJson(mapDb, worldId), battles);
+                   //
+                   // PLAN-worldsim.md W7: and the faction identity map on top
+                   // of that, so the canvas can paint a POI in its owner's
+                   // colour from the same fetch that told it who the owner is
+                   // — two fetches would let the map draw a colour for an
+                   // owner it has not heard of yet.
+                   nlohmann::json body = WorldFactions::AttachFactions(
+                       AttachBattleStatus(
+                           WorldDirector::WorldPoisJson(mapDb, worldId), battles),
+                       mapDb, worldId);
                    return HttpAuth::JsonResponse(200, body.dump());
                  });
 
@@ -4719,6 +4732,263 @@ int main(int argc, char *argv[]) {
         out["changed"] = changed;
         out["clock"] = status.contains("clock") ? status["clock"]
                                                  : nlohmann::json::object();
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // ─────── PLAN-worldsim.md W7: world factions + membership ───────
+  //
+  // A world faction is a player-founded organisation inside one world
+  // (PLAN-metalstorm-worldbuilding.md §4 + Capture 2). The store, the
+  // archetype sheets, the founding gate and every JSON body live in
+  // WorldFactions — these handlers are transport plus the ONE thing the
+  // store deliberately cannot do: read and write the `users` table.
+  //
+  // That is the seam WorldFactions.h documents at length. `users.faction_id`
+  // is the battle SIDE key (a gamedata/sidedata.lua key), permanent from
+  // sign-up; `world_faction_members` is the world-layer authority for who
+  // belongs to what. They are held in agreement by `ReconcileSideKey`:
+  // adopt the faction's side when the account has none, refuse the join
+  // when both are set and differ, and never overwrite a confirmed side —
+  // that is the audited admin override's job (§1a), not a join's.
+
+  /// The world every faction route acts on, plus its rules — the rates come
+  /// off the world row so a per-world tuning applies without a rebuild
+  /// (pillar 7), and a world that predates W7 falls back per key.
+  auto worldFactionRules = [mapDb](const std::string &worldId) {
+    const auto w = WorldDirector::Load(mapDb, worldId);
+    return WorldFactionRules::FromWorldConfig(
+        w ? w->config : nlohmann::json::object());
+  };
+
+  // GET /api/world/factions — the roster + the archetype catalogue + the
+  // founding rules. Public: who holds what is map information, and the
+  // "found a faction" form needs the sheets before there is a session doing
+  // anything with them.
+  net.AddHttpGet(
+      "/api/world/factions", RouteAuth::Public,
+      [mapDb, worldIdFromQuery, worldFactionRules](
+          const std::string &url) -> HttpResponse {
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery(url);
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const nlohmann::json body =
+            WorldFactions::FactionsJson(mapDb, worldId, worldFactionRules(worldId));
+        return HttpAuth::JsonResponse(200, body.dump());
+      });
+
+  // POST /api/world/me — this account's standing in one world: its world
+  // authority, whether that clears the founding gate, and its membership.
+  // POST rather than GET for the reason the admin routes are: the dispatch
+  // gate only sees headers on a POST, so a GET cannot carry the token.
+  net.AddHttpPost(
+      "/api/world/me", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery, worldFactionRules](
+          const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        nlohmann::json body = WorldFactions::MeJson(
+            mapDb, worldId, uid, worldFactionRules(worldId), WorldNowRealMs());
+        // The account's battle side rides along so the client can explain a
+        // side_mismatch before the player hits Join rather than after.
+        if (const auto user = db.FindUserById(uid);
+            user && user->factionId && !user->factionId->empty())
+          body["sideKey"] = *user->factionId;
+        else
+          body["sideKey"] = nullptr;
+        return HttpAuth::JsonResponse(200, body.dump());
+      });
+
+  // POST /api/world/factions/found — found one.
+  // Body: {"name":…, "archetype":…, "governance"?:…, "colour"?:…,
+  //        "seatPoi"?:…}. The founder's side key is NOT taken from the body:
+  // it is read off their account, because a body-supplied side is a way to
+  // field forces on a side the account was never registered for.
+  net.AddHttpPost(
+      "/api/world/factions/found", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery, worldFactionRules](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const auto user = db.FindUserById(uid);
+        if (!user)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+
+        WorldFactionFoundRequest req;
+        req.worldId    = worldId;
+        req.name       = j.value("name", std::string());
+        req.archetype  = j.value("archetype", std::string());
+        req.governance = j.value("governance", std::string());
+        req.colour     = j.value("colour", std::string());
+        req.seatPoiId  = j.value("seatPoi", std::string());
+        req.accountId  = uid;
+        req.username   = user->username;
+        req.sideKey    = user->factionId ? *user->factionId : std::string();
+
+        const auto result = WorldFactions::Found(
+            mapDb, worldFactionRules(worldId), req, WorldNowRealMs());
+        if (!result.ok) {
+          // 403 for the authority gate (they are who they say and it is not
+          // enough), 409 for a state conflict, 400 for a malformed ask —
+          // three different things a client does three different things
+          // about.
+          const int status = result.error == "insufficient_authority" ? 403
+                             : (result.error == "name_taken" ||
+                                result.error == "already_member" ||
+                                result.error == "seat_taken")         ? 409
+                             : result.error == "db_error"             ? 500
+                                                                      : 400;
+          nlohmann::json err;
+          err["ok"]     = false;
+          err["error"]  = result.error;
+          err["detail"] = result.detail;
+          if (result.error == "insufficient_authority") {
+            err["have"] = result.have;
+            err["need"] = result.need;
+          }
+          return HttpAuth::JsonResponse(status, err.dump());
+        }
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["factionId"] = result.faction->factionId;
+        out["authority"] = result.have;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/world/factions/join — join an existing faction.
+  // Body: {"factionId":…}. This is where the `users.faction_id` seam is
+  // enforced; see the block comment above.
+  net.AddHttpPost(
+      "/api/world/factions/join", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const auto user = db.FindUserById(uid);
+        if (!user)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const std::string factionId = j.value("factionId", std::string());
+        if (factionId.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"bad_request","detail":"factionId is required"})");
+
+        const auto faction = WorldFactions::Load(mapDb, worldId, factionId);
+        if (!faction)
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no_such_faction"})");
+
+        const std::string accountSide =
+            user->factionId ? *user->factionId : std::string();
+        const SideKeyAction action =
+            ReconcileSideKey(accountSide, faction->sideKey);
+        if (action == SideKeyAction::Refuse) {
+          nlohmann::json err;
+          err["ok"] = false;
+          err["error"] = "side_mismatch";
+          err["detail"] = "your account is registered to side '" + accountSide +
+                          "' and this faction fields '" + faction->sideKey + "'";
+          err["accountSideKey"] = accountSide;
+          err["factionSideKey"] = faction->sideKey;
+          return HttpAuth::JsonResponse(409, err.dump());
+        }
+
+        const auto result = WorldFactions::Join(mapDb, worldId, factionId, uid,
+                                                user->username, WorldNowRealMs());
+        if (!result.ok) {
+          const int status = result.error == "already_member" ? 409
+                             : result.error == "db_error"     ? 500
+                                                              : 400;
+          nlohmann::json err;
+          err["ok"]     = false;
+          err["error"]  = result.error;
+          err["detail"] = result.detail;
+          return HttpAuth::JsonResponse(status, err.dump());
+        }
+
+        // Adopt AFTER the membership landed: an account re-sided for a
+        // faction it then failed to join would be the one outcome neither
+        // layer can explain. Only ever reached when the column was empty —
+        // ReconcileSideKey refuses every case that would change a confirmed
+        // side.
+        bool adopted = false;
+        if (action == SideKeyAction::Adopt) {
+          int64_t touched = 0;
+          adopted = db.SetFactionByUsername(user->username, faction->sideKey,
+                                            touched);
+          if (adopted)
+            SLOG(SPRING_LOG_INFO,
+                 "world: account '%s' adopted side '%s' by joining faction "
+                 "'%s' in world '%s'",
+                 user->username.c_str(), faction->sideKey.c_str(),
+                 factionId.c_str(), worldId.c_str());
+        }
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["factionId"] = factionId;
+        out["sideKeyAdopted"] = adopted;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/world/factions/leave — leave whatever faction this account is
+  // in, in this world. `users.faction_id` is deliberately NOT cleared: the
+  // account's registered side outlives any one organisation it served in, and
+  // clearing it would silently un-side a player mid-war.
+  net.AddHttpPost(
+      "/api/world/factions/leave", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery](
+          const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const bool left = WorldFactions::Leave(mapDb, worldId, uid);
+        nlohmann::json out;
+        out["ok"] = true;
+        // Not an error: leaving a faction you are not in is a no-op, reported
+        // as one, same convention as the pause route's `changed`.
+        out["left"] = left;
         return HttpAuth::JsonResponse(200, out.dump());
       });
 

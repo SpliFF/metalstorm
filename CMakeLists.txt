@@ -468,6 +468,11 @@ set(LOBBY_SERVER_SOURCES
     # arithmetic that turns it into POI + edge rows. Lobby-only for the same
     # reason WorldDirector.cpp is — it only ever calls through WorldDirector.
     rts/Server/WorldMapSeeder.cpp
+    # PLAN-worldsim.md W7: world-scoped player factions, membership and the
+    # world authority that gates founding one. Lobby-only, same reason again —
+    # a faction is a thing in a world, and the battle layer only ever learns
+    # about it through a side key (see WorldFactions.h's seam note).
+    rts/Server/WorldFactions.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -637,6 +642,9 @@ if(TEST_SOURCES)
         # PLAN-worldsim.md W3: the seeder built on top of it —
         # test_world_map_seeder.cpp drives the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldMapSeeder.cpp
+        # PLAN-worldsim.md W7: the faction store + the founding gate —
+        # test_world_factions.cpp drives the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldFactions.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

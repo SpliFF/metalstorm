@@ -25,7 +25,7 @@
 import {
     drawWorld, fitView, clampView, panView, zoomView, wheelZoomFactor,
     hitTestPoi, parseWorldGraph, edgesFor, formatWorldDuration, formatLatLon,
-    screenToLatLon, parseWorldClock, tickWorldClock, formatWorldClock,
+    screenToLatLon, parseWorldClock, tickWorldClock, formatWorldClock, poiOwnerColour,
     type MapView, type Viewport, type WorldGraph, type WorldPoi, type WorldClock,
 } from './world-map.js';
 
@@ -61,7 +61,7 @@ function esc(s: string): string {
 }
 
 export class WorldScreen {
-    private graph: WorldGraph = { worldId: '', pois: [], edges: [] };
+    private graph: WorldGraph = { worldId: '', pois: [], edges: [], factions: {} };
     private view: MapView = { scale: 1, offsetX: 0, offsetY: 0 };
     private basemap: HTMLImageElement | null = null;
     private hovered: WorldPoi | null = null;
@@ -400,11 +400,23 @@ export class WorldScreen {
             : poi.mapId
             ? `<div class="world-detail-map">Battle map: <code>${esc(poi.mapId)}</code></div>`
             : '<div class="world-detail-map world-detail-dim">No battle map — world only.</div>';
+        // PLAN-worldsim.md W7: who holds this place. The swatch is an inline
+        // style because the colour is per-faction data, not a stylesheet
+        // value; it is the same validated `#rrggbb` the canvas is handed
+        // (parseWorldGraph drops anything else), so there is nothing here for
+        // a faction name to inject through.
+        const ownerColour = poiOwnerColour(poi, this.graph);
+        const owner = poi.owner
+            ? `<div class="world-detail-owner">` +
+              `<span class="world-faction-swatch" style="background:${esc(ownerColour ?? '')}"></span>` +
+              `Held by ${esc(this.graph.factions[poi.owner]?.name ?? poi.owner)}</div>`
+            : '<div class="world-detail-owner world-detail-dim">Unclaimed.</div>';
         el.innerHTML =
             `<h4>${esc(poi.name)}</h4>` +
             `<div class="world-detail-sub">${esc(poi.kind || 'point of interest')} · ` +
             `${esc(formatLatLon(poi.lat, poi.lon))}</div>` +
             (tags ? `<div class="world-tags">${tags}</div>` : '') +
+            owner +
             map +
             (links
                 ? `<div class="world-detail-head">Transit (world time)</div><ul class="world-links">${links}</ul>`

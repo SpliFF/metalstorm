@@ -92,6 +92,30 @@ struct WorldDefaults {
     /// ms of transit per kilometre.
     double transitWorldMsPerKm   = 60000.0;
 
+    // ── W7: factions, membership and the authority gate ────────────────────
+    // Capture 26 ("keep the numbers flexible, sensible defaults, don't let it
+    // become blocking") applies to every value below: they are the ship-with
+    // numbers a world starts with, and the world's own row is the authority
+    // the moment it exists.
+    /// World authority an account is credited with the first time it is seen
+    /// in a world. There is no authority income yet (that is a later
+    /// milestone); until there is, this is what makes the founding gate a
+    /// real gate rather than an unreachable one.
+    double startingAuthority     = 100.0;
+    /// The world-level authority a player must HOLD to found a faction
+    /// (§4: "a player with enough authority can start a faction"; founding is
+    /// a world-level act gated on world-level authority).
+    double foundFactionAuthority = 100.0;
+    /// What founding SPENDS. Separate from the threshold on purpose: "you
+    /// must be this senior" and "this is what it costs you" are two different
+    /// design levers and tuning one must not move the other.
+    double foundFactionCost      = 50.0;
+    /// Faction names are player content and travel into NL context payloads
+    /// and rosters, so their length is a per-world cap rather than a literal
+    /// in the validator.
+    int    factionNameMaxLen     = 32;
+    int    factionNameMinLen     = 3;
+
     nlohmann::json ToJson() const;
 };
 
@@ -120,6 +144,11 @@ struct WorldPoiRecord {
     /// The battle map based around this POI, or empty — "not all regions will
     /// be visitable", so a world-only POI is a legal, expected row.
     std::string mapId;
+    /// W7: the world faction that holds this place, or empty for unowned. A
+    /// TEXT id rather than a foreign key for the same reason `mapId` is not
+    /// one — a POI must survive its owner being dissolved, and a dangling id
+    /// renders as "unowned" rather than deleting geography.
+    std::string ownerFactionId;
     std::vector<std::string> tags;
     int64_t     createdAt = 0;
     nlohmann::json config = nlohmann::json::object();
@@ -188,6 +217,14 @@ public:
     static std::string PrimaryWorldId(sqlite3* db);
 
     static bool UpsertPoi(sqlite3* db, const WorldPoiRecord& poi);
+
+    /// W7: set (or clear, with an empty id) a POI's owning world faction.
+    /// Its own statement rather than a field on UpsertPoi, because ownership
+    /// changes on a different cadence than geography does and a full upsert
+    /// from a stale read would silently revert a name or a map binding.
+    static bool SetPoiOwner(sqlite3* db, const std::string& worldId,
+                            const std::string& poiId,
+                            const std::string& ownerFactionId);
     static std::vector<WorldPoiRecord> PoisFor(sqlite3* db, const std::string& worldId);
     static std::optional<WorldPoiRecord> LoadPoi(sqlite3* db,
                                                  const std::string& worldId,

@@ -60,8 +60,23 @@ export interface WorldPoi {
     /// The room a click-through joins, or null when `battleStatus` is
     /// "quiet". Read-only: W5 does not write anything back through it.
     warRoomId: number | null;
+    /// PLAN-worldsim.md W7: the world faction holding this place, or null for
+    /// unowned. An id, not a colour — the colour comes from `WorldGraph.
+    /// factions` so that a faction recolouring itself repaints every POI it
+    /// holds without the map having to reconcile two copies of the value.
+    owner: string | null;
     tags: string[];
     config: Record<string, unknown>;
+}
+
+/// One world faction's map identity, as `GET /api/world/pois` carries it
+/// (WorldFactions::AttachFactions). The full sheet — parameters, governance,
+/// roster — is `GET /api/world/factions`; this is only what the canvas needs.
+export interface WorldFactionBadge {
+    name: string;
+    colour: string;
+    archetype: string;
+    state: string;
 }
 
 /// One transit edge. `transitWorldMs` is WORLD milliseconds — the world clock
@@ -80,6 +95,10 @@ export interface WorldGraph {
     worldId: string;
     pois: WorldPoi[];
     edges: WorldEdge[];
+    /// id → badge, for every faction in this world. Empty on a world with no
+    /// factions yet, and on a lobby built before W7 — which is exactly why the
+    /// owner colour falls back rather than being required.
+    factions: Record<string, WorldFactionBadge>;
 }
 
 /// A point in map space.
@@ -240,6 +259,7 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
                 ? item.battleStatus : 'quiet',
             warRoomId: typeof item.warRoomId === 'number' && Number.isFinite(item.warRoomId)
                 ? item.warRoomId : null,
+            owner: typeof item.owner === 'string' && item.owner ? item.owner : null,
             tags: Array.isArray(item.tags) ? item.tags.filter(t => typeof t === 'string') as string[] : [],
             config: (item.config && typeof item.config === 'object')
                 ? item.config as Record<string, unknown> : {},
@@ -260,7 +280,28 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
                 ? item.config as Record<string, unknown> : {},
         });
     }
-    return { worldId: typeof raw.worldId === 'string' ? raw.worldId : '', pois, edges };
+    const factions: Record<string, WorldFactionBadge> = {};
+    if (raw.factions && typeof raw.factions === 'object' && !Array.isArray(raw.factions)) {
+        for (const [id, value] of Object.entries(raw.factions as Record<string, unknown>)) {
+            if (!value || typeof value !== 'object') continue;
+            const f = value as Record<string, unknown>;
+            // A colour that is not exactly #rrggbb is dropped rather than
+            // passed to fillStyle: the server validates it too, and a value
+            // that survived both is one the canvas can be handed safely.
+            const colour = typeof f.colour === 'string' && /^#[0-9a-fA-F]{6}$/.test(f.colour)
+                ? f.colour : '';
+            factions[id] = {
+                name: typeof f.name === 'string' && f.name ? f.name : id,
+                colour,
+                archetype: typeof f.archetype === 'string' ? f.archetype : '',
+                state: typeof f.state === 'string' ? f.state : 'active',
+            };
+        }
+    }
+    return {
+        worldId: typeof raw.worldId === 'string' ? raw.worldId : '',
+        pois, edges, factions,
+    };
 }
 
 /// The POI under the cursor, or null. Nearest-within-radius rather than
@@ -409,6 +450,10 @@ export const WORLD_COLORS = {
     poiStagingRing: 'rgba(255, 212, 121, 0.85)',
     poiActive: '#ff5c5c',
     poiActiveRing: 'rgba(255, 92, 92, 0.85)',
+    /// PLAN-worldsim.md W7: an owned POI whose faction sent no usable colour.
+    /// Distinct from `poi` so "held by somebody" still reads differently from
+    /// "unclaimed" when the colour is missing.
+    poiOwnedFallback: '#b39ddb',
     poiHover: '#ffffff',
     poiSelected: '#ffffff',
     poiLabel: 'rgba(233, 242, 250, 0.92)',
@@ -512,6 +557,18 @@ function drawEdges(ctx: WorldCtx, graph: WorldGraph, view: MapView): void {
     ctx.setLineDash([]);
 }
 
+/// The colour a POI should be painted in on behalf of its owner, or null when
+/// it is unowned. An owner id the `factions` map has never heard of (a faction
+/// dissolved between the two halves of one response, or a lobby that predates
+/// W7) still counts as OWNED — it falls back to a neutral held colour rather
+/// than rendering as unclaimed, because "somebody holds this" is the fact the
+/// player is reading and the id is proof of it.
+export function poiOwnerColour(poi: WorldPoi, graph: WorldGraph): string | null {
+    if (!poi.owner) return null;
+    const badge = graph.factions[poi.owner];
+    return badge?.colour || WORLD_COLORS.poiOwnedFallback;
+}
+
 function drawPois(
     ctx: WorldCtx, graph: WorldGraph, view: MapView,
     hoveredId: string | null, selectedId: string | null,
@@ -526,9 +583,14 @@ function drawPois(
         const r = selected ? 7 : hovered ? 6 : 4.5;
         // A POI that stages a battle map is a place you can be sent to; one
         // that does not is scenery with a name. Two colours, because that
-        // distinction is the first question a player asks of a marker.
+        // distinction is the first question a player asks of a marker — with
+        // the owning faction's colour taking precedence over both (W7), since
+        // "whose is this" outranks "can I fight here" the moment anyone holds
+        // it. A live battle still wins over the owner: a fight in progress is
+        // the more urgent fact, and it is the ring that carries the owner's
+        // colour in that case (below).
         ctx.fillStyle = poi.battleStatus === 'active' ? WORLD_COLORS.poiActive
-            : poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi;
+            : poiOwnerColour(poi, graph) ?? (poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi);
         ctx.beginPath();
         ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
         ctx.fill();
@@ -541,6 +603,17 @@ function drawPois(
             ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        // An owned POI that is currently a battlefield keeps its red fill and
+        // gets its owner's colour as an outer band, so the map never has to
+        // choose between "who holds it" and "is it on fire".
+        const ownerColour = poiOwnerColour(poi, graph);
+        if (ownerColour && poi.battleStatus === 'active') {
+            ctx.strokeStyle = ownerColour;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, r + 7, 0, Math.PI * 2);
             ctx.stroke();
         }
         if (selected || hovered) {

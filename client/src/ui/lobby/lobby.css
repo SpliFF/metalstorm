@@ -1193,6 +1193,24 @@ button.link-button:hover { background: none; color: #7fdcff; }
    world-map.ts's WORLD_COLORS.poiStaging / poiActive. */
 .world-detail-map-staging { color: #ffd479; }
 .world-detail-map-active { color: #ff5c5c; }
+/* PLAN-worldsim.md W7: POI ownership. The swatch's colour is per-faction
+   data and arrives as an inline style; everything else about it is here, so a
+   faction cannot change anything but its own colour. */
+.world-detail-owner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    color: #c8d6e5;
+}
+.world-faction-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    flex: none;
+}
 #world-join-war-btn {
     display: block;
     margin-top: 8px;
