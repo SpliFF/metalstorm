@@ -5,7 +5,14 @@ cracked concrete deck slabs, pier footings.  TILEABLE along z: the deck
 runs exactly z = -12 .. +12 at full width at both ends so segments chain
 seamlessly (truss end posts sit just inside the ends so chained posts
 pair up instead of z-fighting).  Static, single `body` piece, no clips,
-no team colour.  Frame: forward -Z, up +Y, ground Y=0, 1 u = 1 m.
+no team colour.  Frame: forward -Z, up +Y, 1 u = 1 m.
+
+NOTE for integrators: the SHIPPED mesh has y = 0 AT THE ROADWAY, not at
+the pier base — see DECK_ORIGIN_Y below.  Every dimension in this file
+is in the original pier-base frame and the shift is applied once at the
+end of gen's build_all(), so subtract DECK_ORIGIN_Y (1.5) from any
+constant here to get a shipped y: the roadway ships at 0.00, the kerb
+tops at 0.22, the model floor at -1.50.
 """
 import meshlib
 meshlib.ATLAS = 2048
@@ -18,6 +25,23 @@ DECK_TOP   = 1.5                     # deck surface height
 DECK_BOT   = 0.9                     # deck slab underside
 KERB_W     = 0.45
 KERB_TOP   = 1.72
+
+# ── ORIGIN AT THE DECK (PLAN-maps.md §2j option A, 2026-08-19) ───────────
+# Everything below is authored in the ORIGINAL frame, whose y = 0 is the
+# pier base, because every atlas Zone above maps a world y to a v and
+# re-basing the constants would re-base the UVs with them.  The whole part
+# is translated down by DECK_ORIGIN_Y once, in gen's `build_all()`, AFTER
+# the UVs are assigned — so the shipped mesh has y = 0 AT THE ROADWAY
+# SURFACE and the substructure runs negative, where an abutment buries it.
+#
+# WHY: `CFeature::UpdatePosition` clamps a feature's y UP to the ground and
+# never down, so a span authored origin-at-pier-base always decked
+# DECK_TOP above the terrain a unit drives on, and raising the terrain
+# raised the span with it — the gap was invariant under every earthwork.
+# With the origin at the deck the two coincide, on any terrain.
+# `features/bridges.lua` publishes the matching `customparams.deck_top`
+# (now 0 — the deck IS the origin); if you ever move this, move that.
+DECK_ORIGIN_Y = DECK_TOP             # 1.5 — the surface that becomes y = 0
 
 # ── truss (riveted steel, both sides at x = ±TRUSS_X) ────────────────────
 TRUSS_X    = 4.28                    # truss plane, outboard of the kerb

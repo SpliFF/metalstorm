@@ -7,12 +7,17 @@ two rails on a 1.5 m gauge (rail centrelines x = ±0.75).  Truss lives
 BELOW the deck (deck-truss): side girders, bottom chords, verticals +
 diagonals, cross beams.  Two concrete pier footings at z = ±6 carry the
 bottom chords to the ground.  Static, single `body` piece, no clips, no
-team colour.  World frame: forward -Z, up +Y, ground Y=0, 1 u = 1 m.
+team colour.  World frame: forward -Z, up +Y, 1 u = 1 m.
 
-NOTE for integrators: rail head tops out at RAIL_Y1 (4.15 m); spawn
-rolling stock with +RAIL_Y1 y offset over ground level at the bridge, or
-sink the bridge so the deck meets the abutment grade.  Tiling: place
-copies at 24 m intervals along z (segment spans z ±12 exactly).
+NOTE for integrators: the SHIPPED mesh has y = 0 at the deck slab top,
+not at the pier base — see DECK_ORIGIN_Y below.  Every dimension in this
+file is in the ORIGINAL pier-base frame and the shift is applied once at
+the end of gen's build_all(), so to read a shipped y subtract
+DECK_ORIGIN_Y from the constant here: the rail head at RAIL_Y1 (4.15)
+ships at +0.35, the model floor ships at -3.80.  Spawn rolling stock at
+the bridge's own y + 0.35; there is no longer anything to sink, because
+the deck already meets the abutment grade.  Tiling: place copies at 24 m
+intervals along z (segment spans z ±12 exactly).
 """
 import meshlib
 meshlib.ATLAS = 2048
@@ -36,6 +41,16 @@ Z_PIERT  = Zone((1536, 832,  2048, 960),  ('x', 'z'), ((-2.3, 2.3), (-1.3, 1.3))
 SEG_Z0, SEG_Z1 = -12.0, 12.0
 DECK_W   = 4.0                       # deck slab width (x -2..2)
 DECK_Y0, DECK_Y1 = 3.4, 3.8          # slab bottom / top
+
+# ── ORIGIN AT THE DECK (PLAN-maps.md §2j option A, 2026-08-19) ───────────
+# Authored in the ORIGINAL frame (y = 0 at the pier base) because every
+# atlas Zone above maps a world y to a v; the whole part is translated down
+# by DECK_ORIGIN_Y once, in gen's `build_all()`, AFTER the UVs are assigned.
+# The shipped mesh therefore has y = 0 AT THE DECK SLAB TOP — not the rail
+# head (4.15), which is what a wheel rides but not what an abutment meets.
+# See the road layout's note for why the clamp made this a model fix, and
+# keep `features/bridges.lua`'s `customparams.deck_top` (now 0) in step.
+DECK_ORIGIN_Y = DECK_Y1              # 3.8 — the surface that becomes y = 0
 KERB_X   = 1.85                      # kerb strip centreline
 KERB_W, KERB_H = 0.3, 0.35           # kerb section (top at 4.15)
 

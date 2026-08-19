@@ -17,11 +17,13 @@
  *     Move(UpVector * (max(CGround::GetHeightReal(x, z), pos.y) - pos.y))
  *
  * — a feature's y is clamped UP to the ground and can never be pushed below
- * it. A bridge span is authored with its origin at the pier base, so the
- * trafficable deck sits `deck_top` ABOVE that origin, and the clamp carries
+ * it. A bridge span WAS authored with its origin at the pier base, so the
+ * trafficable deck sat `deck_top` ABOVE that origin, and the clamp carried
  * the span (and therefore the deck) up with any earthwork: the gap between the
- * road a unit drives on and the deck it should be driving on is INVARIANT
- * under every terrain lever. §2j measured it and the user ruled A + C.
+ * road a unit drives on and the deck it should be driving on was INVARIANT
+ * under every terrain lever. §2j measured it and the user ruled A + C. This
+ * file is C; A has since moved both spans' origins onto the deck, which is
+ * why `IsSeated` below no longer recognises them — see the note there.
  *
  * This header is the C half: a def that declares a deck height is SEATED — it
  * holds the y it was staged at instead of being floated up by the clamp, so a
@@ -51,6 +53,20 @@ namespace FeatureSeating {
 	/// A def declares a deck by publishing a positive height above its own
 	/// origin. Zero (the default) means "no deck declared" — every feature
 	/// that is not a span keeps the historic clamp, unchanged.
+	///
+	/// ⚠️ THIS ENCODING NO LONGER FITS THE SHIPPED SPANS. PLAN-maps.md §2j
+	/// option A landed on 2026-08-19 and re-authored `ms_road_bridge` and
+	/// `ms_rail_bridge` with their origin ON the deck — which is what closes
+	/// the deck/road gap at source, and which makes their truthful
+	/// `customparams.deck_top` exactly **0**. Read through the test below
+	/// that says "no deck declared", so neither span is seated any more and
+	/// both are back on the clamp. It costs nothing live (scenariogen stages
+	/// every chain at y = 0 over water, where `floating` zeroes gravity and
+	/// the clamp cannot fire) but it loses the dry-ravine case this rule was
+	/// built for. The repair is to stop deriving "declares a deck" from the
+	/// SIGN of the offset — a deck at the origin is a deck — and it belongs
+	/// to whoever owns this file. Filed in
+	/// .tasks/notes/model-integration.md.
 	inline bool IsSeated(float deckHeight) { return deckHeight > 0.0f; }
 
 	/// The y a feature holds at the end of a tick, given where it is now and

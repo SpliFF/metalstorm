@@ -499,20 +499,65 @@ class DeckTopIsTheDefs(unittest.TestCase):
     `CFeature::UpdatePosition` clamps a feature's y up to the ground and never
     down (Feature.cpp:570), so a span standing on ground `g` decks at
     `g + deck_top` and an earthwork raises both by the same amount — the gap
-    survives every terrain lever a generator has (PLAN-maps.md §2j). These pin
-    the two halves that could drift apart silently: what the def SAYS, and what
-    the shipped mesh IS.
+    survived every terrain lever a generator has (PLAN-maps.md §2j). **§2j
+    option A closed it at source on 2026-08-19** by re-authoring both spans
+    with y = 0 ON the deck, so `deck_top` is now 0 and `g + deck_top` is `g`.
+    These pin the two halves that could drift apart silently: what the def
+    SAYS, and what the shipped mesh IS.
     """
 
     def test_reads_the_shipped_deck_tops(self):
-        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_road_bridge"), 1.5)
-        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_rail_bridge"), 3.8)
+        """Zero for both — the deck is the origin (§2j option A).
 
-    def test_the_two_spans_disagree(self):
-        """Why this is per-def and not a shared `span()` posture like the pitch:
-        one number would be 2.3 elmos wrong for one of them, silently."""
-        self.assertNotEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_road_bridge"),
-                            ms_defs.feature_deck_top(GAME_DIR, "ms_rail_bridge"))
+        This is the number that moved WITH the mesh. Were it left at the
+        pier-base 1.5 / 3.8, every consumer would be adding an offset to a
+        model that no longer has one and putting decks 1.5 and 3.8 elmos too
+        high; `test_the_declared_deck_is_a_real_surface_in_the_mesh` is what
+        catches that, and this is the value it catches it against.
+        """
+        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_road_bridge"), 0.0)
+        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_rail_bridge"), 0.0)
+
+    def test_zero_is_a_declaration_and_not_an_absence(self):
+        """The one thing a shared-constant refactor would get wrong.
+
+        Both spans now say 0, which looks like the case for hoisting the key
+        into the shared `span()` posture or dropping it entirely. It is not:
+        `feature_deck_top` RAISES on a def that does not declare one, and that
+        raise is the only thing separating "this mesh's deck is at its origin"
+        from "nobody has measured this mesh". A third span authored against a
+        pier-base origin would need a non-zero number here on day one.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "features"))
+            with open(os.path.join(d, "features", "bridges.lua"), "w") as fh:
+                fh.write("return {\n"
+                         "    declared = { customparams = { deck_top = '0' } },\n"
+                         "    silent   = { customparams = { chain_pitch = '24' } },\n"
+                         "}\n")
+            self.assertEqual(ms_defs.feature_deck_top(d, "declared"), 0.0)
+            with self.assertRaises(ValueError):
+                ms_defs.feature_deck_top(d, "silent")
+
+    def test_the_spans_may_disagree(self):
+        """Why this is per-def and not a shared `span()` posture like the pitch.
+
+        They agree today (0 and 0) only because A moved both origins in the
+        same change, and that agreement is the trap: the number is a per-mesh
+        fact, it was 1.5 vs 3.8 an hour before this test was written, and one
+        shared number would have been 2.3 elmos wrong for one of them,
+        silently. The reader must keep telling two spans apart even when the
+        shipped pair happen to match.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "features"))
+            with open(os.path.join(d, "features", "bridges.lua"), "w") as fh:
+                fh.write("return {\n"
+                         "    at_deck = { customparams = { deck_top = '0' } },\n"
+                         "    at_pier = { customparams = { deck_top = '3.8' } },\n"
+                         "}\n")
+            self.assertEqual(ms_defs.feature_deck_top(d, "at_deck"), 0.0)
+            self.assertEqual(ms_defs.feature_deck_top(d, "at_pier"), 3.8)
 
     def test_an_undeclared_def_raises(self):
         with tempfile.TemporaryDirectory() as d:
@@ -537,17 +582,19 @@ class DeckTopIsTheDefs(unittest.TestCase):
             self.assertEqual(ms_defs.feature_deck_top(d, "a"), 1.5)
             self.assertEqual(ms_defs.feature_deck_top(d, "b"), 3.8)
 
-    def test_the_origin_is_the_pier_base(self):
-        """The premise `deck_top` is an OFFSET from.
+    def test_the_origin_is_the_deck_and_the_substructure_is_below_it(self):
+        """§2j option A, asked of the shipped mesh rather than of the def.
 
-        If a span is ever re-authored with its origin AT the deck — which is
-        one of the two ways §2j can be closed — this fails, and it should:
-        every consumer of `deck_top` is then reading a number about a mesh that
-        no longer exists.
+        The old form of this test asserted the opposite — min y == 0, the
+        pier-base origin — precisely so it would FAIL the day A landed. It
+        did. This is its replacement, and it fails just as loudly if a
+        re-export ever puts the piers back on y = 0 while the defs still say
+        the deck is the origin.
         """
-        for defname in ("ms_road_bridge", "ms_rail_bridge"):
+        for defname, floor in (("ms_road_bridge", -1.5), ("ms_rail_bridge", -3.8)):
             ys = [p[1] for p in _mesh_positions(defname)]
-            self.assertAlmostEqual(min(ys), 0.0, places=3, msg=defname)
+            self.assertAlmostEqual(min(ys), floor, places=3, msg=defname)
+            self.assertGreater(max(ys), 0.0, msg=defname)
 
     def test_the_declared_deck_is_a_real_surface_in_the_mesh(self):
         """Not just a plausible number: a full-width run of vertices at that y.

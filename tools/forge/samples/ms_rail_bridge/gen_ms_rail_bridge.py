@@ -113,7 +113,12 @@ def build_body():
 
 
 def build_all():
-    return [dict(name='body', parent=-1, offset=(0, 0, 0), part=build_body())]
+    body = build_body()
+    # Origin at the deck slab top, not the pier base — see L.DECK_ORIGIN_Y.
+    # Applied after build_body() so the atlas zones (which project world y)
+    # have already assigned every UV: geometry moves, UVs and normals do not.
+    body.pos = [(x, y - L.DECK_ORIGIN_Y, z) for x, y, z in body.pos]
+    return [dict(name='body', parent=-1, offset=(0, 0, 0), part=body)]
 
 
 if __name__ == '__main__':
