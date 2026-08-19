@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_radar_s3",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "dish",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    5.6,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2516,
+   "type": "VEC3",
+   "min": [
+    -2.799999952316284,
+    0.0,
+    -2.799999952316284
+   ],
+   "max": [
+    2.799999952316284,
+    5.630764961242676,
+    2.799999952316284
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2516,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2516,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3660,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 604,
+   "type": "VEC3",
+   "min": [
+    -1.7000000476837158,
+    -0.1599999964237213,
+    -0.2956414520740509
+   ],
+   "max": [
+    1.7000000476837158,
+    2.400249719619751,
+    0.2956414520740509
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 604,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 604,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 882,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    12.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 30192,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 30192,
+   "byteLength": 30192,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 60384,
+   "byteLength": 20128,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 80512,
+   "byteLength": 14640,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 95152,
+   "byteLength": 7248,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 102400,
+   "byteLength": 7248,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 109648,
+   "byteLength": 4832,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 114480,
+   "byteLength": 3528,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 118008,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 118028,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 118108,
+   "uri": "ms_radar_s3.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_radar_s3_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_radar_s3_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_radar_s3_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_radar_s3_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_radar_s3_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_radar_s3",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 8.0002,
+   "midpos": [
+    0.0,
+    4.00012,
+    0.0
+   ],
+   "mins": [
+    -2.8,
+    0.0,
+    -2.8
+   ],
+   "maxs": [
+    2.8,
+    8.00025,
+    2.8
+   ],
+   "radius": 5.6286,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -2.8,
+      0.0,
+      -2.8
+     ],
+     "maxs": [
+      2.8,
+      5.63076,
+      2.8
+     ]
+    },
+    {
+     "name": "dish",
+     "parent": 0,
+     "offset": [
+      0.0,
+      5.6,
+      0.0
+     ],
+     "mins": [
+      -1.7,
+      -0.16,
+      -0.29564
+     ],
+     "maxs": [
+      1.7,
+      2.40025,
+      0.29564
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
