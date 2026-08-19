@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_shipyard",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "crane",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    3.0,
+    -11.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4852,
+   "type": "VEC3",
+   "min": [
+    -17.626083374023438,
+    -2.5999999046325684,
+    -23.0
+   ],
+   "max": [
+    17.626083374023438,
+    15.399999618530273,
+    23.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4852,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4852,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 6996,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1156,
+   "type": "VEC3",
+   "min": [
+    -17.399999618530273,
+    -0.029999999329447746,
+    -1.7000000476837158
+   ],
+   "max": [
+    17.399999618530273,
+    13.0,
+    1.7000000476837158
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1156,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1156,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1614,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    12.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC3"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 58224,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 58224,
+   "byteLength": 58224,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 116448,
+   "byteLength": 38816,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 155264,
+   "byteLength": 27984,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 183248,
+   "byteLength": 13872,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 197120,
+   "byteLength": 13872,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 210992,
+   "byteLength": 9248,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 220240,
+   "byteLength": 6456,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 226696,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 226716,
+   "byteLength": 60
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 226776,
+   "uri": "ms_shipyard.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_shipyard_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_shipyard_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_shipyard_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_shipyard_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_shipyard_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_shipyard",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 16.0,
+   "midpos": [
+    0.0,
+    8.0,
+    0.0
+   ],
+   "mins": [
+    -17.62608,
+    -2.6,
+    -23.0
+   ],
+   "maxs": [
+    17.62608,
+    16.0,
+    23.0
+   ],
+   "radius": 30.0613,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -17.62608,
+      -2.6,
+      -23.0
+     ],
+     "maxs": [
+      17.62608,
+      15.4,
+      23.0
+     ]
+    },
+    {
+     "name": "crane",
+     "parent": 0,
+     "offset": [
+      0.0,
+      3.0,
+      -11.0
+     ],
+     "mins": [
+      -17.4,
+      -0.03,
+      -1.7
+     ],
+     "maxs": [
+      17.4,
+      13.0,
+      1.7
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "translation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
