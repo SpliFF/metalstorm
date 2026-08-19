@@ -582,25 +582,148 @@ class DeliveredGrade(unittest.TestCase):
         self.assertGreater(coarse.size, 10)
 
     def test_every_mask_edge_holds_the_limit_and_the_deck_does_not(self):
-        """The degeneracy, in the fixture where it is total.
+        """The degeneracy, in the fixture where it is total — and its fix.
 
-        ⚠ This asserts today's WRONG behaviour on purpose. The cost graph is
-        memoryless, so a pair of opposite legal traverses climbs at the fall
-        line: on a laterally symmetric ramp every zigzag pitch costs the same
-        and Dijkstra takes the tightest, which Chaikin then smooths into a
-        straight climb. Fixing it means heading state in the graph and has a
-        real price — R2 routed that to PLAN-maps §2d as a design question
-        rather than guessing. When it is answered, THIS TEST FLIPS: the
-        delivered grade should fall to the class limit and the assertion below
-        becomes `assertLess`.
+        This test was written asserting today's WRONG behaviour on purpose,
+        because fixing it meant heading state in the graph and a real price.
+        §2d.1 was answered (option C, 2026-08-19) and R6 built it, so the test
+        is now the A/B it was always going to become — and it keeps BOTH arms,
+        because the memoryless arm is the positive control: without it, a
+        heading-state planner that happened to be right for some other reason
+        would pass silently.
+
+        The memoryless arm climbs at the fall line: on a laterally symmetric
+        ramp every zigzag pitch costs the same and Dijkstra takes the tightest,
+        which Chaikin then smooths into a straight climb.
         """
         h = walled_ramp(deg=20.0)
-        p = rd.replace(rd.RoadParams(plan_step=1), max_grade_deg=8.0)
-        pl, _ = quiet(rd.plan_roads, h, -1e9, CELL,
-                      [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)], p)
-        g = rd.deck_grade_profile(pl[0], h, CELL, window=4 * CELL)
-        self.assertGreater(float(np.percentile(g, 95)), 15.0,
-                           "the degeneracy is gone — flip this test, see the docstring")
+        ends = [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)]
+
+        # --- the control: memoryless, and it still delivers a 20 deg fall line
+        off = rd.replace(rd.RoadParams(plan_step=1, heading_sectors=0),
+                         max_grade_deg=8.0)
+        pl, _ = quiet(rd.plan_roads, h, -1e9, CELL, ends, off)
+        g0 = rd.deck_grade_profile(pl[0], h, CELL, window=4 * CELL)
+        self.assertGreater(float(np.percentile(g0, 95)), 15.0,
+                           "the memoryless control is supposed to be broken")
+
+        # --- and the fix: the SAME fixture, the same limit, heading state on
+        for sectors in (4, 8):
+            with self.subTest(sectors=sectors):
+                on = rd.replace(rd.RoadParams(plan_step=1,
+                                              heading_sectors=sectors),
+                                max_grade_deg=8.0)
+                pl2, _ = quiet(rd.plan_roads, h, -1e9, CELL, ends, on)
+                self.assertTrue(pl2, "heading state lost the route entirely")
+                g1 = rd.deck_grade_profile(pl2[0], h, CELL, window=4 * CELL)
+                self.assertLess(float(np.percentile(g1, 95)), 12.0,
+                                "the fall-line climb survived heading state")
+                self.assertLess(float(np.percentile(g1, 95)),
+                                float(np.percentile(g0, 95)) * 0.7,
+                                "heading state barely moved the delivered grade")
+
+    def test_the_zigzag_is_what_heading_state_removes(self):
+        """Name the pathology directly, not just its grade consequence.
+
+        The §2d.1 defect is a **3-cell zigzag**: legs so short the deck reverses
+        every couple of planning cells, which Chaikin then launders into a
+        straight fall-line climb. Grade is the symptom; leg length is the thing.
+        Measured on the RAW planning path (before smoothing), because smoothing
+        is precisely what hides it.
+        """
+        h = walled_ramp(deg=20.0)
+        ends = [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)]
+
+        def mean_leg(sectors):
+            p = rd.replace(rd.RoadParams(plan_step=1, heading_sectors=sectors),
+                           max_grade_deg=8.0)
+            pl, _ = quiet(rd.plan_roads, h, -1e9, CELL, ends, p)
+            r = rd.resample_by_arclength(pl[0], 2 * CELL)
+            t = rd.turn_angles(r)
+            rev = int((t > 90.0).sum())
+            length = float(np.hypot(*(r[1:] - r[:-1]).T).sum())
+            # distance the deck runs per reversal — the leg length the planner
+            # is willing to accept. inf when it never reverses.
+            return length / rev if rev else float("inf"), rev
+
+        leg_off, rev_off = mean_leg(0)
+        leg_on, rev_on = mean_leg(8)
+        self.assertGreater(leg_on, leg_off * 1.5,
+                           "heading state did not lengthen the legs")
+        self.assertGreater(leg_on, 200.0,
+                           "the legs are still short enough to read as a zigzag")
+
+    def test_the_penalty_is_what_works_not_the_layering(self):
+        """Positive control on the mechanism itself.
+
+        Layering the graph by heading changes nothing on its own — it is a
+        relabelling of the same edges. `turn_penalty = 0` must therefore
+        reproduce the memoryless result exactly, which is what proves the fix
+        is the PRICE and not an accident of the larger graph.
+        """
+        h = walled_ramp(deg=20.0)
+        ends = [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)]
+        base = rd.replace(rd.RoadParams(plan_step=1, heading_sectors=0),
+                          max_grade_deg=8.0)
+        free = rd.replace(rd.RoadParams(plan_step=1, heading_sectors=8,
+                                        turn_penalty=0.0), max_grade_deg=8.0)
+        a, _ = quiet(rd.plan_roads, h, -1e9, CELL, ends, base)
+        b, _ = quiet(rd.plan_roads, h, -1e9, CELL, ends, free)
+        ga = rd.deck_grade_profile(a[0], h, CELL, window=4 * CELL)
+        gb = rd.deck_grade_profile(b[0], h, CELL, window=4 * CELL)
+        self.assertAlmostEqual(float(np.percentile(ga, 95)),
+                               float(np.percentile(gb, 95)), places=6,
+                               msg="a free turn is not the memoryless graph")
+
+    def test_heading_sectors_zero_is_the_memoryless_graph_exactly(self):
+        """The escape hatch has to be exact, not merely similar.
+
+        Both shipped maps are pinned to `heading_sectors=0` so their packages
+        do not move (a re-ship is a human's call, not a default). That pin is
+        only worth anything if 0 is bit-for-bit the pre-R6 planner.
+        """
+        for h, wl, ends, roles in (
+                (walled_ramp(deg=20.0), -1e9,
+                 [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)],
+                 [rd.NODE_EDGE, rd.NODE_TOWN]),
+                (rolling(), 0.0, [(80.0, 80.0), (680.0, 700.0), (300.0, 300.0)],
+                 [rd.NODE_EDGE, rd.NODE_TOWN, rd.NODE_POI])):
+            p = rd.RoadParams(plan_step=1, heading_sectors=0)
+            net, _ = quiet(rd.plan_network, h, wl, CELL, ends, roles, p)
+            self.assertTrue(net.links)
+            # the layered graph must not even be built when it is switched off
+            hh, water, slope = rd._plan_grid(h, wl, CELL, p)
+            g = rd._plan_graph(hh, water, slope, CELL, p)
+            self.assertEqual(g.S, 0)
+            self.assertEqual(g.csr.shape[0], g.n)
+            # ...and it IS the same matrix the pre-R6 planner routed on
+            base = rd._edge_costs(hh, water, slope, CELL, p)
+            self.assertEqual((g.csr != base).nnz, 0)
+            # while switching it on grows the graph by exactly sectors + 1
+            q = rd.RoadParams(plan_step=1, heading_sectors=8)
+            gq = rd._plan_graph(hh, water, slope, CELL, q)
+            self.assertEqual(gq.csr.shape[0], g.n * 9)
+            self.assertEqual(gq.csr.nnz, base.nnz * 9)
+
+    def test_ordinary_terrain_is_left_alone_by_the_fix(self):
+        """The fix must be INERT where there was no defect.
+
+        §2d.1's own scoping: on rolling ground the cost field breaks the tie, so
+        the shipped maps were never the point. A heading penalty that rerouted
+        ordinary terrain would be buying a fix nobody needed with detour nobody
+        asked for.
+        """
+        h = rolling()
+        ends = [(100.0, 700.0), (700.0, 100.0)]
+        def length(sectors):
+            p = rd.RoadParams(plan_step=1, heading_sectors=sectors)
+            pl, _ = quiet(rd.plan_roads, h, 0.0, CELL, ends, p)
+            return float(np.hypot(*(pl[0][1:] - pl[0][:-1]).T).sum())
+        base = length(0)
+        for sectors in (4, 8):
+            with self.subTest(sectors=sectors):
+                self.assertLess(abs(length(sectors) - base) / base, 0.05,
+                                "heading state moved a route that was already fine")
 
     def test_ordinary_terrain_does_not_show_the_degeneracy(self):
         """What scopes the finding: on rolling ground the cost field breaks the
@@ -627,7 +750,9 @@ class DeliveredGrade(unittest.TestCase):
 
     def test_the_warning_fires_when_the_deck_beats_its_limit(self):
         h = walled_ramp(deg=20.0)
-        p = rd.RoadParams(plan_step=1)
+        # pinned memoryless: this is the warning ABOUT the memoryless graph,
+        # and R6 gave the priced-reversal case its own wording below
+        p = rd.RoadParams(plan_step=1, heading_sectors=0)
         net, _ = quiet(rd.plan_network, h, -1e9, CELL,
                        [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)],
                        [rd.NODE_EDGE, rd.NODE_TOWN], p)
@@ -640,6 +765,20 @@ class DeliveredGrade(unittest.TestCase):
                         [rd.NODE_EDGE, rd.NODE_TOWN], p)
         _o2, text2 = quiet(rd.report_delivered_grades, net2, flat, CELL, p)
         self.assertNotIn("WARNING", text2)
+        self.assertIn("memoryless", text)
+
+    def test_the_warning_stops_blaming_the_graph_once_it_has_memory(self):
+        """A warning that still said "the cost graph is memoryless" with
+        heading state ON would be pointing at the wrong thing — the reversal is
+        priced, so a steep deck is now a claim about the TERRAIN. Same fixture,
+        same instrument, different diagnosis."""
+        h = walled_ramp(deg=20.0)
+        p = rd.RoadParams(plan_step=1, heading_sectors=8)
+        net, _ = quiet(rd.plan_network, h, -1e9, CELL,
+                       [(48 * CELL, 92 * CELL), (48 * CELL, 4 * CELL)],
+                       [rd.NODE_EDGE, rd.NODE_TOWN], p)
+        _out, text = quiet(rd.report_delivered_grades, net, h, CELL, p)
+        self.assertNotIn("memoryless", text)
 
 
 class RoadsLuaExport(unittest.TestCase):

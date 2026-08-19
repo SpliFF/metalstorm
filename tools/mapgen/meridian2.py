@@ -435,8 +435,13 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         roles.append(rd.NODE_EDGE)
     # see the note at archipelago.py's road step: M9a retired the terrain-slope
     # wall in favour of a grade block plus a side-hill price
+    # heading_sectors=0 PINS this map to the memoryless graph — see the same
+    # note at archipelago.py's road step. R6 measured the re-ship: at 8 sectors
+    # this map's `highway` deck falls from p95 8.6 / max 22.0 deg to p95 7.6 /
+    # max 15.4 (its limit is 8), i.e. the fix is worth having here too and is
+    # waiting on a human's re-ship call, not on the mechanism.
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                       water_penalty=30.0)
+                       water_penalty=30.0, heading_sectors=0)
     net = rd.plan_network(h, 0.0, cell, sites, roles, rp)
     polylines = net.polylines
     raster = rd.rasterize_network(net, h.shape, cell, rp)

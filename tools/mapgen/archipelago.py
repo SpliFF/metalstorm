@@ -1020,8 +1020,16 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # prices the hillside it is cut into, so the old `max_slope_deg=26` (a
         # terrain-slope wall that isolated a town site standing on 29 deg ground)
         # has no successor here — see PLAN-maps M9a.
+        # heading_sectors=0 PINS this map to the memoryless graph (roads R6,
+        # PLAN-maps §2d.1/§2o). The planner's own default is 8 — every map
+        # authored from here on gets the fix — but turning it on for
+        # `skerry_reach` MOVES ITS ROADS, and by this file's own standing rule
+        # that is a re-ship, not a default. R6 measured what the re-ship buys
+        # and gated it on a human: this map's `road` deck reads p95 17.9 deg
+        # against a 15 deg limit and TRIPS `report_delivered_grades`' warning
+        # today; at 8 sectors it reads 15.6 and the warning goes quiet.
         rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                           water_penalty=80.0)
+                           water_penalty=80.0, heading_sectors=0)
         # ...and the two now have to AGREE about buildable ground. M9a FIND 1 was
         # a town site standing where the road cost field could not take a single
         # step, so the planner handed it its own one-site network and the map
