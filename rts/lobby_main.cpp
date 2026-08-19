@@ -21,6 +21,7 @@
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
 #include "Server/WorldDirector.h"
+#include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1238,6 +1239,12 @@ int main(int argc, char *argv[]) {
       SLOG(SPRING_LOG_ERROR,
            "world layer: no world could be seeded or loaded — /api/world will "
            "answer 404 until a world row exists");
+    else
+      // PLAN-worldsim.md W3: grow the POI graph from the Randtown register,
+      // honouring the world's own poiBudget* knobs. Idempotent and additive
+      // (see WorldMapSeeder.h) — safe to call on every boot, including one
+      // where the world already has every registry POI.
+      WorldMapSeeder::SeedFromRegistry(mapDb, seededWorld, WorldNowRealMs());
   }
 
   // war_slot_reservations — the last seat on a side, held for the join that is

@@ -464,6 +464,10 @@ set(LOBBY_SERVER_SOURCES
     # the world layer never touches sim state. It is the layer ABOVE a war, and
     # nothing in it is keyed by room_id.
     rts/Server/WorldDirector.cpp
+    # PLAN-worldsim.md W3: the Randtown register + the great-circle/MST
+    # arithmetic that turns it into POI + edge rows. Lobby-only for the same
+    # reason WorldDirector.cpp is — it only ever calls through WorldDirector.
+    rts/Server/WorldMapSeeder.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -630,6 +634,9 @@ if(TEST_SOURCES)
         # the real store against an in-memory db — and the clock beside it
         # (WorldClock.h) is a pure header driven with no db at all.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldDirector.cpp
+        # PLAN-worldsim.md W3: the seeder built on top of it —
+        # test_world_map_seeder.cpp drives the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldMapSeeder.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.
