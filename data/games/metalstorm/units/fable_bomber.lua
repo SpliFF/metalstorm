@@ -24,15 +24,21 @@ return {
         category = 'AIR MOBILE',
         canfly = true,                 -- fixedwing bombing runs
         collide = false,
-        cruisealtitude = 200,
+        cruisealtitude = 160,          -- was 200: matches ms_bombers_s2 band
         maxdamage = 1100, mass = 300,
-        maxvelocity = 6.5, acceleration = 0.5, brakerate = 0.25, turnrate = 600,
+        -- Strafing bombers IGNORE `acceleration` — UnitDef.cpp re-reads
+        -- `maxacc` (default 0.065) for IsBomberAirUnit; the old 0.5 was
+        -- never applied. BAR T1 bomber anchors: maxacc 0.0575 / maxdec 0.05.
+        maxvelocity = 6.2, maxacc = 0.058, maxdec = 0.05,
+        turnradius = 100,              -- engine doubles the 500 default for bombers
         footprintx = 4, footprintz = 4,
         sightdistance = 600,
+        airsightdistance = 800,        -- engine default is only 1.5×sight
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
         weapons = {
-            [1] = { name = 'MS_BOMB_S2' },        -- belly bay
+            [1] = { name = 'MS_BOMB_S2',          -- belly bay
+                    onlytargetcategory = 'LAND SHIP SUB' },
         },
         customparams = {
             ms_class = 'fable_showcase',

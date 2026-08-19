@@ -25,16 +25,22 @@ return {
         category = 'AIR MOBILE',
         canfly = true,                 -- fixedwing: no hoverattack, strafes
         collide = false,
-        cruisealtitude = 180,
+        cruisealtitude = 150,          -- was 180: matches ms_fighters_s2/s3 band
         maxdamage = 900, mass = 220,
-        maxvelocity = 9.0, acceleration = 0.9, brakerate = 0.3, turnrate = 900,
+        -- Strafing fighters IGNORE `acceleration` — UnitDef.cpp re-reads
+        -- `maxacc` (default 0.065) for IsFighterAirUnit; the old 0.9 was
+        -- never applied. BAR fighter anchors: maxacc 0.18 / maxdec 0.075.
+        maxvelocity = 9.6, maxacc = 0.18, maxdec = 0.075,
+        turnradius = 64,               -- engine default 500 = lumbering arc
         footprintx = 4, footprintz = 4,
         sightdistance = 650,
+        airsightdistance = 950,        -- engine default is only 1.5×sight
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
         weapons = {
             [1] = { name = 'MS_AC_S2' },          -- chin autocannon
-            [2] = { name = 'MS_MISSILE_AA_S2' },  -- wing AA missiles
+            [2] = { name = 'MS_MISSILE_AA_S2',    -- wing AA missiles
+                    onlytargetcategory = 'AIR' },
         },
         customparams = {
             ms_class = 'fable_showcase',

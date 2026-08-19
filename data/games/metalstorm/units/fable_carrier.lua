@@ -39,9 +39,19 @@ return {
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
         weapons = {
-            [1] = { name = 'MS_FLAK_S2' },           -- PDC chain (bow)
-            [2] = { name = 'MS_MISSILE_AA_S2' },     -- point defence
+            [1] = { name = 'MS_FLAK_S2', onlytargetcategory = 'AIR' },           -- PDC chain (bow)
+            [2] = { name = 'MS_MISSILE_AA_S2', onlytargetcategory = 'AIR' },     -- point defence
         },
+        -- NOT `isairbase`: the engine's native air-base path needs a unit
+        -- script's QueryLandingPad, and Metalstorm is script-less by
+        -- constraint (PLAN-bulk-spawn-crash §2). Pad service stays game-Lua
+        -- driven off pad_count/pad_pieces below (ZK unit_air_pads pattern —
+        -- see the header). No canload either: it operates aircraft from pads,
+        -- it does not swallow cargo, so it carries no is_transport key
+        -- (PLAN-metalstorm-transports.md §3.6 is about lift carriers).
+        -- A 102 m capital hull is never someone else's cargo.
+        cantbetransported = true,
+        transportbyenemy = false,
         customparams = {
             ms_class = 'fable_showcase',
             squad_size = '1',

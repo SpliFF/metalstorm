@@ -22,6 +22,7 @@ return {
         radardistance = 1200,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
         canguard = true,
+        transportbyenemy = false,   -- never lifted by an enemy carrier
         customparams = {
             ms_class = 'scout', squad_size = '1',
             authority_cost_base = '1',
@@ -54,6 +55,7 @@ return {
         radardistance = 2200,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
         canguard = true,
+        transportbyenemy = false,   -- never lifted by an enemy carrier
         customparams = {
             ms_class = 'balloon', squad_size = '1',
             authority_cost_base = '2',

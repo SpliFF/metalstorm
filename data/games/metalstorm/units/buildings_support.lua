@@ -195,7 +195,10 @@ return {
         name = 'Barricade Set',
         description = 'Perimeter kit — scrap-plate wall, corner, gateway',
         objectname = 'ms_barricade_set',
-        maxdamage = 3000, mass = 6000,
+        -- Fortification walls are meant to SOAK fire (BAR walls are the
+        -- toughest-per-footprint things in that roster): 6000 puts the 25 m
+        -- run above the meeting hall but below the factories.
+        maxdamage = 6000, mass = 6000,
         footprintx = 13, footprintz = 3,
         sightdistance = 150,
         buildtime = 24000,

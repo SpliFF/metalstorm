@@ -4,11 +4,16 @@ return mk{
     class = 'soldiers', label = 'Infantry',
     category = 'LAND MOBILE INFANTRY',
     movementclass = 'INFANTRY',
-    baseHp = 400, baseMass = 90, baseSpeed = 1.8, baseSquad = 16,
+    -- baseSpeed 1.4 e/f = 42 e/s at s1: a jog, not a vehicle. The old 1.8
+    -- (54 e/s) had rifle sections outrunning BAR scout cars.
+    baseHp = 400, baseMass = 90, baseSpeed = 1.4, baseSquad = 16,
     baseFootprint = 2, formation = 'line',
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S1' } },
                 description = 'Rifle section — numerous and expendable',
+                -- 60 HP per member × 16 (the builder default 400 gave 25/member
+                -- — one MG volley erased a third of the squad).
+                maxdamage = 960,
                 -- Member LOD (PLAN-metalstorm-impostors.md M4): a real low-poly
                 -- 3D body (models/ms_soldiers_s1.gltf) draws each squad member
                 -- up close; beyond impostorDistance the baked directional
@@ -30,13 +35,33 @@ return mk{
                 -- See _builder.lua for the method and its two traps.
                 impostorDistance = 260, impostorSize = 2.3615,
                 impostorCentreY = 0.7650,
-                impostorTeamMask = true },
-        [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
+                impostorTeamMask = true,
+                override = { transportbyenemy = false } },
+        [2] = { weapons = { [1] = { name = 'MS_MG_S2' } },
+                -- builder default 800 = 100 HP/member × 8: fine as-is.
+                -- footprint: infantry squads stay small — the builder's
+                -- +1-per-scale curve (3 here, 5 at s4) is a vehicle curve, and
+                -- anything over 3 also fails the landing ship's transportsize.
+                footprint = 2,
+                override = { transportbyenemy = false } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },
                             [2] = { name = 'MS_MORTAR_S1' } },
-                description = 'Heavy weapons team — autocannon + mortar' },
+                description = 'Heavy weapons team — autocannon + mortar',
+                -- 250 HP per member × 4 (armoured weapon crews, not 400/member
+                -- riflemen as the growth curve gave).
+                maxdamage = 1000, footprint = 3,
+                -- Crews wheel their pieces, they don't pivot like a hull.
+                turnrate = 700,
+                override = { transportbyenemy = false } },
         [4] = { weapons = { [1] = { name = 'MS_AC_S2' },
-                            [2] = { name = 'MS_MISSILE_AA_S1' } },
-                description = 'Exo-assault trooper — single powered suit' },
+                            [2] = { name = 'MS_MISSILE_AA_S1', onlytargetcategory = 'AIR' } },
+                description = 'Exo-assault trooper — single powered suit',
+                -- One suit ≈ a light tank's worth of armour (builder default
+                -- 3200 was MBT-grade for a man-sized target).
+                maxdamage = 2400, footprint = 3,
+                -- Powered suit strides faster than the marching curve (36 e/s
+                -- vs the default 23) and turns on the spot.
+                maxvelocity = 1.2, turnrate = 600,
+                override = { transportbyenemy = false } },
     },
 }

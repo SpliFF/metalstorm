@@ -31,37 +31,44 @@ return {
         objectname = 'wz_tank',
         category = 'LAND MOBILE TANK',
         movementclass = 'VEH',
-        maxdamage = 1600, mass = 600,
-        maxvelocity = 2.4, acceleration = 0.25, brakerate = 0.2, turnrate = 700,
+        -- MBT ballpark: matches fable_tank / ms_tanks_s2 members (BAR stumpy
+        -- 1800hp / 75 e/s / turn 340). turnrate 700 was scout-grade.
+        maxdamage = 1800, mass = 600,
+        maxvelocity = 2.4, acceleration = 0.25, brakerate = 0.2, turnrate = 400,
         footprintx = 3, footprintz = 3,
         sightdistance = 450,
         canmove = true, canattack = true, canpatrol = true, canstop = true, canguard = true,
+        transportbyenemy = false,
         weapons = { [1] = { name = 'MS_AC_S3' } },
     },
     wz_wheeled = baseline{
         name = 'WZ Wheeled (baseline)',
         description = 'Warzone 2100 wheeled vehicle (Viper hull) — conversion baseline',
         objectname = 'wz_wheeled',
-        category = 'LAND MOBILE',
+        category = 'LAND MOBILE VEHICLE',   -- type token, matches recon/civ vehicles
         movementclass = 'VEH',
+        -- Scout-car ballpark (BAR flash: 730hp / 101 e/s) — already sane.
         maxdamage = 700, mass = 250,
         maxvelocity = 3.2, acceleration = 0.35, brakerate = 0.3, turnrate = 1000,
         footprintx = 2, footprintz = 2,
         sightdistance = 420,
         canmove = true, canattack = true, canpatrol = true, canstop = true, canguard = true,
+        transportbyenemy = false,
         weapons = { [1] = { name = 'MS_MG_S2' } },
     },
     wz_cyborg = baseline{
         name = 'WZ Cyborg (baseline)',
         description = 'Warzone 2100 cyborg walker — conversion baseline',
         objectname = 'wz_cyborg',
-        category = 'LAND MOBILE',
+        category = 'LAND MOBILE INFANTRY',   -- type token, matches soldiers.lua
         movementclass = 'INFANTRY',
+        -- Raider-infantry ballpark (ZK glaive ~385hp) — already sane.
         maxdamage = 400, mass = 90,
         maxvelocity = 1.8, acceleration = 0.3, brakerate = 0.3, turnrate = 1400,
         footprintx = 2, footprintz = 2,
         sightdistance = 380,
         canmove = true, canattack = true, canpatrol = true, canstop = true, canguard = true,
+        transportbyenemy = false,
         weapons = { [1] = { name = 'MS_MG_S1' } },
     },
     wz_building = baseline{

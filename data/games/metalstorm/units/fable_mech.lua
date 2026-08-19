@@ -18,14 +18,19 @@ return {
         name = 'MW-3 Strider',
         description = 'Fable recon walker — generated-model showcase (authored clips)',
         objectname = 'fable_mech',
-        category = 'LAND MOBILE',
-        movementclass = 'VEH',
+        category = 'LAND MOBILE MECH',   -- MECH type token, matches units/mechs.lua
+        movementclass = 'VEH',   -- tank-slot stand-in; see the MECH moveclass
+                                 -- proposal in .unitprops/agent-mechs.md
         maxdamage = 800, mass = 240,
-        maxvelocity = 2.6, acceleration = 0.3, brakerate = 0.28, turnrate = 1000,
+        -- Recon-walker ballpark (≈ BAR Pawn at this game's HP scale):
+        -- 78 e/s, walker-quick turn. Sits beside ms_mechs_s1 (84 e/s).
+        maxvelocity = 2.6, acceleration = 0.3, brakerate = 0.28, turnrate = 1200,
         footprintx = 2, footprintz = 2,
-        sightdistance = 460,
+        sightdistance = 550,   -- recon role: sees further than it shoots
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
+        -- Liftable by airship/landing ship (both carry transportsize 3).
+        transportsize = 2, transportbyenemy = false,
         weapons = { [1] = { name = 'MS_AC_S2' } },
         customparams = {
             ms_class = 'fable_showcase',

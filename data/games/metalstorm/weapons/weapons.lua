@@ -77,18 +77,26 @@ family('MS_RAILGUN', {
     { name = 'Dreadnought Rail',  range = 1200, reloadtime = 8.0, dmg = 3200 },
 })
 
--- Mortars — short-range indirect.
+-- Mortars — short-range indirect. Ranges sit ABOVE the same-scale railgun
+-- (600/750) on purpose: artillery must outrange direct fire at its own scale
+-- (unit props review 2026-08-20 — they used to tie exactly). Statistical, so
+-- weaponvelocity is cosmetic only (no projectile is spawned).
 family('MS_MORTAR', {
-    weapontype = 'Cannon', weaponvelocity = 280, turret = true,
+    weapontype = 'Cannon', weaponvelocity = 320, turret = true,
     highTrajectory = 1, accuracy = 220, areaofeffect = 64,
     soundstart = 'mortar_fire',
     customparams = { resolution = 'statistical', min_volley_damage = 15, skip_fire_strength = 0 },
 }, {
-    { name = 'Mortar',       range = 600, reloadtime = 4.0, dmg = 180 },
-    { name = 'Heavy Mortar', range = 750, reloadtime = 5.0, dmg = 320 },
+    { name = 'Mortar',       range = 680, reloadtime = 4.0, dmg = 180 },
+    { name = 'Heavy Mortar', range = 860, reloadtime = 5.0, dmg = 320 },
 })
 
 -- Howitzers — long arcing artillery. Always real ballistics (arcs matter).
+-- weaponvelocity is PER SCALE because these are real projectiles: a ballistic
+-- Cannon's absolute max range is v^2/g (45 deg arc) and the maps ship no
+-- gravity override (engine default 130 e/s^2). The old family-wide 420 capped
+-- reach at ~1357 elmos — S2 (1500), S3 (1900) and S4 (3200) could never land
+-- a shell at their declared range (unit props review 2026-08-20).
 family('MS_HOWITZER', {
     weapontype = 'Cannon', weaponvelocity = 420, turret = true,
     highTrajectory = 1, accuracy = 260, areaofeffect = 110,
@@ -96,16 +104,25 @@ family('MS_HOWITZER', {
     customparams = { resolution = 'ballistic' },
 }, {
     { name = 'Field Howitzer',   range = 1100, reloadtime = 6.0,  dmg = 420  },
-    { name = 'Siege Howitzer',   range = 1500, reloadtime = 8.0,  dmg = 800  },
-    { name = 'Naval Battery',    range = 1900, reloadtime = 10.0, dmg = 1400 },
-    { name = 'Continental Gun',  range = 3200, reloadtime = 20.0, dmg = 3000, areaofeffect = 220 },
+    { name = 'Siege Howitzer',   range = 1500, reloadtime = 8.0,  dmg = 800,  weaponvelocity = 500 },
+    { name = 'Naval Battery',    range = 1900, reloadtime = 10.0, dmg = 1400, weaponvelocity = 560 },
+    { name = 'Continental Gun',  range = 3200, reloadtime = 20.0, dmg = 3000, areaofeffect = 220, weaponvelocity = 750 },
 })
 
 -- AA missiles — guided, interceptable.
+-- AA gating (unit props review 2026-08-20): this engine has NO `toairweapon`
+-- key (zero hits in rts/) — the old tag was dead. What it DOES read is the
+-- weapondef `canattackground` (WeaponDef.cpp WEAPONTAG) and a per-unit-weapon
+-- `onlytargetcategory` (UnitDef.cpp, BAR-style — belongs in the UNIT's
+-- weapons table, proposed in .unitprops/agent-systems.md, not here).
+-- turnrate raised 18000 -> 45000: at 1.7 rad/s the old value could not track
+-- a 270 e/s fighter squad crossing at close range (BAR AA missiles run
+-- 40k-63k). flighttime stays unset: 0 auto-computes a sane ttl from range
+-- (MissileLauncher.cpp:65).
 family('MS_MISSILE_AA', {
     weapontype = 'MissileLauncher', weaponvelocity = 900, turret = true,
-    tracks = true, turnrate = 18000, areaofeffect = 32,
-    soundstart = 'missile_launch', toairweapon = true,
+    tracks = true, turnrate = 45000, areaofeffect = 32,
+    soundstart = 'missile_launch', canattackground = false,
     customparams = { resolution = 'ballistic' },
 }, {
     { name = 'AA Missile Pod',    range = 700,  reloadtime = 3.0, dmg = 220 },
@@ -114,15 +131,33 @@ family('MS_MISSILE_AA', {
 })
 
 -- Cruise missiles — strategic guided strike; interception gameplay.
+-- `trajectoryHeight` replaces the old `cruisealt` tag, which this engine
+-- never read as a weapon key (cruiseAlt is a UNITDEF aircraft key,
+-- UnitDef.cpp:502). 0.35 = arc peaks at ~35% of target distance
+-- (WeaponDef.cpp trajectoryHeight, Missile only) — gives the high strike
+-- profile the interception gameplay wants.
 family('MS_MISSILE_CRUISE', {
     weapontype = 'MissileLauncher', weaponvelocity = 500,
     tracks = true, turnrate = 6000, areaofeffect = 160,
-    soundstart = 'cruise_launch', cruisealt = 300,
+    soundstart = 'cruise_launch', trajectoryHeight = 0.35,
     customparams = { resolution = 'ballistic' },
 }, {
     { name = 'Cruise Missile',       range = 2400, reloadtime = 25.0, dmg = 1800 },
     { name = 'Heavy Cruise Missile', range = 3600, reloadtime = 45.0, dmg = 3600 },
 })
+
+-- Sub-launched strategic missile (ms_subs_s4 VLS). Same bird as
+-- MS_MISSILE_CRUISE_S2 but launchable from a submerged hull:
+-- `firesubmersed` (WeaponDef.cpp:101, requires waterweapon) is the engine's
+-- submerged-fire key; without it a dived boat's VLS never fires.
+defs.MS_MISSILE_CRUISE_SUB = {
+    name = 'Sub-launched Cruise Missile', weapontype = 'MissileLauncher',
+    weaponvelocity = 500, tracks = true, turnrate = 6000,
+    areaofeffect = 160, soundstart = 'cruise_launch', trajectoryHeight = 0.35,
+    range = 3600, reloadtime = 45.0, damage = { default = 3600 },
+    waterweapon = true, firesubmersed = true,
+    customparams = { resolution = 'ballistic' },
+}
 
 -- Torpedoes — underwater kinetic.
 family('MS_TORPEDO', {
@@ -136,11 +171,13 @@ family('MS_TORPEDO', {
     { name = 'Heavy Torpedo', range = 1300, reloadtime = 11.0, dmg = 2000 },
 })
 
--- Flak — proximity-burst AA screens.
+-- Flak — proximity-burst AA screens. `canattackground = false` replaces the
+-- dead `toairweapon` tag (see MS_MISSILE_AA note; BAR's armflak/corflak use
+-- exactly this pair: canattackground=false + onlytargetcategory on the unit).
 family('MS_FLAK', {
     weapontype = 'Cannon', weaponvelocity = 1000, turret = true,
     accuracy = 200, areaofeffect = 96, soundstart = 'flak_fire',
-    toairweapon = true, burnblow = true,
+    canattackground = false, burnblow = true,
     customparams = { resolution = 'statistical', min_volley_damage = 10, skip_fire_strength = 0 },
 }, {
     { name = 'Flak Gun',     range = 600, reloadtime = 1.5, dmg = 120 },

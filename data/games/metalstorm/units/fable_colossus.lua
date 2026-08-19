@@ -22,14 +22,19 @@ return {
         name = 'FW-15 Fenrir',
         description = 'Fable assault titan — generated-model showcase',
         objectname = 'fable_colossus',
-        category = 'LAND MOBILE',
-        movementclass = 'HEAVY',
+        category = 'LAND MOBILE MECH',   -- MECH type token, matches units/mechs.lua
+        movementclass = 'HEAVY',   -- tank-slot; footprint 5 vs HEAVY's 4×4
+                                   -- moveDef is fine (moveDef drives pathing)
         maxdamage = 14000, mass = 3200,
-        maxvelocity = 1.9, acceleration = 0.14, brakerate = 0.16, turnrate = 380,
+        -- Super-heavy walker ballpark (BAR Korgoth 37 e/s / turn 437,
+        -- Bantha 45.6, scaled): 1.9 (57 e/s) let a 15 m titan outrun the
+        -- line mechs — trimmed to 45 e/s; turn stays walker-quick.
+        maxvelocity = 1.5, acceleration = 0.14, brakerate = 0.16, turnrate = 420,
         footprintx = 5, footprintz = 5,
-        sightdistance = 560,
+        sightdistance = 700,   -- flagship overwatch (Korgoth: 845)
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
+        cantbetransported = 1,   -- 3200 mass, over every carrier's cap anyway
         weapons = {
             [1] = { name = 'MS_AC_S3' },        -- arm rotary cannon
             [2] = { name = 'MS_MISSILE_CRUISE_S1' },  -- pack/forearm racks

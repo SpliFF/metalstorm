@@ -20,12 +20,20 @@ return {
         objectname = 'ms_technical',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
-        maxdamage = 320, mass = 180,
+        -- 480 hp: still thin-skinned for an armed vehicle (a BAR T1 scout car
+        -- is ~600 at this speed), but 320 died to a single MS_AC_S1 cycle plus
+        -- change — a raider needs to survive first contact long enough to run.
+        maxdamage = 480, mass = 180,
         maxvelocity = 3.4, acceleration = 0.3, brakerate = 0.28, turnrate = 900,
         footprintx = 2, footprintz = 3,
-        sightdistance = 420,
+        -- Raider eyes: a little past its 380-range family AC, well short of
+        -- the dedicated scouts in recon_vehicles.lua.
+        sightdistance = 480,
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
+        -- Fits the landing ship (footprint ≤ transportsize 3); never lifted
+        -- by an enemy carrier.
+        transportbyenemy = false,
         weapons = { [1] = { name = 'MS_AC_TECHNICAL' } },
         customparams = {
             ms_class = 'technical',
