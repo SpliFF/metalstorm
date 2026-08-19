@@ -15,6 +15,11 @@
              thing in this panel that is asking the player a question and a
              closed panel would swallow it. -->
         <button id="show-friends-btn" style="display:none">Friends</button>
+        <!-- The World screen (PLAN-worldsim.md W2). Hidden until /api/world
+             answers, exactly like Replays above: a lobby built before W1 404s
+             it, and an empty world map reads as a broken feature rather than
+             an absent one. -->
+        <button id="show-world-btn" style="display:none">🌍 World</button>
         <!-- Account + logout (PLAN-endtoend.md D45). Until this existed the
              only way off an account was clearing localStorage by hand, so a
              shared machine could not be handed over. `account_name` is
@@ -146,6 +151,30 @@
          screen it is looking at. Hidden until a ticket answers, so a lobby
          without the chat routes looks exactly as it did. -->
     <div id="chat-dock" class="chat-dock" style="display:none"></div>
+    <!-- The World screen (PLAN-worldsim.md W2). An OVERLAY over the browser,
+         not a replacement for it: the world is a lobby-side object and the
+         room list underneath stays live, so W5 can link a POI to the war
+         standing on it without the player leaving the map. Everything inside
+         is wired by `world-screen.ts`; the canvas is the only thing that
+         draws. -->
+    <div id="world-panel" class="world-panel" style="display:none">
+        <div class="world-head">
+            <h3>World · <span id="world-title">Earth</span></h3>
+            <button id="world-reset-btn" class="secondary">Fit</button>
+            <button id="world-close-btn" class="secondary">Close</button>
+        </div>
+        <div class="world-body">
+            <div class="world-canvas-wrap">
+                <canvas id="world-canvas" class="world-canvas"></canvas>
+                <div id="world-tooltip" class="world-tooltip" style="display:none"></div>
+                <div id="world-status" class="world-status" style="display:none"></div>
+            </div>
+            <aside id="world-detail" class="world-detail">
+                <div class="world-detail-empty">Select a point of interest.</div>
+            </aside>
+        </div>
+        <div class="world-hint">Drag to pan · scroll to zoom · click a marker for detail</div>
+    </div>
     <div id="replay-panel" class="replay-panel" style="display:none">
         <h3>Replays</h3>
         <div id="replay-list" class="replay-list"></div>

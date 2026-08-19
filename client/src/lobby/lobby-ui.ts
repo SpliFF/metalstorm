@@ -90,6 +90,7 @@ import {
     describeReplayEntry, parseWatchFrame, type ReplayListing,
 } from './replay-browser.js';
 import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
+import { WorldScreen } from './world-screen.js';
 
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
@@ -1654,6 +1655,7 @@ export class LobbyUI {
         this.renderGameOptions();
         this.renderRoomList();
         this.wireReplayPanel();
+        this.wireWorldPanel();
         this.wireFriendsPanel();
         this.wireDeployButton();
         this.wireChatDock();
@@ -2426,6 +2428,30 @@ export class LobbyUI {
             this.chatMuteList = null;
             this.renderChat();
         };
+    }
+
+    // ===================== WORLD (PLAN-worldsim.md W2) =====================
+
+    /// The World screen. One per LobbyUI rather than one per browser render:
+    /// the selected POI and the pan/zoom are the player's place in the world
+    /// and should survive a room-list re-render, which happens on every SSE
+    /// tick.
+    private worldScreen: WorldScreen | null = null;
+
+    private wireWorldPanel(): void {
+        const btn = document.getElementById('show-world-btn') as HTMLButtonElement | null;
+        if (!btn) return;
+        this.worldScreen ??= new WorldScreen({ get: (path) => this.lobbyGet(path) });
+        const world = this.worldScreen;
+        btn.onclick = () => world.toggle();
+        // The browser screen replaces its markup on every room-list render, so
+        // this runs against fresh elements each time; `remount` re-attaches and
+        // brings the map back up if it was open.
+        world.remount();
+        // The button appears only once `/api/world` answers — a lobby built
+        // before W1 404s it, and a World button that opens an empty map reads
+        // as a broken feature rather than an absent one.
+        void world.probe().then(ok => { if (ok) btn.style.display = ''; });
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
