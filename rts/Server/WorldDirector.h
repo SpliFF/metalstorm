@@ -92,6 +92,76 @@ struct WorldDefaults {
     /// ms of transit per kilometre.
     double transitWorldMsPerKm   = 60000.0;
 
+    // ── W7: factions, membership and the authority gate ────────────────────
+    // Capture 26 ("keep the numbers flexible, sensible defaults, don't let it
+    // become blocking") applies to every value below: they are the ship-with
+    // numbers a world starts with, and the world's own row is the authority
+    // the moment it exists.
+    /// World authority an account is credited with the first time it is seen
+    /// in a world. There is no authority income yet (that is a later
+    /// milestone); until there is, this is what makes the founding gate a
+    /// real gate rather than an unreachable one.
+    double startingAuthority     = 100.0;
+    /// The world-level authority a player must HOLD to found a faction
+    /// (§4: "a player with enough authority can start a faction"; founding is
+    /// a world-level act gated on world-level authority).
+    double foundFactionAuthority = 100.0;
+    /// What founding SPENDS. Separate from the threshold on purpose: "you
+    /// must be this senior" and "this is what it costs you" are two different
+    /// design levers and tuning one must not move the other.
+    double foundFactionCost      = 50.0;
+    /// Faction names are player content and travel into NL context payloads
+    /// and rosters, so their length is a per-world cap rather than a literal
+    /// in the validator.
+    int    factionNameMaxLen     = 32;
+    int    factionNameMinLen     = 3;
+
+    // ── W8: the stat family's rates (Captures 23/24/27 + 12) ───────────────
+    // Resolved by `WorldStatRules::FromWorldConfig` (WorldStats.h), which
+    // documents what each one means. They live here so a world is seeded with
+    // them and an operator has one blob to tune.
+    double authorityPerVictory       = 12.0;
+    double authorityPerDefeat        = 3.0;
+    double authorityDecayPerWorldDay = 0.01;
+    double authorityFloor            = 1.0;
+    double commanderGrantAuthority   = 50.0;
+    double capacityBase              = 20.0;
+    double capacityPerCommanderAuthority = 0.10;
+    /// REAL hours, not world hours — Capture 12's ceiling protects the
+    /// player's day, so an admin world pause must not widen anybody's budget.
+    double capacityRechargeHours     = 24.0;
+    double capacityRechargeFraction  = 1.0;
+    double rankPerCommander          = 10.0;
+    double rankPerCommanderAuthority = 1.0;
+    double rankPerPoiHeld            = 25.0;
+    double rankPerArtifact           = 50.0;
+    double rankPerMoney              = 1.0;
+    double rankPerResource           = 1.0;
+    double rankPerUnit               = 2.0;
+
+    // ── W9: the economic tick (mirrored by WorldEconomyRules) ──────────────
+    /// Treasury income per world DAY, per POI a faction owns.
+    double poiIncomePerWorldDay      = 2.0;
+    /// The fraction of a faction's treasury lost per world day — the same
+    /// "gentle rate" shape as `authorityDecayPerWorldDay`, applied to money.
+    double treasuryDecayPerWorldDay  = 0.01;
+    double treasuryFloor             = 0.0;
+
+    // ── W10: battle staging (Capture 28 + transports §7.1/§7.2) ────────────
+    // Mirrored by `WorldStagingRules` (WorldStaging.h), which documents what
+    // each one means. Q16's "minimum/maximum staging durations (config,
+    // pillar 7)" is these two clamps and nothing else.
+    double stagingWindowDefaultWorldMs   = 12.0 * 3600.0 * 1000.0;
+    double stagingWindowPerTransitMs     = 1.0;
+    double stagingWindowMinWorldMs       = 1.0 * 3600.0 * 1000.0;
+    double stagingWindowMaxWorldMs       = 72.0 * 3600.0 * 1000.0;
+    int    stagingMaterialiseMaxAttempts = 5;
+
+    // ── W12: seasons (mirrored by WorldSeasonRules) ─────────────────────────
+    /// How long a season runs, in WORLD ms. A narrative/archival unit, not a
+    /// balance lever — see WorldSeasons.h.
+    double seasonLengthWorldMs = 14.0 * 24.0 * 3600.0 * 1000.0;
+
     nlohmann::json ToJson() const;
 };
 
@@ -120,6 +190,11 @@ struct WorldPoiRecord {
     /// The battle map based around this POI, or empty — "not all regions will
     /// be visitable", so a world-only POI is a legal, expected row.
     std::string mapId;
+    /// W7: the world faction that holds this place, or empty for unowned. A
+    /// TEXT id rather than a foreign key for the same reason `mapId` is not
+    /// one — a POI must survive its owner being dissolved, and a dangling id
+    /// renders as "unowned" rather than deleting geography.
+    std::string ownerFactionId;
     std::vector<std::string> tags;
     int64_t     createdAt = 0;
     nlohmann::json config = nlohmann::json::object();
@@ -146,6 +221,11 @@ struct WorldPoiEdgeRecord {
 /// INSERTs, never upserts, because the whole point is that rows accumulate
 /// across many wars fought at the same POI.
 struct WorldSettlementRecord {
+    /// The ledger row's own rowid, filled in on read and ignored on write.
+    /// W8's authority accrual keys its idempotence on it (`WorldStats.h`): two
+    /// identical wars at one POI are two awards, and re-reading either is
+    /// none, which only a per-ROW identity can express.
+    int64_t     settlementId = 0;
     std::string worldId;
     std::string poiId;
     /// The room the war was fought in. A label, not a join key — room ids
@@ -188,6 +268,14 @@ public:
     static std::string PrimaryWorldId(sqlite3* db);
 
     static bool UpsertPoi(sqlite3* db, const WorldPoiRecord& poi);
+
+    /// W7: set (or clear, with an empty id) a POI's owning world faction.
+    /// Its own statement rather than a field on UpsertPoi, because ownership
+    /// changes on a different cadence than geography does and a full upsert
+    /// from a stale read would silently revert a name or a map binding.
+    static bool SetPoiOwner(sqlite3* db, const std::string& worldId,
+                            const std::string& poiId,
+                            const std::string& ownerFactionId);
     static std::vector<WorldPoiRecord> PoisFor(sqlite3* db, const std::string& worldId);
     static std::optional<WorldPoiRecord> LoadPoi(sqlite3* db,
                                                  const std::string& worldId,

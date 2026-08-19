@@ -77,7 +77,7 @@ WorldRecord ReadWorldRow(sqlite3_stmt* s) {
 
 const char* kPoiColumns =
     "world_id, poi_id, name, lat, lon, kind, map_id, tags, created_at, "
-    "config_json";
+    "config_json, owner_faction_id";
 
 WorldPoiRecord ReadPoiRow(sqlite3_stmt* s) {
     WorldPoiRecord p;
@@ -91,6 +91,7 @@ WorldPoiRecord ReadPoiRow(sqlite3_stmt* s) {
     p.tags      = SplitTags(ColText(s, 7));
     p.createdAt = sqlite3_column_int64(s, 8);
     p.config    = ParseConfig(ColText(s, 9));
+    p.ownerFactionId = ColText(s, 10);
     return p;
 }
 
@@ -119,6 +120,36 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["poiPerWorldAgeDay"]      = poiPerWorldAgeDay;
     j["poiPerRegisteredPlayer"] = poiPerRegisteredPlayer;
     j["transitWorldMsPerKm"]    = transitWorldMsPerKm;
+    j["startingAuthority"]      = startingAuthority;
+    j["foundFactionAuthority"]  = foundFactionAuthority;
+    j["foundFactionCost"]       = foundFactionCost;
+    j["factionNameMaxLen"]      = factionNameMaxLen;
+    j["factionNameMinLen"]      = factionNameMinLen;
+    j["authorityPerVictory"]       = authorityPerVictory;
+    j["authorityPerDefeat"]        = authorityPerDefeat;
+    j["authorityDecayPerWorldDay"] = authorityDecayPerWorldDay;
+    j["authorityFloor"]            = authorityFloor;
+    j["commanderGrantAuthority"]   = commanderGrantAuthority;
+    j["capacityBase"]              = capacityBase;
+    j["capacityPerCommanderAuthority"] = capacityPerCommanderAuthority;
+    j["capacityRechargeHours"]     = capacityRechargeHours;
+    j["capacityRechargeFraction"]  = capacityRechargeFraction;
+    j["rankPerCommander"]          = rankPerCommander;
+    j["rankPerCommanderAuthority"] = rankPerCommanderAuthority;
+    j["rankPerPoiHeld"]            = rankPerPoiHeld;
+    j["rankPerArtifact"]           = rankPerArtifact;
+    j["rankPerMoney"]              = rankPerMoney;
+    j["rankPerResource"]           = rankPerResource;
+    j["rankPerUnit"]               = rankPerUnit;
+    j["poiIncomePerWorldDay"]      = poiIncomePerWorldDay;
+    j["treasuryDecayPerWorldDay"]  = treasuryDecayPerWorldDay;
+    j["treasuryFloor"]             = treasuryFloor;
+    j["stagingWindowDefaultWorldMs"]   = stagingWindowDefaultWorldMs;
+    j["stagingWindowPerTransitMs"]     = stagingWindowPerTransitMs;
+    j["stagingWindowMinWorldMs"]       = stagingWindowMinWorldMs;
+    j["stagingWindowMaxWorldMs"]       = stagingWindowMaxWorldMs;
+    j["stagingMaterialiseMaxAttempts"] = stagingMaterialiseMaxAttempts;
+    j["seasonLengthWorldMs"]           = seasonLengthWorldMs;
     return j;
 }
 
@@ -211,6 +242,16 @@ void WorldDirector::EnsureTables(sqlite3* db) {
         "  factions TEXT NOT NULL DEFAULT '',"
         "  recorded_at INTEGER NOT NULL DEFAULT 0"
         ")", nullptr, nullptr, nullptr);
+
+    // W7, additive: ownership of a POI by a world faction. ALTER, not a
+    // recreated table — the header's rule is that these rows are the only copy
+    // of the world, so a column arrives on top of the existing geography. The
+    // duplicate-column error on an already-migrated database is the expected
+    // result of running this every boot and is deliberately unchecked, exactly
+    // as WarPlayerBindings' own ADD COLUMN pass does it.
+    sqlite3_exec(db,
+        "ALTER TABLE world_pois ADD COLUMN owner_faction_id TEXT NOT NULL DEFAULT ''",
+        nullptr, nullptr, nullptr);
 
     sqlite3_exec(db,
         "CREATE INDEX IF NOT EXISTS idx_world_pause_open "
@@ -363,6 +404,38 @@ bool WorldDirector::UpsertPoi(sqlite3* db, const WorldPoiRecord& poi) {
     return committed && ok;
 }
 
+bool WorldDirector::SetPoiOwner(sqlite3* db, const std::string& worldId,
+                                const std::string& poiId,
+                                const std::string& ownerFactionId) {
+    if (!db || worldId.empty() || poiId.empty()) return false;
+    bool ok = true;
+    const bool committed = SqliteWriteTransaction(db, "WorldSetPoiOwner", [&] {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db,
+                "UPDATE world_pois SET owner_faction_id=? "
+                "WHERE world_id=? AND poi_id=?",
+                -1, &stmt, nullptr) != SQLITE_OK) {
+            ok = false;
+            return SQLITE_ERROR;
+        }
+        BindText(stmt, 1, ownerFactionId);
+        BindText(stmt, 2, worldId);
+        BindText(stmt, 3, poiId);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        if (!ok) return SQLITE_ERROR;
+        // No such POI → the caller asked to own a place that does not exist.
+        // Reported as false rather than silently succeeding: a claim on a
+        // missing POI is a bug in the claimer, not a no-op.
+        if (sqlite3_changes(db) == 0) {
+            ok = false;
+            return SQLITE_ABORT;
+        }
+        return SQLITE_OK;
+    });
+    return committed && ok;
+}
+
 std::vector<WorldPoiRecord> WorldDirector::PoisFor(sqlite3* db,
                                                    const std::string& worldId) {
     std::vector<WorldPoiRecord> out;
@@ -508,7 +581,7 @@ std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(
     std::vector<WorldSettlementRecord> out;
     if (!db || worldId.empty()) return out;
     static const char* kSql =
-        "SELECT world_id, poi_id, room_id, outcome, factions, recorded_at "
+        "SELECT world_id, poi_id, room_id, outcome, factions, recorded_at, rowid "
         "FROM world_settlement_ledger WHERE world_id=? "
         "ORDER BY recorded_at ASC, rowid ASC";
     sqlite3_stmt* stmt = nullptr;
@@ -523,6 +596,7 @@ std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(
         e.outcome     = ColText(stmt, 3);
         e.factions    = ColText(stmt, 4);
         e.recordedAt  = sqlite3_column_int64(stmt, 5);
+        e.settlementId = sqlite3_column_int64(stmt, 6);
         out.push_back(std::move(e));
     }
     sqlite3_finalize(stmt);
@@ -702,6 +776,10 @@ nlohmann::json WorldDirector::WorldPoisJson(sqlite3* db, const std::string& worl
         if (p.mapId.empty()) j["mapId"] = nullptr;
         else                 j["mapId"] = p.mapId;
         j["tags"]   = p.tags;
+        // W7: null, not "", for an unowned POI — the same "is there a thing
+        // here" branch `mapId` gets, for the same reason.
+        if (p.ownerFactionId.empty()) j["owner"] = nullptr;
+        else                          j["owner"] = p.ownerFactionId;
         j["config"] = p.config;
         pois.push_back(std::move(j));
     }

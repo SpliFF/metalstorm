@@ -60,8 +60,51 @@ export interface WorldPoi {
     /// The room a click-through joins, or null when `battleStatus` is
     /// "quiet". Read-only: W5 does not write anything back through it.
     warRoomId: number | null;
+    /// PLAN-worldsim.md W7: the world faction holding this place, or null for
+    /// unowned. An id, not a colour — the colour comes from `WorldGraph.
+    /// factions` so that a faction recolouring itself repaints every POI it
+    /// holds without the map having to reconcile two copies of the value.
+    owner: string | null;
+    /// PLAN-worldsim.md W10: the forces gathering against this place, newest
+    /// window last. Empty on a quiet POI and on a lobby built before W10 —
+    /// which is why `battleStatus` stays the thing the marker branches on: the
+    /// server has already upgraded it to "staging" for any POI with an entry
+    /// here, so a client that ignores this array still draws the right ring.
+    staging: WorldStagingEntry[];
     tags: string[];
     config: Record<string, unknown>;
+}
+
+/// One force gathering against a POI, as `GET /api/world/pois` carries it
+/// (WorldStaging::StagingJson, PLAN-worldsim.md W10). Only OPEN windows are
+/// ever sent — a materialised or cancelled row is history the map does not
+/// draw.
+export interface WorldStagingEntry {
+    stagingId: number;
+    /// The world faction that committed the force. An id; the name and colour
+    /// come from `WorldGraph.factions`, for the same reason `WorldPoi.owner`
+    /// is an id.
+    attackerFaction: string;
+    originPoiId: string | null;
+    transports: number;
+    squads: number;
+    /// WORLD milliseconds left before the window closes and this becomes a
+    /// battle. Served rather than computed from `endsAtWorldMs` locally: the
+    /// client ticks its own copy of the world clock between fetches, and two
+    /// clocks disagreeing about "3 hours left" is the one confusion a warning
+    /// mechanic cannot afford.
+    remainingWorldMs: number;
+    endsAtWorldMs: number;
+}
+
+/// One world faction's map identity, as `GET /api/world/pois` carries it
+/// (WorldFactions::AttachFactions). The full sheet — parameters, governance,
+/// roster — is `GET /api/world/factions`; this is only what the canvas needs.
+export interface WorldFactionBadge {
+    name: string;
+    colour: string;
+    archetype: string;
+    state: string;
 }
 
 /// One transit edge. `transitWorldMs` is WORLD milliseconds — the world clock
@@ -80,6 +123,10 @@ export interface WorldGraph {
     worldId: string;
     pois: WorldPoi[];
     edges: WorldEdge[];
+    /// id → badge, for every faction in this world. Empty on a world with no
+    /// factions yet, and on a lobby built before W7 — which is exactly why the
+    /// owner colour falls back rather than being required.
+    factions: Record<string, WorldFactionBadge>;
 }
 
 /// A point in map space.
@@ -216,6 +263,36 @@ export function wheelZoomFactor(deltaY: number): number {
 /// somewhere arbitrary on the canvas and be indistinguishable from a real
 /// place, which is worse than not drawing it; an edge whose endpoints are not
 /// both present has nothing to draw between.
+/// W10's `staging` array, defensively. A malformed entry is DROPPED rather
+/// than defaulted: a commitment drawn with the wrong force count is a lie
+/// about how big the incoming attack is, and the panel is better showing one
+/// fewer stack than a wrong one.
+function parseStagingEntries(raw: unknown): WorldStagingEntry[] {
+    if (!Array.isArray(raw)) return [];
+    const out: WorldStagingEntry[] = [];
+    for (const item of raw as Record<string, unknown>[]) {
+        if (!item || typeof item !== 'object') continue;
+        if (typeof item.attackerFaction !== 'string' || !item.attackerFaction) continue;
+        const id = Number(item.stagingId);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const remaining = Number(item.remainingWorldMs);
+        out.push({
+            stagingId: id,
+            attackerFaction: item.attackerFaction,
+            originPoiId: typeof item.originPoiId === 'string' && item.originPoiId
+                ? item.originPoiId : null,
+            transports: Number.isFinite(Number(item.transports)) ? Number(item.transports) : 0,
+            squads: Number.isFinite(Number(item.squads)) ? Number(item.squads) : 0,
+            // Never negative: an overdue window is materialising, i.e. zero
+            // left, and a negative countdown would render as a battle that
+            // started in the past and never happened.
+            remainingWorldMs: Number.isFinite(remaining) ? Math.max(0, remaining) : 0,
+            endsAtWorldMs: Number.isFinite(Number(item.endsAtWorldMs)) ? Number(item.endsAtWorldMs) : 0,
+        });
+    }
+    return out;
+}
+
 export function parseWorldGraph(json: unknown): WorldGraph | null {
     if (!json || typeof json !== 'object') return null;
     const raw = json as Record<string, unknown>;
@@ -240,6 +317,8 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
                 ? item.battleStatus : 'quiet',
             warRoomId: typeof item.warRoomId === 'number' && Number.isFinite(item.warRoomId)
                 ? item.warRoomId : null,
+            owner: typeof item.owner === 'string' && item.owner ? item.owner : null,
+            staging: parseStagingEntries(item.staging),
             tags: Array.isArray(item.tags) ? item.tags.filter(t => typeof t === 'string') as string[] : [],
             config: (item.config && typeof item.config === 'object')
                 ? item.config as Record<string, unknown> : {},
@@ -260,7 +339,28 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
                 ? item.config as Record<string, unknown> : {},
         });
     }
-    return { worldId: typeof raw.worldId === 'string' ? raw.worldId : '', pois, edges };
+    const factions: Record<string, WorldFactionBadge> = {};
+    if (raw.factions && typeof raw.factions === 'object' && !Array.isArray(raw.factions)) {
+        for (const [id, value] of Object.entries(raw.factions as Record<string, unknown>)) {
+            if (!value || typeof value !== 'object') continue;
+            const f = value as Record<string, unknown>;
+            // A colour that is not exactly #rrggbb is dropped rather than
+            // passed to fillStyle: the server validates it too, and a value
+            // that survived both is one the canvas can be handed safely.
+            const colour = typeof f.colour === 'string' && /^#[0-9a-fA-F]{6}$/.test(f.colour)
+                ? f.colour : '';
+            factions[id] = {
+                name: typeof f.name === 'string' && f.name ? f.name : id,
+                colour,
+                archetype: typeof f.archetype === 'string' ? f.archetype : '',
+                state: typeof f.state === 'string' ? f.state : 'active',
+            };
+        }
+    }
+    return {
+        worldId: typeof raw.worldId === 'string' ? raw.worldId : '',
+        pois, edges, factions,
+    };
 }
 
 /// The POI under the cursor, or null. Nearest-within-radius rather than
@@ -409,6 +509,10 @@ export const WORLD_COLORS = {
     poiStagingRing: 'rgba(255, 212, 121, 0.85)',
     poiActive: '#ff5c5c',
     poiActiveRing: 'rgba(255, 92, 92, 0.85)',
+    /// PLAN-worldsim.md W7: an owned POI whose faction sent no usable colour.
+    /// Distinct from `poi` so "held by somebody" still reads differently from
+    /// "unclaimed" when the colour is missing.
+    poiOwnedFallback: '#b39ddb',
     poiHover: '#ffffff',
     poiSelected: '#ffffff',
     poiLabel: 'rgba(233, 242, 250, 0.92)',
@@ -512,6 +616,18 @@ function drawEdges(ctx: WorldCtx, graph: WorldGraph, view: MapView): void {
     ctx.setLineDash([]);
 }
 
+/// The colour a POI should be painted in on behalf of its owner, or null when
+/// it is unowned. An owner id the `factions` map has never heard of (a faction
+/// dissolved between the two halves of one response, or a lobby that predates
+/// W7) still counts as OWNED — it falls back to a neutral held colour rather
+/// than rendering as unclaimed, because "somebody holds this" is the fact the
+/// player is reading and the id is proof of it.
+export function poiOwnerColour(poi: WorldPoi, graph: WorldGraph): string | null {
+    if (!poi.owner) return null;
+    const badge = graph.factions[poi.owner];
+    return badge?.colour || WORLD_COLORS.poiOwnedFallback;
+}
+
 function drawPois(
     ctx: WorldCtx, graph: WorldGraph, view: MapView,
     hoveredId: string | null, selectedId: string | null,
@@ -526,9 +642,14 @@ function drawPois(
         const r = selected ? 7 : hovered ? 6 : 4.5;
         // A POI that stages a battle map is a place you can be sent to; one
         // that does not is scenery with a name. Two colours, because that
-        // distinction is the first question a player asks of a marker.
+        // distinction is the first question a player asks of a marker — with
+        // the owning faction's colour taking precedence over both (W7), since
+        // "whose is this" outranks "can I fight here" the moment anyone holds
+        // it. A live battle still wins over the owner: a fight in progress is
+        // the more urgent fact, and it is the ring that carries the owner's
+        // colour in that case (below).
         ctx.fillStyle = poi.battleStatus === 'active' ? WORLD_COLORS.poiActive
-            : poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi;
+            : poiOwnerColour(poi, graph) ?? (poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi);
         ctx.beginPath();
         ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
         ctx.fill();
@@ -541,6 +662,17 @@ function drawPois(
             ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        // An owned POI that is currently a battlefield keeps its red fill and
+        // gets its owner's colour as an outer band, so the map never has to
+        // choose between "who holds it" and "is it on fire".
+        const ownerColour = poiOwnerColour(poi, graph);
+        if (ownerColour && poi.battleStatus === 'active') {
+            ctx.strokeStyle = ownerColour;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, r + 7, 0, Math.PI * 2);
             ctx.stroke();
         }
         if (selected || hovered) {
@@ -568,3 +700,141 @@ function drawPois(
 /// against the basemap's own width: 1400px per map unit ≈ a 2800px-wide world,
 /// i.e. the player has zoomed past "whole Earth" on any ordinary window.
 export const fitScaleLabelThreshold = 1400;
+
+// ─────────────── the player stat panel (PLAN-worldsim.md W8) ───────────────
+//
+// Authority is per COMMANDER, Capacity is per PLAYER and Rank is derived on
+// read from holdings — the locked design of
+// PLAN-metalstorm-worldbuilding.md Captures 23/24/27. The shapes below mirror
+// `WorldStats::AttachMeStats`'s body exactly, and the parse drops anything
+// unusable rather than throwing, for the same reason `parseWorldGraph` does: a
+// lobby built before W8 answers `/api/world/me` without any of these keys, and
+// that must render as "no stats yet" rather than as a broken panel.
+
+/// One commander a player holds, as the panel shows it. A world ROW, not a
+/// unit — the battle-side commander is a different thing entirely.
+export interface WorldCommander {
+    id: string;
+    name: string;
+    factionId: string;
+    poiId: string;
+    state: string;
+    /// Decayed to now by the server. The number everything reads.
+    authority: number;
+    /// What the row stores, before decay — shown beside the live value so a
+    /// player can SEE the decay rather than suspect the display.
+    authorityStored: number;
+    loaned: boolean;
+}
+
+/// The order budget (Capture 12's per-real-24h ceiling).
+export interface WorldCapacity {
+    max: number;
+    spent: number;
+    available: number;
+    /// Real ms until the next recharge — real, not world: the ceiling protects
+    /// the player's day, so a world pause does not move it.
+    nextRechargeInMs: number;
+    rechargeHours: number;
+}
+
+/// Rank: derived, per player per faction, and reported with its terms so the
+/// number can be audited by the player it weights the votes of.
+export interface WorldRank {
+    factionId: string | null;
+    total: number;
+    commanderCount: number;
+    poiCount: number;
+    loanedCount: number;
+    terms: Record<string, number>;
+}
+
+export interface WorldPlayerStats {
+    /// W7's world authority — the founding gate's number, and NOT a
+    /// commander's Authority. Two different stats with one name in the design;
+    /// the panel labels them apart.
+    worldAuthority: number;
+    commanders: WorldCommander[];
+    capacity: WorldCapacity | null;
+    rank: WorldRank | null;
+}
+
+/// Parse the W8 half of `POST /api/world/me`. Null when the body carries none
+/// of it (a pre-W8 lobby), which the panel renders as absent rather than empty.
+export function parseWorldPlayerStats(json: unknown): WorldPlayerStats | null {
+    if (!json || typeof json !== 'object') return null;
+    const raw = json as Record<string, unknown>;
+    const hasStats = Array.isArray(raw.commanders) || !!raw.capacity || !!raw.rank;
+    if (!hasStats) return null;
+    const commanders: WorldCommander[] = [];
+    for (const item of (Array.isArray(raw.commanders) ? raw.commanders : []) as Record<string, unknown>[]) {
+        if (!item || typeof item.commanderId !== 'string' || !item.commanderId) continue;
+        commanders.push({
+            id: item.commanderId,
+            name: typeof item.name === 'string' && item.name ? item.name : item.commanderId,
+            factionId: typeof item.factionId === 'string' ? item.factionId : '',
+            poiId: typeof item.poiId === 'string' ? item.poiId : '',
+            state: typeof item.state === 'string' ? item.state : 'active',
+            authority: num(item.authority),
+            authorityStored: num(item.authorityStored),
+            loaned: item.loaned === true,
+        });
+    }
+    let capacity: WorldCapacity | null = null;
+    if (raw.capacity && typeof raw.capacity === 'object') {
+        const c = raw.capacity as Record<string, unknown>;
+        capacity = {
+            max: num(c.max),
+            spent: num(c.spent),
+            available: num(c.available),
+            nextRechargeInMs: num(c.nextRechargeInMs),
+            rechargeHours: num(c.rechargeHours, 24),
+        };
+    }
+    let rank: WorldRank | null = null;
+    if (raw.rank && typeof raw.rank === 'object') {
+        const r = raw.rank as Record<string, unknown>;
+        const terms: Record<string, number> = {};
+        if (r.terms && typeof r.terms === 'object') {
+            for (const [k, v] of Object.entries(r.terms as Record<string, unknown>))
+                if (typeof v === 'number' && Number.isFinite(v)) terms[k] = v;
+        }
+        rank = {
+            factionId: typeof r.factionId === 'string' && r.factionId ? r.factionId : null,
+            total: num(r.total),
+            commanderCount: num(r.commanderCount),
+            poiCount: num(r.poiCount),
+            loanedCount: num(r.loanedCount),
+            terms,
+        };
+    }
+    return { worldAuthority: num(raw.authority), commanders, capacity, rank };
+}
+
+/// A number, or `fallback` — `Number(null)` is 0 and `Number(undefined)` is
+/// NaN, and neither is a stat worth displaying.
+function num(v: unknown, fallback = 0): number {
+    return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+/// A REAL duration, for the capacity countdown. Deliberately not
+/// `formatWorldDuration`: that one reads a world-clock interval, which runs 24×
+/// faster, and formatting a real 4-hour wait with it would tell the player to
+/// come back in "4 days".
+export function formatRealDuration(ms: number): string {
+    if (!Number.isFinite(ms) || ms <= 0) return 'now';
+    const totalMin = Math.ceil(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    return `${m}m`;
+}
+
+/// Stats are display numbers, not currency: one decimal on anything small
+/// enough for it to matter and none above 100, so an Authority of 12.4 reads
+/// as 12.4 and a rank of 1284.3 reads as 1284.
+export function formatStat(value: number): string {
+    if (!Number.isFinite(value)) return '—';
+    if (Math.abs(value) >= 100) return Math.round(value).toString();
+    return (Math.round(value * 10) / 10).toString();
+}

@@ -468,6 +468,39 @@ set(LOBBY_SERVER_SOURCES
     # arithmetic that turns it into POI + edge rows. Lobby-only for the same
     # reason WorldDirector.cpp is — it only ever calls through WorldDirector.
     rts/Server/WorldMapSeeder.cpp
+    # PLAN-worldsim.md W7: world-scoped player factions, membership and the
+    # world authority that gates founding one. Lobby-only, same reason again —
+    # a faction is a thing in a world, and the battle layer only ever learns
+    # about it through a side key (see WorldFactions.h's seam note).
+    rts/Server/WorldFactions.cpp
+    # PLAN-worldsim.md W8: the stat family — per-commander Authority, per-player
+    # Capacity and Rank derived on read. Lobby-only for the third time and the
+    # same reason: a commander here is a world ROW, and the only battle-shaped
+    # input it has is the W6 settlement ledger, which is itself world-scoped.
+    rts/Server/WorldStats.cpp
+    # PLAN-worldsim.md W9: the economic tick — per-POI/per-faction income and
+    # treasury decay, ledgered and priced against the world clock. Lobby-only,
+    # same reason again: the tick reads world_pois/world_factions and writes
+    # only world-scoped rows, never a war table.
+    rts/Server/WorldEconomy.cpp
+    # PLAN-worldsim.md W10: battle staging — the world-layer object a
+    # commitment opens and the sweep materialises into a war. Lobby-only for
+    # the same reason as the rest: a staging row is world-scoped and the war
+    # it becomes is created by the EXISTING lobby machinery at the call site.
+    rts/Server/WorldStaging.cpp
+    # PLAN-worldsim.md W11: staging alerts — the notification vocabulary, the
+    # recipient computation (attacker/defender faction members ∪ commanders
+    # garrisoned at the POI) and the in-process pub/sub seam a later
+    # Discord/web-push milestone subscribes a second sink to. Lobby-only,
+    # same reason as the rest: it reads world_factions/world_commanders and
+    # sends nothing itself.
+    rts/Server/WorldNotifications.cpp
+    # PLAN-worldsim.md W12: seasons — per-world season rows advancing on the
+    # world clock, rollover archiving the settlement/economy ledgers into a
+    # digest. Lobby-only, same reason as the rest: it reads
+    # world_settlement_ledger/world_economy_events and writes only
+    # world-scoped rows.
+    rts/Server/WorldSeasons.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -637,6 +670,30 @@ if(TEST_SOURCES)
         # PLAN-worldsim.md W3: the seeder built on top of it —
         # test_world_map_seeder.cpp drives the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldMapSeeder.cpp
+        # PLAN-worldsim.md W7: the faction store + the founding gate —
+        # test_world_factions.cpp drives the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldFactions.cpp
+        # PLAN-worldsim.md W8: the Authority/Capacity/Rank ledgers —
+        # test_world_stats.cpp drives the pure rules with no db at all and the
+        # store against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldStats.cpp
+        # PLAN-worldsim.md W9: the economic tick — test_world_economy.cpp
+        # drives the pure pricing functions with no db and the store/Tick
+        # against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldEconomy.cpp
+        # PLAN-worldsim.md W10: battle staging — test_world_staging.cpp drives
+        # the pure instigation rule and window sizing with no db at all, and
+        # the store/sweep against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldStaging.cpp
+        # PLAN-worldsim.md W11: staging alerts — test_world_notifications.cpp
+        # drives the headline/JSON shape, the recipient union and the bus
+        # against the same in-memory-db pattern (WorldFactions/WorldStats
+        # tables, no lobby, no sim).
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldNotifications.cpp
+        # PLAN-worldsim.md W12: seasons — test_world_seasons.cpp drives the
+        # store/Tick against the same in-memory-db pattern, reading
+        # WorldDirector's settlement ledger and WorldEconomy's events.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldSeasons.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

@@ -1095,6 +1095,43 @@ button.link-button:hover { background: none; color: #7fdcff; }
 }
 .war-notice-dismiss:hover { color: #e6e8ec; }
 
+/* PLAN-worldsim.md W11: the staging toast. Same card as .war-notice (right
+   side rather than left, so the two can be up at once without overlapping —
+   a war coming back and a staging window opening are unrelated news). */
+.staging-notice {
+    position: fixed;
+    right: 1.5rem;
+    bottom: 1.5rem;
+    z-index: 140;
+    max-width: 22rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: #161a22;
+    border: 1px solid #2a3140;
+    border-left-width: 3px;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    color: #e6e8ec;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+}
+.staging-notice-good { border-left-color: #7fd4a8; }
+.staging-notice-wait { border-left-color: #e0c67a; }
+.staging-notice-bad  { border-left-color: #d9a06a; }
+.staging-notice-detail { color: #b4bccb; font-size: 12px; line-height: 1.35; }
+.staging-notice-dismiss {
+    align-self: flex-end;
+    background: none;
+    border: 0;
+    color: #7a8496;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+.staging-notice-dismiss:hover { color: #e6e8ec; }
+
 /* ---- World screen (PLAN-worldsim.md W2) ----
    An overlay, not a panel in the flow: a strategic map is only readable at
    size, and the browser screen's column would give it about 300px of height.
@@ -1173,15 +1210,88 @@ button.link-button:hover { background: none; color: #7fdcff; }
     color: #9fb3c8;
     font-size: 13px;
 }
-.world-detail {
+/* The right column. The width, the border and the scroll live here rather
+   than on `.world-detail` so that W8's stat panel and the POI detail share one
+   column and one scrollbar instead of fighting for the edge. */
+.world-side {
     width: 280px;
     flex: none;
-    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     border-left: 1px solid #22314a;
     background: #0f1626;
     overflow-y: auto;
+}
+.world-detail {
+    padding: 14px 16px;
     font-size: 13px;
 }
+/* PLAN-worldsim.md W8: the player's own stats — per-commander Authority, the
+   per-player Capacity budget, the derived Rank. Visually a card at the top of
+   the column so it does not read as part of whichever POI is selected. */
+.world-player {
+    padding: 12px 16px;
+    border-bottom: 1px solid #22314a;
+    background: #121b2e;
+    font-size: 13px;
+}
+.world-player h4 { margin: 0 0 8px; font-size: 14px; color: #8ad2ff; }
+.world-player-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.world-player-label { color: #9fb3c8; }
+.world-player-value { margin-left: auto; color: #ffd479; font-variant-numeric: tabular-nums; }
+.world-player-sub { color: #6f8299; font-size: 12px; margin-bottom: 8px; }
+/* The capacity budget as a bar: a budget is a proportion, and a number alone
+   makes the player do the division. */
+.world-capacity-bar {
+    position: relative;
+    height: 6px;
+    border-radius: 3px;
+    background: #22314a;
+    overflow: hidden;
+    margin: 2px 0 6px;
+}
+.world-capacity-fill { position: absolute; inset: 0 auto 0 0; background: #4a9eff; }
+.world-commanders { list-style: none; margin: 4px 0 0; padding: 0; }
+.world-commanders li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 0;
+    border-top: 1px solid #1b2942;
+}
+.world-commander-authority { margin-left: auto; color: #ffd479; font-variant-numeric: tabular-nums; }
+.world-commander-where { color: #6f8299; font-size: 12px; }
+.world-commander-loaned { color: #ffcf70; font-size: 11px; text-transform: uppercase; }
+
+/* PLAN-worldsim.md W11: staging alerts, the standing list. Same card shape as
+   .world-player (it sits directly below it in the column) but its rows carry
+   the war-notice colour split (good/wait/bad) rather than a stat — an alert
+   is news, not a number. */
+.world-notifications {
+    padding: 12px 16px;
+    border-bottom: 1px solid #22314a;
+    background: #121b2e;
+    font-size: 12px;
+}
+.world-notifications h4 { margin: 0 0 8px; font-size: 14px; color: #8ad2ff; }
+.world-notice-list { list-style: none; margin: 0; padding: 0; }
+.world-notice-row {
+    padding: 6px 0 6px 8px;
+    border-top: 1px solid #1b2942;
+    border-left: 2px solid transparent;
+    color: #b4bccb;
+    line-height: 1.35;
+}
+.world-notice-row:first-child { border-top: none; }
+.world-notice-good { border-left-color: #7fd4a8; }
+.world-notice-wait { border-left-color: #e0c67a; }
+.world-notice-bad  { border-left-color: #d9a06a; }
 .world-detail h4 { margin: 0 0 4px; font-size: 15px; color: #ffd479; }
 .world-detail-sub { color: #9fb3c8; margin-bottom: 10px; }
 .world-detail-empty { color: #6f8299; }
@@ -1193,6 +1303,24 @@ button.link-button:hover { background: none; color: #7fdcff; }
    world-map.ts's WORLD_COLORS.poiStaging / poiActive. */
 .world-detail-map-staging { color: #ffd479; }
 .world-detail-map-active { color: #ff5c5c; }
+/* PLAN-worldsim.md W7: POI ownership. The swatch's colour is per-faction
+   data and arrives as an inline style; everything else about it is here, so a
+   faction cannot change anything but its own colour. */
+.world-detail-owner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    color: #c8d6e5;
+}
+.world-faction-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    flex: none;
+}
 #world-join-war-btn {
     display: block;
     margin-top: 8px;
@@ -1211,6 +1339,78 @@ button.link-button:hover { background: none; color: #7fdcff; }
     background: #17233a;
     border-radius: 10px;
     color: #9fb3c8;
+    font-size: 11px;
+}
+/* PLAN-worldsim.md W10: the forces gathering against a POI, and the
+   commitment form. The staging colour is deliberately the same #ffd479 the
+   W5 marker uses and world-map.ts paints the staging ring with — one fact
+   ("a force is inbound here") must not have two colours across the map, the
+   marker legend and the panel. */
+.world-staging { list-style: none; margin: 0 0 4px; padding: 0; }
+.world-staging-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 0;
+    border-bottom: 1px solid #1a2439;
+    color: #c8d6e5;
+}
+/* Your own commitment reads as yours before it reads as a countdown. */
+.world-staging-own { color: #ffd479; }
+.world-staging-who { font-weight: 600; }
+.world-staging-force { color: #6f8299; font-size: 11px; }
+.world-staging-eta { margin-left: auto; color: #ffd479; }
+.world-staging-cancel {
+    padding: 2px 8px;
+    background: #2a1d1d;
+    border: 1px solid #5c3a3a;
+    border-radius: 5px;
+    color: #ffb3b3;
+    font-size: 11px;
+    cursor: pointer;
+}
+.world-staging-cancel:hover { background: #3a2626; }
+.world-staging-form {
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.world-staging-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    color: #9fb3c8;
+    font-size: 11px;
+}
+.world-staging-form input {
+    width: 62px;
+    padding: 4px 6px;
+    background: #101a2c;
+    border: 1px solid #2a3a58;
+    border-radius: 5px;
+    color: #e9f2fa;
+    font-size: 12px;
+}
+#world-commit-btn {
+    padding: 6px 12px;
+    background: #1d2b45;
+    border: 1px solid #3a4d70;
+    border-radius: 6px;
+    color: #e9f2fa;
+    font-size: 12px;
+    cursor: pointer;
+}
+#world-commit-btn:hover:not(:disabled) { background: #26385a; }
+#world-commit-btn:disabled { opacity: 0.5; cursor: default; }
+.world-staging-hint { margin-top: 6px; font-size: 11px; }
+.world-staging-error {
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: #2a1616;
+    border: 1px solid #5c2a2a;
+    border-radius: 5px;
+    color: #ffb3b3;
     font-size: 11px;
 }
 .world-links { list-style: none; margin: 0; padding: 0; }

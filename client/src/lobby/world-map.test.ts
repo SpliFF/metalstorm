@@ -15,7 +15,8 @@ import {
     fitScale, fitView, clampView, panView, zoomView, wheelZoomFactor,
     parseWorldGraph, hitTestPoi, edgesFor, formatWorldDuration, formatLatLon,
     parseWorldClock, tickWorldClock, formatWorldClock, worldCalendarFromMs,
-    drawWorld, WORLD_COLORS,
+    drawWorld, WORLD_COLORS, poiOwnerColour,
+    parseWorldPlayerStats, formatRealDuration, formatStat,
     type MapView, type Viewport, type WorldPoi, type WorldCtx,
 } from './world-map';
 
@@ -387,5 +388,173 @@ describe('drawWorld', () => {
         // A leaked dash would put dots through every subsequent stroke in the
         // lobby's canvas, not just this map's.
         expect(dashes[dashes.length - 1]).toBe('[]');
+    });
+});
+
+// ─────────────────────── PLAN-worldsim.md W7 ───────────────────────────────
+
+const OWNED_JSON = {
+    worldId: 'earth',
+    pois: [
+        { id: 'a', name: 'Randtown', lat: 48.86, lon: 2.35, kind: 'settlement', mapId: 'meridian_basin', owner: 'third-armoured', tags: [], config: {} },
+        { id: 'b', name: 'Skerry', lat: -33.87, lon: 151.21, kind: 'outpost', mapId: null, owner: null, tags: [], config: {} },
+        // Held by a faction the `factions` map has never heard of — a faction
+        // dissolved between the two halves of one response.
+        { id: 'c', name: 'Ashfall', lat: 10, lon: 10, kind: 'ruin', mapId: null, owner: 'ghosts', tags: [], config: {} },
+        // Held AND on fire: the two facts must both survive.
+        { id: 'd', name: 'Skerry Reach', lat: -10, lon: -10, kind: 'settlement', mapId: 'skerry_reach', owner: 'third-armoured', battleStatus: 'active', warRoomId: 7, tags: [], config: {} },
+    ],
+    edges: [],
+    factions: {
+        'third-armoured': { name: 'Third Armoured', colour: '#5b9bd5', archetype: 'order', state: 'active' },
+        'house-verendi': { name: 'House Verendi', colour: 'red; background:url(x)', archetype: 'dynasty', state: 'active' },
+    },
+};
+
+describe('W7: faction ownership', () => {
+    it('parses owners and the faction badge map', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        expect(g.pois.find(p => p.id === 'a')!.owner).toBe('third-armoured');
+        expect(g.pois.find(p => p.id === 'b')!.owner).toBeNull();
+        expect(g.factions['third-armoured'].name).toBe('Third Armoured');
+        expect(g.factions['third-armoured'].colour).toBe('#5b9bd5');
+    });
+
+    it('drops a colour that is not exactly #rrggbb rather than handing it to fillStyle', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        expect(g.factions['house-verendi'].colour).toBe('');
+    });
+
+    it('answers an empty faction map for a lobby built before W7', () => {
+        const g = parseWorldGraph(POIS_JSON)!;
+        expect(g.factions).toEqual({});
+        expect(g.pois[0].owner).toBeNull();
+    });
+
+    it('falls back to a held colour for an owner it has no badge for', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const byId = (id: string) => g.pois.find(p => p.id === id)!;
+        expect(poiOwnerColour(byId('a'), g)).toBe('#5b9bd5');
+        // Unowned is null — the caller falls back to playable/world-only.
+        expect(poiOwnerColour(byId('b'), g)).toBeNull();
+        // Owned by an unknown faction is still OWNED: the id is proof.
+        expect(poiOwnerColour(byId('c'), g)).toBe(WORLD_COLORS.poiOwnedFallback);
+    });
+
+    it("paints an owned POI in its owner's colour, over the playable colour", () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const r = recordingCtx();
+        drawWorld(r.ctx, { graph: g, view: fitView(VIEWPORT), viewport: VIEWPORT, basemap: null });
+        const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
+        expect(fills).toContain('#5b9bd5');
+        expect(fills).toContain(WORLD_COLORS.poiOwnedFallback);
+        // 'a' is playable AND owned, and no other POI here is playable-and-
+        // unowned, so the playable colour must be gone entirely.
+        expect(fills).not.toContain(WORLD_COLORS.poiPlayable);
+        // 'b' is unowned and world-only.
+        expect(fills).toContain(WORLD_COLORS.poi);
+    });
+
+    it('keeps a battle red and gives the owner an outer band', () => {
+        const g = parseWorldGraph(OWNED_JSON)!;
+        const r = recordingCtx();
+        drawWorld(r.ctx, { graph: g, view: fitView(VIEWPORT), viewport: VIEWPORT, basemap: null });
+        const fills = r.calls.filter(c => c.op === 'arc').map(c => c.fill);
+        expect(fills).toContain(WORLD_COLORS.poiActive);
+        const strokes = r.calls.filter(c => c.op === 'stroke').map(c => c.stroke);
+        expect(strokes).toContain(WORLD_COLORS.poiActiveRing);
+        expect(strokes).toContain('#5b9bd5');
+    });
+});
+
+// ───────────── the player stat panel (PLAN-worldsim.md W8) ─────────────
+
+const ME_JSON = {
+    worldId: 'earth',
+    accountId: 7,
+    authority: 50,
+    canFound: false,
+    membership: { factionId: 'iron-order', role: 'founder', rank: 0 },
+    commanders: [
+        {
+            commanderId: 'vex-1', name: 'Vex', factionId: 'iron-order', poiId: 'paris',
+            state: 'active', authority: 12.5, authorityStored: 14, loaned: false,
+        },
+        {
+            commanderId: 'vex-2', name: 'Rell', factionId: 'iron-order', poiId: '',
+            state: 'active', authority: 3, authorityStored: 3, loaned: true, loanedTo: 9,
+        },
+    ],
+    capacity: { max: 40, spent: 10, available: 30, rechargedAt: 1000, nextRechargeInMs: 3_600_000, rechargeHours: 24 },
+    rank: {
+        factionId: 'iron-order', total: 47.5, commanderCount: 1, poiCount: 1, loanedCount: 1,
+        terms: { commanders: 10, commanderAuthority: 12.5, regions: 25, money: 0 },
+    },
+};
+
+describe('parsing the W8 player stats off POST /api/world/me', () => {
+    it('reads the three stats and keeps them apart', () => {
+        const s = parseWorldPlayerStats(ME_JSON)!;
+        // World authority (W7's founding-gate number) is NOT a commander's
+        // Authority — Capture 23 makes them separate stats and the panel must
+        // not merge them.
+        expect(s.worldAuthority).toBe(50);
+        expect(s.commanders.map(c => c.authority)).toEqual([12.5, 3]);
+        expect(s.capacity!.available).toBe(30);
+        expect(s.rank!.total).toBe(47.5);
+        expect(s.rank!.factionId).toBe('iron-order');
+    });
+
+    it('carries the loan flag and the decayed/stored pair', () => {
+        const s = parseWorldPlayerStats(ME_JSON)!;
+        expect(s.commanders[1].loaned).toBe(true);
+        // C27's exclusion is the server's to apply; the client only has to be
+        // able to SAY why the rank does not count it.
+        expect(s.rank!.loanedCount).toBe(1);
+        expect(s.commanders[0].authorityStored).toBe(14);
+    });
+
+    it('is null on a body that has no stats at all', () => {
+        // A lobby built before W8 answers /api/world/me without any of it. The
+        // panel must read that as absent, not as a player with zero of
+        // everything.
+        expect(parseWorldPlayerStats({ worldId: 'earth', authority: 50 })).toBeNull();
+        expect(parseWorldPlayerStats(null)).toBeNull();
+    });
+
+    it('drops unusable numbers rather than rendering NaN', () => {
+        const s = parseWorldPlayerStats({
+            authority: null,
+            commanders: [{ commanderId: 'a', authority: 'lots' }, { name: 'no id' }],
+            capacity: { max: 'wide', available: 5 },
+            rank: { total: undefined, terms: { good: 3, bad: 'no' } },
+        })!;
+        expect(s.worldAuthority).toBe(0);
+        expect(s.commanders.map(c => c.id)).toEqual(['a']);
+        expect(s.commanders[0].authority).toBe(0);
+        expect(s.capacity!.max).toBe(0);
+        expect(s.capacity!.rechargeHours).toBe(24);   // a stat with a real default
+        expect(s.rank!.total).toBe(0);
+        expect(s.rank!.terms).toEqual({ good: 3 });
+    });
+});
+
+describe('stat formatting', () => {
+    it('formats a REAL wait, not a world-clock one', () => {
+        // The capacity recharge is real hours (Capture 12 protects the
+        // player's day), so formatting it with the world-duration formatter
+        // would promise "4 days" for a four-hour wait.
+        expect(formatRealDuration(4 * 3_600_000)).toBe('4h');
+        expect(formatRealDuration(90 * 60_000)).toBe('1h 30m');
+        expect(formatRealDuration(0)).toBe('now');
+        expect(formatRealDuration(-5)).toBe('now');
+        expect(formatWorldDuration(4 * 3_600_000)).toBe('4h');
+    });
+
+    it('shows a decimal where it matters and none where it does not', () => {
+        expect(formatStat(12.44)).toBe('12.4');
+        expect(formatStat(1284.3)).toBe('1284');
+        expect(formatStat(0)).toBe('0');
+        expect(formatStat(NaN)).toBe('—');
     });
 });
