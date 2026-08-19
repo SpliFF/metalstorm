@@ -53,6 +53,7 @@ local mapinfo = {
     },
 
     resources = {
+        groundtex = "ground.png",   -- DEVIATION: map-space ground albedo (PLAN-maps §2n)
         splatdistrtex = "splat_distr.png",
         splatdetailtex = "splat_detail.png",
     },
