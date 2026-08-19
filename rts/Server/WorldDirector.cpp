@@ -149,6 +149,7 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["stagingWindowMinWorldMs"]       = stagingWindowMinWorldMs;
     j["stagingWindowMaxWorldMs"]       = stagingWindowMaxWorldMs;
     j["stagingMaterialiseMaxAttempts"] = stagingMaterialiseMaxAttempts;
+    j["seasonLengthWorldMs"]           = seasonLengthWorldMs;
     return j;
 }
 

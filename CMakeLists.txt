@@ -495,6 +495,12 @@ set(LOBBY_SERVER_SOURCES
     # same reason as the rest: it reads world_factions/world_commanders and
     # sends nothing itself.
     rts/Server/WorldNotifications.cpp
+    # PLAN-worldsim.md W12: seasons — per-world season rows advancing on the
+    # world clock, rollover archiving the settlement/economy ledgers into a
+    # digest. Lobby-only, same reason as the rest: it reads
+    # world_settlement_ledger/world_economy_events and writes only
+    # world-scoped rows.
+    rts/Server/WorldSeasons.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -684,6 +690,10 @@ if(TEST_SOURCES)
         # against the same in-memory-db pattern (WorldFactions/WorldStats
         # tables, no lobby, no sim).
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldNotifications.cpp
+        # PLAN-worldsim.md W12: seasons — test_world_seasons.cpp drives the
+        # store/Tick against the same in-memory-db pattern, reading
+        # WorldDirector's settlement ledger and WorldEconomy's events.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldSeasons.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

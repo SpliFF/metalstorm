@@ -157,6 +157,11 @@ struct WorldDefaults {
     double stagingWindowMaxWorldMs       = 72.0 * 3600.0 * 1000.0;
     int    stagingMaterialiseMaxAttempts = 5;
 
+    // ── W12: seasons (mirrored by WorldSeasonRules) ─────────────────────────
+    /// How long a season runs, in WORLD ms. A narrative/archival unit, not a
+    /// balance lever — see WorldSeasons.h.
+    double seasonLengthWorldMs = 14.0 * 24.0 * 3600.0 * 1000.0;
+
     nlohmann::json ToJson() const;
 };
 

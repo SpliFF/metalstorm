@@ -28,6 +28,7 @@
 #include "Server/WorldNotifications.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
+#include "Server/WorldSeasons.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1247,6 +1248,13 @@ int main(int argc, char *argv[]) {
   // becomes is created by the machinery further down this file, and the
   // `room_id` this table keeps is a LABEL, exactly as W6's ledger keeps one.
   WorldStaging::EnsureTables(mapDb);
+  // PLAN-worldsim.md W12: `world_seasons` / `world_season_digests` — per-world
+  // season rows and their archived digests. After WorldDirector's/WorldStats'/
+  // WorldEconomy's for the same reason as the rest: a rollover reads
+  // `world_settlement_ledger` (WorldDirector) and `world_economy_events`
+  // (WorldEconomy, ensured by WorldStats::EnsureTables above) — it needs both
+  // to already exist, though it writes only its own two tables.
+  WorldSeasons::EnsureTables(mapDb);
   // Seed Earth on first boot, so a fresh lobby has a world to serve rather
   // than a 404 the client has to special-case. Idempotent, and guarded on "no
   // world exists at all": a lobby that already has a world never gets a second
@@ -4665,9 +4673,22 @@ int main(int argc, char *argv[]) {
                    if (worldId.empty())
                      return HttpAuth::JsonResponse(
                          404, R"({"error":"no_world"})");
-                   const nlohmann::json body = WorldDirector::WorldStatusJson(
+                   nlohmann::json body = WorldDirector::WorldStatusJson(
                        mapDb, worldId, WorldNowRealMs());
                    const int status = body.contains("error") ? 404 : 200;
+                   if (status == 200) {
+                     // PLAN-worldsim.md W12: fold the active season onto the
+                     // clock/meta body — the `AttachFactions`/
+                     // `AttachBattleStatus` idiom. Read-only: never calls
+                     // `Tick`, so reading this route can never itself cause a
+                     // rollover (the lobby loop's sweep is the only writer).
+                     const auto w = WorldDirector::Load(mapDb, worldId);
+                     const auto rules =
+                         WorldSeasonRules::FromWorldConfig(w ? w->config : nlohmann::json::object());
+                     const int64_t worldMs = body["clock"]["worldMs"].get<int64_t>();
+                     body = WorldSeasons::AttachSeasonStatus(std::move(body), mapDb, worldId,
+                                                              rules, worldMs);
+                   }
                    return HttpAuth::JsonResponse(status, body.dump());
                  });
 
@@ -8375,6 +8396,12 @@ int main(int argc, char *argv[]) {
   // 10 s against a window measured in world hours is well inside the noise of
   // the warning itself.
   int worldStagingTick = 0;
+  // PLAN-worldsim.md W12: the season-rollover sweep's driver — ~every 60 s at
+  // 10 Hz. Slower than the staging sweep and for the same reason the economic
+  // tick's cadence is: a season boundary is priced by comparing world-ms
+  // against a length measured in world DAYS, so a slow cadence here costs
+  // freshness (the rollover fires a little late), never correctness.
+  int worldSeasonTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -8601,6 +8628,41 @@ int main(int argc, char *argv[]) {
               gWorldNotifications.Publish(ev);
             }
           }
+        }
+      }
+    }
+
+    // PLAN-worldsim.md W12: roll every world's season forward (~every 60 s at
+    // 10 Hz — see the counter's declaration). `Tick` is idempotent (a call
+    // before the active season's length has elapsed does nothing) and a
+    // paused world's `worldMs` has not moved since the last call, so a
+    // rollover never fires while the world is paused — the pause ledger
+    // stops the season clock for free, the same trick W9/W10 rely on.
+    if (++worldSeasonTick >= 600) {
+      worldSeasonTick = 0;
+      const int64_t nowReal = WorldNowRealMs();
+      for (const auto& w : WorldDirector::ListWorlds(mapDb)) {
+        const auto reading = WorldDirector::ClockFor(mapDb, w.worldId, nowReal);
+        if (!reading) continue;
+        const auto rules = WorldSeasonRules::FromWorldConfig(w.config);
+        const auto result =
+            WorldSeasons::Tick(mapDb, w.worldId, rules, reading->worldMs, nowReal);
+        if (result.rolledOver) {
+          const std::string headline =
+              WorldSeasonHeadline(result.endedSeasonNumber, result.newSeasonNumber);
+          SLOG(SPRING_LOG_NOTICE, "world '%s': season %d -> %d — %s",
+               w.worldId.c_str(), result.endedSeasonNumber, result.newSeasonNumber,
+               headline.c_str());
+          // Broadcast, not per-account: a season boundary is every player's
+          // business, the same reasoning `broadcastRooms`' "war-state" event
+          // uses for a world-wide transition with no per-connection identity
+          // to restrict against.
+          nlohmann::json ev;
+          ev["worldId"]     = w.worldId;
+          ev["endedSeason"] = result.endedSeasonNumber;
+          ev["newSeason"]   = result.newSeasonNumber;
+          ev["headline"]    = headline;
+          net.SendSSE(roomStreamChannel, ev.dump(), "world-season");
         }
       }
     }
