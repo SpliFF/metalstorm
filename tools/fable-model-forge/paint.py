@@ -16,6 +16,19 @@ import layout as L
 
 RNG = np.random.default_rng(90210)
 FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf'
+FONT_FALLBACKS = (FONT,
+                  '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+                  '/System/Library/Fonts/Supplemental/Courier New Bold.ttf')
+
+
+def font(size):
+    """Bold truetype with fallbacks — FONT is a Linux path, absent on macOS."""
+    for path in FONT_FALLBACKS:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 # ── palette (sRGB) ───────────────────────────────────────────────────────
 ARMOR      = (97, 106, 115)      # mid blue-grey armor
@@ -136,7 +149,7 @@ def wear_edges(m: Maps, box, base, density=40):
 
 
 def stencil(m: Maps, xy, text, size, color, bridge=True, angle=0):
-    f = ImageFont.truetype(FONT, size)
+    f = font(size)
     tmp = Image.new('L', (size * len(text), int(size * 1.4)), 0)
     td = ImageDraw.Draw(tmp)
     td.text((2, 2), text, font=f, fill=255)

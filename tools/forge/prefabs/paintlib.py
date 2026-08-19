@@ -64,15 +64,8 @@ def nbox(x0, y0, x1, y1):
 
 
 def font(size):
-    """Bold truetype with macOS fallbacks (paint.FONT is a Linux path)."""
-    for path in (P.FONT,
-                 '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
-                 '/System/Library/Fonts/Supplemental/Courier New Bold.ttf'):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+    """Bold truetype with macOS fallbacks — now just paint.font (one source)."""
+    return P.font(size)
 
 
 # ------------------------------------------------------------- stamps
