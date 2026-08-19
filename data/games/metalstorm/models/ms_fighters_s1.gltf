@@ -1,0 +1,641 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_fighters_s1",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "gear_n",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    0.62,
+    -1.7
+   ]
+  },
+  {
+   "name": "gear_l",
+   "mesh": 2,
+   "translation": [
+    0.55,
+    0.72,
+    0.55
+   ]
+  },
+  {
+   "name": "gear_r",
+   "mesh": 3,
+   "translation": [
+    -0.55,
+    0.72,
+    0.55
+   ]
+  },
+  {
+   "name": "muzzle",
+   "translation": [
+    0.0,
+    0.63,
+    -3.3
+   ]
+  },
+  {
+   "name": "exhaust",
+   "translation": [
+    0.0,
+    0.9,
+    2.26
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 12,
+      "NORMAL": 13,
+      "TEXCOORD_0": 14
+     },
+     "indices": 15,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 638,
+   "type": "VEC3",
+   "min": [
+    -3.0,
+    0.550000011920929,
+    -3.4000000953674316
+   ],
+   "max": [
+    3.0,
+    1.600000023841858,
+    2.2200000286102295
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 638,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 638,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 960,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3",
+   "min": [
+    -0.05000000074505806,
+    -0.6199038028717041,
+    -0.15000000596046448
+   ],
+   "max": [
+    0.05000000074505806,
+    0.0019445102661848068,
+    0.15000000596046448
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 84,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3",
+   "min": [
+    -0.05999999865889549,
+    -0.719903826713562,
+    -0.15000000596046448
+   ],
+   "max": [
+    0.05999999865889549,
+    0.0016158686485141516,
+    0.15000000596046448
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 84,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3",
+   "min": [
+    -0.05999999865889549,
+    -0.719903826713562,
+    -0.15000000596046448
+   ],
+   "max": [
+    0.05999999865889549,
+    0.0016158686485141516,
+    0.15000000596046448
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 14,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 52,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 15,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 84,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 7656,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 7656,
+   "byteLength": 7656,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 15312,
+   "byteLength": 5104,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 20416,
+   "byteLength": 3840,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 24256,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 24880,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 25504,
+   "byteLength": 416,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 25920,
+   "byteLength": 336,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 26256,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 26880,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27504,
+   "byteLength": 416,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27920,
+   "byteLength": 336,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 28256,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 28880,
+   "byteLength": 624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 29504,
+   "byteLength": 416,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 29920,
+   "byteLength": 336,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 30256,
+   "uri": "ms_fighters_s1.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_fighters_s1_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_fighters_s1_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_fighters_s1_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_fighters_s1_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_fighters_s1_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_fighters_s1",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 1.6,
+   "midpos": [
+    0.0,
+    0.8,
+    -0.59
+   ],
+   "mins": [
+    -3.0,
+    0.0001,
+    -3.4
+   ],
+   "maxs": [
+    3.0,
+    1.6,
+    2.22
+   ],
+   "radius": 4.1876,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -3.0,
+      0.55,
+      -3.4
+     ],
+     "maxs": [
+      3.0,
+      1.6,
+      2.22
+     ]
+    },
+    {
+     "name": "gear_n",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.62,
+      -1.7
+     ],
+     "mins": [
+      -0.05,
+      -0.6199,
+      -0.15
+     ],
+     "maxs": [
+      0.05,
+      0.00194,
+      0.15
+     ]
+    },
+    {
+     "name": "gear_l",
+     "parent": 0,
+     "offset": [
+      0.55,
+      0.72,
+      0.55
+     ],
+     "mins": [
+      -0.06,
+      -0.7199,
+      -0.15
+     ],
+     "maxs": [
+      0.06,
+      0.00162,
+      0.15
+     ]
+    },
+    {
+     "name": "gear_r",
+     "parent": 0,
+     "offset": [
+      -0.55,
+      0.72,
+      0.55
+     ],
+     "mins": [
+      -0.06,
+      -0.7199,
+      -0.15
+     ],
+     "maxs": [
+      0.06,
+      0.00162,
+      0.15
+     ]
+    },
+    {
+     "name": "muzzle",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.63,
+      -3.3
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "exhaust",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.9,
+      2.26
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
