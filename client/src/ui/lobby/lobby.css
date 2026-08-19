@@ -1122,6 +1122,14 @@ button.link-button:hover { background: none; color: #7fdcff; }
 }
 .world-head h3 { margin: 0; font-size: 15px; flex: 1; }
 .world-head #world-title { color: #8ad2ff; }
+/* PLAN-worldsim.md W4: the world date/time widget. Monospace so the digits
+   don't jitter the layout as they tick once a minute. */
+.world-clock {
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9fb3c8;
+    white-space: nowrap;
+}
+.world-clock.paused { color: #ffcf70; }
 .world-body { flex: 1; display: flex; min-height: 0; }
 /* The wrap is the positioning context for the tooltip, and the canvas is
    sized by flex rather than by attributes — `world-screen.ts` copies the CSS

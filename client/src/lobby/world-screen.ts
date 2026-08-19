@@ -25,9 +25,15 @@
 import {
     drawWorld, fitView, clampView, panView, zoomView, wheelZoomFactor,
     hitTestPoi, parseWorldGraph, edgesFor, formatWorldDuration, formatLatLon,
-    screenToLatLon,
-    type MapView, type Viewport, type WorldGraph, type WorldPoi,
+    screenToLatLon, parseWorldClock, tickWorldClock, formatWorldClock,
+    type MapView, type Viewport, type WorldGraph, type WorldPoi, type WorldClock,
 } from './world-map.js';
+
+/// How often the World screen re-fetches `/api/world` while it is open, to
+/// resync the locally-ticked clock (an admin pause elsewhere, a server
+/// restart, or ordinary clock drift all show up here rather than only on the
+/// next `open()`).
+const CLOCK_RESYNC_MS = 30_000;
 
 /// The equirectangular basemap (public/world/SOURCE.md). Absolute from the
 /// site root, like every other file the client serves out of `public/`.
@@ -59,6 +65,13 @@ export class WorldScreen {
     private lastPointer: { x: number; y: number } | null = null;
     private frame = 0;
     private resizeObserver: ResizeObserver | null = null;
+    /// The last clock reading fetched from `/api/world`. Ticked locally once a
+    /// second between fetches (PLAN-worldsim.md W4) rather than polled every
+    /// second — the server comment on `WorldStatusJson`'s ratio fields exists
+    /// for exactly this.
+    private clock: WorldClock | null = null;
+    private clockTickTimer: ReturnType<typeof setInterval> | null = null;
+    private clockResyncTimer: ReturnType<typeof setInterval> | null = null;
     /// The canvas the handlers are attached to. Identity, not a boolean: the
     /// browser screen replaces its whole `innerHTML` on every room-list
     /// re-render (i.e. on every SSE tick), so "already wired" against a
@@ -96,6 +109,8 @@ export class WorldScreen {
         this.wire();
         this.loadBasemap();
         void this.refresh();
+        void this.fetchClock();
+        this.startClockTimers();
         // Layout has to have happened before `fitView` can know the canvas
         // size; a panel unhidden in this same tick still measures 0×0 in some
         // browsers, and a fit computed against 0 gives scale 1 and an empty
@@ -109,6 +124,7 @@ export class WorldScreen {
         if (panel) panel.style.display = 'none';
         this.dragging = false;
         this.hideTooltip();
+        this.stopClockTimers();
     }
 
     toggle(): void { this.isOpen() ? this.close() : this.open(); }
@@ -146,6 +162,40 @@ export class WorldScreen {
         this.renderDetail();
         this.paint();
         return !!poi || poiId === null;
+    }
+
+    /// Fetch the clock straight from `/api/world`'s body (probe() only reads
+    /// the title). `Date.now()` is stamped here, at receipt — the instant the
+    /// client will measure elapsed wall time from.
+    private async fetchClock(): Promise<void> {
+        const json = await this.deps.get('/api/world').catch(() => null);
+        const clock = parseWorldClock(json, Date.now());
+        if (clock) this.clock = clock;
+        this.renderClock();
+    }
+
+    private renderClock(): void {
+        const el = document.getElementById('world-clock');
+        if (!el) return;
+        if (!this.clock) { el.textContent = ''; return; }
+        const c = tickWorldClock(this.clock, Date.now());
+        el.textContent = formatWorldClock(c) + (c.paused ? ' · PAUSED' : '');
+        el.classList.toggle('paused', c.paused);
+    }
+
+    /// Re-render every second (a locally-ticked clock, no network) and re-fetch
+    /// every `CLOCK_RESYNC_MS` (to pick up an admin pause/resume or ordinary
+    /// drift). Guarded against double-starting: `remount()` calls `open()`
+    /// again for an already-open panel on every SSE room-list re-render.
+    private startClockTimers(): void {
+        this.stopClockTimers();
+        this.clockTickTimer = setInterval(() => this.renderClock(), 1000);
+        this.clockResyncTimer = setInterval(() => void this.fetchClock(), CLOCK_RESYNC_MS);
+    }
+
+    private stopClockTimers(): void {
+        if (this.clockTickTimer !== null) { clearInterval(this.clockTickTimer); this.clockTickTimer = null; }
+        if (this.clockResyncTimer !== null) { clearInterval(this.clockResyncTimer); this.clockResyncTimer = null; }
     }
 
     private setStatus(text: string): void {
@@ -349,5 +399,6 @@ export class WorldScreen {
         if (this.frame) cancelAnimationFrame(this.frame);
         this.frame = 0;
         this.wiredCanvas = null;
+        this.stopClockTimers();
     }
 }

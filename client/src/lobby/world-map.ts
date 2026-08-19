@@ -304,6 +304,77 @@ export function formatLatLon(lat: number, lon: number): string {
     return `${Math.abs(lat).toFixed(1)}°${ns} ${Math.abs(lon).toFixed(1)}°${ew}`;
 }
 
+// ─────────────────────── the world clock (PLAN-worldsim.md W4) ───────────────
+
+/// Mirrors `GET /api/world`'s `clock` object (WorldDirector::WorldStatusJson).
+/// `fetchedAtMs` is stamped by the client on receipt — the browser's own
+/// clock, used only to measure elapsed wall time since the poll, never
+/// compared against `realMs` (a different machine's clock, possibly skewed).
+export interface WorldClock {
+    worldMs: number;
+    paused: boolean;
+    ratioNum: number;
+    ratioDen: number;
+    day: number;
+    hour: number;
+    minute: number;
+    fetchedAtMs: number;
+}
+
+/// Parse `clock` out of a `GET /api/world` body. `nowMs` is the caller's
+/// wall-clock reading at the moment of the fetch (`Date.now()` in the real
+/// client, injected here for tests).
+export function parseWorldClock(json: unknown, nowMs: number): WorldClock | null {
+    const c = (json as any)?.clock;
+    if (!c || typeof c.worldMs !== 'number') return null;
+    const ratioNum = typeof c.ratioNum === 'number' && c.ratioNum > 0 ? c.ratioNum : 24;
+    const ratioDen = typeof c.ratioDen === 'number' && c.ratioDen > 0 ? c.ratioDen : 1;
+    return {
+        worldMs: c.worldMs,
+        paused: !!c.paused,
+        ratioNum, ratioDen,
+        day: typeof c.day === 'number' ? c.day : 0,
+        hour: typeof c.hour === 'number' ? c.hour : 0,
+        minute: typeof c.minute === 'number' ? c.minute : 0,
+        fetchedAtMs: nowMs,
+    };
+}
+
+/// Mirrors `rts/Server/WorldClock.h`'s `WorldCalendarFromMs` — the day/hour
+/// this world-ms falls on, ONE calendar the server and client must agree on
+/// or a poll and a locally-ticked frame would show different days.
+export function worldCalendarFromMs(worldMs: number): { day: number; hour: number; minute: number } {
+    const sec = Math.floor(Math.max(0, worldMs) / 1000);
+    return {
+        day: Math.floor(sec / 86400) + 1,
+        hour: Math.floor(sec / 3600) % 24,
+        minute: Math.floor(sec / 60) % 60,
+    };
+}
+
+/// Advance a polled clock reading by elapsed WALL time, at its ratio — the
+/// ticking-between-polls the server's `clock` comment calls out
+/// (WorldDirector.cpp: "so a client can advance the clock locally between
+/// polls"). A paused clock never advances: the ledger, not this function, is
+/// the source of truth for "is the world moving", and a client that kept
+/// ticking through a pause would silently disagree with every other client.
+export function tickWorldClock(clock: WorldClock, nowMs: number): WorldClock {
+    if (clock.paused) return clock;
+    const elapsedRealMs = nowMs - clock.fetchedAtMs;
+    if (elapsedRealMs <= 0) return clock;
+    const worldMs = clock.worldMs + elapsedRealMs * (clock.ratioNum / clock.ratioDen);
+    return { ...clock, worldMs, ...worldCalendarFromMs(worldMs), fetchedAtMs: nowMs };
+}
+
+/// "Day 12, 07:31" — matches `WorldClock.h`'s `FormatWorldCalendar` exactly,
+/// so the label never disagrees with the one the server would have printed
+/// for the same instant.
+export function formatWorldClock(clock: WorldClock): string {
+    const hh = String(clock.hour).padStart(2, '0');
+    const mm = String(clock.minute).padStart(2, '0');
+    return `Day ${clock.day}, ${hh}:${mm}`;
+}
+
 // ─────────────────────────── drawing ───────────────────────────
 
 /// Colours in one place so the canvas and the CSS panel can be kept in step by

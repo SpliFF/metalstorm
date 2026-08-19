@@ -313,6 +313,40 @@ TEST_CASE("W1: pause/resume through the store drives the clock") {
     CHECK_FALSE(WorldDirector::ClockFor(f.db, "mars", kEpoch).has_value());
 }
 
+// ── W4: POST /api/world/pause's effect on the served clock ─────────────────
+//
+// The route itself is a thin transport (parse {action,reason} → call
+// OpenPause/ClosePause → re-serve WorldStatusJson); there is no socket
+// fixture in this file, so what is tested here is exactly that contract:
+// after an admin pauses, the very next `GET /api/world` body (i.e.
+// WorldStatusJson) must show the frozen clock, and after a resume it must
+// show the clock running again with the pause counted into pausedRealMs.
+
+TEST_CASE("W4: pausing then resuming is visible in the next WorldStatusJson") {
+    WorldDb f;
+    const std::string id = WorldDirector::SeedDefaultWorld(f.db, kEpoch);
+
+    REQUIRE(WorldDirector::OpenPause(f.db, id, kEpoch + kHourMs, "maintenance", "admin1"));
+    const nlohmann::json paused = WorldDirector::WorldStatusJson(f.db, id, kEpoch + 3 * kHourMs);
+    CHECK(paused["clock"]["paused"] == true);
+    // Frozen at the instant of the pause, not still advancing.
+    CHECK(paused["clock"]["worldMs"] == kDayMs);
+
+    // A second pause is refused (already open) — the route reports this as
+    // `changed:false`, not an error; OpenPause's own return is that signal.
+    CHECK_FALSE(WorldDirector::OpenPause(f.db, id, kEpoch + 2 * kHourMs, "again", "admin2"));
+
+    REQUIRE(WorldDirector::ClosePause(f.db, id, kEpoch + 5 * kHourMs));
+    const nlohmann::json running = WorldDirector::WorldStatusJson(f.db, id, kEpoch + 6 * kHourMs);
+    CHECK(running["clock"]["paused"] == false);
+    // 4 hours paused (kEpoch+1h .. kEpoch+5h), then 1 more hour running.
+    CHECK(running["clock"]["pausedRealMs"] == 4 * kHourMs);
+    CHECK(running["clock"]["worldMs"] == 2 * kDayMs);
+
+    // Resuming an already-running world is a no-op, same as ClosePause alone.
+    CHECK_FALSE(WorldDirector::ClosePause(f.db, id, kEpoch + 7 * kHourMs));
+}
+
 // ── The route bodies ───────────────────────────────────────────────────────
 
 TEST_CASE("W1: GET /api/world's body carries the clock and the tunables") {

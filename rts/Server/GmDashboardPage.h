@@ -152,6 +152,14 @@ function renderShell() {
       <div class="card"><h2>Fleet <span class="muted" id="ftime"></span></h2>
         <div id="fleet">loading…</div></div>
       <div id="drill"></div>
+      <div class="card"><h2>World clock <span class="muted" id="wtime"></span></h2>
+        <div id="worldclock">loading…</div>
+        <div class="row" style="margin-top:10px">
+          <button id="worldpause">Pause</button>
+          <button id="worldresume">Resume</button></div>
+        <div class="muted" style="margin-top:6px;font-size:11px">Pauses the WORLD clock's
+          pause ledger only — in-flight battles are not paused by this
+          (PLAN-worldsim.md W4; battle orchestration is still a stub).</div></div>
       <div class="card"><h2>Client crashes <span class="muted" id="crashmeta"></span></h2>
         <div class="row">
           <select id="crashsince">
@@ -174,8 +182,32 @@ function renderShell() {
   $('#unbanbtn').onclick = () => doBan(false);
   $('#crashrefresh').onclick = loadCrashes;
   $('#crashsince').onchange = loadCrashes;
+  $('#worldpause').onclick = () => doWorldPause('pause');
+  $('#worldresume').onclick = () => doWorldPause('resume');
   loadBanned();
   loadCrashes();
+  loadWorldClock();
+}
+
+// GET /api/world is public (same route the lobby's World screen polls), so
+// this reads it directly rather than through the admin-only api() helper;
+// only the pause/resume ACTION needs the admin token.
+async function loadWorldClock() {
+  const r = await fetch('/api/world').catch(() => null);
+  const j = r ? await r.json().catch(() => null) : null;
+  $('#wtime').textContent = '· ' + new Date().toLocaleTimeString();
+  if (!j || j.error || !j.clock) { $('#worldclock').innerHTML = '<span class="muted">world unavailable</span>'; return; }
+  const c = j.clock;
+  $('#worldclock').innerHTML =
+    `<b>${esc(c.label)}</b> ${c.paused ? '<span style="color:#ffcf70">PAUSED</span>' : '<span class="muted">running</span>'}`;
+}
+
+async function doWorldPause(action) {
+  const reason = action === 'pause' ? (prompt('Pause reason (optional):') || '') : undefined;
+  const { ok, j } = await api('/api/world/pause', { action, reason });
+  toast(ok ? `world ${action}: ${j.changed ? 'ok' : 'no-op (already ' + (action === 'pause' ? 'paused' : 'running') + ')'}`
+    : `world ${action} failed: ${j.error || j.detail || ''}`, !ok);
+  loadWorldClock();
 }
 
 function alarmBadges(g) {

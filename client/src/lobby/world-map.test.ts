@@ -14,6 +14,7 @@ import {
     mapFromLatLon, latLonFromMap, mapToScreen, screenToMap, poiToScreen, screenToLatLon,
     fitScale, fitView, clampView, panView, zoomView, wheelZoomFactor,
     parseWorldGraph, hitTestPoi, edgesFor, formatWorldDuration, formatLatLon,
+    parseWorldClock, tickWorldClock, formatWorldClock, worldCalendarFromMs,
     drawWorld, WORLD_COLORS,
     type MapView, type Viewport, type WorldPoi, type WorldCtx,
 } from './world-map';
@@ -249,6 +250,39 @@ describe('POI detail', () => {
     it('writes hemispheres as letters', () => {
         expect(formatLatLon(48.86, 2.35)).toBe('48.9°N 2.4°E');
         expect(formatLatLon(-33.87, -70.67)).toBe('33.9°S 70.7°W');
+    });
+});
+
+// PLAN-worldsim.md W4: the client-side clock widget's pure half.
+describe('the world clock (W4)', () => {
+    it('parses the clock object off a GET /api/world body', () => {
+        const c = parseWorldClock({ clock: { worldMs: 90000, paused: false, ratioNum: 24, ratioDen: 1, day: 2, hour: 1, minute: 30 } }, 1000);
+        expect(c).toEqual({ worldMs: 90000, paused: false, ratioNum: 24, ratioDen: 1, day: 2, hour: 1, minute: 30, fetchedAtMs: 1000 });
+        expect(parseWorldClock({}, 1000)).toBeNull();
+        expect(parseWorldClock(null, 1000)).toBeNull();
+    });
+
+    it('derives day/hour/minute from world-ms the same way the server does', () => {
+        // Day 1 is worldMs in [0, 86400000) — a fresh world starts on day 1,
+        // not day 0, matching WorldClock.h's WorldCalendarFromMs.
+        expect(worldCalendarFromMs(0)).toEqual({ day: 1, hour: 0, minute: 0 });
+        expect(worldCalendarFromMs(3600000 * 25 + 60000 * 31)).toEqual({ day: 2, hour: 1, minute: 31 });
+    });
+
+    it('ticks forward between polls at the served ratio, and never while paused', () => {
+        const base = parseWorldClock({ clock: { worldMs: 0, paused: false, ratioNum: 24, ratioDen: 1, day: 1, hour: 0, minute: 0 } }, 0)!;
+        // 1 real hour at 24× is 1 world day.
+        const ticked = tickWorldClock(base, 3600000);
+        expect(ticked.worldMs).toBe(24 * 3600000);
+        expect(ticked.day).toBe(2);
+
+        const paused = { ...base, paused: true };
+        expect(tickWorldClock(paused, 3600000)).toBe(paused);
+    });
+
+    it('formats "Day N, HH:MM" exactly like FormatWorldCalendar', () => {
+        const c = parseWorldClock({ clock: { worldMs: 0, paused: false, ratioNum: 24, ratioDen: 1, day: 12, hour: 7, minute: 5 } }, 0)!;
+        expect(formatWorldClock(c)).toBe('Day 12, 07:05');
     });
 });
 
