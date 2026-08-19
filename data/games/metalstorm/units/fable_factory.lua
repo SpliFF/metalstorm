@@ -22,6 +22,7 @@ return {
         category = 'LAND BUILDING',
         isbuilding = true,
         canmove = false, canattack = false,
+        maxvelocity = 0,   -- immobile units MUST be speed 0 (see _builder.lua)
         maxdamage = 16000, mass = 28000,
         footprintx = 15, footprintz = 12,
         yardmap = string.rep(string.rep('o', 15) .. ' ', 12),

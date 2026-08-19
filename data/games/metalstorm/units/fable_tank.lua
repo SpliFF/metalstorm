@@ -27,12 +27,15 @@ local tank = {
     objectname = 'fable_tank',
     category = 'LAND MOBILE TANK',
     movementclass = 'VEH',
+    -- MBT ballpark (BAR stumpy: 1800hp / 75 e/s / turn 340). 2.3 e/f =
+    -- 69 e/s. turnrate was 680 — scout-car agility on an MBT hull.
     maxdamage = 2000, mass = 700,
-    maxvelocity = 2.3, acceleration = 0.24, brakerate = 0.2, turnrate = 680,
+    maxvelocity = 2.3, acceleration = 0.24, brakerate = 0.2, turnrate = 420,
     footprintx = 3, footprintz = 3,
     sightdistance = 470,
     canmove = true, canattack = true, canpatrol = true, canstop = true,
     canguard = true,
+    transportbyenemy = false,
     weapons = { [1] = { name = 'MS_RAILGUN_S2' } },
     customparams = {
         ms_class = 'fable_showcase',

@@ -35,8 +35,17 @@ return {
         collide = false,
         cruisealtitude = 220,
         verticalspeed = 15,
-        maxdamage = 3500, mass = 1500,
-        maxvelocity = 2.0, acceleration = 0.06, brakerate = 0.08, turnrate = 120,
+        -- Durability to the §7.9 comparator (PLAN-metalstorm-transports.md),
+        -- not warship HP: survives one ms_soldiers_s1 squad's focused fire
+        -- ≥30 s (MS_MG_S1 ≈ 50 dps raw → 24 s, ≥30 s with statistical accuracy
+        -- falloff at cruise altitude), dies to dedicated flak in ~10-15 s
+        -- (MS_FLAK_S1 80 dps / MS_FLAK_S2 120 dps). 3500 survived flak 44 s —
+        -- HVT-proof, so it came down.
+        maxdamage = 1200, mass = 1500,
+        -- 3.6 e/f = 108 e/s: slow for air (BAR lift transports run 150-240
+        -- e/s) but a heavy dirigible must still outpace the ground columns it
+        -- lifts (tanks 2.6 e/f); 2.0 was slower than its own cargo.
+        maxvelocity = 3.6, acceleration = 0.06, brakerate = 0.08, turnrate = 120,
         turninplace = 0,
         footprintx = 8, footprintz = 8,
         sightdistance = 600,
@@ -52,9 +61,18 @@ return {
         -- 4 = the two cradles the model actually ships.
         transportcapacity = 4,
         transportsize = 3,
-        transportmass = 1200,
+        -- Must cover the MBT the cradles are sized for: one ms_tanks_s2 masses
+        -- 1000 (baseMass 500 × 2), two s1 squads ≈ 180-1000. 1200 was one
+        -- squad's margin, not a tank's.
+        transportmass = 2200,
         loadingradius = 160,
         releaseheld = true,
+        -- §7.9: fire platform, not a gunship — carried squads fight from the
+        -- external cradles (train T5 precedent); canattack stays false.
+        isfireplatform = true,
+        -- A carrier is never cargo, and no enemy Pelican abducts our squads.
+        cantbetransported = true,
+        transportbyenemy = false,
         customparams = {
             ms_class = 'fable_showcase',
             -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and

@@ -14,6 +14,12 @@
 // HoverSpeedMod rather than GroundSpeedMod for slope. That is a separate
 // measured milestone (PLAN-maps.md 2o: "B for infantry later"); do not
 // change it here without one.
+//
+// Reviewed vs BAR movedefs ballparks 2026-08-20 (unit props pass): the
+// maxslope ladder (45/32/24) matches BAR's bot > light-veh > heavy ordering,
+// maxwaterdepth rises with hull size (12/20/30 -- fording depth scales with
+// vehicle), minwaterdepth 12/20 for SHIP/SUB and the crushstrength ladder
+// (5/50/500, ships 200) are all in BAR range. No numeric changes made.
 
 [CLASS0]
 {
@@ -66,4 +72,7 @@
     minwaterdepth=20;
     crushstrength=100;
     speedmodclass=3;
+    // Without subMarine the SUB class paths like a surface ship
+    // (MoveDefHandler.cpp:235 reads it).
+    subMarine=1;
 }

@@ -64,7 +64,9 @@ return {
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
         maxdamage = 260, mass = 150,
-        maxvelocity = 4.6, acceleration = 0.4, brakerate = 0.34, turnrate = 1000,
+        -- 4.0 (was 4.6, props review 2026-08-20): fast, but a courier truck
+        -- should not outrun the dedicated recon scout (4.2, recon_vehicles.lua).
+        maxvelocity = 4.0, acceleration = 0.4, brakerate = 0.34, turnrate = 1000,
         footprintx = 2, footprintz = 2,
         sightdistance = 400,
         canmove = true, canattack = true, canpatrol = true, canstop = true,

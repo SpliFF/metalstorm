@@ -22,9 +22,16 @@ return {
         objectname = 'ms_command_s2',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
-        maxdamage = 900, mass = 600,
-        maxvelocity = 2.2, acceleration = 0.16, brakerate = 0.2, turnrate = 480,
+        -- Tanky-ish single high-value unit: 1600 sits between a tank-squad
+        -- member (700) and an s3 heavy member (2800) — a raid should have to
+        -- commit to kill it (BAR radar vehicles run ~1000 hp; an HQ is worth
+        -- more). Speed 1.7 = 51 e/s, tracked-HQ pace (BAR Seer 57, corvrad
+        -- 48) — the old 2.2 (66 e/s) outran the MBTs it is meant to follow.
+        maxdamage = 1600, mass = 600,
+        maxvelocity = 1.7, acceleration = 0.16, brakerate = 0.2, turnrate = 480,
         footprintx = 3, footprintz = 3,
+        -- Intel: above the scout buggy (700/1200), below the s2 sensor
+        -- building (750/2600) — mobile eyes, not a substitute for a station.
         sightdistance = 900,
         radardistance = 1800,
         canmove = true, canattack = true, canpatrol = true, canstop = true,

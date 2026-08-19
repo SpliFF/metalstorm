@@ -33,6 +33,13 @@
 -- solid with no underpass — they simply omit an `underpass` list.
 
 return {
+    -- NOTE (unit props review 2026-08-20): the three MOBILE profiles below
+    -- (quad_walker_l, heavy_tracks, dreadnought) are referenced by NO unit —
+    -- only the four building profiles at the bottom are wired up via
+    -- customparams.footprint_profile. Proposed attachments (units files, see
+    -- .unitprops/agent-systems.md): mechs s3 -> quad_walker_l,
+    -- tanks s3 -> heavy_tracks, mechs s4 / fable_colossus -> dreadnought.
+
     -- Scale-3 quad walker (the §1 reference profile). Four feet on a duty cycle;
     -- infantry may thread between the planted legs.
     quad_walker_l = {

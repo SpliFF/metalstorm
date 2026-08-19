@@ -22,17 +22,23 @@ return {
         objectname = 'fable_battleship',
         category = 'SHIP MOBILE',
         movementclass = 'SHIP',
-        maxdamage = 22000, mass = 6000,
-        maxvelocity = 1.6, acceleration = 0.05, brakerate = 0.06, turnrate = 180,
+        -- Stats aligned with ms_ships_s4 (2026-08-20 unitprops pass) so the
+        -- showcase hull and the roster battleship agree: between BAR bats
+        -- (9800) and epoch (50000). Mass matches the roster s4 (1500×8).
+        maxdamage = 24000, mass = 12000,
+        maxvelocity = 1.8, acceleration = 0.045, brakerate = 0.06, turnrate = 160,
         footprintx = 14, footprintz = 14,
         sightdistance = 700,
+        -- The model's spinning mast radar is real intel, not set dressing;
+        -- sonar so the capital ship is not blind to the torpedoes' shooters.
+        radardistance = 1400, sonardistance = 600,
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
         weapons = {
             [1] = { name = 'MS_RAILGUN_S4' },        -- A turret
             [2] = { name = 'MS_RAILGUN_S3' },        -- C turret (aft)
             [3] = { name = 'MS_HOWITZER_S3' },       -- B superfiring
-            [4] = { name = 'MS_FLAK_S2' },           -- PDC screen
+            [4] = { name = 'MS_FLAK_S2', onlytargetcategory = 'AIR' },           -- PDC screen
             [5] = { name = 'MS_MISSILE_CRUISE_S2' }, -- VLS
         },
         customparams = {

@@ -8,6 +8,7 @@ local function building(t)
     t.category   = 'LAND BUILDING'
     t.isbuilding = true
     t.canmove    = false
+    t.maxvelocity = 0          -- immobile units MUST be speed 0 (see _builder.lua)
     t.canattack  = t.canattack or false
     t.customparams = t.customparams or {}
     t.customparams.ms_class = 'buildings'
@@ -35,6 +36,12 @@ return {
         objectname = 'fable_factory',
         maxdamage = 18000, mass = 30000,
         footprintx = 16, footprintz = 20,    -- dwarfs the scale-3 tanks it builds
+        -- Factory yards must be 'c' (YARDMAP_YARD): Factory.cpp opens exactly
+        -- those cells while producing, so an all-'o' footprint traps whatever
+        -- the world layer rolls off the line. Closed, 'c' blocks like 'o'.
+        -- (In-battle these factories building nothing is BY DESIGN — field
+        -- engineering only; production is the world layer's.)
+        yardmap = string.rep(string.rep('c', 16) .. ' ', 20),
         sightdistance = 500,
         buildtime = 480000,            -- ~80 min
         builder = true, canbeassisted = true,
@@ -51,6 +58,7 @@ return {
         objectname = 'ms_garrison',
         maxdamage = 12000, mass = 20000,
         footprintx = 10, footprintz = 10,
+        yardmap = string.rep(string.rep('c', 10) .. ' ', 10),  -- see ms_foundry
         sightdistance = 450,
         buildtime = 360000,            -- ~1 h
         builder = true, canbeassisted = true,
@@ -65,6 +73,7 @@ return {
         objectname = 'ms_airbase',
         maxdamage = 15000, mass = 25000,
         footprintx = 20, footprintz = 14,
+        yardmap = string.rep(string.rep('c', 20) .. ' ', 14),  -- see ms_foundry
         sightdistance = 600,
         buildtime = 540000,            -- ~90 min
         builder = true, canbeassisted = true,
@@ -79,6 +88,7 @@ return {
         objectname = 'ms_shipyard',
         maxdamage = 20000, mass = 35000,
         footprintx = 18, footprintz = 24,
+        yardmap = string.rep(string.rep('c', 18) .. ' ', 24),  -- see ms_foundry
         sightdistance = 550,
         buildtime = 720000,            -- ~2 h
         builder = true, canbeassisted = true,

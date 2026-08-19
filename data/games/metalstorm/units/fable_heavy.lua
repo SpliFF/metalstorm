@@ -22,12 +22,19 @@ local heavy = {
     objectname = 'fable_heavy',
     category = 'LAND MOBILE TANK',
     movementclass = 'HEAVY',
-    maxdamage = 9000, mass = 2800,
-    maxvelocity = 1.4, acceleration = 0.10, brakerate = 0.12, turnrate = 320,
+    -- Super-heavy ballpark (unit props review 2026-08-20): this is the same
+    -- hull ms_tanks_s4 ships (units/tanks.lua), so the standalone showcase
+    -- def tracks the roster flagship — 24000hp (a shade under the s4's
+    -- 30000: twin rail + bow AC vs the s4's three-weapon fit), dreadnought
+    -- crawl/turn. The old 9000hp/320-turn read as a mere T2 heavy.
+    maxdamage = 24000, mass = 9000,
+    maxvelocity = 1.2, acceleration = 0.07, brakerate = 0.09, turnrate = 160,
     footprintx = 6, footprintz = 6,
-    sightdistance = 520,
+    sightdistance = 650,
     canmove = true, canattack = true, canpatrol = true, canstop = true,
     canguard = true,
+    cantbetransported = true,
+    transportbyenemy = false,
     weapons = {
         [1] = { name = 'MS_RAILGUN_S4' },   -- twin main tubes (muzzle_l/_r)
         [2] = { name = 'MS_AC_S2' },        -- independent bow turret2

@@ -127,10 +127,14 @@ local SoundItems = {
         gain = 0.4, pitchmod = 0.05, dopplermod = 1.0, priority = 1,
         maxconcurrent = 12, maxdist = 2000, in3d = true, loop = true,
     },
-    turret_servo = {
-        file = 'sounds/units/turret_servo.webm',
-        gain = 0.3, pitchmod = 0.04, dopplermod = 1.0, priority = 1,
-        maxconcurrent = 8, maxdist = 1600, in3d = true, loop = true,
-    },
+    -- turret_servo: DISABLED (unit props review 2026-08-20) — the asset
+    -- sounds/units/turret_servo.webm does not exist (sounds/units/ holds only
+    -- engine_run.webm). Only effects/bindings.example.json references the key,
+    -- so nothing live breaks; restore this entry when the file is sourced.
+    -- turret_servo = {
+    --     file = 'sounds/units/turret_servo.webm',
+    --     gain = 0.3, pitchmod = 0.04, dopplermod = 1.0, priority = 1,
+    --     maxconcurrent = 8, maxdist = 1600, in3d = true, loop = true,
+    -- },
 }
 return { SoundItems = SoundItems }

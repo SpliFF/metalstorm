@@ -31,6 +31,11 @@ local common = {
     movementclass = 'VEH',
     canmove = true, canattack = true, canpatrol = true, canstop = true,
     canguard = true,
+    -- A coupled consist is MoveCtrl-slaved by game_train.lua; letting a
+    -- transport scoop a car out of a consist would break the gadget's
+    -- ordered-list state (and transports.lua's transportmass=2400 covers
+    -- even the engine's mass, so mass alone does not protect the cars).
+    cantbetransported = true,
     footprintx = 3,
     sightdistance = 450,
 }
@@ -59,8 +64,8 @@ return {
         weapons = {
             -- T4: 270° forward arc (mainDir -Z, maxAngleDif 135° = half of 270°)
             [1] = { name = 'MS_RAILGUN_S2', maindir = '0 0 -1', maxangledif = 135 },
-            -- T4: 360° AA (air-only via toairweapon in weapon def)
-            [2] = { name = 'MS_FLAK_S1', maxangledif = 180 },
+            -- T4: 360° AA (air-only: canattackground=false in weapon def + AIR gate here)
+            [2] = { name = 'MS_FLAK_S1', maxangledif = 180, onlytargetcategory = 'AIR' },
         },
         customparams = { train_role = 'engine' },
     },

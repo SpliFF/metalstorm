@@ -25,7 +25,17 @@ return {
         footprintx = 2, footprintz = 3,
         sightdistance = 250,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
+        -- Extraction carrier: it must actually be able to LOAD its passengers.
+        -- canload/loadingradius were missing (props review 2026-08-20) — the
+        -- capacity/size pair alone never makes a unit a transport.
+        canload = 1,
         transportcapacity = 4, transportsize = 1,
-        customparams = { ms_class = 'civvehicles', civilian = '1', squad_size = '1' },
+        loadingradius = 100, releaseheld = true,
+        customparams = {
+            ms_class = 'civvehicles', civilian = '1', squad_size = '1',
+            -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and
+            -- gadgets key off to recognise a carrier.
+            is_transport = '1',
+        },
     },
 }
