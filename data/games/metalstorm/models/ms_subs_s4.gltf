@@ -1,0 +1,482 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_subs_s4",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "prop",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    0.0,
+    31.0
+   ]
+  },
+  {
+   "name": "muzzle",
+   "translation": [
+    0.0,
+    -0.8,
+    -32.5
+   ]
+  },
+  {
+   "name": "muzzle2",
+   "translation": [
+    0.0,
+    5.1,
+    5.25
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3412,
+   "type": "VEC3",
+   "min": [
+    -5.400000095367432,
+    -4.599999904632568,
+    -32.5
+   ],
+   "max": [
+    5.400000095367432,
+    7.25,
+    32.5
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3412,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3412,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 4932,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 172,
+   "type": "VEC3",
+   "min": [
+    -1.2677494287490845,
+    -1.3604604005813599,
+    -0.550000011920929
+   ],
+   "max": [
+    1.3200000524520874,
+    1.3604604005813599,
+    0.550000011920929
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 172,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 172,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 240,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    8.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 40944,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 40944,
+   "byteLength": 40944,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 81888,
+   "byteLength": 27296,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 109184,
+   "byteLength": 19728,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 128912,
+   "byteLength": 2064,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 130976,
+   "byteLength": 2064,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 133040,
+   "byteLength": 1376,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 134416,
+   "byteLength": 960,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 135376,
+   "byteLength": 16
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 135392,
+   "byteLength": 64
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 135456,
+   "uri": "ms_subs_s4.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_subs_s4_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_subs_s4_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_subs_s4_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_subs_s4_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_subs_s4_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_subs_s4",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 7.25,
+   "midpos": [
+    0.0,
+    3.625,
+    0.0
+   ],
+   "mins": [
+    -5.4,
+    -4.6,
+    -32.5
+   ],
+   "maxs": [
+    5.4,
+    7.25,
+    32.5
+   ],
+   "radius": 33.1444,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -5.4,
+      -4.6,
+      -32.5
+     ],
+     "maxs": [
+      5.4,
+      7.25,
+      32.5
+     ]
+    },
+    {
+     "name": "prop",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.0,
+      31.0
+     ],
+     "mins": [
+      -1.26775,
+      -1.36046,
+      -0.55
+     ],
+     "maxs": [
+      1.32,
+      1.36046,
+      0.55
+     ]
+    },
+    {
+     "name": "muzzle",
+     "parent": 0,
+     "offset": [
+      0.0,
+      -0.8,
+      -32.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "muzzle2",
+     "parent": 0,
+     "offset": [
+      0.0,
+      5.1,
+      5.25
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
