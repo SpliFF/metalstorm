@@ -31,6 +31,17 @@ The three arms below are the whole claim:
     FULL jitter amplitude plus the margin, so the sampler's own ±jitter cannot
     put a placement back on the deck. Checked against the minimum emitted
     offset, not the mean.
+
+R5 adds the case R4d found and did not fix (§2l FIND 2). The raise above is a
+purely LOCAL computation — it clears the deck of the polyline the station
+stepped off. Where a road doubles back on itself the normal points into the
+carriageway of a different vertex range of the SAME polyline, or of a
+neighbouring one, and the local raise cannot see it. `TheHairpinIsCleared` and
+`ANeighbouringDeckIsADeckToo` run against a fabricated switchback and a pair of
+parallel roads — fabricated deliberately, because a rule the producer already
+satisfies is inert and a test against shipped geometry would prove nothing.
+Both carry the pre-fix arm (`path_global_clearance=False`, which is the R4d
+sampler verbatim) checked to REPRODUCE the defect.
 """
 import os
 import sys
@@ -79,6 +90,41 @@ def fence_layer(**kw):
 
 def offsets_from(features, z_centre):
     return np.abs(np.array([f[2] for f in features], dtype=np.float64) - z_centre)
+
+
+def hairpin(z0=1800.0, gap=60.0, x0=600.0, x1=3400.0, step=50.0):
+    """One polyline that runs out, turns 180 degrees, and runs back.
+
+    `gap` is the distance between the two branches' centrelines. At 60 with a
+    highway deck (half-width 35.2) the two carriageways OVERLAP, so there is no
+    clear ground between them at all and every inner-side station has to move
+    to the outside of its own branch or be given up."""
+    n = int((x1 - x0) / step) + 1
+    xs = x0 + step * np.arange(n)
+    r = gap * 0.5
+    th = np.linspace(-np.pi / 2, np.pi / 2, 13)
+    return np.concatenate([
+        np.stack([xs, np.full(n, z0)], axis=1),
+        np.stack([x1 + r * np.cos(th), z0 + r + r * np.sin(th)], axis=1),
+        np.stack([xs[::-1], np.full(n, z0 + gap)], axis=1),
+    ], axis=0)
+
+
+def dist_to_polyline(px, pz, poly):
+    """Exact point-to-polyline distance, computed here rather than imported —
+    the production index is what is under test."""
+    p = np.asarray(poly, dtype=np.float64)
+    a, b = p[:-1], p[1:]
+    v = b - a
+    w = np.stack([px - a[:, 0], pz - a[:, 1]], axis=1)
+    vv = (v * v).sum(axis=1)
+    t = np.clip((w * v).sum(axis=1) / np.maximum(vv, 1e-12), 0.0, 1.0)
+    d = w - v * t[:, None]
+    return float(np.hypot(d[:, 0], d[:, 1]).min())
+
+
+def closest_to_any(features, polys):
+    return [min(dist_to_polyline(f[1], f[2], q) for q in polys) for f in features]
 
 
 class HighwayFencesClearTheDeck(unittest.TestCase):
@@ -196,6 +242,154 @@ class MixedNetworksAreResolvedPerPolyline(unittest.TestCase):
         # the road tier gets its OWN raise (22 + 4 + 10), not the highway's
         # 49.2, which is what a single network-wide maximum would do.
         self.assertLess(near_rd.max(), 45.0)
+
+
+HIGHWAY_HALF = rd.class_width(rd.ROAD_HIGHWAY, rd.RoadParams(road_width=44.0)) * 0.5
+
+
+class TheHairpinIsCleared(unittest.TestCase):
+    """A road that comes back on itself, which no per-polyline offset can see.
+
+    The switchback is fabricated on purpose. R4d measured a real one on
+    `meridian_basin` at (10 422, 3 212) and could not turn it into an assertion,
+    because a shipped map is a sample of one and a rule the producer already
+    satisfies is inert — it would pass whether or not the code under it worked.
+    A 60-elmo gap between the branches of a highway (deck half-width 35.2) is
+    tighter than anything the planner has produced, and that is the point."""
+
+    GAP = 60.0
+
+    @classmethod
+    def setUpClass(cls):
+        cls.line = hairpin(gap=cls.GAP)
+        ctx = lambda: flat_ctx(halfwidths=[HIGHWAY_HALF], polylines=[cls.line])
+        cls.before = pl.run(ctx(), [fence_layer(path_global_clearance=False)]).features
+        cls.after = pl.run(ctx(), [fence_layer()]).features
+        cls.stats = dict(pl._LAST_PATH_STATS.get("road_fences", {}))
+
+    def test_the_branches_are_closer_than_two_decks(self):
+        """The premise: at this gap the two carriageways overlap outright."""
+        self.assertLess(self.GAP, 2.0 * HIGHWAY_HALF)
+
+    def test_the_r4d_sampler_reproduces_the_defect(self):
+        """Every one of these is correctly offset from its OWN segment."""
+        self.assertTrue(self.before, "pre-fix arm emitted nothing — vacuous")
+        bad = sum(1 for d in closest_to_any(self.before, [self.line])
+                  if d < HIGHWAY_HALF)
+        self.assertGreater(bad, 0,
+                           "the fabricated hairpin does not reproduce the "
+                           "defect, so the arm below proves nothing")
+        # and it is not a stray one or two: the whole inner side is on tarmac
+        self.assertGreater(bad, len(self.before) * 0.25)
+
+    def test_nothing_survives_on_a_deck(self):
+        self.assertTrue(self.after, "the fix emptied the layer")
+        worst = min(closest_to_any(self.after, [self.line]))
+        self.assertGreaterEqual(
+            worst, HIGHWAY_HALF + fence_layer().path_min_clearance - 1e-6,
+            f"closest surviving fence is {worst:.1f} from a centreline")
+
+    def test_it_clears_the_edge_the_bake_PAINTS(self):
+        """The R4d lesson, applied to the global test: the geometric edge is
+        not the edge a player sees."""
+        worst = min(closest_to_any(self.after, [self.line]))
+        self.assertGreater(worst, HIGHWAY_HALF + PAINTED_OVERHANG)
+
+    def test_the_fix_moves_stations_rather_than_deleting_them(self):
+        """A hairpin has two good verges — the outsides. Most inner-side
+        stations mirror onto them; a fence run that merely got shorter would
+        be a worse map, not a fixed one."""
+        self.assertGreater(len(self.after), len(self.before) * 0.6)
+        self.assertGreater(self.stats["flipped"], self.stats["dropped"])
+
+    def test_the_rule_reports_that_it_fired(self):
+        self.assertGreater(self.stats["flipped"], 0)
+
+
+class ANeighbouringDeckIsADeckToo(unittest.TestCase):
+    """The offending deck can belong to a different polyline entirely."""
+
+    @classmethod
+    def setUpClass(cls):
+        # three parallel highways 60 apart: the middle one has a deck within
+        # reach on BOTH sides, so its stations cannot be mirrored anywhere
+        cls.lines = [straight_line(z) for z in (1800.0, 1860.0, 1920.0)]
+        hw = [HIGHWAY_HALF] * 3
+        cls.before = pl.run(flat_ctx(halfwidths=hw, polylines=cls.lines),
+                            [fence_layer(path_global_clearance=False)]).features
+        cls.after = pl.run(flat_ctx(halfwidths=hw, polylines=cls.lines),
+                           [fence_layer()]).features
+
+    def test_the_r4d_sampler_puts_fences_on_the_neighbour(self):
+        on_deck = sum(1 for d in closest_to_any(self.before, self.lines)
+                      if d < HIGHWAY_HALF)
+        self.assertGreater(on_deck, len(self.before) * 0.5)
+
+    def test_after_the_fix_no_fence_is_on_any_of_the_three(self):
+        self.assertTrue(self.after)
+        self.assertEqual(
+            0, sum(1 for d in closest_to_any(self.after, self.lines)
+                   if d < HIGHWAY_HALF + fence_layer().path_min_clearance - 1e-6))
+
+    def test_the_middle_road_is_given_up_on_and_the_outer_two_are_not(self):
+        """Both sides blocked is a DROP, not a nudge — R4c's rule for a
+        blocked prop, applied here."""
+        z = np.array([f[2] for f in self.after])
+        self.assertEqual(int(((z > 1830.0) & (z < 1890.0)).sum()), 0)
+        self.assertGreater(int((z < 1800.0 - HIGHWAY_HALF).sum()), 0)
+        self.assertGreater(int((z > 1920.0 + HIGHWAY_HALF).sum()), 0)
+
+
+class TheGlobalTestIsInertOnGeometryThatDoesNotNeedIt(unittest.TestCase):
+    """It must not redress a road that was already right — including the
+    shipped straight-and-gentle case, which is nearly all road on both maps."""
+
+    def test_a_lone_straight_road_is_bit_for_bit_unchanged(self):
+        a = pl.run(flat_ctx(halfwidths=[HIGHWAY_HALF]), [fence_layer()]).features
+        b = pl.run(flat_ctx(halfwidths=[HIGHWAY_HALF]),
+                   [fence_layer(path_global_clearance=False)]).features
+        self.assertTrue(a)
+        self.assertEqual(a, b)
+        self.assertEqual(pl._LAST_PATH_STATS["road_fences"]["dropped"], 0)
+
+    def test_two_roads_far_enough_apart_are_unchanged(self):
+        lines = [straight_line(1024.0), straight_line(3072.0)]
+        hw = [HIGHWAY_HALF, HIGHWAY_HALF]
+        a = pl.run(flat_ctx(halfwidths=hw, polylines=lines), [fence_layer()]).features
+        b = pl.run(flat_ctx(halfwidths=hw, polylines=lines),
+                   [fence_layer(path_global_clearance=False)]).features
+        self.assertEqual(a, b)
+
+
+class TheIndexCostsWhatItClaims(unittest.TestCase):
+    """All-pairs on a full-res network is ~1e4 stations x ~2e4 segments. The
+    grid index has to make that a bucket read, and the cheapest way to say so
+    in a test is to check that a query touches a bounded number of segments."""
+
+    def test_a_query_reads_a_bucket_not_the_network(self):
+        lines = [straight_line(400.0 + 200.0 * i, step=10.0) for i in range(12)]
+        radii = [HIGHWAY_HALF + 10.0] * len(lines)
+        idx = pl._DeckIndex(lines, radii)
+        total_segments = sum(len(np.asarray(q)) - 1 for q in lines)
+        keys, counts = np.unique(idx.keys, return_counts=True)
+        self.assertGreater(total_segments, 4000)
+        # every bucket holds the segments of at most a few roads' worth of
+        # neighbourhood, never the whole network
+        self.assertLess(int(counts.max()), total_segments // 10)
+
+    def test_it_answers_the_same_as_brute_force(self):
+        """The index is an optimisation, so it is checked against the
+        definition it optimises."""
+        line = hairpin(gap=70.0)
+        idx = pl._DeckIndex([line], [HIGHWAY_HALF + 10.0])
+        rng = np.random.default_rng(11)
+        px = rng.uniform(400.0, 3700.0, 400)
+        pz = rng.uniform(1600.0, 2100.0, 400)
+        got = idx.clear(px, pz)
+        want = np.array([dist_to_polyline(a, b, line) >= HIGHWAY_HALF + 10.0 - 1e-6
+                         for a, b in zip(px, pz)])
+        self.assertTrue(bool(want.any()) and bool((~want).any()))
+        np.testing.assert_array_equal(got, want)
 
 
 if __name__ == "__main__":
