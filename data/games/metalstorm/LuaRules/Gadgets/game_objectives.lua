@@ -285,6 +285,18 @@ local function buildCtx(frame)
                 Spring.GiveOrderToUnit(unitID, CMD.MOVE, { x, y, z }, {})
             end
         end,
+        -- §3.4's withdrawal ledger, read by escort.lua's transport form. An
+        -- outbound escort succeeds by its payload CEASING TO EXIST (the
+        -- departure removes the carrier from the sim), so position alone
+        -- cannot tell a win from a loss — the counter can, because it only
+        -- ever increments through the departure path. Zero when the
+        -- transports gadget is absent, which is the honest reading: nothing
+        -- has departed.
+        withdrawnTransports = function(team)
+            if not GG.Transports or not GG.Transports.Withdrawn then return 0 end
+            local _, transports = GG.Transports.Withdrawn(team)
+            return transports or 0
+        end,
         lastCommander = function(unitID)
             local v = Spring.GetUnitRulesParam(unitID, 'last_commander')
             return v and math.floor(v) or nil
@@ -303,7 +315,9 @@ local function positionHint(o, ctx)
         local x, _, z = ctx.unitPos(o.params.targetUnitID)
         return x, z, nil, nil
     elseif o.type == 'escort' then
-        local d = o.params.destArea
+        -- Either spelling of the one exit concept (§7.10 unification — see
+        -- escort.lua's header); `extractArea` is the name that won.
+        local d = o.params.extractArea or o.params.destArea
         return d and d.x, d and d.z, d and d.r, nil
     elseif o.type == 'extract' then
         local a = (o.data and o.data.phase == 'evac') and o.params.extractArea or o.params.pickupArea
@@ -875,7 +889,42 @@ local function buildWorld(frame, tick, ctx)
         civilianDistrictsUnderThreat = function()
             return GG.Civilians and GG.Civilians.ThreatenedDistricts and GG.Civilians.ThreatenedDistricts() or {}
         end,
+        -- Deliberately still a stub, and no longer on the critical path
+        -- (§10.3): escort's PRIMARY subject is now a transport, which every
+        -- battle has, so the escort type no longer waits on civilian convoy
+        -- routes that 1 of 13 maps publishes. Civilian convoys become flavour
+        -- whenever somebody wants them.
         newConvoys = function() return {} end,
+
+        -- ===== §10.5's universal generator floor: transports =============
+        -- These three read GG.Transports (game_transports.lua, layer -80,
+        -- which is why it loads before this gadget at -50). Absent gadget ->
+        -- empty answers -> the transport rule simply produces nothing, the
+        -- same "ready, awaiting content" shape as the civilian rules — except
+        -- that the content here is guaranteed by the battle's own definition
+        -- rather than by a map file.
+        inFlightArrivals = function()
+            if not GG.Transports or not GG.Transports.InFlightArrivals then return {} end
+            return GG.Transports.InFlightArrivals()
+        end,
+        -- The teams that could actually run an outbound escort: a live
+        -- carrier AND somewhere to take it.
+        extractableTransports = function()
+            if not GG.Transports or not GG.Transports.LiveTransports then return {} end
+            local out = {}
+            local gaia = Spring.GetGaiaTeamID()
+            for _, teamID in ipairs(Spring.GetTeamList()) do
+                if teamID ~= gaia then
+                    local area = GG.Transports.ExtractArea(teamID)
+                    local carriers = GG.Transports.LiveTransports(teamID)
+                    if area and #carriers > 0 then
+                        out[#out + 1] = { team = teamID, transportUnitIDs = carriers,
+                                          extractArea = area }
+                    end
+                end
+            end
+            return out
+        end,
         -- No unit def currently sets the `objective_infra` customParams tag
         -- (mirrors game_authority.lua's `authority_cost_base` convention) —
         -- same "ready, awaiting content" status as the civilian rules.

@@ -38,6 +38,9 @@ return {
         releaseheld = true,
         customparams = {
             ms_class = 'landing_ship', squad_size = '1',
+            -- PLAN-metalstorm-transports.md §3.6/§7.9: the ONE key UI, AI and
+            -- gadgets key off to recognise a carrier. No per-consumer def lists.
+            is_transport = '1',
             authority_cost_base = '2',
             transport_links = 'link1,link2,link3,link4',
             generator = 'Claude Fable 5 (tools/forge)',

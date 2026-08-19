@@ -108,7 +108,16 @@ describe("Scorched Crossing — The Standoff", function()
         -- a team has ZERO ordered units, so a partly-ordered army reads clean.
         -- Hence the check lives here.
         local IMMOBILE = { ms_radar_s1 = true }
-        local STAY_HOME = { ms_engineers_s1 = true }   -- deliberately not in the push
+        local STAY_HOME = {
+            ms_engineers_s1 = true,   -- deliberately not in the push
+            -- The carrier is staged-as-arrived (transports §3.2) and stays
+            -- PARKED. An opening order on it would be exactly backwards:
+            -- there is deliberately no auto-withdraw macro (§3.4, "withdrawal
+            -- is a mechanic, not a menu"), so the player loads it, protects it
+            -- and flies it to the departure zone. Sending it toward the basin
+            -- on frame 0 would fly the side's only way home into the fight.
+            fable_airship = true,
+        }
         local ordered, unordered = 0, {}
         for _, u in ipairs(scn.units) do
             if type(u.team) == 'number' and not IMMOBILE[u.def] and not STAY_HOME[u.def] then
@@ -229,6 +238,107 @@ describe("Scorched Crossing — The Standoff", function()
         end)())
         for _, o in ipairs(scn.objectives) do
             if o.victory then assert.is_nil(owned[o.region]) end
+        end
+    end)
+end)
+
+-- ============================================================
+-- Transports (PLAN-metalstorm-transports.md §3.2/§3.3/§7.1). Before this,
+-- NO shipped scenario staged a transport, so every mechanism
+-- game_transports.lua implements was unreachable in a real war.
+-- ============================================================
+describe("Scorched Crossing — transports", function()
+    local scn
+
+    before_each(function()
+        scn = dofile(SCENARIO)
+    end)
+
+    it("stages a carrier for each side, parked, as part of its declared force", function()
+        local carriers = {}
+        for _, u in ipairs(scn.units) do
+            if u.def == 'fable_airship' then carriers[u.team] = u end
+        end
+        assert.is_not_nil(carriers[0])
+        assert.is_not_nil(carriers[1])
+        -- §3.2: staged-as-arrived, not a frame-0 drive-in.
+        assert.is_nil(carriers[0].orders)
+        assert.is_nil(carriers[1].orders)
+    end)
+
+    it("flags both sides expeditionary — this army was SENT here (§7.1)", function()
+        for _, side in ipairs(scn.sides) do
+            assert.is_true(side.expeditionary,
+                'side ' .. side.faction .. ' landed here and must be expeditionary')
+        end
+    end)
+
+    it("gives each side a departure zone clear of its own parked carrier", function()
+        -- A departure zone drawn over your own staged transport deletes it on
+        -- the first poll after frame 60.
+        local carriers = {}
+        for _, u in ipairs(scn.units) do
+            if u.def == 'fable_airship' then carriers[u.team] = u end
+        end
+        for _, side in ipairs(scn.sides) do
+            local d = side.departure
+            assert.is_not_nil(d, 'side ' .. side.faction .. ' has no departure zone')
+            local c = carriers[side.team]
+            local dx, dz = c.x - d.x, c.z - d.z
+            assert.is_true(math.sqrt(dx * dx + dz * dz) > d.radius,
+                'the parked carrier of team ' .. side.team .. ' sits in its own exit')
+        end
+    end)
+
+    it("authors a mirrored arrival wave per side, after the victory notBefore", function()
+        assert.are.equal(2, #scn.arrivals)
+        local notBefore
+        for _, o in ipairs(scn.objectives) do
+            if o.victory then notBefore = o.notBefore end
+        end
+        local byTeam = {}
+        for _, a in ipairs(scn.arrivals) do
+            byTeam[a.team] = a
+            -- §3.3: an arrival with no order unloads into silence (D20's
+            -- finding 1 — a unit nobody ordered never moves).
+            assert.is_not_nil(a.order, a.id .. ' declares no order')
+            -- §7.8: an eta before the war can even be decided is a wave that
+            -- reinforces a decision already made.
+            assert.is_true(a.eta > notBefore, a.id .. ' arrives before the war can start')
+        end
+        assert.is_not_nil(byTeam[0])
+        assert.is_not_nil(byTeam[1])
+        assert.are.equal(byTeam[0].eta, byTeam[1].eta)   -- symmetric war, symmetric waves
+    end)
+
+    it("keeps every wave inside its carrier's slot capacity (§7.7)", function()
+        -- fable_airship carries 2 slots; an s1 squad costs 1 (scale tier).
+        -- game_transports validates this at load and DROPS an overweight wave
+        -- whole rather than half-staging it, so an over-packed scenario loses
+        -- its reinforcements silently as far as the player is concerned.
+        local SLOTS = { fable_airship = 2 }
+        local COST = { ms_soldiers_s1 = 1, ms_tanks_s2 = 2, ms_tanks_s3 = 3 }
+        for _, a in ipairs(scn.arrivals) do
+            local used = 0
+            for _, c in ipairs(a.cargo) do
+                assert.is_not_nil(COST[c.def], 'unpriced cargo def ' .. c.def)
+                used = used + COST[c.def] * (c.count or 1)
+            end
+            assert.is_true(used <= SLOTS[a.def], a.id .. ' is over capacity')
+        end
+    end)
+
+    it("enters and lands every wave on the map", function()
+        -- The map is 8960 square: this file's header fixes `raven_basin` at
+        -- the dead centre, (4480, 4480). game_transports validates the same
+        -- thing at load against the live Game.mapSizeX and drops an off-map
+        -- wave whole; this catches it before a war is launched to find out.
+        local W = 8960
+        for _, a in ipairs(scn.arrivals) do
+            for _, p in ipairs({ a.entry, a.dropZone }) do
+                assert.is_true(p.x >= 0 and p.x <= W and p.z >= 0 and p.z <= W,
+                    a.id .. ' has an off-map point')
+            end
         end
     end)
 end)

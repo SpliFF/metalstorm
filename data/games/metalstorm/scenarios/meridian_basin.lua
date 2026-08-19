@@ -89,11 +89,34 @@ return {
         -- factions for real (lobby sign-up reads them). They are still not
         -- mechanically differentiated in sim — no per-faction rosters or
         -- faction-gated gadgets — same as scenario_smoke_test.lua's usage.
-        { faction = 'compact', team = 0 },
+        --
+        -- NEITHER SIDE IS `expeditionary` (PLAN-metalstorm-transports.md
+        -- §7.1), and that omission is a decision, not an oversight. Both
+        -- factions own home rows ON THIS MAP — the forges, habitats, gates and
+        -- vales seeded to them in `world.regions` above — so each is fighting
+        -- over the neutral band in front of its own towns. §7.1: "a faction
+        -- defending a POI it holds is HOME; its force is garrison, and it
+        -- arrives by already being there." Stranding is an expeditionary
+        -- property only, so flagging these sides would make every defender's
+        -- own ground a trap and make `war_side_stranded` cry wolf from frame
+        -- 60 forever. crossing_standoff.lua is the contrasting case: two armies
+        -- that were SENT somewhere, and are flagged.
+        --
+        -- Each of the two staged sides still gets a `departure` zone, because
+        -- withdrawal is NOT gated on being expeditionary — extracting materiel
+        -- by transport is how value leaves any battle (§3.4). Under the §7.10
+        -- unification this is the same circle the objectives layer calls
+        -- `extractArea` (see objectives/escort.lua's header). Each sits on its
+        -- own side's map edge, >= 1100 elmos clear of the carrier parked with
+        -- its army below — a departure zone drawn over your own staged
+        -- transport deletes it on the first poll after frame 60.
+        { faction = 'compact', team = 0,
+          departure = { x = 6600, z = 400, radius = 700 } },
         { faction = 'compact', team = 1 },
         { faction = 'compact', team = 2 },
         { faction = 'compact', team = 3 },
-        { faction = 'union',   team = 4 },
+        { faction = 'union',   team = 4,
+          departure = { x = 6600, z = 15984, radius = 700 } },
         { faction = 'union',   team = 5 },
         { faction = 'union',   team = 6 },
         { faction = 'union',   team = 7 },
@@ -172,6 +195,14 @@ return {
         { def = 'ms_scout_buggy', team = 0, x = 6900, z = 1400, facing = 'south', count = 2, spacing = 130,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_supply_truck', team = 0, x = 5900, z = 1400, facing = 'south', count = 1 },
+        -- The side's lift, staged-as-arrived (§3.2): parked with the army it
+        -- carried, not driven in at frame 0. A side's transports are part of
+        -- its DECLARED staged force, so being transport-less at GameStart is a
+        -- choice a scenario makes out loud (a raid with no way home) instead of
+        -- an accident nobody notices. No opening order: withdrawal is a
+        -- mechanic, not a menu (§3.4) — load it, protect it, fly it to the
+        -- departure zone above yourself.
+        { def = 'fable_airship', team = 0, x = 7200, z = 1400, facing = 'south' },
 
         { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
@@ -182,6 +213,7 @@ return {
         { def = 'ms_scout_buggy', team = 4, x = 6900, z = 14984, facing = 'north', count = 2, spacing = 130,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_supply_truck', team = 4, x = 5900, z = 14984, facing = 'north', count = 1 },
+        { def = 'fable_airship', team = 4, x = 7200, z = 14984, facing = 'north' },
 
         -- Basin Reavers (team 8, NPC — see the `ai` block below). Camped on
         -- the East Pass causeway, centroid of the region's polygon

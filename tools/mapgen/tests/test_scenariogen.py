@@ -781,6 +781,107 @@ class TestInvariant5IsConditionalOnAudience(unittest.TestCase):
             terrain, wrecks, points, "synth", mutual=False)
 
 
+class TestTransports(unittest.TestCase):
+    """Every generated war stages the transports its sides arrived on.
+
+    PLAN-metalstorm-transports.md §3.2/§7.1. Before this, NO shipped or
+    generated scenario staged a transport at all, so every mechanism
+    game_transports.lua implements — arrivals, withdrawal, stranding, the
+    outcome vocabulary the world layer settles on — was unreachable in a real
+    war. It is also what makes the objectives layer's universal generator floor
+    (PLAN-metalstorm-objectives.md §10.5) produce anything: the transport rule
+    is the one rule that needs no map content, and it needs a transport.
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def _generate(self, fixture=wide_flat_map, name="synth_wide", **kw):
+        with SyntheticMap(fixture, name) as d:
+            return sg.generate(d, seed=11, game_dir=GAME_DIR, **kw)
+
+    def test_the_carrier_def_is_one_the_content_actually_has(self):
+        facts = ms_defs.load(GAME_DIR)
+        self.assertIn(sg.CARRIER_DEF, facts)
+        self.assertFalse(facts[sg.CARRIER_DEF].building)
+
+    def test_every_side_is_staged_a_carrier(self):
+        lua, meta = self._generate()
+        entries = parse_units(lua)
+        for team in range(meta["sides"]):
+            carriers = [e for e in entries
+                        if e["def"] == sg.CARRIER_DEF and e.get("team") == team]
+            self.assertEqual(len(carriers), 1,
+                             f"side {team} has no way to withdraw anything")
+
+    def test_the_carrier_is_parked_not_ordered_into_the_battle(self):
+        """§3.2 staged-as-arrived, and §3.4's "withdrawal is a mechanic, not a
+        menu": an opening FIGHT would fly a side's only way home into the
+        fight on frame 0."""
+        lua, _ = self._generate()
+        for e in parse_units(lua):
+            if e["def"] == sg.CARRIER_DEF:
+                self.assertFalse(e.get("orders"),
+                                 "the carrier must open with no order")
+
+    def test_every_side_is_flagged_expeditionary(self):
+        """§7.1. A generated war is two forces SENT to a map, so both can be
+        stranded; a home defender must never carry the flag or
+        `war_side_stranded` cries wolf from frame 60 forever."""
+        lua, meta = self._generate()
+        # Exactly the playable sides, and nobody else: a hostile NPC squatting
+        # on the map it lives on is home, not an expedition.
+        self.assertEqual(lua.count("expeditionary = true"), meta["sides"])
+        for i in range(meta["sides"]):
+            self.assertIn(f"team = {i}, expeditionary = true", lua)
+
+    def test_the_departure_zone_never_swallows_the_side_s_own_carrier(self):
+        """A departure zone drawn over a parked transport deletes it on the
+        first poll after frame 60 — a mechanic that reads as a crash."""
+        lua, meta = self._generate()
+        entries = parse_units(lua)
+        deps = re.findall(
+            r"team = (\d+), expeditionary = true,\s*\n\s*departure = "
+            r"{ x = (-?\d+), z = (-?\d+), radius = (\d+) }", lua)
+        self.assertTrue(deps, "no departure zone was emitted at all")
+        for team, dx, dz, rad in deps:
+            carrier = next(e for e in entries
+                           if e["def"] == sg.CARRIER_DEF
+                           and e.get("team") == int(team))
+            gap = math.hypot(carrier["x"] - int(dx), carrier["z"] - int(dz))
+            self.assertGreater(gap, int(rad),
+                               f"side {team}'s carrier sits in its own exit")
+
+    def test_a_map_too_small_for_an_exit_omits_it_rather_than_authoring_a_trap(self):
+        """flat_map is 1024 elmos square, so every landing zone is within the
+        clearance of an edge. Emitting a 40-elmo departure circle there would
+        be worse than emitting none: game_transports falls back to its own
+        default when a side declares no zone."""
+        lua, _ = self._generate(fixture=flat_map, name="synth_flat")
+        self.assertIn("expeditionary = true", lua)
+        self.assertNotIn("departure = {", lua)
+
+    def test_the_carrier_clears_every_building_like_any_other_staged_unit(self):
+        """Being air is not a licence to spawn inside a shipyard. Re-derived
+        from the emitted file, the way the yardmap regression test is."""
+        lua, _ = self._generate()
+        facts = ms_defs.load(GAME_DIR)
+        entries = parse_units(lua)
+        buildings = [e for e in entries if facts[e["def"]].building]
+        self.assertTrue(buildings, "fixture placed no buildings to collide with")
+        for e in entries:
+            if e["def"] != sg.CARRIER_DEF:
+                continue
+            for b in buildings:
+                bf = facts[b["def"]]
+                dist = math.hypot(e["x"] - b["x"], e["z"] - b["z"])
+                self.assertGreaterEqual(
+                    dist, bf.clear_radius,
+                    f'the carrier at ({e["x"]},{e["z"]}) is inside '
+                    f'{b["def"]}\'s blocked footprint')
+
+
 class TestGoldenFixture(unittest.TestCase):
     """tests/fixtures/generated_scenario.lua must still be what the generator emits.
 
@@ -1289,6 +1390,16 @@ class TestFullCoverageTemplates(unittest.TestCase):
             named |= set(spec["defs"])
         for spec in tt.POPULACE.values():
             named |= {d for d, _w in spec["defs"]}
+        # The carrier is named by no template BY DESIGN. It is not roster
+        # content — it is staged once per side by generate()'s own carrier
+        # step (PLAN-metalstorm-transports.md §3.2), because a side's
+        # transports are part of its declared force rather than part of its
+        # order of battle. Putting it in a roster would stage it twice in a
+        # `full` war and would send it to the front with an opening FIGHT.
+        # It is therefore placeable by EVERY generated war, which is the
+        # property this method is really asking about; TestTransports asserts
+        # that directly against the emitted file.
+        named.add(sg.CARRIER_DEF)
         return named
 
     def test_every_shipped_def_is_nameable_by_some_template(self):
@@ -1305,7 +1416,11 @@ class TestFullCoverageTemplates(unittest.TestCase):
                          "generated war can ever stage one")
 
     def test_full_roster_fields_every_mobile_def(self):
+        # Minus the carrier, which every roster gets for free from the
+        # per-side carrier step and which no roster should name (see
+        # `_nameable`).
         mobile = {n for n, f in self.facts.items() if not f.building}
+        mobile.discard(sg.CARRIER_DEF)
         full = {d for d, _c, _s in ARMY_ROSTERS["full"]}
         self.assertEqual(sorted(mobile - full), [],
                          "the `full` roster is meant to be every mobile def")

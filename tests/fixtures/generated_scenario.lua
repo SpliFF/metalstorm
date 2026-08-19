@@ -116,9 +116,25 @@ return {
     -- side below is staged an army in `units`, which is what makes
     -- ScenarioDiscovery resolve it with staged == true — a side with no
     -- army is a room slot that starts with nothing (endtoend D19).
+    -- Every playable side here is EXPEDITIONARY (transports §7.1): a
+    -- generated war is two forces SENT to a map, landing on zones the
+    -- generator picked for them, not two garrisons standing in their own
+    -- towns. The flag is what gates `ms_stranded_<team>` and the
+    -- `war_side_stranded` guard — both of which exist only for a force
+    -- that arrived by transport and can therefore be trapped, and both
+    -- of which cry wolf forever if a home defender carries it.
+    --
+    -- `departure` is §3.4's withdrawal zone (the objectives layer calls
+    -- the same circle `extractArea` — §7.10). Nearest map edge to the
+    -- landing zone: you leave the way you came, and its radius is
+    -- clamped clear of the carrier parked in `units` below, because a
+    -- departure zone drawn over your own transport deletes it on the
+    -- first poll after frame 60.
     sides = {
-        { faction = 'compact', team = 0 },
-        { faction = 'union', team = 1 },
+        { faction = 'compact', team = 0, expeditionary = true,
+          departure = { x = 0, z = 682, radius = 482 } },
+        { faction = 'union', team = 1, expeditionary = true,
+          departure = { x = 4096, z = 3412, radius = 484 } },
         -- Team 2 is an NPC faction holding the fortified
         -- clusters (see `ai` below). Every non-Gaia team is its own
         -- ally team, so it is hostile to every player with no extra
@@ -173,6 +189,7 @@ return {
         { def = 'ms_supply_truck', team = 0, x = 682, z = 422, facing = 'south', count = 2, spacing = 140,
           orders = { { cmd = 'FIGHT', params = { 2047, 0, 3412 } } } },
         { def = 'ms_radar_s1', team = 0, x = 865, z = 498, facing = 'south' },
+        { def = 'fable_airship', team = 0, x = 682, z = 682, facing = 'south' },
         -- side 1 — landing zone r2_2
         { def = 'ms_tanks_s2', team = 1, x = 3672, z = 3412, facing = 'south', count = 4, spacing = 150,
           orders = { { cmd = 'FIGHT', params = { 2047, 0, 3412 } } } },
@@ -189,6 +206,7 @@ return {
         { def = 'ms_supply_truck', team = 1, x = 3412, z = 3152, facing = 'south', count = 2, spacing = 140,
           orders = { { cmd = 'FIGHT', params = { 2047, 0, 3412 } } } },
         { def = 'ms_radar_s1', team = 1, x = 3595, z = 3228, facing = 'south' },
+        { def = 'fable_airship', team = 1, x = 3412, z = 3412, facing = 'south' },
 
         -- Existing settlement and NPC garrisons. `team = 'neutral'`
         -- resolves to the Gaia team at stage time: the Gaia id is

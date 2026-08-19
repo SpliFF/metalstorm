@@ -16,6 +16,11 @@ local function fakeWorld(overrides)
         civilianDistrictsUnderThreat = function() return {} end,
         newConvoys = function() return {} end,
         infraBuildings = function() return {} end,
+        -- §10.5's transport floor. Empty by default so every pre-existing
+        -- expectation in this file still counts only the objectives its own
+        -- rule produced.
+        inFlightArrivals = function() return {} end,
+        extractableTransports = function() return {} end,
         teams = function() return {} end,
         completableObjectiveCount = function() return 1 end,
         nearestNeutralOrContestedRegion = function() return nil end,
@@ -228,5 +233,122 @@ describe("infra damage rule", function()
         generator.tick(world, state)
         assert.are.equal(1, #world._created)
         assert.are.equal(1, world._created[1].forTeam)
+    end)
+end)
+
+-- ============================================================
+-- §10.5's universal floor: the transport rule. These are the only generator
+-- tests that need NO map content whatsoever — which is the whole claim.
+-- ============================================================
+describe("transport rule (the universal generator floor)", function()
+    local function arrival(id, team, transportID)
+        return { arrivalID = id, team = team, transportID = transportID,
+                 dropZone = { x = 1000, z = 2000 } }
+    end
+
+    it("pairs an inbound escort with a kill race when a wave is on the map", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            inFlightArrivals = function() return { arrival('w1', 4, 77) } end,
+        })
+        generator.tick(world, state)
+        assert.are.equal(1, #world._created)
+        local pair = world._created[1]
+        assert.are.equal('escort', pair.escort.type)
+        assert.are.equal(4, pair.escort.forTeam)
+        assert.are.equal('inbound', pair.escort.params.direction)
+        assert.are.same({ 77 }, pair.escort.params.transportUnitIDs)
+        assert.are.equal(1000, pair.escort.params.extractArea.x)
+        assert.are.equal('kill', pair.kill.type)
+        assert.are.equal(77, pair.kill.params.targetUnitID)
+        assert.is_nil(pair.kill.forTeam)          -- open race for everyone else
+    end)
+
+    it("edge-triggers per wave: a wave still in flight does not re-fire", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            inFlightArrivals = function() return { arrival('w1', 4, 77) } end,
+        })
+        generator.tick(world, state)
+        world.frame, world.tick = 100000, 50     -- past any cooldown
+        generator.tick(world, state)
+        assert.are.equal(1, #world._created)
+    end)
+
+    it("forgets a wave once it leaves the in-flight list", function()
+        local state = generator.newState()
+        local live = { arrival('w1', 4, 77) }
+        local world = fakeWorld({ inFlightArrivals = function() return live end })
+        generator.tick(world, state)
+        assert.is_true(state.seenArrivals['w1'])
+        live = {}                                 -- unloaded (or died)
+        generator.tick(world, state)
+        assert.is_nil(state.seenArrivals['w1'])
+    end)
+
+    it("gives every side with a live carrier and an exit a standing outbound escort", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            extractableTransports = function()
+                return {
+                    { team = 0, transportUnitIDs = { 11 },
+                      extractArea = { x = 10, z = 20, r = 700 } },
+                    { team = 1, transportUnitIDs = { 12, 13 },
+                      extractArea = { x = 90, z = 80, r = 700 } },
+                }
+            end,
+        })
+        generator.tick(world, state)
+        assert.are.equal(2, #world._created)
+        assert.are.equal('escort', world._created[1].type)
+        assert.are.equal('outbound', world._created[1].params.direction)
+        assert.are.equal(0, world._created[1].forTeam)
+        assert.are.same({ 12, 13 }, world._created[2].params.transportUnitIDs)
+        assert.are.equal(700, world._created[2].params.extractArea.r)
+    end)
+
+    it("is idempotent per team while that side's escort stays active", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            extractableTransports = function()
+                return { { team = 0, transportUnitIDs = { 11 },
+                           extractArea = { x = 10, z = 20, r = 700 } } }
+            end,
+        })
+        generator.tick(world, state)
+        world.frame, world.tick = 100000, 50
+        generator.tick(world, state)
+        assert.are.equal(1, #world._created)
+    end)
+
+    it("produces nothing for a side with a carrier but nowhere to take it", function()
+        -- extractableTransports is the facade's job to filter; the rule trusts
+        -- it. This pins the contract that an empty answer stays empty.
+        local state = generator.newState()
+        local world = fakeWorld({ extractableTransports = function() return {} end })
+        generator.tick(world, state)
+        assert.are.equal(0, #world._created)
+    end)
+
+    it("keeps the liveness backstop quiet, because the floor already fired", function()
+        -- §10.5: "livenessRule's forced-control backstop stays as the last
+        -- resort but should rarely fire once the transport rule exists." Here
+        -- the starved team has no regions at all, so the backstop could not
+        -- have helped it anyway — the transport rule can, on any map.
+        local state = generator.newState()
+        local world = fakeWorld({
+            teams = function() return { 0 } end,
+            completableObjectiveCount = function() return 0 end,
+            nearestNeutralOrContestedRegion = function() return nil end,
+            extractableTransports = function()
+                return { { team = 0, transportUnitIDs = { 11 },
+                           extractArea = { x = 10, z = 20, r = 700 } } }
+            end,
+        })
+        generator.tick(world, state)
+        world.tick = 1
+        generator.tick(world, state)
+        assert.are.equal(1, #world._created)
+        assert.are.equal('escort', world._created[1].type)
     end)
 end)
