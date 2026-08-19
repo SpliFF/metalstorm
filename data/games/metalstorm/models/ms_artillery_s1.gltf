@@ -1,0 +1,722 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_artillery_s1",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "axle_f",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    0.4065069943049662,
+    -1.5
+   ]
+  },
+  {
+   "name": "axle_r",
+   "mesh": 2,
+   "translation": [
+    0.0,
+    0.4065069943049662,
+    1.35
+   ]
+  },
+  {
+   "name": "turret",
+   "children": [
+    5
+   ],
+   "mesh": 3,
+   "translation": [
+    0.0,
+    1.0,
+    0.9
+   ]
+  },
+  {
+   "name": "barrel",
+   "children": [
+    6
+   ],
+   "mesh": 4,
+   "translation": [
+    0.0,
+    0.56,
+    -0.12
+   ]
+  },
+  {
+   "name": "muzzle",
+   "translation": [
+    0.0,
+    0.924433942777383,
+    -0.43107062697551346
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 12,
+      "NORMAL": 13,
+      "TEXCOORD_0": 14
+     },
+     "indices": 15,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 16,
+      "NORMAL": 17,
+      "TEXCOORD_0": 18
+     },
+     "indices": 19,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 839,
+   "type": "VEC3",
+   "min": [
+    -0.8588908910751343,
+    0.39675793051719666,
+    -2.388284206390381
+   ],
+   "max": [
+    0.7599999904632568,
+    2.350343704223633,
+    2.25
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 839,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 839,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1197,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC3",
+   "min": [
+    -0.9599999785423279,
+    -0.4065069854259491,
+    -0.4065069854259491
+   ],
+   "max": [
+    0.9599999785423279,
+    0.4065069854259491,
+    0.4065069854259491
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 300,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC3",
+   "min": [
+    -0.9599999785423279,
+    -0.4065069854259491,
+    -0.4065069854259491
+   ],
+   "max": [
+    0.9599999785423279,
+    0.4065069854259491,
+    0.4065069854259491
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 192,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 300,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 228,
+   "type": "VEC3",
+   "min": [
+    -0.4804173707962036,
+    0.0,
+    -0.4804173707962036
+   ],
+   "max": [
+    0.4804173707962036,
+    0.5988909006118774,
+    0.4804173707962036
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 228,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 14,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 228,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 15,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 342,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 16,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 156,
+   "type": "VEC3",
+   "min": [
+    -0.11999999731779099,
+    -0.419079065322876,
+    -0.5213324427604675
+   ],
+   "max": [
+    0.11999999731779099,
+    0.9665237069129944,
+    0.2599126398563385
+   ]
+  },
+  {
+   "bufferView": 17,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 156,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 18,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 156,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 19,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 228,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 10068,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 10068,
+   "byteLength": 10068,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 20136,
+   "byteLength": 6712,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 26848,
+   "byteLength": 4788,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 31636,
+   "byteLength": 2304,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 33940,
+   "byteLength": 2304,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36244,
+   "byteLength": 1536,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 37780,
+   "byteLength": 1200,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 38980,
+   "byteLength": 2304,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 41284,
+   "byteLength": 2304,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 43588,
+   "byteLength": 1536,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 45124,
+   "byteLength": 1200,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 46324,
+   "byteLength": 2736,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 49060,
+   "byteLength": 2736,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 51796,
+   "byteLength": 1824,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 53620,
+   "byteLength": 1368,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 54988,
+   "byteLength": 1872,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 56860,
+   "byteLength": 1872,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 58732,
+   "byteLength": 1248,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 59980,
+   "byteLength": 912,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 60892,
+   "uri": "ms_artillery_s1.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_artillery_s1_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_artillery_s1_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_artillery_s1_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_artillery_s1_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_artillery_s1_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_artillery_s1",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 2.5265,
+   "midpos": [
+    0.0,
+    1.26326,
+    -0.06914
+   ],
+   "mins": [
+    -0.96,
+    -0.0,
+    -2.38828
+   ],
+   "maxs": [
+    0.96,
+    2.52652,
+    2.25
+   ],
+   "radius": 2.81,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -0.85889,
+      0.39676,
+      -2.38828
+     ],
+     "maxs": [
+      0.76,
+      2.35034,
+      2.25
+     ]
+    },
+    {
+     "name": "axle_f",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.40651,
+      -1.5
+     ],
+     "mins": [
+      -0.96,
+      -0.40651,
+      -0.40651
+     ],
+     "maxs": [
+      0.96,
+      0.40651,
+      0.40651
+     ]
+    },
+    {
+     "name": "axle_r",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.40651,
+      1.35
+     ],
+     "mins": [
+      -0.96,
+      -0.40651,
+      -0.40651
+     ],
+     "maxs": [
+      0.96,
+      0.40651,
+      0.40651
+     ]
+    },
+    {
+     "name": "turret",
+     "parent": 0,
+     "offset": [
+      0.0,
+      1.0,
+      0.9
+     ],
+     "mins": [
+      -0.48042,
+      0.0,
+      -0.48042
+     ],
+     "maxs": [
+      0.48042,
+      0.59889,
+      0.48042
+     ]
+    },
+    {
+     "name": "barrel",
+     "parent": 3,
+     "offset": [
+      0.0,
+      0.56,
+      -0.12
+     ],
+     "mins": [
+      -0.12,
+      -0.41908,
+      -0.52133
+     ],
+     "maxs": [
+      0.12,
+      0.96652,
+      0.25991
+     ]
+    },
+    {
+     "name": "muzzle",
+     "parent": 4,
+     "offset": [
+      0.0,
+      0.92443,
+      -0.43107
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
