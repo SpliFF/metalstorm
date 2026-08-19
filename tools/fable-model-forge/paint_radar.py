@@ -121,6 +121,8 @@ def paint_all():
     paint_details(m)
 
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=31)
     wx.crevice_grime(m.dif, 0.35)
     wx.mud_band(L.R_PAD.rect, 0.3, fade=None, spatter=True)

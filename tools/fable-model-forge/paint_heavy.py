@@ -16,6 +16,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    stencil, jit, shade, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK, RUBBER,
@@ -90,7 +91,7 @@ def paint_glacis(m):
     m.t.polygon(poly, fill=(255, 0, 0))
     m.d.polygon(poly, fill=TEAMGREY, outline=shade(ARMOR_DK, 0.5))
     # numeral on the lower plate
-    f = ImageFont.truetype(FONT, 56)
+    f = font(56)
     tw = m.d.textlength(NUM, font=f)
     ny = y0 + (y1 - y0) * 0.66
     m.d.text((cxm - tw / 2 + 2, ny + 2), NUM, font=f, fill=shade(ARMOR_DK, 0.55))
@@ -122,7 +123,7 @@ def paint_hull_rear(m):
                      (x0 + i * 18 + 9, hz[3]), (x0 + i * 18 - 9, hz[3])], fill=c)
     m.t.rectangle([x1 - 58, y0 + 14, x1 - 16, y0 + 52], fill=(255, 0, 0))
     m.d.rectangle([x1 - 58, y0 + 14, x1 - 16, y0 + 52], fill=TEAMGREY)
-    f = ImageFont.truetype(FONT, 40)
+    f = font(40)
     m.d.text((x0 + 18, y0 + 12), NUM, font=f, fill=(188, 192, 196))
     m.e.rectangle([x0 + 18, y0 + 62, x0 + 52, y0 + 69], fill=(160, 30, 24))
     m.d.rectangle([x0 + 18, y0 + 62, x0 + 52, y0 + 69], fill=(70, 20, 18))
@@ -293,7 +294,7 @@ def paint_turret_top(m):
                  (fu1 * W, fv1 * W)], fill=TEAMGREY)
     # roof tactical numeral
     nu, nv = zone.uv((0.0, 0, 2.35))
-    f = ImageFont.truetype(FONT, 58)
+    f = font(58)
     tw = m.d.textlength(NUM, font=f)
     m.d.text((nu * W - tw / 2 + 2, nv * W - 27 + 2), NUM, font=f,
              fill=shade(ARMOR_DK, 0.55))
@@ -364,7 +365,7 @@ def paint_turret_rear(m):
         m.d.rectangle([sx - 2, y0 + 48, sx + 2, y1 - 12], fill=STEEL_DK)
     m.o.rectangle([x0 + 14, y0 + 48, x1 - 14, y1 - 12],
                   fill=(AO_BASE - 40, 190, 10))
-    f = ImageFont.truetype(FONT, 32)
+    f = font(32)
     m.d.text((x0 + 10, y0 + 8), NUM, font=f, fill=(188, 192, 196))
 
 
@@ -445,7 +446,7 @@ def paint_breech(m):
     bolts(m, [(x0 + 12 + i * ((x1 - x0 - 24) / 5), y0 + 12) for i in range(6)],
           base=STEEL)
     m.d.rectangle([x0 + 14, y1 - 30, x0 + 66, y1 - 14], fill=YELLOW)
-    m.d.text((x0 + 17, y1 - 29), 'HV2', font=ImageFont.truetype(FONT, 13),
+    m.d.text((x0 + 17, y1 - 29), 'HV2', font=font(13),
              fill=BLACKISH)
 
 
@@ -775,6 +776,8 @@ def paint_all():
 
     # ── weathering (heavier than the line tank: this thing lives forward) ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=47)
     wx.crevice_grime(m.dif, 0.52)
     wx.mud_band(L.Z_TRACK_SIDE.rect, 1.0, fade='down')

@@ -43,8 +43,11 @@ return mk{
                 -- and for what the old 12 / 4.0109 pair got wrong.
                 -- centreY CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9175 ->
                 -- 0.7759: measured hover 0.1416 elmos (20 deg / 45 deg).
-                impostorDistance = 260, impostorSize = 2.3056,
-                impostorCentreY = 0.7759,
+                -- RE-CALIBRATED 2026-08-20 (texture-enrichment rebake) — see
+                -- soldiers.lua for the pixel-derivation; quad from the new
+                -- bake's json, lift from the pitch-15 ground rows.
+                impostorDistance = 260, impostorSize = 1.9990,
+                impostorCentreY = 0.9370,
                 impostorTeamMask = true },
         [2] = { -- footprint 2, not the builder's 3: still a foot squad, and it
                 -- must fit the landing ship's transportsize (3).

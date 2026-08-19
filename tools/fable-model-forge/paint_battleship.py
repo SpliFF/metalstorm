@@ -20,6 +20,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    stencil, jit, shade, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK,
@@ -78,7 +79,7 @@ def paint_hull(m):
         m.d.rectangle([pz(wz) - 5, int(py(5.55)), pz(wz) + 5, int(py(5.4))],
                       fill=(40, 42, 46))
     # draft marks at bow + stern
-    fdm = ImageFont.truetype(FONT, 11)
+    fdm = font(11)
     for (wz, base) in ((-35.0, None), (37.5, None)):
         for i, wy in enumerate((1.6, 2.2, 2.8)):
             m.d.text((pz(wz), py(wy) - 5), f'{2 * i + 2}', font=fdm,
@@ -91,7 +92,7 @@ def paint_hull(m):
     fill(m, (x0, y0, x1, y1), dif=HAZE, ao=AO_BASE - 8)
     m.t.rectangle([x0 + 10, y1 - 42, x1 - 10, y1 - 14], fill=(255, 0, 0))
     m.d.rectangle([x0 + 10, y1 - 42, x1 - 10, y1 - 14], fill=TEAMGREY)
-    f = ImageFont.truetype(FONT, 40)
+    f = font(40)
     tw = m.d.textlength('SOVEREIGN', font=f)
     m.d.text(((x0 + x1) / 2 - tw / 2 + 2, y0 + 60 + 2), 'SOVEREIGN', font=f,
              fill=shade(HAZE, 0.5))
@@ -140,7 +141,7 @@ def paint_deck(m):
         m.d.arc([hcx - rr_z + 6, hcy - rr_x + 6, hcx + rr_z - 6,
                  hcy + rr_x - 6], np.degrees(a), np.degrees(a) + 8,
                 fill=(220, 224, 228), width=4)
-    fh = ImageFont.truetype(FONT, 54)
+    fh = font(54)
     tw = m.d.textlength('H', font=fh)
     m.d.text((hcx - tw / 2, hcy - 27), 'H', font=fh, fill=(220, 224, 228))
     # tie-down dots around the pad
@@ -365,6 +366,8 @@ def paint_all():
 
     # ── marine weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=71)
     wx.crevice_grime(m.dif, 0.42)
     zone = L.B_HULL_SIDE

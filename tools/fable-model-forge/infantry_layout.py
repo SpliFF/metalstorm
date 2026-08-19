@@ -30,9 +30,10 @@ CELL = 56          # painted solid swatch, padded inside a 64-px grid cell
 GRID = 64          # 8×8 grid of swatches on the 512² atlas
 
 # ── palette (sRGB) — fable family (paint.py) + impostor-sprite wardrobe ───
-ARMOR     = (97, 106, 115)
-ARMOR_DK  = (72, 79, 87)
-LEG       = (63, 68, 75)
+# olive-drab military register — keep in step with paint.py's ARMOR family
+ARMOR     = (106, 103, 84)
+ARMOR_DK  = (84, 82, 67)
+LEG       = (66, 64, 53)
 STEEL     = (74, 78, 84)
 STEEL_DK  = (44, 47, 52)
 RUBBER    = (36, 38, 42)

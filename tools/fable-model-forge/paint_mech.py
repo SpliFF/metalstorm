@@ -8,6 +8,7 @@ painter helpers from paint.py; zones come from mech_layout.py.
 import numpy as np
 from PIL import Image, ImageFilter, ImageFont
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    shade, jit, stencil, FONT,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK, RUBBER,
@@ -54,7 +55,7 @@ def paint_torso(m):
     m.o.rectangle([x0 + 24, y0 + 40, x1 - 24, y0 + 96], fill=(AO_BASE - 20, R_ARMOR, M_ARMOR))
     bolts(m, [(x0 + 32 + i * ((x1 - x0 - 64) / 3), y0 + 48) for i in range(4)],
           base=ARMOR_DK)
-    f = ImageFont.truetype(FONT, 30)
+    f = font(30)
     m.d.text((x1 - 64, y0 + 104), '07', font=f, fill=(188, 192, 196))
     # side: intake slats toward the rear
     zone = M.M_TORSO_SIDE
@@ -81,7 +82,7 @@ def paint_torso_top(m):
         seam_v(m, int(u * W), y0 + 3, y1 - 3, ARMOR)
     # roof numeral (reads for the player camera) + team wedge
     nu, nv = zone.uv((0.0, 0, 0.42))
-    f = ImageFont.truetype(FONT, 42)
+    f = font(42)
     tw = m.d.textlength('07', font=f)
     m.d.text((nu * W - tw / 2 + 2, nv * W - 20 + 2), '07', font=f,
              fill=shade(ARMOR_DK, 0.55))
@@ -207,7 +208,7 @@ def paint_gun(m):
           base=ARMOR_DK)
     stencil(m, (x0 + 12, y0 + 10), 'MW-3', 20, shade(ARMOR, 1.25), bridge=False)
     m.d.rectangle([x1 - 42, y0 + 8, x1 - 10, y0 + 22], fill=YELLOW)
-    m.d.text((x1 - 39, y0 + 9), 'HV', font=ImageFont.truetype(FONT, 12),
+    m.d.text((x1 - 39, y0 + 9), 'HV', font=font(12),
              fill=BLACKISH)
 
     zone = M.M_MUZZLE_CELL
@@ -260,6 +261,8 @@ def paint_all():
     # ── weathering pass: mud rises from the feet, grease on joints ──
     from weathering import Weather, vertical_rects_of
     from paint import BOLT_LOG as _bolts
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=63)
     wx.crevice_grime(m.dif, 0.65)
     # ground contact: feet heaviest, fading up the legs (u runs hip->foot)

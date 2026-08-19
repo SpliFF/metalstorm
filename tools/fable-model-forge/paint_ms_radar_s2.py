@@ -18,6 +18,7 @@ import normals as NM
 NM.W = 1024
 import paintlib as PL
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    shade, jit, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, STEEL, STEEL_DK,

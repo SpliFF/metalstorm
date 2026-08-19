@@ -19,6 +19,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    stencil, jit, shade, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK,
@@ -79,7 +80,7 @@ def paint_walls(m):
     # plant code on the rear wall (single projection: no mirroring)
     zone = L.F_REAR
     x0, y0, x1, y1 = zone.rect
-    f = ImageFont.truetype(FONT, 96)
+    f = font(96)
     m.d.text((x0 + 96 + 3, y0 + 128 + 3), 'PLANT 07', font=f,
              fill=shade(SIDING, 0.55))
     m.d.text((x0 + 96, y0 + 128), 'PLANT 07', font=f, fill=(200, 204, 208))
@@ -110,7 +111,7 @@ def paint_roof(m):
     m.d.rectangle([x0 + 40, y0 + 10, x0 + 110, y1 - 10],
                   fill=shade(ROOFC, 1.12))
     # plant code sized to ONE sawtooth slope band (z 1.0..5.6 -> tooth 3)
-    f = ImageFont.truetype(FONT, 42)
+    f = font(42)
     tw = m.d.textlength('PLANT 07', font=f)
     ty = y0 + (y1 - y0) * ((3.3 + 8.6) / 20.2) - 21
     m.d.text(((x0 + x1) / 2 - tw / 2 + 2, ty + 2), 'PLANT 07', font=f,
@@ -173,7 +174,7 @@ def paint_pad(m):
                     fill=YELLOW)
     # pad numeral + hazard edging at the front lip
     nu, nv = zone.uv((10.5, 0, -9.5))
-    f = ImageFont.truetype(FONT, 72)
+    f = font(72)
     m.d.text((nu * W, nv * W), '07', font=f, fill=shade(CONCRETE, 0.7))
     # tire tracks arcing to the gate
     for dx in (-26, 26):
@@ -416,6 +417,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=61)
     wx.crevice_grime(m.dif, 0.45)
     # walls: dust low, rust streaks from eave/team band and wainscot line

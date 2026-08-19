@@ -293,6 +293,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=47)
     wx.crevice_grime(m.dif, 0.4)
     for zone in (L.N_T1_SIDE, L.N_T1_FR, L.N_T2_SIDE, L.N_T2_FR):

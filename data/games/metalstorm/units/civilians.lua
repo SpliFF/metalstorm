@@ -20,7 +20,10 @@ return {
             -- (models/ms_civilians.gltf), baked directional sprite far
             -- (models/ms_civilians_impostor.ktx2 — deliberately no team mask,
             -- civilians read as neutral population).
-            impostor_distance = '260', impostor_size = '2.2559',
+            -- RE-CALIBRATED 2026-08-20 (texture-enrichment rebake) — quad
+            -- from the new bake json, lift from pitch-15 ground rows; see
+            -- soldiers.lua.
+            impostor_distance = '260', impostor_size = '1.9508',
             -- The `infantry_v2` atlas convention (impostor_convention.py
             -- INFANTRY_V2), declared per atlas — see _builder.lua for why the
             -- runtime must be told rather than assume. Phase 180 = column 0 is
@@ -34,7 +37,8 @@ return {
             -- shipped sheet. See soldiers.lua.
             -- CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9000 -> 0.7470:
             -- measured hover 0.1530 elmos. See _builder.lua.
-            impostor_centre_y = '0.7470',
+            -- RE-CALIBRATED 2026-08-20 with the rebaked sheet (see above).
+            impostor_centre_y = '0.9192',
         },
     },
     ms_militia = {
@@ -56,7 +60,9 @@ return {
             -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
             -- (models/ms_militia.gltf), baked directional sprite far; militia
             -- get a team armband (models/ms_militia_impostor{,_team}.ktx2).
-            impostor_distance = '260', impostor_size = '2.3227',
+            -- RE-CALIBRATED 2026-08-20 (texture-enrichment rebake) — see
+            -- ms_civilians above.
+            impostor_distance = '260', impostor_size = '2.0470',
             impostor_team_mask = '1',
             -- `infantry_v2` convention + size/lift measured off the shipped
             -- sheet (2026-08-03 M5 live pass; was 11 / 3.5050) — see
@@ -65,7 +71,8 @@ return {
             impostor_azimuth_phase = '180', impostor_pitch_degrees = '15,45,80',
             -- CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9075 -> 0.7544:
             -- measured hover 0.1531 elmos. See _builder.lua.
-            impostor_centre_y = '0.7544',
+            -- RE-CALIBRATED 2026-08-20 with the rebaked sheet (see above).
+            impostor_centre_y = '0.9265',
         },
     },
 }

@@ -21,6 +21,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    jit, shade, BOLT_LOG,
                    ARMOR, GLASS, YELLOW, BLACKISH, TEAMGREY, CYAN,
@@ -155,7 +156,7 @@ def paint_top(m):
         m.d.ellipse([rcx - rx * 0.6, rcy - ry * 0.6, rcx + rx * 0.6,
                      rcy + ry * 0.6], fill=TEAMGREY)
     # FA-06 code on the starboard wing, reading spanwise, aft of the roundel
-    f = ImageFont.truetype(FONT, 46)
+    f = font(46)
     timg = Image.new('RGBA', (160, 56), (0, 0, 0, 0))
     td = ImageDraw.Draw(timg)
     td.text((2, 2), 'FA-06', font=f, fill=(210, 213, 217, 255))
@@ -165,7 +166,7 @@ def paint_top(m):
     for s in (1, -1):
         m.d.line([(u(-1.5), vx(s * 0.62)), (u(4.6), vx(s * 0.62))],
                  fill=shade(AIR, 0.85), width=2)
-    fs = ImageFont.truetype(FONT, 16)
+    fs = font(16)
     for wz in (0.6, 2.8):
         m.d.text((u(wz), vx(1.15)), 'NO STEP', font=fs,
                  fill=shade(AIR, 0.65))
@@ -318,6 +319,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=59)
     wx.crevice_grime(m.dif, 0.35)
     zone = L.F_SIDE

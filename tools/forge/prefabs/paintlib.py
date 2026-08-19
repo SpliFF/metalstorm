@@ -212,11 +212,18 @@ def standard_weather(m, L, ground_rects=(), side_zones=(), seed=41,
     return wx
 
 
-def finish(m, L, stem, hm=None, wx=None, emissive_blur=0.6, outdir='out'):
+def finish(m, L, stem, hm=None, wx=None, emissive_blur=0.6, outdir='out',
+           enrich=1.0):
     """The standard ending: apply weathering, blur emissive, write ALL FIVE
     maps (normals included). Pass hm=normals.HeightMap() with your proud
     plates/straps already stamped; with hm=None a default HeightMap is built
-    from crevices + logged bolts + weathering alone."""
+    from crevices + logged bolts + weathering alone.
+
+    `enrich` scales the automatic multi-scale mottle pass (paint.enrich)
+    that breaks up flat fills; 0 disables it (ancient-tech seamless
+    surfaces may want that)."""
+    if enrich:
+        P.enrich(m, strength=enrich)
     if wx is not None:
         wx.apply(m)
     if hm is None:

@@ -31,11 +31,14 @@ def font(size):
     return ImageFont.load_default()
 
 # ── palette (sRGB) ───────────────────────────────────────────────────────
-ARMOR      = (97, 106, 115)      # mid blue-grey armor
-ARMOR_LT   = (110, 120, 129)
-ARMOR_DK   = (79, 87, 95)
-LOWER      = (63, 68, 75)       # lower hull / skirt armor
-STEEL      = (74, 78, 84)       # mechanical steel
+# Warm olive-drab military register (post-nuclear scavenger per
+# DESIGN-GUIDE: rust and soot, never clean sci-fi). Was a 5-shade
+# desaturated blue-grey, which read as a bland monotone in-engine.
+ARMOR      = (106, 103, 84)      # mid olive-drab armor
+ARMOR_LT   = (123, 119, 97)
+ARMOR_DK   = (86, 84, 68)
+LOWER      = (66, 64, 53)       # lower hull / skirt armor
+STEEL      = (74, 78, 84)       # mechanical steel (stays cool — bare metal)
 STEEL_DK   = (48, 51, 56)
 RUBBER     = (36, 38, 42)       # tires / track pads
 TRACK_MET  = (58, 60, 64)
@@ -46,6 +49,11 @@ TEAMGREY   = (168, 172, 176)    # diffuse under full team mask (preview only)
 CYAN       = (86, 226, 255)     # emissive
 ORANGE     = (255, 128, 42)
 WHITEHOT   = (235, 244, 248)
+# Scavenger accents — for mismatched plates, oxide patches, canvas stowage.
+OXIDE      = (116, 66, 46)      # rust-red primer / oxidised plate
+KHAKI      = (146, 132, 99)     # sun-bleached repaint
+CANVAS     = (108, 97, 76)      # tarps / stowage rolls
+SOOT       = (38, 36, 33)       # exhaust staining base
 
 AO_BASE, AO_SEAM, AO_DEEP = 232, 150, 95
 R_ARMOR, R_STEEL, R_RUBBER, R_GLASS, R_GLOW = 168, 128, 205, 60, 90
@@ -83,6 +91,43 @@ def fill(m: Maps, box, dif=None, ao=None, rough=None, metal=None):
         m.o.rectangle(box, fill=(ao if ao is not None else cur[0],
                                  rough if rough is not None else cur[1],
                                  metal if metal is not None else cur[2]))
+
+
+def _smooth_noise(rng, cells, size):
+    """Low-res uniform noise upscaled bilinearly → smooth field in [0,1]."""
+    n = rng.random((cells, cells)).astype(np.float32)
+    img = Image.fromarray((n * 255).astype(np.uint8), 'L')
+    return np.asarray(img.resize((size, size), Image.BILINEAR),
+                      dtype=np.float32) / 255.0
+
+
+def enrich(m: Maps, seed=90210, strength=1.0):
+    """Break up flat fills AFTER all painting: multi-scale value mottle +
+    a subtle warm/cool drift on the diffuse, and matching roughness
+    variation on the ORM. Tone-on-tone (≤ ~±9% at strength 1.0) so large
+    quads stay impostor-baker-safe, but enough that hulls stop reading as
+    one solid colour in-engine. Deterministic; call once, before
+    weathering is applied and before normals are derived."""
+    rng = np.random.default_rng(seed)
+    size = m.dif.size[0]
+    coarse = _smooth_noise(rng, 12, size) - 0.5     # plate-scale blotch
+    med    = _smooth_noise(rng, 48, size) - 0.5     # patch-scale
+    fine   = _smooth_noise(rng, 192, size) - 0.5    # grain
+    value = 1.0 + strength * (0.11 * coarse + 0.055 * med + 0.04 * fine)
+
+    d = np.asarray(m.dif, dtype=np.float32)
+    d *= value[..., None]
+    # temperature drift: warm patches gain red / lose blue, cool the reverse
+    temp = strength * 6.0 * (_smooth_noise(rng, 16, size) - 0.5)
+    d[..., 0] += temp
+    d[..., 2] -= temp
+    m.dif = Image.fromarray(np.clip(d, 0, 255).astype(np.uint8), 'RGB')
+    m.d = ImageDraw.Draw(m.dif)
+
+    o = np.asarray(m.orm, dtype=np.float32)
+    o[..., 1] += strength * 26.0 * (0.7 * coarse + 0.3 * med)  # roughness
+    m.orm = Image.fromarray(np.clip(o, 0, 255).astype(np.uint8), 'RGB')
+    m.o = ImageDraw.Draw(m.orm)
 
 
 def seam_h(m: Maps, x0, x1, y, base, hi=True):
@@ -376,7 +421,7 @@ def paint_turret_top(m):
                  (fu1 * W, fv1 * W)], fill=TEAMGREY)
     # roof tactical numeral (reads for the top-down RTS camera)
     nu, nv = zone.uv((0.0, 0, 1.35))
-    f = ImageFont.truetype(FONT, 54)
+    f = font(54)
     tw = m.d.textlength('09', font=f)
     m.d.text((nu * W - tw / 2 + 2, nv * W - 25 + 2), '09', font=f, fill=shade(ARMOR_DK, 0.55))
     m.d.text((nu * W - tw / 2, nv * W - 25), '09', font=f, fill=(196, 200, 204))
@@ -443,7 +488,7 @@ def paint_turret_rear(m):
         sx = x0 + (x1 - x0) * fx
         m.d.rectangle([sx - 2, y0 + 42, sx + 2, y1 - 10], fill=STEEL_DK)
     m.o.rectangle([x0 + 12, y0 + 42, x1 - 12, y1 - 10], fill=(AO_BASE - 40, 190, 10))
-    f = ImageFont.truetype(FONT, 30)
+    f = font(30)
     m.d.text((x0 + 8, y0 + 6), '09', font=f, fill=(188, 192, 196))
 
 
@@ -521,7 +566,7 @@ def paint_breech(m):
     bolts(m, [(x0 + 10 + i * ((x1 - x0 - 20) / 3), y0 + 10) for i in range(4)],
           base=STEEL)
     m.d.rectangle([x0 + 12, y1 - 26, x0 + 58, y1 - 12], fill=YELLOW)
-    m.d.text((x0 + 15, y1 - 25), 'HV', font=ImageFont.truetype(FONT, 12),
+    m.d.text((x0 + 15, y1 - 25), 'HV', font=font(12),
              fill=BLACKISH)
 
 
@@ -665,6 +710,7 @@ def paint_all():
     paint_brake(m)
     paint_tube_cap(m)
     paint_details(m)
+    enrich(m)
     # ── weathering pass (gritty: dirt/rust where physics puts them) ──
     from weathering import Weather, vertical_rects_of
     wx = Weather(seed=41)

@@ -23,6 +23,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    jit, shade, BOLT_LOG,
                    ARMOR, GLASS, YELLOW, BLACKISH, TEAMGREY, CYAN,
@@ -44,7 +45,7 @@ STRIP_AX = None                 # filled in paint_deck
 
 
 def rot_text(m, text, size, anchor_uv, fill_c, angle=-90, shadow=True):
-    f = ImageFont.truetype(FONT, size)
+    f = font(size)
     tw = int(m.d.textlength(text, font=f)) + 6
     timg = Image.new('RGBA', (tw, size + 12), (0, 0, 0, 0))
     td = ImageDraw.Draw(timg)
@@ -162,7 +163,7 @@ def paint_deck(m):
                     outline=MARK, width=3)
         m.d.ellipse([cx_ - rz * 0.42, cy_ - rx * 0.42, cx_ + rz * 0.42,
                      cy_ + rx * 0.42], outline=shade(MARK, 0.8), width=2)
-        f = ImageFont.truetype(FONT, 30)
+        f = font(30)
         m.d.text((cx_ - 9, cy_ - 17), 'H', font=f, fill=MARK)
     for (px_, pz) in L.PADS_FIGHT:                   # herringbone brackets
         ang = np.radians(40)
@@ -259,7 +260,7 @@ def paint_hull(m):
     def vy(wy):
         return zone.uv((0, wy, 0))[1] * W
 
-    f = ImageFont.truetype(FONT, 44)
+    f = font(44)
     tw = m.d.textlength('BASTION', font=f)
     m.d.text(((x0 + x1) / 2 - tw / 2 + 2, vy(6.4) + 2), 'BASTION', font=f,
              fill=shade(HAZE, 0.5))
@@ -479,6 +480,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=97)
     wx.crevice_grime(m.dif, 0.4)
     dz = L.C_DECK

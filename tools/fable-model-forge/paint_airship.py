@@ -20,6 +20,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    stencil, jit, shade, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK,
@@ -115,7 +116,7 @@ def paint_envelope(m):
         m.d.line([(u(-20.0), vx(wx_)), (u(15.0), vx(wx_))],
                  fill=jit(YELLOW, 10), width=2)
     # big topside code, reading along the axis
-    f = ImageFont.truetype(FONT, 96)
+    f = font(96)
     tw = m.d.textlength('FT-02', font=f)
     tcx = u(22.0) - tw / 2
     m.d.text((tcx + 3, vx(-2.9) + 3), 'FT-02', font=f, fill=shade(ENV, 0.6))
@@ -371,6 +372,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=83)
     wx.crevice_grime(m.dif, 0.4)
     zone = L.A_SIDE

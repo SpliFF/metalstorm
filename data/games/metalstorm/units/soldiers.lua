@@ -33,8 +33,16 @@ return mk{
                 -- camera pitches (20 deg, 45 deg), which agree to 0.0003; then
                 -- confirmed by re-measuring the residual after the edit landed.
                 -- See _builder.lua for the method and its two traps.
-                impostorDistance = 260, impostorSize = 2.3615,
-                impostorCentreY = 0.7650,
+                -- RE-CALIBRATED 2026-08-20 (texture-enrichment rebake): the
+                -- sheets were rebaked (new olive infantry palette) and the
+                -- current baker fits tighter than the 2026-08 sheet — quad
+                -- 2.0704 elmos (json width), feet ~4.5% above the cell bottom.
+                -- centreY re-derived from the sheet pixels via the M11
+                -- relationship lift = (groundRow − cellCentre)/cellPx × quad,
+                -- mean over the 8 pitch-15 cells. Worth an in-game residual
+                -- check (M11 method) next live session.
+                impostorDistance = 260, impostorSize = 2.0704,
+                impostorCentreY = 0.9422,
                 impostorTeamMask = true,
                 override = { transportbyenemy = false } },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } },

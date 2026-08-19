@@ -20,6 +20,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    jit, shade, BOLT_LOG,
                    GLASS, YELLOW, BLACKISH, TEAMGREY,
@@ -146,7 +147,7 @@ def paint_transit(m):
     x0, y0, x1, y1 = zone.rect
     fill(m, (x0, y0, x1, y1), dif=(30, 38, 52), ao=AO_BASE, rough=120,
          metal=90)
-    f = ImageFont.truetype(FONT, 74)
+    f = font(74)
     tw = m.d.textlength('TRANSIT', font=f)
     m.d.text(((x0 + x1) / 2 - tw / 2, (y0 + y1) / 2 - 40), 'TRANSIT',
              font=f, fill=(226, 230, 235))

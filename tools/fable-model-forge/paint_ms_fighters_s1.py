@@ -21,6 +21,7 @@ NM.W = 1024
 import paintlib as PL
 
 from PIL import Image, ImageDraw
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, wear_edges, shade, jit,
                    BOLT_LOG, BLACKISH, TEAMGREY, STEEL, STEEL_DK,
                    AO_BASE, AO_SEAM, AO_DEEP,

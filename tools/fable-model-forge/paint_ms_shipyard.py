@@ -22,6 +22,7 @@ import normals as NM
 NM.W = 2048
 import paintlib as PL
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, stencil, wear_edges,
                    shade, jit, BOLT_LOG, YELLOW, BLACKISH, STEEL, STEEL_DK,
                    AO_BASE, AO_SEAM, AO_DEEP, R_STEEL, M_STEEL)

@@ -17,6 +17,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    stencil, jit, shade, BOLT_LOG,
                    ARMOR, ARMOR_LT, ARMOR_DK, LOWER, STEEL, STEEL_DK, RUBBER,
@@ -178,7 +179,7 @@ def paint_torso(m):
         _, v = zone.uv((0, 0, wz))
         seam_h(m, x0 + 4, x1 - 4, int(v * W), PLATE)
     nu, nv = zone.uv((0.0, 0, 1.5))
-    f = ImageFont.truetype(FONT, 60)
+    f = font(60)
     tw = m.d.textlength('01', font=f)
     m.d.text((nu * W - tw / 2 + 2, nv * W - 28 + 2), '01', font=f,
              fill=shade(PLATE, 0.55))
@@ -416,7 +417,7 @@ def paint_weapons(m):
         seam_v(m, int(x0 + (x1 - x0) * fx), y0 + 3, y1 - 3, STEEL)
     rivets(m, x0, y0, x1, y1, step=36)
     m.d.rectangle([x0 + 12, y1 - 32, x0 + 68, y1 - 14], fill=YELLOW)
-    m.d.text((x0 + 15, y1 - 31), 'ARM', font=ImageFont.truetype(FONT, 14),
+    m.d.text((x0 + 15, y1 - 31), 'ARM', font=font(14),
              fill=BLACKISH)
     hatch(m, x1 - 70, y0 + 60, 44, 52, 'W-04')
     # pressure gauge dial
@@ -521,6 +522,8 @@ def paint_all():
 
     # ── weathering ──
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=53)
     wx.crevice_grime(m.dif, 0.42)
     # mud: feet heaviest, shins graded, thigh spatter

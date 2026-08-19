@@ -25,6 +25,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, wear_edges, jit, shade,
                    BOLT_LOG, YELLOW, BLACKISH, AO_BASE, AO_SEAM, AO_DEEP,
                    R_ARMOR, R_STEEL, M_ARMOR, M_STEEL)

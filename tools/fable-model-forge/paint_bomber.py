@@ -20,6 +20,7 @@ weathering.W = 2048
 import normals as NM
 NM.W = 2048
 
+from paint import font
 from paint import (Maps, fill, seam_h, seam_v, bolts, vent_slots, wear_edges,
                    jit, shade, BOLT_LOG,
                    ARMOR, GLASS, YELLOW, BLACKISH, TEAMGREY, CYAN,
@@ -146,13 +147,13 @@ def paint_top(m):
                      rcy + ry * 0.6], fill=(255, 0, 0))
         m.d.ellipse([rcx - rx * 0.6, rcy - ry * 0.6, rcx + rx * 0.6,
                      rcy + ry * 0.6], fill=TEAMGREY)
-    f = ImageFont.truetype(FONT, 44)
+    f = font(44)
     timg = Image.new('RGBA', (150, 54), (0, 0, 0, 0))
     td = ImageDraw.Draw(timg)
     td.text((2, 2), 'FB-09', font=f, fill=(206, 209, 213, 255))
     timg = timg.rotate(-90, expand=True)
     m.dif.paste(timg, (int(u(2.6)) - 27, int(vx(-5.3))), timg)
-    fs = ImageFont.truetype(FONT, 15)
+    fs = font(15)
     for s in (1.55, -1.85):
         m.d.text((u(0.2), vx(s)), 'NO STEP', font=fs, fill=shade(AIR, 0.65))
     wear_edges(m, (int(u(-1.6)), int(vx(-6.2)), int(u(4.6)), int(vx(6.2))),
@@ -290,6 +291,8 @@ def paint_all():
     paint_stores(m)
 
     from weathering import Weather, vertical_rects_of
+    from paint import enrich
+    enrich(m)
     wx = Weather(seed=43)
     wx.crevice_grime(m.dif, 0.35)
     tz = L.B_TOP
