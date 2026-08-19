@@ -139,6 +139,14 @@ struct WorldDefaults {
     double rankPerResource           = 1.0;
     double rankPerUnit               = 2.0;
 
+    // ── W9: the economic tick (mirrored by WorldEconomyRules) ──────────────
+    /// Treasury income per world DAY, per POI a faction owns.
+    double poiIncomePerWorldDay      = 2.0;
+    /// The fraction of a faction's treasury lost per world day — the same
+    /// "gentle rate" shape as `authorityDecayPerWorldDay`, applied to money.
+    double treasuryDecayPerWorldDay  = 0.01;
+    double treasuryFloor             = 0.0;
+
     nlohmann::json ToJson() const;
 };
 

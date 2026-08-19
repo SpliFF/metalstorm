@@ -141,6 +141,9 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["rankPerMoney"]              = rankPerMoney;
     j["rankPerResource"]           = rankPerResource;
     j["rankPerUnit"]               = rankPerUnit;
+    j["poiIncomePerWorldDay"]      = poiIncomePerWorldDay;
+    j["treasuryDecayPerWorldDay"]  = treasuryDecayPerWorldDay;
+    j["treasuryFloor"]             = treasuryFloor;
     return j;
 }
 

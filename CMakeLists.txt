@@ -478,6 +478,11 @@ set(LOBBY_SERVER_SOURCES
     # same reason: a commander here is a world ROW, and the only battle-shaped
     # input it has is the W6 settlement ledger, which is itself world-scoped.
     rts/Server/WorldStats.cpp
+    # PLAN-worldsim.md W9: the economic tick — per-POI/per-faction income and
+    # treasury decay, ledgered and priced against the world clock. Lobby-only,
+    # same reason again: the tick reads world_pois/world_factions and writes
+    # only world-scoped rows, never a war table.
+    rts/Server/WorldEconomy.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -654,6 +659,10 @@ if(TEST_SOURCES)
         # test_world_stats.cpp drives the pure rules with no db at all and the
         # store against the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldStats.cpp
+        # PLAN-worldsim.md W9: the economic tick — test_world_economy.cpp
+        # drives the pure pricing functions with no db and the store/Tick
+        # against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldEconomy.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

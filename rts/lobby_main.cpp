@@ -21,6 +21,7 @@
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
 #include "Server/WorldDirector.h"
+#include "Server/WorldEconomy.h"
 #include "Server/WorldFactions.h"
 #include "Server/WorldStats.h"
 #include "Server/WorldWarLinkage.h"
@@ -7988,6 +7989,12 @@ int main(int argc, char *argv[]) {
   int warSideMaintenanceTick = 0;
   // §7, task 4: the meta-state machine's driver.
   int warLifecycleTick = 0;
+  // PLAN-worldsim.md W9: the economic tick's driver — ~every 30 s at 10 Hz.
+  // Low-frequency by design (see WorldEconomy.h): the pricing itself is a
+  // closed-form function of elapsed world time, so a slow cadence here costs
+  // freshness, never correctness — a lobby that only fires this once an hour
+  // still prices the whole gap in one call.
+  int worldEconomyTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -8116,6 +8123,26 @@ int main(int argc, char *argv[]) {
             }
           }
         }
+      }
+    }
+
+    // PLAN-worldsim.md W9: price every world's economic tick (~every 30 s at
+    // 10 Hz — see the counter's declaration above for why the cadence is not
+    // a correctness knob). WorldDirector, not WorldStats: the tick is a
+    // WRITE the world layer owns independently of any route being read, the
+    // same separation WarDirector/WarLifecycleSweep keep for wars.
+    if (++worldEconomyTick >= 300) {
+      worldEconomyTick = 0;
+      const int64_t nowReal = WorldNowRealMs();
+      for (const auto& w : WorldDirector::ListWorlds(mapDb)) {
+        const auto reading = WorldDirector::ClockFor(mapDb, w.worldId, nowReal);
+        if (!reading) continue;
+        // A paused world's `worldMs` has not moved since the last tick (see
+        // WorldClock.h), so `WorldEconomy::Tick` prices an elapsed of <= 0
+        // and writes nothing — the pause ledger stops accrual without this
+        // loop having to know pause is even a state.
+        const auto rules = WorldEconomyRules::FromWorldConfig(w.config);
+        WorldEconomy::Tick(mapDb, w.worldId, rules, reading->worldMs, nowReal);
       }
     }
 

@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "SqliteThreading.h"
+#include "WorldEconomy.h"
 #include "WorldFactions.h"
 
 namespace {
@@ -331,6 +332,10 @@ void WorldStats::EnsureTables(sqlite3* db) {
     // outcome and is ignored — the same shape every other add-a-column
     // migration in this tree uses (GameStateStore.cpp, WarDirector.cpp).
     WorldFactions::EnsureTables(db);
+    // W9's tables. Ensured here too (not just from the lobby's tick driver)
+    // so a read-only route hit before the first tick still finds
+    // `world_economy_events` present — same reasoning as WorldFactions above.
+    WorldEconomy::EnsureTables(db);
     sqlite3_exec(db,
         "ALTER TABLE world_authority ADD COLUMN capacity_spent REAL NOT NULL DEFAULT 0",
         nullptr, nullptr, nullptr);
@@ -728,9 +733,20 @@ WorldRankBreakdown WorldStats::RankFor(sqlite3* db, const std::string& worldId,
                 ++poisHeld;
         }
     }
-    // Money / resources / units: zero until W9's economy exists. Passed
-    // explicitly so the formula is whole (see WorldStatRules' comment).
-    const WorldHoldings holdings;
+    // Money: W9's per-faction treasury, split evenly across the faction's
+    // active membership — Rank is a PER-PLAYER holdings sum (C27) and the
+    // treasury is a per-FACTION row, so an equal share is the simplest
+    // reading that does not require a second per-player ledger. Resources
+    // and units still have no world-layer source and stay zero (see
+    // WorldStatRules' comment — the weights are wired and multiply zero on
+    // purpose, not a gap this function should paper over with a guess).
+    WorldHoldings holdings;
+    if (const auto m = WorldFactions::MembershipFor(db, worldId, accountId)) {
+        const double treasury = WorldEconomy::TreasuryFor(db, worldId, m->factionId);
+        const int members =
+            static_cast<int>(WorldFactions::MembersOf(db, worldId, m->factionId).size());
+        holdings.money = members > 0 ? treasury / members : 0.0;
+    }
     return ComputeRank(owned, poisHeld, holdings, rules, nowWorldMs);
 }
 
@@ -831,6 +847,15 @@ nlohmann::json WorldStats::StatsJson(sqlite3* db, const std::string& worldId,
         factions.push_back(std::move(fj));
     }
     out["factions"] = std::move(factions);
+
+    // W9: the tick itself is driven by the lobby's periodic sweep
+    // (WorldDirector), not by this read — this only reports what it has
+    // priced so far, the same "other director merges what it knows" idiom
+    // AttachFactions/AttachMeStats already use.
+    const auto w = WorldDirector::Load(db, worldId);
+    out["economy"] = WorldEconomy::EconomyJson(
+        db, worldId,
+        WorldEconomyRules::FromWorldConfig(w ? w->config : nlohmann::json::object()));
     return out;
 }
 
