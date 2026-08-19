@@ -64,12 +64,28 @@ Two entry points, and they are not alternatives (PLAN-maps §2c/§2d):
     / `carve_junction_aprons` are its rasterization half.
 
 ⚠ **The grade limit above is a claim about one mask edge, not about the deck
-that ships.** The cost graph is memoryless, so a pair of opposite legal
-traverses climbs at the terrain's fall line while every edge certifies the
-limit, and Chaikin then smooths the saw-tooth into a straight climb.
-`deck_grade_profile` measures what shipped, at a declared scale, and
-`report_delivered_grades` warns when the two disagree — see PLAN-maps §2d.1 for
-the open design question behind it.
+that ships** — unless the graph carries heading state. A memoryless graph lets
+a pair of opposite legal traverses climb at the terrain's fall line while every
+edge certifies the limit, and Chaikin then smooths the saw-tooth into a
+straight climb. `heading_sectors` (roads R6, PLAN-maps §2d.1 option C, ruled
+2026-08-19) is the fix: the graph is layered by the QUANTISED heading a cell
+was entered on, so a reversal can be priced rather than being free. It is
+approximate by construction and that is the point — a full heading-state graph
+is exact and costs ~40x, coarse sectors cost ~3x measured (below) and kill the
+3-cell zigzag, which is the entire pathology.
+
+`deck_grade_profile` and `report_delivered_grades` remain the instrument, and
+they are what the fix was measured with. **Measured at plan_step=4, mask_k=4 on
+both shipped maps** (2049^2 heightmaps, 513^2 planning grids), `plan_network`
+alone:
+
+    map              sectors=0   sectors=4   sectors=8
+    meridian_basin      2.45 s      5.58 s      8.83 s   (3.6x)
+    skerry_reach        1.82 s      3.61 s      5.15 s   (2.8x)
+
+`heading_sectors = 0` reproduces the memoryless graph **exactly** — it is the
+same edge list, and both shipped maps are pinned to it so their packages do not
+move (see the note at each generator's road step; a re-ship is a human's call).
 """
 from __future__ import annotations
 
@@ -125,6 +141,24 @@ class RoadParams:
     # for it yet, so a map with a denser settlement graph can just set it.
     road_discount: float = 1.0      # cost multiplier for reusing an existing way
     detour_lambda: float = 1.5      # Gabriel shortcut kept when route/direct > this
+    # --- heading state (PLAN-maps §2d.1, option C, user ruling 2026-08-19) ---
+    # The cost graph above is memoryless, so nothing stops a route from
+    # alternating two opposite legal traverses: each edge certifies the grade
+    # limit while the pair climbs at the terrain's fall line, and Chaikin
+    # smooths the saw-tooth into a straight climb. `heading_sectors` layers the
+    # graph by the QUANTISED heading a cell was entered on, so the reversal can
+    # be priced. 0 reproduces the memoryless graph exactly (and every pre-R6
+    # map from it); 8 is the ruled default. It is deliberately approximate —
+    # two headings inside one sector reverse for free — but a 3-cell zigzag
+    # crosses sectors, and that is the whole pathology.
+    heading_sectors: int = 8        # 0 == memoryless; 4 or 8 per the ruling
+    # Added to an edge whose heading turns by more than `turn_max_deg` from the
+    # heading the cell was entered on. It is a LENGTH SCALE, not a taste knob:
+    # a zigzag with legs of length L pays this every L, so the penalty is what
+    # sets the shortest leg the planner will accept. In planning-cell units, so
+    # it is independent of `cellsize` and of `plan_step`.
+    turn_penalty: float = 30.0
+    turn_max_deg: float = 90.0      # a turn at or below this is free
     road_width: float = 48.0        # world units, full-res rasterization
     flatten_blend: float = 96.0     # shoulder blend distance (world units)
 
@@ -185,10 +219,121 @@ def _deep_water(water: np.ndarray, p: RoadParams) -> np.ndarray:
     return depth > (p.max_bridge_cells * 0.5)
 
 
-def _edge_costs(h, water, slope, cellsize, p: RoadParams,
-                deep: np.ndarray | None = None,
-                on_road: np.ndarray | None = None):
-    """Build the sparse segment-mask cost graph over the planning grid."""
+def _heading_sector(dr: int, dc: int, sectors: int) -> int:
+    """Which of `sectors` equal heading bins the offset (dr, dc) falls in."""
+    ang = math.atan2(dr, dc)
+    return int(round(ang / (2.0 * math.pi / sectors))) % sectors
+
+
+def _turn_penalties(p: RoadParams) -> np.ndarray:
+    """`pen[s_in, s_out]` — the toll for arriving on `s_in` and leaving on `s_out`.
+
+    The turn is read between the two sector CENTRES, which is the whole
+    approximation in option C: a turn is charged at the resolution of the
+    quantisation, so two headings inside one sector reverse for free. That is
+    affordable because the pathology is a 3-cell zigzag between *opposite*
+    traverses — a reversal is 180 deg and crosses sectors at any width the
+    ruling allows.
+    """
+    S = p.heading_sectors
+    d = np.abs(np.arange(S)[:, None] - np.arange(S)[None, :])
+    d = np.minimum(d, S - d) * (360.0 / S)
+    return np.where(d > p.turn_max_deg, float(p.turn_penalty), 0.0)
+
+
+class _PlanGraph:
+    """The planner's cost graph, memoryless or layered by incoming heading.
+
+    Layered, a node is `(cell, sector)` laid out as `sector * n + cell`, plus
+    one extra START layer at `sectors * n` that a route is seeded from — a
+    source has no incoming heading, so its first edge must be free to leave in
+    any direction. Callers still speak in CELLS: `run` reduces the per-layer
+    distances to a per-cell minimum and `path` walks the layered predecessors
+    back down to a cell sequence. That is what keeps `plan_roads`,
+    `plan_network` and `_join_to_deck` unaware of the layering.
+    """
+
+    def __init__(self, csr, n_cells: int, sectors: int, out_deg: np.ndarray):
+        self.csr = csr
+        self.n = n_cells
+        self.S = sectors
+        self.out_deg = out_deg      # per CELL, so the M9a FIND 1 diagnostic
+                                    # still reads "no edge leaves this cell"
+
+    def _source(self, cell: int) -> int:
+        return cell if self.S <= 0 else self.S * self.n + cell
+
+    def run(self, cells: list[int]) -> "_PlanRoutes":
+        dist, pred = dijkstra(self.csr, indices=[self._source(c) for c in cells],
+                              return_predecessors=True)
+        if self.S <= 0:
+            return _PlanRoutes(self, dist, pred, dist)
+        # min over the heading layers AND the start layer: the source's own
+        # cell only ever carries a distance in the start layer
+        cell_dist = dist.reshape(len(cells), self.S + 1, self.n).min(axis=1)
+        return _PlanRoutes(self, dist, pred, cell_dist)
+
+
+class _PlanRoutes:
+    """One Dijkstra run's results, addressed by cell."""
+
+    def __init__(self, g: _PlanGraph, raw_dist, pred, cell_dist):
+        self.g = g
+        self.raw = raw_dist
+        self.pred = pred
+        self.dist = cell_dist       # (len(sources), n_cells)
+
+    def path(self, i: int, src_cell: int, dst_cell: int) -> np.ndarray | None:
+        g = self.g
+        if g.S <= 0:
+            return _walk_predecessors(self.pred[i], src_cell, dst_cell)
+        # enter the destination on whichever heading was cheapest to arrive on
+        cand = self.raw[i][dst_cell::g.n]
+        if not np.isfinite(cand).any():
+            return None
+        layer = int(np.argmin(np.where(np.isfinite(cand), cand, np.inf)))
+        raw = _walk_predecessors(self.pred[i], g._source(src_cell),
+                                 layer * g.n + dst_cell)
+        if raw is None:
+            return None
+        # every mask edge moves to a different cell, so the layered walk maps
+        # one-to-one onto a cell sequence
+        return raw % g.n
+
+
+def _layered_graph(rows, cols, costs, secs, n: int, p: RoadParams):
+    """Cross the memoryless edge list with the heading layers.
+
+    Every base edge is emitted once per layer it can be entered from — the
+    `sectors` heading layers plus the start layer — so the graph grows by
+    `sectors + 1` in both nodes and edges. That factor IS the price the ruling
+    gated on: 8 sectors is ~9x, against a full heading-state graph's ~40x.
+    """
+    S = p.heading_sectors
+    pen = _turn_penalties(p)
+    E = rows.size
+    heads = cols + secs.astype(np.int64) * n          # the head node, layered
+    lr = np.empty(E * (S + 1), dtype=np.int64)
+    lc = np.empty(E * (S + 1), dtype=np.int64)
+    lv = np.empty(E * (S + 1), dtype=np.float64)
+    for s in range(S + 1):
+        sl = slice(s * E, (s + 1) * E)
+        lr[sl] = rows + s * n            # s == S is the start layer
+        lc[sl] = heads
+        lv[sl] = costs if s == S else costs + pen[s][secs]
+    return coo_matrix((lv, (lr, lc)),
+                      shape=(n * (S + 1), n * (S + 1))).tocsr()
+
+
+def _edge_arrays(h, water, slope, cellsize, p: RoadParams,
+                 deep: np.ndarray | None = None,
+                 on_road: np.ndarray | None = None):
+    """The segment-mask cost graph as flat (row, col, cost, sector) arrays.
+
+    Split out of `_edge_costs` so the heading layers can be crossed with the
+    edges without building the memoryless matrix first and throwing it away —
+    at 8 sectors that matrix is a ninth of the memory and all of it wasted.
+    """
     H, W = h.shape
     n = H * W
     idx = np.arange(n).reshape(H, W)
@@ -200,7 +345,8 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
     grade_ref = max(p.grade_ref_deg, 1e-6)
     side_ref = max(p.sidehill_ref_deg, 1e-6)
 
-    rows, cols, costs = [], [], []
+    S = max(int(p.heading_sectors), 0)
+    rows, cols, costs, secs = [], [], [], []
     for dr, dc in mask_offsets(p.mask_k):
         samples = _segment_samples(dr, dc)
         lo_r = min(s[0] for s in samples); hi_r = max(s[0] for s in samples)
@@ -272,9 +418,41 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
         keep = ~blocked
 
         rows.append(src[keep]); cols.append(dst[keep]); costs.append(cost[keep])
+        if S:
+            secs.append(np.full(int(keep.sum()), _heading_sector(dr, dc, S),
+                                dtype=np.int64))
 
-    rows = np.concatenate(rows); cols = np.concatenate(cols); costs = np.concatenate(costs)
+    return (np.concatenate(rows), np.concatenate(cols), np.concatenate(costs),
+            np.concatenate(secs) if S else None, n)
+
+
+def _edge_costs(h, water, slope, cellsize, p: RoadParams,
+                deep: np.ndarray | None = None,
+                on_road: np.ndarray | None = None):
+    """The MEMORYLESS cost graph, as a cell-by-cell sparse matrix.
+
+    This is the cost model on its own, with no heading layers: it is what
+    `unbuildable_mask` asks "does any edge leave this cell" of, and what
+    `tests/test_roads.py` prices. The planner itself goes through
+    `_plan_graph`.
+    """
+    rows, cols, costs, _secs, n = _edge_arrays(
+        h, water, slope, cellsize, p, deep=deep, on_road=on_road)
     return coo_matrix((costs, (rows, cols)), shape=(n, n)).tocsr()
+
+
+def _plan_graph(h, water, slope, cellsize, p: RoadParams,
+                deep: np.ndarray | None = None,
+                on_road: np.ndarray | None = None) -> "_PlanGraph":
+    """The graph the planner routes on: memoryless, or layered by heading."""
+    rows, cols, costs, secs, n = _edge_arrays(
+        h, water, slope, cellsize, p, deep=deep, on_road=on_road)
+    out_deg = np.bincount(rows, minlength=n)
+    if secs is None:
+        return _PlanGraph(coo_matrix((costs, (rows, cols)), shape=(n, n)).tocsr(),
+                          n, 0, out_deg)
+    return _PlanGraph(_layered_graph(rows, cols, costs, secs, n, p),
+                      n, max(int(p.heading_sectors), 0), out_deg)
 
 
 def unbuildable_mask(
@@ -343,8 +521,7 @@ def _report_split(nets, k, edges, graph, nodes, endpoints, idx, tier="roads",
     # planner disagreement about buildable ground and was M9a FIND 1.
     # `unbuildable_mask` is the same condition offered to `pick_sites` as a
     # `forbidden` field, so a generator can reject the site instead.
-    out_deg = np.asarray(graph.getnnz(axis=1)).ravel()
-    stranded = [j for j in range(k) if out_deg[nodes[j]] == 0]
+    stranded = [j for j in range(k) if graph.out_deg[nodes[j]] == 0]
     if stranded:
         where = ", ".join(f"#{idx[j]} at ({endpoints[idx[j]][0]:.0f},"
                           f"{endpoints[idx[j]][1]:.0f})" for j in stranded)
@@ -469,7 +646,7 @@ def plan_roads(
     h, water, slope = _plan_grid(height, water_level, cellsize, p)
     H, W = h.shape
     deep = _deep_water(water, p)
-    graph = _edge_costs(h, water, slope, cellsize, p, deep=deep)
+    graph = _plan_graph(h, water, slope, cellsize, p, deep=deep)
 
     def to_node(pt):
         x, z = pt
@@ -482,8 +659,9 @@ def plan_roads(
     if k < 2:
         return []
 
-    dist, pred = dijkstra(graph, indices=nodes, return_predecessors=True)
-    pair_cost = np.array([[dist[i][nodes[j]] for j in range(k)] for i in range(k)])
+    routes = graph.run(nodes)
+    pair_cost = np.array([[routes.dist[i][nodes[j]] for j in range(k)]
+                          for i in range(k)])
 
     edges = _mst_forest(pair_cost)
     nets = k - len(edges)          # a spanning forest has k - (#components) edges
@@ -506,7 +684,7 @@ def plan_roads(
     if p.road_discount == 1.0:
         polylines = []
         for i, j in edges:
-            path_nodes = _walk_predecessors(pred[i], nodes[i], nodes[j])
+            path_nodes = routes.path(i, nodes[i], nodes[j])
             if path_nodes is not None:
                 polylines.append(to_polyline(path_nodes))
         return polylines
@@ -514,10 +692,9 @@ def plan_roads(
     on_road = np.zeros((H, W), dtype=bool)
     polylines = []
     for i, j in sorted(edges, key=lambda e: (pair_cost[e[0]][e[1]], e)):
-        g = graph if not on_road.any() else _edge_costs(
+        g = graph if not on_road.any() else _plan_graph(
             h, water, slope, cellsize, p, deep=deep, on_road=on_road)
-        _d, pr = dijkstra(g, indices=[nodes[i]], return_predecessors=True)
-        path_nodes = _walk_predecessors(pr[0], nodes[i], nodes[j])
+        path_nodes = g.run([nodes[i]]).path(0, nodes[i], nodes[j])
         if path_nodes is None:
             continue
         on_road.ravel()[path_nodes] = True
@@ -1242,7 +1419,7 @@ def _graph_cache(h, water, slope, cellsize, p: RoadParams, deep):
         cp = class_road_params(road_class, p)
         key = (float(cp.max_grade_deg), float(cp.max_sidehill_deg))
         if key not in cache:
-            cache[key] = _edge_costs(h, water, slope, cellsize, cp, deep=deep)
+            cache[key] = _plan_graph(h, water, slope, cellsize, cp, deep=deep)
         return cache[key]
 
     return get
@@ -1338,8 +1515,8 @@ def plan_network(
             return 0
         g = graph_for(road_class)
         sub_nodes = [nodes[i] for i in idx]
-        dist, pred = dijkstra(g, indices=sub_nodes, return_predecessors=True)
-        pair_cost = np.array([[dist[a][sub_nodes[b]] for b in range(len(idx))]
+        routes = g.run(sub_nodes)
+        pair_cost = np.array([[routes.dist[a][sub_nodes[b]] for b in range(len(idx))]
                               for a in range(len(idx))])
         edges, nets = _tier_edges(pair_cost, pts[idx], lam)
         for pair in extra_pairs or []:
@@ -1350,7 +1527,7 @@ def plan_network(
         _report_split(nets, len(idx), edges, g, sub_nodes, endpoints, idx,
                       tier=f"roads/{ROAD_CLASS_NAMES[road_class]}")
         for a, b in edges:
-            path = _walk_predecessors(pred[a], sub_nodes[a], sub_nodes[b])
+            path = routes.path(a, sub_nodes[a], sub_nodes[b])
             if path is not None:
                 add_link(road_class, path, idx[a], idx[b])
         return nets
@@ -1399,14 +1576,13 @@ def _join_to_deck(net, idx, nodes, graph, deck, road_class, add_link,
         if nodes[i] in deck:
             continue          # the node is already standing on the network
         targets = sorted(deck)[::max(1, stride)]
-        dist, pred = dijkstra(graph, indices=[nodes[i]],
-                              return_predecessors=True)
-        costs = dist[0][targets]
+        routes = graph.run([nodes[i]])
+        costs = routes.dist[0][targets]
         if not np.isfinite(costs).any():
             continue
         target = targets[int(np.nanargmin(np.where(np.isfinite(costs),
                                                    costs, np.inf)))]
-        path = _walk_predecessors(pred[0], nodes[i], target)
+        path = routes.path(0, nodes[i], target)
         if path is None:
             continue
         add_link(road_class, path, i, -1)
@@ -1664,9 +1840,12 @@ def deck_grade_profile(
     corridor, a uniform ramp — it is what the planner *always* does, because
     every zigzag pitch costs exactly the same and the tightest one is shortest.
 
-    Until the planner carries heading state (see PLAN-maps §2d, the R2 design
-    question), this is the instrument: measure what shipped, at a declared
-    scale, and let `plan_network` say so out loud.
+    The planner CAN now carry heading state (`RoadParams.heading_sectors`,
+    roads R6) and that is what closes the gap — but this stays the instrument
+    either way, because it is the only thing that measures the DELIVERED deck
+    rather than the deck the cost model believes in. Both shipped maps are
+    pinned to the memoryless graph, so on them this still reports the
+    degeneracy and is meant to.
     """
     r = resample_by_arclength(polyline, window)
     if len(r) < 2:
@@ -1703,12 +1882,22 @@ def report_delivered_grades(
         name = ROAD_CLASS_NAMES[rc]
         progress(f"  roads: {name} delivered grade p95 {p95:.1f} deg / max {mx:.1f} "
                  f"deg over {window:.0f}-unit windows (class limit {limit:.0f})")
-        if p95 > limit * 1.15 + 0.5:
+        if p95 > limit * 1.15 + 0.5 and p.heading_sectors <= 0:
             progress(f"  roads: WARNING the delivered {name} deck is steeper than "
                      f"the class limit the route was planned under. Every mask "
                      f"edge held {limit:.0f} deg; the deck does not, because the "
                      f"cost graph is memoryless and a pair of opposite legal "
                      f"traverses climbs at the fall line (see "
                      f"roads.deck_grade_profile). This is a road that looks "
-                     f"engineered and drives like a cliff.")
+                     f"engineered and drives like a cliff. Price the reversal "
+                     f"with RoadParams.heading_sectors (roads R6); it is 0 here.")
+        elif p95 > limit * 1.15 + 0.5:
+            # ...and the SAME reading means something else once reversals are
+            # priced: it is no longer the memoryless degeneracy, so it is a
+            # claim about the terrain rather than about the cost graph.
+            progress(f"  roads: WARNING the delivered {name} deck is steeper than "
+                     f"the class limit, at heading_sectors={p.heading_sectors}. "
+                     f"The reversal IS priced here, so this is NOT the fall-line "
+                     f"degeneracy: no route on this terrain holds {limit:.0f} deg "
+                     f"and the planner took the cheapest one that breaks it.")
     return out
