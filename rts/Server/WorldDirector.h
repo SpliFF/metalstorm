@@ -15,9 +15,13 @@
 // BATTLE.** A war is an event; a world is the persistent thing the event
 // happens inside. Nothing here reads, writes or extends a `war*` table, and
 // no world column is keyed by a room. The seam between the layers (staging,
-// escrow, settlement write-back) is W6 and later, and it will be a NEW
-// world-scoped row written at battle end — never a war row re-interpreted as
-// world state.
+// escrow) is later; W6 opens it a crack with `world_settlement_ledger` — a
+// NEW world-scoped row written at battle end, never a war row
+// re-interpreted as world state. The row is keyed by `(world_id, poi_id)`
+// same as everything else here; `room_id` rides along as a label only (rooms
+// are reused, so it is never a join key back into `war*`), and the caller
+// that fills it in (the lobby's lifecycle sweep, `rts/lobby_main.cpp`)
+// reads `war_outcome` itself — this file still never does.
 //
 // ── What a world is, as rows ───────────────────────────────────────────────
 //   `worlds`             one row per persistent world: its clock definition
@@ -33,8 +37,13 @@
 //   `world_pause_ledger` Capture 11's admin global pause, as intervals. The
 //                        clock is computed from them (WorldClock.h); pausing
 //                        is a row, not a stopped process.
+//   `world_settlement_ledger` W6: the write-back seam this header promised
+//                        above — one row per war that settles at a POI
+//                        (outcome, winning faction(s), the room it happened
+//                        in). Append-only history, never updated: a ledger
+//                        is the point, not a snapshot a later war overwrites.
 //
-// All four are keyed by `world_id` (TEXT — worlds are named, not numbered, and
+// All five are keyed by `world_id` (TEXT — worlds are named, not numbered, and
 // a name is what the UI and the operator both use). Migration is ADDITIVE
 // only, never probe-and-drop: a row here is the only copy of the world.
 //
@@ -132,6 +141,26 @@ struct WorldPoiEdgeRecord {
     nlohmann::json config = nlohmann::json::object();
 };
 
+/// A `world_settlement_ledger` row (W6) — one war's ending, as it lands on
+/// the world layer. Append-only: `WorldDirector::RecordSettlement` always
+/// INSERTs, never upserts, because the whole point is that rows accumulate
+/// across many wars fought at the same POI.
+struct WorldSettlementRecord {
+    std::string worldId;
+    std::string poiId;
+    /// The room the war was fought in. A label, not a join key — room ids
+    /// are reused, and no `war*` table is ever read back through it.
+    uint32_t    roomId = 0;
+    /// The war layer's own vocabulary (`WarTerminalReasonToString`), reused
+    /// rather than a second one invented here — "victory_objective",
+    /// "faction_elimination", "operator_retire", "season_end".
+    std::string outcome;
+    /// Winning faction(s), comma-separated (`WarOutcomeRecord::
+    /// winnerFactions`). Empty when the war had no in-sim winner.
+    std::string factions;
+    int64_t     recordedAt = 0;
+};
+
 /// The durable half. Static, like WarDirector: there is no per-instance state
 /// to hold, and the handle is the lobby's shared one.
 class WorldDirector {
@@ -166,6 +195,20 @@ public:
 
     static bool UpsertEdge(sqlite3* db, const WorldPoiEdgeRecord& edge);
     static std::vector<WorldPoiEdgeRecord> EdgesFor(sqlite3* db, const std::string& worldId);
+
+    /// The POI (if any, across every world this lobby knows) whose battle map
+    /// is `mapId`. Used at war end to resolve a room's map back to the
+    /// world+POI it settles at — nullopt is a legal answer, not a defect: a
+    /// map with no POI (not yet seeded, or a world-only scenario) settles
+    /// nowhere and W6 records nothing for it.
+    static std::optional<WorldPoiRecord> PoiForMap(sqlite3* db, const std::string& mapId);
+
+    // ── The settlement ledger (W6) ──────────────────────────────────────────
+
+    /// Append one settlement row. Always an INSERT — see the struct comment.
+    static bool RecordSettlement(sqlite3* db, const WorldSettlementRecord& e);
+    static std::vector<WorldSettlementRecord> SettlementsFor(sqlite3* db,
+                                                              const std::string& worldId);
 
     // ── The pause ledger (Capture 11) ──────────────────────────────────────
     // W1 ships the STORE and the arithmetic; the admin route that calls these

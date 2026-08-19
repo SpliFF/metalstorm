@@ -197,12 +197,30 @@ void WorldDirector::EnsureTables(sqlite3* db) {
     // Every clock read scans this world's ledger; the primary key leads with
     // world_id and serves that, but the open-interval lookup (`ended_at_ms=0`)
     // is the hot one on a world with a long pause history.
+    // W6: append-only, so no primary key beyond the implicit rowid — a
+    // (world_id, poi_id) pair earns many rows over a world's life, one per
+    // war that settled there, and that accumulation is the whole point.
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS world_settlement_ledger ("
+        "  world_id TEXT NOT NULL,"
+        "  poi_id TEXT NOT NULL,"
+        // Label only, never a join key — see the header note on
+        // WorldSettlementRecord::roomId.
+        "  room_id INTEGER NOT NULL DEFAULT 0,"
+        "  outcome TEXT NOT NULL DEFAULT '',"
+        "  factions TEXT NOT NULL DEFAULT '',"
+        "  recorded_at INTEGER NOT NULL DEFAULT 0"
+        ")", nullptr, nullptr, nullptr);
+
     sqlite3_exec(db,
         "CREATE INDEX IF NOT EXISTS idx_world_pause_open "
         "ON world_pause_ledger(world_id, ended_at_ms)", nullptr, nullptr, nullptr);
     sqlite3_exec(db,
         "CREATE INDEX IF NOT EXISTS idx_world_pois_map "
         "ON world_pois(map_id)", nullptr, nullptr, nullptr);
+    sqlite3_exec(db,
+        "CREATE INDEX IF NOT EXISTS idx_world_settlement_poi "
+        "ON world_settlement_ledger(world_id, poi_id)", nullptr, nullptr, nullptr);
 }
 
 bool WorldDirector::Upsert(sqlite3* db, const WorldRecord& w) {
@@ -430,6 +448,83 @@ std::vector<WorldPoiEdgeRecord> WorldDirector::EdgesFor(sqlite3* db,
     BindText(stmt, 1, worldId);
     while (sqlite3_step(stmt) == SQLITE_ROW)
         out.push_back(ReadEdgeRow(stmt));
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::optional<WorldPoiRecord> WorldDirector::PoiForMap(sqlite3* db,
+                                                       const std::string& mapId) {
+    if (!db || mapId.empty()) return std::nullopt;
+    // `idx_world_pois_map` makes this an indexed lookup, not a scan. LIMIT 1:
+    // the same map id claimed by two POIs (in the same or different worlds)
+    // is not a case W6 needs to resolve — the first one found settles the
+    // war, and that ambiguity belongs to whoever seeds POIs, not to this read.
+    const std::string sql = std::string("SELECT ") + kPoiColumns +
+                            " FROM world_pois WHERE map_id=? LIMIT 1";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    BindText(stmt, 1, mapId);
+    std::optional<WorldPoiRecord> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        out = ReadPoiRow(stmt);
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+// ── The settlement ledger (W6) ────────────────────────────────────────────
+
+bool WorldDirector::RecordSettlement(sqlite3* db, const WorldSettlementRecord& e) {
+    if (!db || e.worldId.empty() || e.poiId.empty()) return false;
+    bool ok = true;
+    const bool committed = SqliteWriteTransaction(db, "WorldRecordSettlement", [&] {
+        // Plain INSERT, no ON CONFLICT: this is a ledger, and the whole point
+        // of W6 is that two wars settling at the same POI leave two rows, not
+        // one row overwritten.
+        static const char* kSql =
+            "INSERT INTO world_settlement_ledger "
+            "(world_id, poi_id, room_id, outcome, factions, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            ok = false;
+            return SQLITE_ERROR;
+        }
+        BindText(stmt, 1, e.worldId);
+        BindText(stmt, 2, e.poiId);
+        sqlite3_bind_int64(stmt, 3, static_cast<int64_t>(e.roomId));
+        BindText(stmt, 4, e.outcome);
+        BindText(stmt, 5, e.factions);
+        sqlite3_bind_int64(stmt, 6, e.recordedAt);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok ? SQLITE_OK : SQLITE_ERROR;
+    });
+    return committed && ok;
+}
+
+std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(
+    sqlite3* db, const std::string& worldId) {
+    std::vector<WorldSettlementRecord> out;
+    if (!db || worldId.empty()) return out;
+    static const char* kSql =
+        "SELECT world_id, poi_id, room_id, outcome, factions, recorded_at "
+        "FROM world_settlement_ledger WHERE world_id=? "
+        "ORDER BY recorded_at ASC, rowid ASC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+    BindText(stmt, 1, worldId);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        WorldSettlementRecord e;
+        e.worldId     = ColText(stmt, 0);
+        e.poiId       = ColText(stmt, 1);
+        e.roomId      = static_cast<uint32_t>(sqlite3_column_int64(stmt, 2));
+        e.outcome     = ColText(stmt, 3);
+        e.factions    = ColText(stmt, 4);
+        e.recordedAt  = sqlite3_column_int64(stmt, 5);
+        out.push_back(std::move(e));
+    }
     sqlite3_finalize(stmt);
     return out;
 }

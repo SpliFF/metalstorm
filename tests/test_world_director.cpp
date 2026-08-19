@@ -154,12 +154,13 @@ TEST_CASE("W1: the calendar splits world ms the way the UI reads it") {
 
 // ── The rows: schema round-trip ────────────────────────────────────────────
 
-TEST_CASE("W1: EnsureTables creates the four world tables and no war table") {
+TEST_CASE("W1: EnsureTables creates the five world tables and no war table") {
     WorldDb f;
     CHECK(TableExists(f.db, "worlds"));
     CHECK(TableExists(f.db, "world_pois"));
     CHECK(TableExists(f.db, "world_poi_edges"));
     CHECK(TableExists(f.db, "world_pause_ledger"));
+    CHECK(TableExists(f.db, "world_settlement_ledger"));
     // The hard boundary, asserted rather than assumed: the world layer must
     // not create, extend or depend on the per-battle (room_id-keyed) tables.
     CHECK_FALSE(TableExists(f.db, "wars"));
@@ -417,4 +418,116 @@ TEST_CASE("W1: GET /api/world/pois's body carries nodes and edges") {
     REQUIRE(j["edges"].size() == 1);
     CHECK(j["edges"][0]["from"] == "osprey_fen");
     CHECK(j["edges"][0]["transitWorldMs"] == 6 * kHourMs);
+}
+
+// ── W6: the settlement write-back stub ─────────────────────────────────────
+
+TEST_CASE("W6: PoiForMap resolves a room's map to its POI, across worlds") {
+    WorldDb f;
+    WorldRecord w;
+    w.worldId = "earth";
+    REQUIRE(WorldDirector::Upsert(f.db, w));
+
+    WorldPoiRecord a;
+    a.worldId = "earth";
+    a.poiId   = "randtown";
+    a.mapId   = "meridian_basin";
+    REQUIRE(WorldDirector::UpsertPoi(f.db, a));
+
+    const auto found = WorldDirector::PoiForMap(f.db, "meridian_basin");
+    REQUIRE(found.has_value());
+    CHECK(found->worldId == "earth");
+    CHECK(found->poiId == "randtown");
+
+    // A world-only POI's absent map is never returned for an empty query —
+    // nothing here should match a room with no map id set.
+    CHECK_FALSE(WorldDirector::PoiForMap(f.db, "").has_value());
+    // A map nobody seeded as a POI settles nowhere. Legal, not a defect.
+    CHECK_FALSE(WorldDirector::PoiForMap(f.db, "no_such_map").has_value());
+}
+
+TEST_CASE("W6: two sequential wars at one POI accumulate, they do not overwrite") {
+    WorldDb f;
+    WorldRecord w;
+    w.worldId = "earth";
+    REQUIRE(WorldDirector::Upsert(f.db, w));
+    WorldPoiRecord a;
+    a.worldId = "earth";
+    a.poiId   = "randtown";
+    a.mapId   = "meridian_basin";
+    REQUIRE(WorldDirector::UpsertPoi(f.db, a));
+
+    // War 1: room 7 settles at Randtown, the union wins.
+    WorldSettlementRecord s1;
+    s1.worldId    = "earth";
+    s1.poiId      = "randtown";
+    s1.roomId     = 7;
+    s1.outcome    = "victory_objective";
+    s1.factions   = "union";
+    s1.recordedAt = 1000;
+    REQUIRE(WorldDirector::RecordSettlement(f.db, s1));
+
+    // War 2: a LATER war, different room, same POI — the compact wins this
+    // time. The room id could even be reused (§ header note); it is not the
+    // key.
+    WorldSettlementRecord s2;
+    s2.worldId    = "earth";
+    s2.poiId      = "randtown";
+    s2.roomId     = 11;
+    s2.outcome    = "faction_elimination";
+    s2.factions   = "compact";
+    s2.recordedAt = 2000;
+    REQUIRE(WorldDirector::RecordSettlement(f.db, s2));
+
+    const auto rows = WorldDirector::SettlementsFor(f.db, "earth");
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].roomId == 7);
+    CHECK(rows[0].outcome == "victory_objective");
+    CHECK(rows[0].factions == "union");
+    CHECK(rows[0].recordedAt == 1000);
+    CHECK(rows[1].roomId == 11);
+    CHECK(rows[1].outcome == "faction_elimination");
+    CHECK(rows[1].factions == "compact");
+    CHECK(rows[1].recordedAt == 2000);
+
+    // A world nobody has settled anything in yet reports an empty ledger, not
+    // an error.
+    CHECK(WorldDirector::SettlementsFor(f.db, "mars").empty());
+}
+
+TEST_CASE("W6: an ending the sim never saw settles with no faction named") {
+    // An operator retire or a season end has no war_outcome row (see
+    // WarOutcome.h); the caller then passes an empty factions string rather
+    // than inventing a winner, and the ledger must accept and preserve that.
+    WorldDb f;
+    WorldSettlementRecord s;
+    s.worldId    = "earth";
+    s.poiId      = "randtown";
+    s.roomId     = 3;
+    s.outcome    = "operator_retire";
+    s.recordedAt = 500;
+    REQUIRE(WorldDirector::RecordSettlement(f.db, s));
+
+    const auto rows = WorldDirector::SettlementsFor(f.db, "earth");
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].factions.empty());
+    CHECK(rows[0].outcome == "operator_retire");
+}
+
+TEST_CASE("W6: RecordSettlement is guarded against an empty world or POI id") {
+    WorldDb f;
+    WorldSettlementRecord s;
+    s.roomId     = 1;
+    s.outcome    = "victory_objective";
+    s.recordedAt = 100;
+
+    s.worldId = "";
+    s.poiId   = "randtown";
+    CHECK_FALSE(WorldDirector::RecordSettlement(f.db, s));
+
+    s.worldId = "earth";
+    s.poiId   = "";
+    CHECK_FALSE(WorldDirector::RecordSettlement(f.db, s));
+
+    CHECK(WorldDirector::SettlementsFor(f.db, "earth").empty());
 }

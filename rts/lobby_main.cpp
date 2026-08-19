@@ -7757,6 +7757,32 @@ int main(int argc, char *argv[]) {
              WarStateToString(step->from), WarStateToString(step->to),
              WarTerminalReasonToString(step->reason),
              step->archived ? " — archived, digest emitted" : "");
+
+        // PLAN-worldsim.md W6: the settlement write-back stub. Same chokepoint
+        // as the war-over digest above (fires exactly once per archival, for
+        // the same reason — `AdvanceWarLifecycle` reports `archived` on only
+        // the one sweep that made the transition). Guarded: a room whose map
+        // is not any world's POI (not yet seeded, or a world-only scenario)
+        // settles nowhere, and that is not an error.
+        if (step->archived) {
+          if (const GameRoom* room = rooms.GetRoom(war.roomId)) {
+            if (const auto poi = WorldDirector::PoiForMap(mapDb, room->mapId)) {
+              WorldSettlementRecord rec;
+              rec.worldId = poi->worldId;
+              rec.poiId   = poi->poiId;
+              rec.roomId  = war.roomId;
+              rec.outcome = WarTerminalReasonToString(step->reason);
+              // The sim's own verdict, when there is one — see WarOutcome.h:
+              // an ending the sim never saw (operator retire, season end)
+              // legitimately has no `war_outcome` row and settles with no
+              // faction named.
+              if (const auto outcome = WarOutcomeDb::Load(mapDb, war.roomId))
+                rec.factions = outcome->winnerFactions;
+              rec.recordedAt = now;
+              WorldDirector::RecordSettlement(mapDb, rec);
+            }
+          }
+        }
       }
     }
 
