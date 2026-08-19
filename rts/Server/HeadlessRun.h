@@ -96,6 +96,11 @@ struct Config {
     // map/game/aiSlots). Values are strings on the wire — CGameSetup stores
     // them as strings and Spring.GetModOptions() hands them to Lua as strings —
     // so JSON numbers/bools are coerced rather than rejected.
+    //
+    // A TOP-LEVEL `"scenario"` string in the manifest is folded in here as the
+    // `scenario` modoption, replacing any `modOptions.scenario` in the same
+    // file — that is the spelling every other manifest consumer requires, so
+    // one manifest now boots identically as a room and as a headless run.
     std::vector<std::pair<std::string, std::string>> modOptions;
 };
 
@@ -121,6 +126,15 @@ StopReason EvaluateStop(const StopConditions& cond, int64_t maxWallSec,
 // Microseconds per tick for the given mode. Returns 0 for Uncapped (sentinel:
 // "do not pace"). `gameSpeed` is GAME_SPEED (sim frames per game-second).
 int64_t TickIntervalMicros(TickMode mode, float tickMultiple, int gameSpeed);
+
+// Whether the synced-Lua predicate is due for a poll at this frame: once per
+// game-second (every `gameSpeed` frames), never at frame 0 (pre-GameStart).
+// The cadence used to be every 30 GAME-SECONDS (frame 900 first), which meant
+// any run whose frame limit fired earlier exited having never evaluated its
+// luaCondition even once — silently, since an unevaluated predicate produces
+// no output at all. Once per second keeps the cost invisible next to a sim
+// tick while bounding the stop latency to under a game-second.
+bool LuaConditionPollDue(int64_t frame, int gameSpeed);
 
 // Human-readable name for logs / the stats dump status field.
 const char* StopReasonName(StopReason r);

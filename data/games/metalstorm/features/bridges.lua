@@ -32,6 +32,49 @@
 -- query to features. When that lands, flipping `blocking` here is a one-line
 -- change and the models/footprints below need no revision.
 --
+-- ⚠️ THE ENGINE-SIDE `deckHeight` THAT LANDED (PLAN-maps §2j option C) IS THE
+-- SEATING HALF, NOT THE PATHING HALF. `FeatureDef::deckHeight` (resolved from
+-- `customparams.deck_top` below) makes a span HOLD the y it was staged at
+-- instead of being clamped up to the ground — a level deck. It does NOT raise
+-- the blocking map's sampled Y and it does NOT make anything walk over a span.
+-- The paragraphs above stand exactly as written: `blocking = false` is still
+-- the right half of a binary choice, and flipping it is still gated on the
+-- pathing work, which nobody has done.
+--
+-- ============================================================================
+-- THE DECK GAP IS A MODEL CONSTANT, NOT A TERRAIN ONE (roads R3c, 2026-08-15)
+-- ============================================================================
+-- Every span in this file is authored with its ORIGIN AT THE PIER BASE: the
+-- shipped glTF runs y = 0.00 .. 4.52 (road) and 0.00 .. 4.15 (rail), measured
+-- off the mesh, so the trafficable surface sits `deck_top` ABOVE the model's
+-- own y = 0. And `CFeature::UpdatePosition` ends every tick with
+--
+--   Move(UpVector * (max(CGround::GetHeightReal(x, z), pos.y) - pos.y))
+--   (Feature.cpp:570)
+--
+-- — a feature's y is clamped UP to the ground and can never be pushed down.
+-- So a unit driving at the terrain height under a span is ALWAYS exactly
+-- `deck_top` below the deck it should be driving on, and **raising the terrain
+-- raises the span with it**: the gap is invariant under every earthwork a map
+-- generator can do. It is closed by moving the model origin to the deck
+-- surface, or by the `deckHeight` engine ask above — never by terrain alone.
+-- PLAN-maps.md §2j has the options; the note below in `span()` about "terrain
+-- shaped to carry it" was written before this was measured and is wrong.
+--
+-- The user ruled A + C on 2026-08-19. **C landed**: the engine now reads
+-- `deck_top` (`FeatureSeating::ResolveDeckHeight`, rts/Sim/Features/) and a
+-- def that declares one is SEATED — `CFeature::UpdatePosition` skips both
+-- gravity and the up-clamp for it, so a chain staged at one y lays a LEVEL
+-- deck over dry ground as well as over water. **A has not landed**: the origin
+-- is still at the pier base, so `deck_top` is still the offset between where a
+-- span stands and where its deck is, and every consumer still has to add it.
+-- Seating fixes the STAIRCASE; A is what makes the deck coincide with the road.
+--
+-- `deck_top` is published PER DEF (not in the shared `span()` posture) because
+-- the two spans do not agree: the road deck is a slab at 1.50 and the rail
+-- deck is 3.80 with the rail head at 4.15. A single shared number would be
+-- wrong for one of them, silently.
+--
 -- ============================================================================
 -- CHAINING — the acceptance criterion, and why 24.0 exactly is safe
 -- ============================================================================
@@ -73,8 +116,15 @@ local function span(t)
     t.indestructible = true            -- implies reclaimable = false; correct, a bridge is not scrap
     t.flammable      = false
     t.upright        = true
-    -- FLOATING IS NOT COSMETIC HERE — it is the only way a span keeps a level
-    -- deck. Features are not fixed in the air: CFeature::UpdatePosition applies
+    -- FLOATING WAS the only way a span kept a level deck, and since the
+    -- engine-side seating landed (§2j option C, see the header) it is
+    -- REDUNDANT FOR THESE DEFS — both publish `deck_top`, so both are seated,
+    -- and a seated feature never runs the gravity term `floating` zeroes. It
+    -- is kept because it is the correct posture for a span regardless, and
+    -- because a span whose `deck_top` is ever removed would otherwise sink.
+    -- The history below is the measurement the seating rule was built on.
+    --
+    -- Features are not fixed in the air: CFeature::UpdatePosition applies
     -- gravity every tick and then clamps to
     -- `max(CGround::GetHeightReal(x, z), pos.y)` (Feature.cpp:565-571), so the
     -- y a scenario passes to Spring.CreateFeature is a SPAWN height that the
@@ -89,11 +139,16 @@ local function span(t)
     -- covers the case §M4 actually wants ("bridges over water gaps —
     -- scorched_crossing is the natural first map").
     --
-    -- What it does NOT fix: a span over a DRY ravine still falls to the
-    -- riverbed, because the ground clamp is unconditional. A level deck over
-    -- dry ground needs either terrain shaped to carry it (a scenariogen/map
-    -- job) or the same deck-height engine work the blocking note above asks
-    -- for. Recorded in .tasks/notes/model-integration.md; not worked around here.
+    -- What floating did NOT fix: a span over a DRY ravine fell to the riverbed,
+    -- because the ground clamp was unconditional. Nor does terrain shaping fix
+    -- it — see the deck-gap header above: the clamp raises the span with the
+    -- ground, so an earthwork moves the deck and the road surface by the same
+    -- amount and the gap never closes. **That is what `deck_top` seating now
+    -- fixes**: a span with a declared deck holds its staged y on dry ground
+    -- too. The staged y is still a SPAWN height for anything else, and a
+    -- MAP-placed span is still unfixable — the featureplacer carries no y at
+    -- all, so it is seated on the bed it spawned on. Only the scenario path
+    -- (game_scenario.lua's stageFeatures) can lay a level deck.
     t.floating       = true
     t.smokeTime      = 0
     t.metal          = 0
@@ -117,6 +172,14 @@ return {
         footprintx  = 4, footprintz = 12,     -- 8 x 24 m
         health      = 6000,                   -- inert while indestructible; sized for the flip
         mass        = 9000,
+        customparams = {
+            -- Roadway slab surface above the model's y = 0, measured off the
+            -- shipped mesh (28 verts at y = 1.500 spanning x -4.35..+4.35,
+            -- kerb tops at 1.72 outboard of it). See the deck-gap header.
+            -- Read by the ENGINE (FeatureDef::deckHeight) as well as by
+            -- content: a positive value seats this def. §2j option C.
+            deck_top = '1.5',
+        },
     },
 
     -- 4.4 m wide, 4.2 m tall, 24.0 m per segment (rail heads to 24.08). Deck
@@ -128,5 +191,10 @@ return {
         footprintx  = 2, footprintz = 12,     -- 4 x 24 m
         health      = 5000,
         mass        = 7000,
+        customparams = {
+            -- Deck slab top, NOT the rail head (4.15): the deck is what a
+            -- vehicle would stand on and what an abutment has to meet.
+            deck_top = '3.8',
+        },
     },
 }

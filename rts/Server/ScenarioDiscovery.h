@@ -41,6 +41,8 @@
 #include <string>
 #include <vector>
 
+#include "WarSides.h"   // WarSideCapacities — the shape AuthoredSideCapacities returns
+
 namespace ScenarioDiscovery {
 
 /// One playable (or NPC) side of a scenario — a `faction` from the scenario's
@@ -76,6 +78,59 @@ struct ScenarioSide {
     /// entry, i.e. the side is an NPC and must never be offered as a player
     /// slot. Data-driven so Meridian's `reavers` needs no special case.
     bool npc = false;
+
+    /// Humans this side may hold, from the scenario's `capacity` field
+    /// (PLAN-metalstorm-lobby.md §6, task 7). `0` means the scenario authored
+    /// none, NOT "unlimited": an author who wants a side without a cap says so
+    /// with `capacity = 'unlimited'`, which resolves to `hasCapacity` with a
+    /// value of 0. Without that distinction a scenario could not opt out of the
+    /// seeding rule, because "I said nothing" and "I said no limit" would be
+    /// the same string on the wire.
+    unsigned capacity = 0;
+    bool hasCapacity = false;
+};
+
+/// The authored briefing splash content (PLAN-test-automation S2).
+///
+/// DISPLAY-ONLY METADATA. The sim never reads it: `game_scenario.lua`'s
+/// validate() walks only the sections it knows and has no unknown-top-level-key
+/// sweep, so a `briefing` block is inert to the loader by construction. It
+/// exists so one scenario file can carry its own narrative — the story, the
+/// field advice, the banner — instead of splitting a war across a content file
+/// and a UI file.
+///
+/// Every field is optional. `present` is the only thing a consumer should
+/// branch on, and it is true only when the block carried actual reading matter
+/// (story or tips) — a `briefing = {}` or BAR's string-valued `briefing` is
+/// parsed to an absent briefing rather than an empty splash.
+struct ScenarioBriefing {
+    /// Headline. Empty means the client falls back to ScenarioInfo::displayName.
+    std::string title;
+
+    /// One-line kicker under the title.
+    std::string subtitle;
+
+    /// Multi-paragraph narrative; blank lines separate paragraphs (the client
+    /// splits on them). Authored as a Lua `[[long string]]`.
+    std::string story;
+
+    /// Gameplay advice, one string per line item, in authored order. Capped at
+    /// 12 at parse time; non-string entries are skipped individually rather
+    /// than truncating the list.
+    std::vector<std::string> tips;
+
+    /// Banner image path relative to the GAME root (`data/games/<id>/`),
+    /// served by the client-origin `/api/games/data/` route. Empty = none, and
+    /// the client falls back to the map thumbnail. A path containing `..` or
+    /// starting with `/` is dropped at parse time (ContentServer.cpp:49
+    /// posture) so a traversal shape never reaches a client.
+    std::string image;
+
+    /// Target completion time in seconds (BAR's `partime` prior art). 0 = none.
+    int parTimeSec = 0;
+
+    /// True iff story or tips carried content — see the struct note.
+    bool present = false;
 };
 
 } // namespace ScenarioDiscovery
@@ -103,6 +158,22 @@ struct ScenarioInfo {
     /// silently hand a player.
     bool tutorial = false;
 
+    /// `retired` field. A retired war is never defaulted to and never
+    /// offered — the lobby treats it as content that exists for fixtures and
+    /// for its objective coverage, not as a war a player may pick.
+    ///
+    /// WHY THIS IS NOT A DELETION (PLAN-metalstorm-wars.md §7.6). The first
+    /// scenario to need it, `meridian_basin.lua`, is authored for a map whose
+    /// start positions sit in three disconnected components of the passability
+    /// mask — its two armies cannot reach each other, so the war ends
+    /// uncontested at a deterministic frame however it is paced (endtoend
+    /// D20). But it is also the only shipped content exercising `escort` and
+    /// `extract` objectives, so the file stays loadable by `game_scenario.lua`
+    /// (the `?direct=` manifest path and the gadget specs still stage it) and
+    /// only leaves the *offer*. Same shape as `tutorial`: a scenario that is
+    /// real and loadable but is not a Create Game choice.
+    bool retired = false;
+
     /// True when any entry in `objectives` carries `victory = true`.
     ///
     /// This is the whole point of the module: `victory` is the ONLY
@@ -118,6 +189,10 @@ struct ScenarioInfo {
     /// scenario that declares no sides — callers then fall back to the
     /// legacy two-team room.
     std::vector<ScenarioSide> sides;
+
+    /// The `briefing` block, if the scenario authored one. Display-only —
+    /// see ScenarioBriefing. `briefing.present` is false when absent.
+    ScenarioBriefing briefing;
 };
 
 /// The playable sides of `info` — every entry of `sides` that is not an NPC.
@@ -135,6 +210,18 @@ std::vector<ScenarioSide> PlayableSides(const ScenarioInfo& info);
 /// two-team room" (PLAN-metalstorm-wars.md §7.4).
 std::string EncodeWarSides(const ScenarioInfo& info);
 
+/// The per-side human capacities this scenario AUTHORS, as `(faction,
+/// capacity)` in declaration order — one entry per playable side that declared
+/// a `capacity`, and none for the sides that did not.
+///
+/// Partial on purpose (PLAN-metalstorm-lobby.md §6, task 7): the lobby seeds
+/// every side from the registered population and then lets these override,
+/// per side. So an author who has a reason for one side's size — an asymmetric
+/// scenario, a garrison that is meant to be outnumbered — states that one and
+/// leaves the rest to the population, instead of having to hand-size a war they
+/// have no population figures for.
+WarSideCapacities AuthoredSideCapacities(const ScenarioInfo& info);
+
 /// Scan `<gamePath>/scenarios/` for `*.lua` files and parse each.
 /// A missing `scenarios/` directory returns an empty vector — most games
 /// ship none, and that is not an error. Results are sorted by `id` so the
@@ -148,6 +235,9 @@ std::vector<ScenarioInfo> Discover(const std::string& gamePath);
 ///   1. `world.map` must equal `mapId`.
 ///   2. Tutorials are never candidates — the tutorial has its own boot path
 ///      and is not what a Create Game default should silently hand a player.
+///   2b. Retired wars are never candidates either, for the stronger reason:
+///      the one thing a default must not do is hand a player a war that
+///      cannot be fought (PLAN-metalstorm-wars.md §7.6).
 ///   3. **`terminal` is required, not merely preferred.** The whole purpose
 ///      of this default is "don't create a war that cannot end", and a
 ///      non-terminal scenario does not serve it — auto-applying one would

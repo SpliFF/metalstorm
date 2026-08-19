@@ -233,3 +233,59 @@ void CScriptMoveType::SetNoBlocking(bool state)
 		owner->Block();
 	}
 }
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+
+void CScriptMoveType::SnapshotCapture(movetypesnapshot::MoveTypeState& s) const {
+	SnapshotCaptureBase(s.scriptBase);
+
+	auto& c = s.script;
+	c.velVecX = velVec.x; c.velVecY = velVec.y; c.velVecZ = velVec.z;
+	c.relVelX = relVel.x; c.relVelY = relVel.y; c.relVelZ = relVel.z;
+	c.rotX = rot.x; c.rotY = rot.y; c.rotZ = rot.z;
+	c.rotVelX = rotVel.x; c.rotVelY = rotVel.y; c.rotVelZ = rotVel.z;
+	c.minsX = mins.x; c.minsY = mins.y; c.minsZ = mins.z;
+	c.maxsX = maxs.x; c.maxsY = maxs.y; c.maxsZ = maxs.z;
+	c.tag = tag;
+	c.drag = drag;
+	c.groundOffset = groundOffset;
+	c.gravityFactor = gravityFactor;
+	c.windFactor = windFactor;
+	c.extrapolate = extrapolate;
+	c.useRelVel = useRelVel;
+	c.useRotVel = useRotVel;
+	c.trackSlope = trackSlope;
+	c.trackGround = trackGround;
+	c.trackLimits = trackLimits;
+	c.noBlocking = noBlocking;
+	c.groundStop = groundStop;
+	c.limitsStop = limitsStop;
+	c.scriptNotify = static_cast<int32_t>(scriptNotify);
+}
+
+void CScriptMoveType::SnapshotApply(const movetypesnapshot::MoveTypeState& s) {
+	SnapshotApplyBase(s.scriptBase);
+
+	const auto& c = s.script;
+	velVec = float3(c.velVecX, c.velVecY, c.velVecZ);
+	relVel = float3(c.relVelX, c.relVelY, c.relVelZ);
+	rot = float3(c.rotX, c.rotY, c.rotZ);
+	rotVel = float3(c.rotVelX, c.rotVelY, c.rotVelZ);
+	mins = float3(c.minsX, c.minsY, c.minsZ);
+	maxs = float3(c.maxsX, c.maxsY, c.maxsZ);
+	tag = c.tag;
+	drag = c.drag;
+	groundOffset = c.groundOffset;
+	gravityFactor = c.gravityFactor;
+	windFactor = c.windFactor;
+	extrapolate = c.extrapolate;
+	useRelVel = c.useRelVel;
+	useRotVel = c.useRotVel;
+	trackSlope = c.trackSlope;
+	trackGround = c.trackGround;
+	trackLimits = c.trackLimits;
+	noBlocking = c.noBlocking;
+	groundStop = c.groundStop;
+	limitsStop = c.limitsStop;
+	scriptNotify = static_cast<ScriptNotifyState>(c.scriptNotify);
+}

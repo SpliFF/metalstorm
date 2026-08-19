@@ -29,6 +29,7 @@ import {
     VertexData,
     StandardMaterial,
     Texture,
+    RawTexture,
     Color3,
     Vector3,
     VertexBuffer,
@@ -40,8 +41,17 @@ import type { LosBitmap } from './los-bitmap.js';
 import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
 import type { FineWindowState } from './decal-overlay.js';
 import { WaterAbsorptionPlugin, attachWaterAbsorption } from './water-absorption-plugin.js';
-import { TerrainSplatPlugin, attachTerrainSplat } from './terrain-splat-plugin.js';
+import {
+    TerrainSplatPlugin, attachTerrainSplat, attachTerrainDetailPlain,
+    attachTerrainSplatNormal,
+} from './terrain-splat-plugin.js';
+import type { TerrainDetailMode } from './terrain-splat-plugin.js';
 import type { MapWaterAbsorption } from './map-lighting.js';
+import {
+    TerrainPageSamplePlugin, attachTerrainPageSample,
+} from './terrain-page-plugin.js';
+import type { PageSampleGeometry } from './terrain-page-plugin.js';
+import type { BaseTexture } from '@babylonjs/core';
 
 const SQUARE_SIZE = 8;
 const TILE_PIXELS = 32;
@@ -989,6 +999,21 @@ export function compositeAtlasLevel(
     return { page, pageW, pageH, placed, skipped };
 }
 
+/** Empty the GL error queue so a following `getError()` can only report a call
+ *  made after this point. WebGL keeps one error per category, so the queue is
+ *  short and bounded; the guard is only there to keep a broken context (which
+ *  returns CONTEXT_LOST_WEBGL forever) from spinning. Returns what it drained,
+ *  so a caller can report pre-existing damage instead of swallowing it. */
+export function drainGlErrors(gl: WebGL2RenderingContext, limit = 16): number[] {
+    const drained: number[] = [];
+    for (let i = 0; i < limit; i++) {
+        const e = gl.getError();
+        if (e === gl.NO_ERROR) break;
+        drained.push(e);
+    }
+    return drained;
+}
+
 function buildAtlasPage(
     gl: WebGL2RenderingContext,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1013,6 +1038,18 @@ function buildAtlasPage(
     // that would bleed unrelated adjacent tiles into each other.
     const numLevels = Math.min(tilesLevels.length, TILE_MIP_TEXELS.length);
     let placed = 0, skipped = 0;
+    // `getError` reports the OLDEST error queued anywhere in this context since
+    // it was last called, so a single check after the loop attributes an
+    // unrelated upstream failure (feature/decal texture work, LuaUI GL) to the
+    // atlas. Drain first, then check per level, so the warning names the call
+    // that actually failed — pools_of_ilys reported a 0x501 here that survived
+    // an exact-dimension replay of all four uploads (PLAN-maps M8g).
+    const preExisting = drainGlErrors(gl);
+    if (preExisting.length > 0) {
+        console.warn(`[terrain] gl error(s) already queued BEFORE the atlas `
+            + `upload (not caused by it): `
+            + preExisting.map(e => `0x${e.toString(16)}`).join(', '));
+    }
     for (let lvl = 0; lvl < numLevels; lvl++) {
         const r = compositeAtlasLevel(
             dims, tileIndex, tilesLevels[lvl],
@@ -1021,6 +1058,12 @@ function buildAtlasPage(
         gl.compressedTexImage2D(
             gl.TEXTURE_2D, lvl, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
             r.pageW, r.pageH, 0, r.page);
+        const lvlErr = gl.getError();
+        if (lvlErr !== gl.NO_ERROR) {
+            console.warn(`[terrain] gl error 0x${lvlErr.toString(16)} uploading `
+                + `mip ${lvl} of page @(${tileX0},${tileZ0}): `
+                + `${r.pageW}x${r.pageH}, ${r.page.length} bytes`);
+        }
         if (lvl === 0) { placed = r.placed; skipped = r.skipped; }
     }
 
@@ -1034,7 +1077,8 @@ function buildAtlasPage(
 
     const glErr = gl.getError();
     if (glErr !== gl.NO_ERROR) {
-        console.warn(`[terrain] gl error after page upload: 0x${glErr.toString(16)}`);
+        console.warn(`[terrain] gl error after page sampler state: `
+            + `0x${glErr.toString(16)}`);
     }
     gl.bindTexture(gl.TEXTURE_2D, null);
 
@@ -1091,15 +1135,61 @@ async function buildMapAtlasPages(
 }
 
 /**
+ * Apply the map's ground albedo as ONE map-space texture — PLAN-maps.md §2n
+ * ruling 1 (M7f option A), the path a map opts into by declaring
+ * `resources.groundtex`.
+ *
+ * FIDELITY-STANDIN / DEVIATION from Recoil, and the reason it is worth one:
+ * Recoil delivers the ground albedo only through the SMF's tile dictionary,
+ * and the dictionary terragen writes is a lossy vector quantizer rather than
+ * Spring's exact dedup (see `dxt1.cluster_tiles`). M7d measured its seam jump
+ * across the 32-elmo tile grid at 15.7x the interior gradient — a visible
+ * checkerboard on smooth ground — and M7f measured the replacement: at 2048²
+ * a map-space texture reads 1.95 mean levels of error against 2.51, 7.5 % of
+ * texels badly wrong against 12.5 %, seam ratio 1.20 against 15.74, in a third
+ * of the bytes. Per-texel grain stays the runtime splat layer's job either
+ * way. A map that ships an exactly-deduped SMT (every real Spring map) never
+ * declares this and keeps the faithful path.
+ *
+ * The mesh already carries GLOBAL 0..1 map UVs, so the texture needs no
+ * remapping: the same UVs that indexed the atlas index this.
+ */
+export function applyGroundTexture(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    groundTexUrl: string,
+): void {
+    const tex = new Texture(groundTexUrl, scene, false,
+        false /* invertY: KTX2 path ignores, raster stays top-down */);
+    // Clamp, not wrap: this texture IS the map, and a bilinear tap at the very
+    // edge must not fetch the far side of the world.
+    tex.wrapU = Texture.CLAMP_ADDRESSMODE;
+    tex.wrapV = Texture.CLAMP_ADDRESSMODE;
+    applyTerrainDiffuseTexture(scene, terrain, tex);
+}
+
+/**
  * Composite DXT1 tiles into per-page atlas textures and apply to terrain.
  * One page for the common case; a MultiMaterial grid for over-cap maps.
+ *
+ * `groundTexUrl` (PLAN-maps §2n) short-circuits the whole atlas path: a map
+ * that ships a map-space ground albedo has no `tiles.ktx2` on the server at
+ * all, because MapProcessor stops extracting the tile dictionary for it.
  */
 export async function loadTerrainTextures(
     scene: Scene,
     terrain: TerrainMeshGroup,
     mapBaseUrl: string,
     dims: MapDimensions,
+    groundTexUrl = '',
 ): Promise<void> {
+    if (groundTexUrl) {
+        console.log(`[terrain] map-space ground albedo: ${groundTexUrl} ` +
+            `(SMT tile dictionary not delivered for this map)`);
+        applyGroundTexture(scene, terrain, groundTexUrl);
+        return;
+    }
+
     let gl: WebGL2RenderingContext;
     try { gl = getEngineGl(scene.getEngine() as Engine); } catch { console.warn('[terrain] no WebGL context'); return; }
 
@@ -1139,6 +1229,19 @@ export function applyWebGLTexture(
     const texture = new Texture(null, scene);
     texture._texture = internalTex;
 
+    applyTerrainDiffuseTexture(scene, terrain, texture);
+}
+
+/**
+ * Swap the terrain onto a StandardMaterial carrying `texture` as its ground
+ * albedo, preserving the material plugins attached to whatever was there
+ * before. Shared by the DXT1 atlas path and the map-space ground texture —
+ * the two differ only in where the pixels come from, and the plugin-reattach
+ * dance below is exactly the part that is easy to get wrong twice.
+ */
+function applyTerrainDiffuseTexture(
+    scene: Scene, terrain: TerrainMeshGroup, texture: Texture,
+): void {
     // Remove vertex colours if present (they'd multiply with the sampled
     // diffuse colour and darken the terrain)
     for (const mesh of terrain.allMeshes) {
@@ -1156,12 +1259,13 @@ export function applyWebGLTexture(
 
     // Carry the ground-decal overlay (PLAN-decals.md) onto the new material.
     // The overlay plugin is attached to the *initial* terrain material in
-    // main.ts; this textured material is built later (once the map atlas
-    // finishes loading) and swapped in here. Without re-attaching, the
-    // textured terrain samples no overlay and scars/tracks never render.
-    // Anisotropic filtering on the baked far-field: the oblique RTS camera
-    // samples the ground at grazing angles where trilinear alone blurs badly.
-    // 8x on the bake per PLAN-maps.md (4x default elsewhere).
+    // main.ts; this textured material is built later (once the ground texture
+    // or the map atlas finishes loading) and swapped in here. Without
+    // re-attaching, the textured terrain samples no overlay and scars/tracks
+    // never render.
+    // Anisotropic filtering: the oblique RTS camera samples the ground at
+    // grazing angles where trilinear alone blurs badly. 8x per PLAN-maps.md
+    // (4x default elsewhere).
     texture.anisotropicFilteringLevel = 8;
 
     // Chunks share ONE material, so the previous plugin state lives on that
@@ -1170,11 +1274,13 @@ export function applyWebGLTexture(
     const prevPlugin = findDecalOverlayPlugin(prev);
     const prevWater = findWaterAbsorptionPlugin(prev);
     const prevSplat = findTerrainSplatPlugin(prev);
+    const prevPages = findTerrainPagePlugin(prev);
     terrain.setMaterial(mat);
     prev?.dispose();
     reattachDecalOverlay(mat, prevPlugin);
     reattachWaterAbsorption(mat, prevWater);
     reattachTerrainSplat(mat, prevSplat);
+    reattachTerrainPageSample(mat, prevPages);
 }
 
 /** Locate the DecalOverlayPlugin attached to a material, if any (first
@@ -1285,21 +1391,149 @@ function findTerrainSplatPlugin(
         : undefined;
 }
 
-/** Re-attach the splat-detail plugin after a material swap (shares textures). */
+/** Re-attach the near-field detail plugin after a material swap (shares
+ *  textures). Carries the mode: a plain-detail map must not come back as a
+ *  splat map with no textures to sample. */
 function reattachTerrainSplat(
     mat: StandardMaterial, prev: TerrainSplatPlugin | undefined,
 ): void {
-    if (prev && prev.distrTexture && prev.detailTexture) {
+    if (!prev) return;
+    if (prev.mode === 'plain') {
+        if (prev.plainDetailTexture)
+            attachTerrainDetailPlain(mat, prev.plainDetailTexture);
+        return;
+    }
+    if (prev.mode === 'splatNormal') {
+        if (prev.distrTexture) {
+            attachTerrainSplatNormal(
+                mat, prev.distrTexture, prev.normalTextures,
+                prev.texScales, prev.texMults, prev.diffuseAlpha,
+                prev.worldW, prev.worldH);
+        }
+        return;
+    }
+    if (prev.distrTexture && prev.detailTexture) {
         attachTerrainSplat(
             mat, prev.distrTexture, prev.detailTexture,
             prev.texScales, prev.texMults, prev.worldW, prev.worldH);
     }
 }
 
+/** The decals subset the near-field detail attach needs. */
+export interface TerrainDetailDecals {
+    detailTex: string;
+    splatDetailTex: string;
+    splatDistrTex: string;
+    splatNormal: [string, string, string, string];
+    splatScales: [number, number, number, number];
+    splatMults: [number, number, number, number];
+    splatDetailNormalDiffuseAlpha: boolean;
+}
+
+/**
+ * Attach the one near-field detail branch this map's `resources` select, in
+ * SMFFragProg.glsl's own precedence. Returns the mode attached, or null when
+ * the map declares no detail shading at all.
+ *
+ * The order is not a preference — it is the shader's `#ifdef` nesting.
+ * `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` wraps the *whole* detail section
+ * (SMFFragProg.glsl:311), so on a map that has splat normals,
+ * `GetDetailTextureColor` is never called and neither `splatDetailTex` nor
+ * `detailTex` is ever sampled. Reproducing only the inner two branches is
+ * what caused endtoend **D48**: scorched_crossing declares all three, the
+ * client took the splat pair, and that map's `splatDetailTex` alpha is a
+ * constant 1.0 — a flat +0.93 added to the ground albedo, i.e. a white void.
+ *
+ * Keep this the single decision point. Three `if`s at a call site is exactly
+ * how the branches drifted apart the first time.
+ */
+export function attachTerrainDetailFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: TerrainDetailDecals,
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): TerrainDetailMode | null {
+    if (attachTerrainSplatNormalFromDecals(scene, terrain, decals, mapBaseUrl, dims))
+        return 'splatNormal';
+    if (attachTerrainSplatFromDecals(scene, terrain, decals, mapBaseUrl, dims))
+        return 'splat';
+    if (attachTerrainDetailPlainFromDecals(scene, terrain, decals, mapBaseUrl))
+        return 'plain';
+    return null;
+}
+
+/** Attach Recoil's splat detail-*normal* shading
+ *  (`SMF_DETAIL_NORMAL_TEXTURE_SPLATTING`) — the branch that WINS over
+ *  `attachTerrainSplatFromDecals` where a map ships both, because in
+ *  SMFFragProg.glsl it wraps the whole detail section and
+ *  `GetDetailTextureColor` is then never called. Callers must try this FIRST
+ *  (see endtoend D48: taking the splat branch on scorched_crossing sampled a
+ *  `splatDetailTex` whose alpha is a constant 1.0 and whitewashed the map).
+ *  Returns false when the map ships no distribution map or no normal set. */
+export function attachTerrainSplatNormalFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: {
+        splatDistrTex: string;
+        splatNormal: [string, string, string, string];
+        splatScales: [number, number, number, number];
+        splatMults: [number, number, number, number];
+        splatDetailNormalDiffuseAlpha: boolean;
+    },
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): boolean {
+    if (!decals.splatDistrTex) return false;
+    if (!decals.splatNormal.some(u => !!u)) return false;
+    const resolve = (u: string): string =>
+        /^(https?:)?\/\//.test(u) || u.startsWith('/') ? u : `${mapBaseUrl}/${u}`;
+
+    const distr = new Texture(resolve(decals.splatDistrTex), scene,
+        false, false /* invertY: KTX2 path ignores, raster stays top-down */);
+    distr.wrapU = Texture.CLAMP_ADDRESSMODE;
+    distr.wrapV = Texture.CLAMP_ADDRESSMODE;
+    distr.anisotropicFilteringLevel = 4;
+
+    // A channel the map does not declare must contribute nothing. Mid-grey
+    // (128) is the neutral value for the shader's `tex * 2 - 1`, so one
+    // shared 1x1 texel stands in for every absent slot. Recoil leaves the
+    // sampler unbound instead, which reads black and drives the channel to
+    // -1; that is a Recoil bug, not a behaviour to reproduce.
+    let neutral: RawTexture | null = null;
+    const normals = decals.splatNormal.map((u) => {
+        if (!u) {
+            neutral ??= RawTexture.CreateRGBATexture(
+                new Uint8Array([128, 128, 128, 128]), 1, 1, scene, false, false,
+                Texture.NEAREST_SAMPLINGMODE);
+            return neutral;
+        }
+        const t = new Texture(resolve(u), scene, false, false);
+        t.wrapU = Texture.WRAP_ADDRESSMODE;
+        t.wrapV = Texture.WRAP_ADDRESSMODE;
+        t.anisotropicFilteringLevel = 4;
+        return t;
+    });
+
+    const worldW = dims.mapx * SQUARE_SIZE;
+    const worldH = dims.mapy * SQUARE_SIZE;
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainSplatPlugin(m)) {
+            attachTerrainSplatNormal(m, distr, normals,
+                decals.splatScales, decals.splatMults,
+                decals.splatDetailNormalDiffuseAlpha, worldW, worldH);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
 /** Attach Recoil splat-detail shading (PLAN-maps.md §1.2) to a terrain mesh
  *  from the map's decals metadata. Loads splat_distr + splat_detail textures
  *  and attaches the plugin to every material (single or paged); idempotent,
- *  and survives later material swaps via the reattach calls above. */
+ *  and survives later material swaps via the reattach calls above.
+ *  **Try `attachTerrainSplatNormalFromDecals` first** — see its note. */
 export function attachTerrainSplatFromDecals(
     scene: Scene,
     terrain: TerrainMeshGroup,
@@ -1336,6 +1570,117 @@ export function attachTerrainSplatFromDecals(
         }
     }
     return attached;
+}
+
+/** Attach Recoil's plain-detail shading (`resources.detailTex`) — the other,
+ *  mutually exclusive half of `GetDetailTextureColor`
+ *  (PLAN-terrain-detailtex.md §2.3). Callers must try
+ *  `attachTerrainSplatFromDecals` FIRST and only fall back here: the splat pair
+ *  wins where a map declares both, exactly as the shader's `#ifndef` does.
+ *  Idempotent, and survives material swaps via `reattachTerrainSplat` (which
+ *  carries the mode). Returns false when the map ships no `detailTex`. */
+export function attachTerrainDetailPlainFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: { detailTex: string },
+    mapBaseUrl: string,
+): boolean {
+    if (!decals.detailTex) return false;
+    const url = /^(https?:)?\/\//.test(decals.detailTex) || decals.detailTex.startsWith('/')
+        ? decals.detailTex : `${mapBaseUrl}/${decals.detailTex}`;
+
+    const detail = new Texture(url, scene,
+        false, false /* invertY: KTX2 path ignores, raster stays top-down */);
+    detail.wrapU = Texture.WRAP_ADDRESSMODE;
+    detail.wrapV = Texture.WRAP_ADDRESSMODE;
+    detail.anisotropicFilteringLevel = 4;
+
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainSplatPlugin(m)) {
+            attachTerrainDetailPlain(m, detail);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
+/** Enable/disable the near-field terrain detail plugin (either mode) on every
+ *  terrain material — the A/B hook the acceptance shots in
+ *  PLAN-terrain-detailtex.md §4 need, since CDP screenshots cannot see the
+ *  WebGL2 canvas. Returns whether any plugin was found + toggled. */
+export function setTerrainDetailPluginEnabled(
+    terrain: TerrainMeshGroup | null, on: boolean,
+): boolean {
+    let found = false;
+    for (const mat of terrain?.materials ?? []) {
+        const plugin = findTerrainSplatPlugin(mat);
+        if (!plugin) continue;
+        plugin.isEnabled = on;
+        found = true;
+    }
+    return found;
+}
+
+/** Locate the TerrainPageSamplePlugin on a material (first sub-material for a
+ *  MultiMaterial — all pages share one page cache). */
+function findTerrainPagePlugin(
+    mat: Material | null,
+): TerrainPageSamplePlugin | undefined {
+    let m: Material | null = mat;
+    if (m instanceof MultiMaterial) m = m.subMaterials.find((s) => !!s) ?? null;
+    return m && m.pluginManager
+        ? (m.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+            ?.find((p): p is TerrainPageSamplePlugin =>
+                p instanceof TerrainPageSamplePlugin)
+        : undefined;
+}
+
+/** Re-attach the page-sample plugin after a material swap (shares the page
+ *  array + table textures — the cache behind them is untouched). Carries the
+ *  enabled state so a disabled A/B arm does not come back on. */
+function reattachTerrainPageSample(
+    mat: StandardMaterial, prev: TerrainPageSamplePlugin | undefined,
+): void {
+    if (!prev || !prev.atlasTexture || !prev.tableTexture) return;
+    const plugin = attachTerrainPageSample(
+        mat, prev.atlasTexture, prev.tableTexture, prev.geometry);
+    plugin.isEnabled = prev.isEnabled;
+}
+
+/** Attach the streaming page-sample plugin (PLAN-maps.md §1.2.1) to every
+ *  StandardMaterial the terrain currently carries. Survives later material
+ *  swaps via the reattach calls in applyTerrainDiffuseTexture /
+ *  applyPagedTextures. Idempotent. */
+export function attachTerrainPageSampleToTerrain(
+    terrain: TerrainMeshGroup,
+    atlas: BaseTexture, table: BaseTexture, geometry: PageSampleGeometry,
+): boolean {
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainPagePlugin(m)) {
+            attachTerrainPageSample(m, atlas, table, geometry);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
+/** Enable/disable the streaming page-sample plugin on every terrain material
+ *  — the streaming A/B arm. ⚠ The property is `isEnabled`, not `enabled`;
+ *  returns whether any plugin was found + toggled so a zero-delta reading
+ *  can be distinguished from a toggle that never took (M8i). */
+export function setTerrainPagePluginEnabled(
+    terrain: TerrainMeshGroup | null, on: boolean,
+): boolean {
+    let found = false;
+    for (const mat of terrain?.materials ?? []) {
+        const plugin = findTerrainPagePlugin(mat);
+        if (!plugin) continue;
+        plugin.isEnabled = on;
+        found = true;
+    }
+    return found;
 }
 
 /** Attach the underwater terrain-absorption tint (Recoil SMF
@@ -1383,6 +1728,7 @@ function applyPagedTextures(
     const prevPlugin = findDecalOverlayPlugin(prevMat);
     const prevWater = findWaterAbsorptionPlugin(prevMat);
     const prevSplat = findTerrainSplatPlugin(prevMat);
+    const prevPages = findTerrainPagePlugin(prevMat);
 
     const numPages = atlas.pagesX * atlas.pagesZ;
     const pageOf = (cu: number, cv: number): number => {
@@ -1457,6 +1803,7 @@ function applyPagedTextures(
         reattachDecalOverlay(mat, prevPlugin);
         reattachWaterAbsorption(mat, prevWater);
         reattachTerrainSplat(mat, prevSplat);
+        reattachTerrainPageSample(mat, prevPages);
         multi.subMaterials[p] = mat;
     }
     terrain.setMaterial(multi);

@@ -176,3 +176,115 @@ TEST_CASE("lobby_main registers the faction routes with the intended RouteAuth")
     // faction is a permanent account-level allegiance with no player-facing
     // change flow; this is the only route that can rewrite it after sign-up.
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/auth/logout — PLAN-endtoend.md D45.
+//
+// These drive the real handler out of the real registration, via
+// NetworkServer::FindPostHandlerForTest, so they assert behaviour rather
+// than the tag alone. Every case is a way the route can be wrong in a
+// direction that strands a player on an account:
+//   - not revoking → clearing localStorage is not a logout, the token
+//     stays live for its full 24h in anything that copied it;
+//   - 401 on a dead token → the button fails at exactly the moment it is
+//     needed most, and the client cannot complete the logout;
+//   - revoking on a header it did not parse → a Basic-auth caller (or a
+//     malformed header) reported success it never performed.
+
+/// HttpResponse::body is a byte vector; every assertion below is on JSON.
+static std::string BodyText(const HttpResponse& resp) {
+    return std::string(resp.body.begin(), resp.body.end());
+}
+
+static HttpResponse PostLogout(NetworkServer& net, const std::string& authHeader) {
+    auto handler = net.FindPostHandlerForTest("/api/auth/logout");
+    REQUIRE_MESSAGE(static_cast<bool>(handler), "/api/auth/logout is not registered");
+    HttpRequestHeaders headers;
+    headers.authorization = authHeader;
+    return handler("/api/auth/logout", "{}", headers);
+}
+
+TEST_CASE("POST /api/auth/logout revokes the presented session token") {
+    Database db;
+    REQUIRE(db.Open(":memory:"));
+    const std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+    NetworkServer net;
+    HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+
+    const int64_t userId = db.CreateUser("d45", Crypto::HashPassword("pw"),
+                                         "player", /*isDev=*/false, "compact");
+    REQUIRE(userId != 0);
+    const std::string token = HttpAuth::GenerateToken();
+    REQUIRE(db.CreateSession(userId, token));
+    REQUIRE(db.ValidateSession(token) == userId);
+
+    const HttpResponse resp = PostLogout(net, "Bearer " + token);
+    CHECK(resp.status == 200);
+    CHECK(BodyText(resp).find("\"revoked\":true") != std::string::npos);
+
+    // The property the whole row is about: the token is dead server-side,
+    // not merely forgotten by the browser that held it.
+    CHECK(db.ValidateSession(token) == 0);
+}
+
+TEST_CASE("POST /api/auth/logout succeeds on a token that is already gone") {
+    Database db;
+    REQUIRE(db.Open(":memory:"));
+    const std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+    NetworkServer net;
+    HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+
+    // A logout must be completable with a token the server has never seen —
+    // otherwise an expired session is a session you cannot leave.
+    const HttpResponse resp = PostLogout(net, "Bearer not-a-real-token");
+    CHECK(resp.status == 200);
+    CHECK(BodyText(resp).find("\"revoked\":false") != std::string::npos);
+}
+
+TEST_CASE("POST /api/auth/logout reports revoked:false for a header it cannot parse") {
+    Database db;
+    REQUIRE(db.Open(":memory:"));
+    const std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+    NetworkServer net;
+    HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+
+    const int64_t userId = db.CreateUser("d45basic", Crypto::HashPassword("pw"),
+                                         "player", /*isDev=*/false, "union");
+    REQUIRE(userId != 0);
+    const std::string token = HttpAuth::GenerateToken();
+    REQUIRE(db.CreateSession(userId, token));
+
+    // Basic auth holds no session row (ValidateAuth logs it in per request),
+    // an empty Bearer names no token, and no header names nothing at all.
+    // None of the three may revoke anything — least of all somebody else's
+    // live session.
+    for (const std::string& header : {std::string("Basic ZDQ1YmFzaWM6cHc="),
+                                      std::string("Bearer "),
+                                      std::string("")}) {
+        const HttpResponse resp = PostLogout(net, header);
+        CHECK(resp.status == 200);
+        CHECK(BodyText(resp).find("\"revoked\":false") != std::string::npos);
+    }
+    CHECK(db.ValidateSession(token) == userId);
+}
+
+TEST_CASE("HttpAuth::RegisterEndpoints tags /api/auth/logout Public") {
+    Database db;
+    REQUIRE(db.Open(":memory:"));
+    const std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+    NetworkServer net;
+    HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+
+    // Public, not TokenRequired: DispatchPost would 401 a dead token before
+    // the handler ran, which is the one case the route exists to survive.
+    // The handler does its own parsing and revokes only what the caller
+    // presents, so there is nothing a token would authorise.
+    bool found = false;
+    for (auto& r : net.GetRegisteredRoutes()) {
+        if (r.method == "POST" && r.pattern == "/api/auth/logout") {
+            found = true;
+            CHECK(r.auth == RouteAuth::Public);
+        }
+    }
+    CHECK(found);
+}

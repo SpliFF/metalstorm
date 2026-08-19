@@ -46,11 +46,21 @@ local Escrow                       = VFS.Include("LuaRules/Gadgets/authority/esc
 local Ledger                       = VFS.Include("LuaRules/Gadgets/authority/ledger.lua")
 local Metrics                      = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
 local CostSpec                     = VFS.Include("LuaRules/Configs/authority_cost.lua")
+local Tick                         = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 local STARTING_TEAM_AUTHORITY      = 500
 local EVENT_RING_SIZE              = 8
 local STIPEND_PERIOD_FRAMES        = 1800 -- 1 minute at GAME_SPEED 30
 local LEDGER_PUBLISH_PERIOD_FRAMES = 900 -- 30 s at GAME_SPEED 30 (§1)
+
+-- D15: all three periodic jobs below are skip-safe (see tick.lua). The two that
+-- move authority use the ACCRUAL policy — a stipend and an overflow decay are
+-- earned by the passage of frames, and a modulo gate let a stalled server take
+-- a whole minute's income off every team with nobody noticing. The ledger
+-- publish is an observation and collapses.
+local stipendGate                  = Tick.new(STIPEND_PERIOD_FRAMES)
+local decayGate                    = Tick.new()   -- period comes from CostSpec
+local ledgerPublishGate            = Tick.new(LEDGER_PUBLISH_PERIOD_FRAMES)
 
 local costScale                    = 1.0
 local joinGrant                    = 100
@@ -68,6 +78,13 @@ local metricsState                 = Metrics.newState()
 local prevLedger                   = {}
 
 GG.Authority                       = GG.Authority or {}
+
+--- The war-end escrow outcome (PLAN-metalstorm-wars.md §7), re-exported from
+--- the pure ledger module so `game_objectives.lua`'s war-end sweep can name it
+--- without VFS.Including another gadget's private module. Authority owns the
+--- escrow vocabulary; this is the one word of it that another gadget needs to
+--- say, and there is exactly one spelling of it.
+GG.Authority.ESCROW_WAR_END        = Escrow.WAR_END
 
 --- Export ledger counters (PLAN-metalstorm-economy.md §1: for stats-dump
 --- and game_events hooks). Returns { [teamID] = {mint=N, burn=M, move=K, unmapped=U}, ... }
@@ -463,12 +480,23 @@ function GG.Authority.EscrowTotal(objectiveID)
     return Escrow.total(escrowState, objectiveID)
 end
 
---- Resolve an objective's escrow. outcome = 'complete' | 'expired' | 'failed'.
+--- Resolve an objective's escrow.
+--- outcome = 'complete' | 'expired' | 'failed' | 'war_end'.
 --- 'complete': caller already awarded EscrowTotal(objectiveID) as part of
 ---   the reward — this just clears the ledger. 'expired'/'failed': returns
 ---   each stake to its staker's player pool, or to their team pool if
 ---   they've since left (§6 "escrow stays on the objective... on
 ---   resolve, the staker's returned share goes to their team pool").
+---
+--- 'war_end' is the war's own terminal sweep (PLAN-metalstorm-wars.md §7
+--- `resolving`, task 4) and it routes EVERY stake team-ward. This closes the
+--- gap §7.2 recorded and deliberately left open: that pass reused 'expired',
+--- whose player-pool branch made the disposition depend on who was still
+--- connected at the final frame — two players who staked the same bounty on
+--- the same dead objective got different answers because one of them had a
+--- browser tab open. §7's rule is not a rounding of the ordinary one, it is a
+--- different rule ("never to individuals"), so it gets its own outcome rather
+--- than a flag on this one.
 function GG.Authority.SettleEscrow(objectiveID, outcome)
     local refunds = Escrow.settle(escrowState, objectiveID, outcome, function(playerID)
         local active = select(2, Spring.GetPlayerInfo(playerID, false))
@@ -516,10 +544,11 @@ end
 --- pool state during normal play — shared by every charge site
 --- (ChargeOrder for AllowCommand, ChargeDirective/ChargeStandingOrder for
 --- directive/standing-order create) so pool debit + ledger tagging + hooks
---- never diverge between call sites. `class` tags the ledger entry
---- (authority_cost.lua order_class key — a bookkeeping label; `cost` is
---- already computed by the caller).
-local function debitPools(teamID, playerID, cost, class)
+--- never diverge between call sites. `reason` tags the ledger entry (an
+--- authority/ledger.lua REASON_CLASS key — a bookkeeping label; `cost` is
+--- already computed by the caller). For a unit order that key is the
+--- authority_cost.lua order_class name; other charge sites pass their own.
+local function debitPools(teamID, playerID, cost, reason)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
     local teamPool = getTeamPool(teamID)
@@ -543,16 +572,29 @@ local function debitPools(teamID, playerID, cost, class)
         -- Tag the team→player subsidy as a 'move' (§1: player_fallback)
         Ledger.tagCharge(ledgerState, teamID, spentFromTeam, 'player_fallback')
     end
-    -- Tag the full charge as a burn
+    -- Tag the full charge under the caller's reason (burn for an order, but a
+    -- tribute/fee caller passes its own — D62)
     if totalCharged > 0 then
-        Ledger.tagCharge(ledgerState, teamID, totalCharged, class)
+        Ledger.tagCharge(ledgerState, teamID, totalCharged, reason)
     end
     return true
 end
 
 --- `cmdID` is used to classify the charge reason for ledger tagging.
-function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
-    return debitPools(unitTeam, playerID, cost, Classify.orderClass(cmdID or 0))
+---
+--- `reason` (endtoend D62) overrides that classification for the callers that
+--- are not unit orders at all. This function is also the game's generic
+--- player-then-team pool debit — game_parley.lua draws a tribute and a
+--- proposal fee through it — and without a reason of their own those callers
+--- had to borrow the COST-table key as the ACCOUNTING reason. A tribute is
+--- pool-to-pool (the payee's half is already tagged 'tribute'/move), so filing
+--- the payer's half as an order class made the payer team's `burn` counter
+--- overstate by the tribute total for a transaction that burns nothing.
+--- Defaults to `Classify.orderClass(cmdID)` so the ordinary order path — every
+--- caller through game_authority_charge.lua's AllowCommand hook — is unchanged.
+function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID, reason)
+    return debitPools(unitTeam, playerID, cost,
+                      reason or Classify.orderClass(cmdID or 0))
 end
 
 --- Σ authority_cost_base over an org group's current roster (mirrors the
@@ -688,7 +730,38 @@ end
 -- Lifecycle
 -- ============================================================
 
+-- ── What the clients mirror, and the one number that says it is stale ──
+--
+-- ui/lib/authority-cost.js evaluates this gadget's cost formula client-side from
+-- the build-exported authority_cost.json, and its header states the fail-safe:
+-- "a `version` mismatch between the JSON and the live game state disables
+-- prediction". Nothing was publishing the live version, so the mismatch was
+-- undetectable — a client holding a cached JSON from before a patch predicted
+-- confidently wrong costs, and a wrong prediction is worse than none (the red
+-- cursor says an order is affordable and the sim refuses it).
+--
+-- Published as a gameRulesParam, so it reaches every client through the ordinary
+-- params stream and rides the snapshot like the rest of them. Re-published on
+-- DefsReconciled below, which is the case a fresh Initialize does NOT cover: a
+-- resumed war's clients reconnect into a process that booted with the NEW spec.
+local function publishCostSpecVersion()
+    Spring.SetGameRulesParam('authority_cost_version', tonumber(CostSpec.version) or 0)
+end
+
+-- PLAN-def-reconciliation task 4 (§2 step 5). This gadget holds no def-derived
+-- state to repair, and that is worth stating rather than leaving as an absence:
+-- every cost it charges is read from the live def AT THE MOMENT OF THE CHARGE
+-- (GG.Authority.OrderCost reads `authority_cost_base` off UnitDefs per call), so
+-- a retune reaches the next order with nothing cached in between. Its ledger and
+-- escrow hold authority amounts, which are money already spent and not a def's
+-- opinion. What the patch DOES invalidate is what the clients believe about the
+-- formula — so the handler's whole job is to tell them.
+function gadget:DefsReconciled(delta)
+    publishCostSpecVersion()
+end
+
 function gadget:Initialize()
+    publishCostSpecVersion()
     -- Read modoptions here too (not just GameStart): Initialize always runs
     -- (cold start + gadget reload), covering test scenes that skip GameStart
     -- — the §6 "authority_cost_scale=0 ... must not even require pools to
@@ -726,19 +799,100 @@ function gadget:GameStart()
             setTeamPool(teamID, STARTING_TEAM_AUTHORITY)
         end
     end
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    -- ACTIVE players only (the `true` second argument), and that filter is
+    -- load-bearing twice over. A war is pre-allocated Σ slotCap empty player
+    -- slots at spawn (PLAN-metalstorm-wars.md §8.1) so a dynamic joiner has a
+    -- seat to land on; seeding them here would mint one join grant per EMPTY
+    -- seat, into a pool nobody can spend and a team ledger that would be
+    -- wrong. The same reasoning already applied to a disconnected row: nobody
+    -- is sitting there. Everyone who actually arrives is granted through the
+    -- PlayerAdded hook the server fires on their join (PlayerOnboarding.h),
+    -- which is the same call this loop makes.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- The POOLS are not here, and that is the point of the split: team and player
+-- pools live in team rulesParams (`authority_pool`, `authority_player_<id>`),
+-- as do the `authority_granted_<id>` re-join guard and the own-pool-only flag,
+-- so the money itself rides the `teams` section and is restored before this
+-- call. What is left in Lua is everything that WATCHES the money.
+--
+-- CAPTURED — `ledgerState`. Reason-tagged cumulative counters. Nothing derives
+-- them: they are the record of awards and charges that have already happened,
+-- and the gm-tools dashboard and the headless economy validation both read them
+-- as a history. A restore that keeps a live ledger against restored pools
+-- reports mint the world no longer contains.
+--
+-- CAPTURED — `metricsState` and `prevLedger`, and they must travel TOGETHER
+-- with the ledger. `prevLedger` is the previous frame's counters and the very
+-- next GameFrame subtracts it from the live ones: restore the ledger without
+-- it and the first frame after a restore books the entire difference between
+-- the two worlds as one frame's velocity, which is the single largest spike
+-- the EMA will ever see. `metricsState` carries that EMA plus each team's
+-- dead-frame total.
+--
+-- CAPTURED — `escrowState`. Staked bounties are money that has already left a
+-- player's pool and has not yet been settled; the pools ride the `teams`
+-- section, so dropping the escrow would debit the stake and refund it to
+-- nobody.
+--
+-- CAPTURED — `eventSeq`. Same reason as the guidance change feed: the ring
+-- slots are rulesParams and are restored, so a reset cursor overwrites the
+-- newest event next and publishes a seq the client has already consumed.
+--
+-- CAPTURED — all three gates. Two of them (stipend, overflow decay) are
+-- ACCRUAL gates, the case tick.lua's snapshot note calls out: `Tick.count`
+-- banks every whole period between `last` and the restored frame, so a stipend
+-- gate left where the live process had it pays every team an unearned lump —
+-- or, restoring forward, compounds the decay a hoarder already paid.
+--
+-- RE-DERIVED, not captured — `costScale` / `joinGrant` / `teamStipend`
+-- (modoptions, re-read in Initialize AND GameStart; the live launch must win
+-- over a fossilised copy) and the hook lists, which are re-registered by the
+-- observing gadgets' own Initialize.
+function gadget:Save(state)
+    state.ledger = ledgerState
+    state.metrics = metricsState
+    state.prevLedger = prevLedger
+    state.escrow = escrowState
+    state.eventSeq = eventSeq
+    state.stipendGate = Tick.save(stipendGate)
+    state.decayGate = Tick.save(decayGate)
+    state.ledgerPublishGate = Tick.save(ledgerPublishGate)
+end
+
+function gadget:Load(state)
+    ledgerState   = state.ledger or Ledger.newState()
+    metricsState  = state.metrics or Metrics.newState()
+    prevLedger    = state.prevLedger or {}
+    escrowState   = state.escrow or Escrow.newState()
+    eventSeq      = tonumber(state.eventSeq) or 0
+    Tick.load(stipendGate, state.stipendGate)
+    Tick.load(decayGate, state.decayGate)
+    Tick.load(ledgerPublishGate, state.ledgerPublishGate)
+end
+
 function gadget:GameFrame(frame)
     -- Stipend distribution (§2)
-    if teamStipend > 0 and frame % STIPEND_PERIOD_FRAMES == 0 then
+    -- The gate is stepped unconditionally: short-circuiting it on `teamStipend`
+    -- would leave `last` at 0 for a war with no stipend, so enabling one later
+    -- (a GM knob, a reload) would bank every period since frame 0 as one lump.
+    local stipendPeriods = Tick.count(stipendGate, frame)
+    if stipendPeriods > 0 and teamStipend > 0 then
+        -- One award per elapsed period, so ten minutes of sim always pays ten
+        -- minutes of stipend however badly the machine fell behind. Paid as a
+        -- single ledger entry per team: the ledger records what was awarded,
+        -- and N identical rows would misreport the cadence as well as spam it.
+        local owed = teamStipend * stipendPeriods
         local gaia = Spring.GetGaiaTeamID()
         for _, teamID in ipairs(Spring.GetTeamList()) do
             if teamID ~= gaia then
-                setTeamPool(teamID, getTeamPool(teamID) + teamStipend)
-                Ledger.tagAward(ledgerState, teamID, teamStipend, 'stipend')
+                setTeamPool(teamID, getTeamPool(teamID) + owed)
+                Ledger.tagAward(ledgerState, teamID, owed, 'stipend')
             end
         end
     end
@@ -771,8 +925,11 @@ function gadget:GameFrame(frame)
     -- Overflow decay (§3.1, Lever 1): pools above ceiling decay toward it
     local econ = CostSpec.economy
     if econ and econ.soft_ceiling_C_base and econ.overflow_decay_period then
-        if frame % econ.overflow_decay_period == 0 then
-            local decayFactor = 1 - (econ.overflow_decay_pct / 100)
+        local decayPeriods = Tick.count(decayGate, frame, econ.overflow_decay_period)
+        if decayPeriods > 0 then
+            -- Compounded over the elapsed periods: skipping the decay would
+            -- hand a hoarding team free headroom for being on a busy server.
+            local decayFactor = (1 - (econ.overflow_decay_pct / 100)) ^ decayPeriods
             for _, teamID in ipairs(Spring.GetTeamList()) do
                 if teamID ~= gaia then
                     -- Player pools: decay to team pool first (§3.1: "use it or share it")
@@ -804,7 +961,7 @@ function gadget:GameFrame(frame)
     -- Ledger publish (§1): every LEDGER_PUBLISH_PERIOD_FRAMES, publish all
     -- counters as teamRulesParam econ_<class> (30 s cadence, same as the
     -- planned scoreboard refresh)
-    if frame % LEDGER_PUBLISH_PERIOD_FRAMES == 0 then
+    if Tick.due(ledgerPublishGate, frame) then
         Ledger.publish(ledgerState)
     end
 end
@@ -827,6 +984,81 @@ function gadget:PlayerAdded(playerID)
     setPlayerPool(playerID, getPlayerPool(playerID) + joinGrant)
     emitEvent('award', joinGrant, 'join_grant', playerID, teamID)
     Ledger.tagAward(ledgerState, teamID, joinGrant, 'join_grant')
+end
+
+--- Rejoin restore (PLAN-metalstorm-lobby.md §2.5, task 4). The server calls
+--- this when a player comes back to a persistent war inside the brief-absence
+--- window, with the pool it captured on the frame before they left.
+---
+--- TOP-UP, NOT A DEPOSIT, and that is the entire design. Two things make the
+--- obvious `pool = pool + amount` wrong, and they pull in the same direction:
+---
+---  * PlayerRemoved below merges a departing player's pool into the TEAM
+---    pool, so the saved authority is in the team's hands and may already be
+---    spent — adding it back would MINT a second copy.
+---  * And that merge did NOT run at all until task 5 (2026-08-11): the three
+---    player callins are classified unsynced, so the engine refuses to
+---    register a synced gadget for them and `eventHandler.PlayerRemoved`
+---    reached nobody here. The server now delivers PlayerAdded/PlayerRemoved
+---    to the synced state explicitly (rts/Server/PlayerOnboarding.h), but a
+---    war RESUMED from a fresh process still restores a pool the new sim
+---    never held, so a reconnecting player can still be holding the pool
+---    being restored and a deposit would double it.
+---
+--- Restoring to a REMEMBERED LEVEL is right under both: it makes up the
+--- shortfall and nothing more, so it is idempotent, un-farmable, and a no-op
+--- when the sim never lost the pool in the first place. It is also conserving
+--- — the shortfall comes out of the team pool and only as far as the team can
+--- fund it, which is the honest answer when the team spent it: a player who
+--- left with 400 and returns to a team that burned it through gets what is
+--- left, not a refund the war cannot afford.
+function GG.Authority.RestorePool(playerID, amount)
+    if not playerID or not amount or amount <= 0 then return 0 end
+    local teamID = playerTeam(playerID)
+    if not teamID then return 0 end
+    local shortfall = amount - getPlayerPool(playerID)
+    if shortfall <= 0 then return 0 end
+    local moved = math.min(shortfall, getTeamPool(teamID))
+    if moved <= 0 then return 0 end
+    setTeamPool(teamID, getTeamPool(teamID) - moved)
+    setPlayerPool(playerID, getPlayerPool(playerID) + moved)
+    -- A 'move' in ledger terms (pool-to-pool, net zero — §1), the exact
+    -- inverse of the leaver_merge PlayerRemoved records — and tagged ONCE,
+    -- like that one: tagCharge IS tagAward (ledger.lua), so tagging both ways
+    -- would double-count the class rather than balance it.
+    Ledger.tagCharge(ledgerState, teamID, moved, 'rejoin_restore')
+    emitEvent('award', moved, 'rejoin_restore', playerID, teamID)
+    return moved
+end
+
+--- The other half of §2.5: past the brief window the saved pool is stale, and
+--- "rejoin re-grants a small onboarding stipend rather than restoring a stale
+--- pool". Minted, like the join grant it reuses the size of — a returning
+--- player must be able to give an order rather than waiting for the next team
+--- payout, and taking it from the team pool would punish the side for having
+--- someone come back.
+---
+--- Deliberately NOT guarded by `authority_granted_<id>`: that guard exists so
+--- the once-per-identity JOIN grant cannot be farmed by reconnecting, and this
+--- is the opposite case — a player who has been away long enough to lose their
+--- pool. Two other things stop it being farmable, and both are needed:
+--- the server only calls it past the absence window (measured against the
+--- binding's own `last_seen_at`), and it is a TOP-UP like RestorePool above —
+--- it mints only the shortfall to `joinGrant`, so a player who still holds a
+--- pool gets nothing. Without that second guard, a reconnect every five
+--- minutes would have been an income stream on any war whose leaver merge did
+--- not run — which was EVERY war before task 5 wired the synced PlayerRemoved
+--- delivery, and is still a resumed war's first minute (see RestorePool).
+function GG.Authority.GrantRejoinStipend(playerID)
+    if not playerID then return 0 end
+    local teamID = playerTeam(playerID)
+    if not teamID then return 0 end
+    local minted = joinGrant - getPlayerPool(playerID)
+    if minted <= 0 then return 0 end
+    setPlayerPool(playerID, getPlayerPool(playerID) + minted)
+    emitEvent('award', minted, 'rejoin_stipend', playerID, teamID)
+    Ledger.tagAward(ledgerState, teamID, minted, 'rejoin_stipend')
+    return minted
 end
 
 -- Departing players (§6, every leave reason incl. timeouts — no pool

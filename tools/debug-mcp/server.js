@@ -17,9 +17,29 @@ import {
     ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
-import { resolve, join } from 'path';
-import { readFileSync, existsSync, readdirSync, unlinkSync, rmdirSync, statSync } from 'fs';
-import { execFile } from 'child_process';
+import { buildScenarioManifest } from './scenario-manifest.js';
+import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
+import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
+import { classifyEndResponse } from './room-end.js';
+import { validateToolArgs } from './tool-args.js';
+import {
+    BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
+} from './browser.js';
+import {
+    classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
+    probeSqliteAnnotations, dbDivergenceWarning,
+} from './sqlite-health.js';
+import {
+    STACK_PATTERNS, STACK_PORTS, STATUS_STALE_SEC,
+    parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries, classifyStack,
+    planCleanup, summarize, isStackPort, CLEANABLE_KINDS, parseLobbyDbFlag,
+} from './stack-census.js';
+import { resolve, join, dirname } from 'path';
+import {
+    readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
+    rmdirSync, statSync,
+} from 'fs';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -35,7 +55,63 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
 // switch named widgets off once the worker is ready. launch_game suggests a
 // browser URL with this widget disabled unless `testStartupSelector` is set.
 const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
-const DB_PATH = process.env.SPRING_DB || resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+// --- Which SQLite file? ----------------------------------------------------
+//
+// This must be the file the RUNNING lobby writes, not a default. The committed
+// .mcp.json said `data/spring-server.db` while the lobby ran `--db data/t9d.db`
+// (scratch dbs are routine here), and the whole probe surface then reported
+// `spawning` forever against a game that was demonstrably up — the SPRING_DB
+// divergence warning exists precisely because this kept happening.
+//
+// Order: an explicit SPRING_DB always wins (it is how you point at a db by
+// hand); otherwise ask the running lobby what it opened; otherwise the default.
+const DB_DEFAULT = resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+function detectLobbyDb() {
+    try {
+        const ps = execFileSync('ps', ['-eo', 'pid,ppid,lstart,args='], {
+            encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5000,
+        });
+        const flag = parseLobbyDbFlag(ps);
+        return flag ? resolve(process.env.PROJECT_ROOT || '.', flag) : null;
+    } catch { return null; }
+}
+const DB_EXPLICIT = !!process.env.SPRING_DB;
+const DB_DETECTED = DB_EXPLICIT ? null : detectLobbyDb();
+const DB_PATH = process.env.SPRING_DB
+    ? resolve(process.env.PROJECT_ROOT || '.', process.env.SPRING_DB)
+    : (DB_DETECTED || DB_DEFAULT);
+if (DB_DETECTED && DB_DETECTED !== DB_DEFAULT) {
+    // stdout is the MCP protocol channel — diagnostics go to stderr only.
+    console.error(`SPRING_DB: following the running lobby's --db (${DB_DETECTED}); `
+                + `set SPRING_DB to override.`);
+}
+
+// --- SQLite boot self-check (FU2) ---
+//
+// better-sqlite3 loads its native binding lazily, in the Database constructor,
+// so a NODE_MODULE_VERSION mismatch does NOT fail the import above — it fails
+// every `new Database(...)`, which the per-tool try/catches used to swallow as
+// "no rows" (empty process lists, gameStatus {available:false}, probe_game
+// stuck at 'spawning'). Probe ONCE at boot and fail loudly instead. A missing
+// DB file is deliberately NOT this condition (fileMustExist:true throws a
+// plain SqliteError, which classifyBindingError rejects) and keeps its
+// existing per-tool handling.
+let sqliteUnavailable = null; // the reason string, or null when SQLite works
+try {
+    const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    db.close();
+} catch (err) {
+    const mismatch = classifyBindingError(err);
+    if (mismatch) {
+        const info = { ...mismatch, nodeVersion: process.version };
+        sqliteUnavailable = bindingMismatchReason(info);
+        // ONE line, on stderr — stdout is the MCP protocol channel.
+        console.error(bindingMismatchBanner(info));
+    }
+}
+
+/** Repo root for the tools with direct fs access (defs cache, scenarios). */
+const projectRoot = () => process.env.PROJECT_ROOT || resolve('.');
 const AUTH_USER = process.env.SPRING_USER || 'admin';
 const AUTH_PASS = process.env.SPRING_PASS || 'admin';
 
@@ -155,26 +231,36 @@ async function authedFetch(makeReq) {
 // /api/processes; the game_servers SQLite table only holds entries when
 // a lobby restart has staged hand-off info. Query the lobby first and
 // fall back to SQLite for offline/post-mortem use.
-async function getGameServers() {
+// getGameServersWithSource additionally names which source answered:
+// probeGame's SPRING_DB-divergence warning only makes sense when the LOBBY
+// (not the SQLite fallback) vouched for the process row.
+async function getGameServersWithSource() {
     try {
         const resp = await fetch(`${LOBBY_URL}/api/processes`);
         if (resp.ok) {
             const rows = await resp.json();
             // Normalise to the SQLite shape so callers don't care.
-            return rows.map(r => ({
-                room_id: r.room_id, port: r.port, pid: r.pid,
-                map_id: r.map, game_id: r.game, state: r.state,
-            }));
+            return {
+                source: 'lobby',
+                rows: rows.map(r => ({
+                    room_id: r.room_id, port: r.port, pid: r.pid,
+                    map_id: r.map, game_id: r.game, state: r.state,
+                })),
+            };
         }
     } catch { /* fall through */ }
     try {
         const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
         const rows = db.prepare('SELECT room_id, port, pid, map_id, game_id, state FROM game_servers').all();
         db.close();
-        return rows;
+        return { source: 'sqlite', rows };
     } catch {
-        return [];
+        return { source: 'none', rows: [] };
     }
+}
+
+async function getGameServers() {
+    return (await getGameServersWithSource()).rows;
 }
 
 async function getGameServerUrl(roomId) {
@@ -192,11 +278,214 @@ async function getGameServerUrl(roomId) {
     return { url: `http://127.0.0.1:${server.port}`, ...server };
 }
 
+// --- Readiness probing ---
+//
+// probeGame() composes four independent signals into one honest phase. The
+// ORDER IS LOAD-BEARING: pid liveness is checked *before* the game_status row,
+// because nothing deletes that row when a server dies by SIGKILL
+// (GameServersDb::DeleteForRoom only runs on the lobby's cleanup path), so a
+// fresh-looking row must never be able to resurrect a dead server.
+
+// 5 missed 2s heartbeats — defined once in stack-census.js, because the
+// P8 census applies the same threshold to the same rows and two copies of a
+// staleness rule drift. The heartbeat is published from inside the sim loop
+// (server_main.cpp:2559-2562); if that cadence changes, that constant follows.
+
+const PHASE_ORDER = { dead: -1, spawning: 0, loading: 1, ready: 2, ticking: 3 };
+
+function probeResult(phase, fields) {
+    return {
+        phase,
+        roomId: null, pid: null, port: null,
+        ready: null, clientCount: null, statusAgeSec: null,
+        frame: null, simFps: null, detail: '',
+        ...fields,
+    };
+}
+
+async function probeGame(roomId) {
+    const { source, rows: servers } = await getGameServersWithSource();
+    const row = servers.find(s => s.room_id === roomId);
+    if (!row) {
+        return probeResult('dead', { roomId, detail: `no process row for room ${roomId}` });
+    }
+    if (!pidAlive(row.pid)) {
+        return probeResult('dead', {
+            roomId, pid: row.pid, port: row.port,
+            detail: `pid ${row.pid} not running (row state='${row.state}')`,
+        });
+    }
+
+    // Readonly, opened and closed per probe: a cached handle would hold a WAL
+    // snapshot and read ever-staler heartbeats.
+    let st = null, sqliteOpened = false;
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        try {
+            st = db.prepare(
+                'SELECT ready, client_count, pid, port, updated_at FROM game_status WHERE room_id = ?',
+            ).get(roomId) ?? null;
+            sqliteOpened = true;
+        } finally { db.close(); }
+    } catch { /* no DB / no table yet → treat as no status row; a broken
+                 native binding was already flagged at boot (sqliteUnavailable) */ }
+
+    // The two ways this read can lie, made loud (sqlite-health.js): a broken
+    // native binding → sqliteUnavailable rides every result; the lobby vouching
+    // for a process that has no game_status row while SQLite reads fine →
+    // the SPRING_DB-divergence `warning`. Neither changes the phase.
+    const health = probeSqliteAnnotations({
+        processSource: source, bindingReason: sqliteUnavailable,
+        sqliteOpened, statusRow: st, port: row.port, pid: row.pid,
+    });
+
+    const base = { roomId, pid: row.pid, port: st?.port || row.port, ...health };
+    if (!st) {
+        return probeResult('spawning', {
+            ...base,
+            detail: sqliteUnavailable
+                ? 'process up; game_status unreadable (see sqliteUnavailable)'
+                : 'process up, no game_status row yet',
+        });
+    }
+    if (st.pid !== row.pid) {
+        // A corpse's row describing a *new* incarnation of the same room.
+        return probeResult('spawning', {
+            ...base, port: row.port,
+            detail: `game_status row is stale (previous pid ${st.pid})`,
+        });
+    }
+
+    const statusAgeSec = Math.max(0, Math.floor(Date.now() / 1000) - st.updated_at);
+    const withStatus = { ...base, ready: st.ready, clientCount: st.client_count, statusAgeSec };
+    if (statusAgeSec > STATUS_STALE_SEC) {
+        // The heartbeat only runs inside the sim loop; a live pid deep in
+        // map/defs precache is busy, not dead.
+        return probeResult('loading', {
+            ...withStatus,
+            detail: `status heartbeat stale ${statusAgeSec}s — server busy loading or wedged`,
+        });
+    }
+    if (!st.ready) return probeResult('loading', { ...withStatus, detail: 'ready=0' });
+
+    let m = null, mErr = '';
+    try { m = await fetchMetrics(`http://127.0.0.1:${withStatus.port}`, 1500); }
+    catch (e) { mErr = e.message; }
+    if (!m) {
+        return probeResult('ready', {
+            ...withStatus, detail: `ready=1 but /api/metrics unreachable: ${mErr}`,
+        });
+    }
+    const withMetrics = { ...withStatus, frame: m.frame, simFps: m.simFps };
+    // writeGameStatus(true, 0) fires before the sim loop starts, and a Skirmish
+    // holds GameStart until humans connect — ready=1/frame=0 is a real, stable,
+    // connectable state.
+    if (!(m.frame > 0)) {
+        // frame is -1 before GameStart, 0 on the first tick boundary.
+        return probeResult('ready', { ...withMetrics, detail: `accepting, sim not ticking (frame ${m.frame})` });
+    }
+    return probeResult('ticking', withMetrics);
+}
+
+// Resolve the room a probe/wait targets. An explicit roomId is taken verbatim
+// (probing a room that has already gone is a legitimate post-mortem question);
+// omitting it uses getGameServerUrl's prefer-running pick, ONCE.
+async function resolveWaitRoom(roomId) {
+    if (roomId !== undefined && roomId > 0) return { roomId };
+    const server = await getGameServerUrl(undefined);
+    if (server) return { roomId: server.room_id };
+    const servers = await getGameServers();
+    const list = servers.map(s => `  room ${s.room_id} (state=${s.state}, pid=${s.pid})`).join('\n') || '  (none)';
+    return { error: `Error: no game server to probe. Candidates:\n${list}\nPass an explicit roomId.` };
+}
+
+// Last N formatted room-scoped log lines, for inlining into a failed wait.
+// Never throws and never hangs: a failure to fetch logs must not turn a fast
+// failure into a slow one. Returns {lines, note} — the note names the reason
+// the lines are missing so an empty array is never mistaken for a quiet server.
+async function roomLogTail(roomId, limit = 15) {
+    try {
+        const data = await fetchJson(`${LOG_SERVER_URL}/api/logs/${roomId}?limit=${limit}`, 1500);
+        if (!Array.isArray(data) || !data.length) return { lines: [], note: '' };
+        return { lines: formatLogEntries(data).split('\n'), note: '' };
+    } catch (e) {
+        return { lines: [], note: `log server ${LOG_SERVER_URL} unreachable: ${e.message}` };
+    }
+}
+
+// --- Direct-start manifests (PLAN-test-automation/P3) ---
+//
+// Loading and merge rules live in direct-manifest.js so they stay unit-testable
+// without starting an MCP stdio server.
+//
+// The single POST/parse choke point for /api/rooms/direct, shared by
+// launch_scenario and launch_direct so the two never drift on error wording.
+// Returns {ok:true, room} or {ok:false, error} with a caller-facing message.
+async function postDirectManifest(manifest) {
+    let resp;
+    try {
+        resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/rooms/direct`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify(manifest),
+        }));
+    } catch (e) {
+        return { ok: false, error: `POST ${LOBBY_URL}/api/rooms/direct failed: ${e.message}` };
+    }
+    if (resp.status === 404) {
+        return {
+            ok: false,
+            error: 'POST /api/rooms/direct answered 404 — the lobby needs --dev-direct-start '
+                 + '(or this lobby binary predates the route). Restart the lobby with the flag '
+                 + '(the mprocs dev stack passes it already), or use launch_game for the lobby-flow path.',
+        };
+    }
+    const bodyText = await resp.text();
+    let room = {};
+    try { room = JSON.parse(bodyText); } catch { /* non-JSON error body */ }
+    if (!resp.ok) {
+        if (resp.status === 403) {
+            return {
+                ok: false,
+                error: `direct start refused (403): ${room.error ?? bodyText}. `
+                     + 'The route is LocalhostOrAdmin — run the MCP on the lobby host, or as an admin account.',
+            };
+        }
+        return { ok: false, error: `direct start failed (${resp.status}): ${room.error ?? (bodyText || '?')}` };
+    }
+    return { ok: true, room };
+}
+
+// Poll probeGame until `want` ('ready' accepts 'ticking' too) or the deadline.
+// A 'dead' phase short-circuits: a server that died during boot never recovers,
+// and waiting the full budget on it turns a fast failure into a slow one.
+async function waitForPhase(roomId, want, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    let probe = await probeGame(roomId);
+    const reached = p => (want === 'ready' ? (p === 'ready' || p === 'ticking') : p === 'ticking');
+    while (probe.phase !== 'dead' && !reached(probe.phase)) {
+        if (Date.now() >= deadline) return { ...probe, timedOut: true };
+        await new Promise(r => setTimeout(r, 500));
+        probe = await probeGame(roomId);
+    }
+    return { ...probe, timedOut: false };
+}
+
 // --- HTTP helpers ---
-async function fetchJson(url) {
-    const resp = await fetch(url);
+async function fetchJson(url, timeoutMs) {
+    const opts = timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {};
+    const resp = await fetch(url, opts);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
     return resp.json();
+}
+
+// GET :port/api/metrics — RouteAuth::Public, served off the HTTP thread, so it
+// answers while the sim is paused or the exec queue is wedged, and it survives
+// SPRING_PROD (where /api/exec is compiled out). Base payload is
+// PerfMetrics::ToJSON(): {frame, tickUs, simFps, entities, clients, ais,
+// combatEvents} plus a `simFrame` block.
+async function fetchMetrics(serverUrl, timeoutMs) {
+    return fetchJson(`${serverUrl}/api/metrics`, timeoutMs);
 }
 
 /// Resolve `rel` against `base`, falling back to case-insensitive
@@ -250,6 +539,180 @@ async function execOnGameServer(scope, code, roomId) {
         throw new Error(`No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`);
     }
     return execOnServer(server.url, scope, code);
+}
+
+/// Try the structured form of a server verb (`json <verb>`), falling back to
+/// legacy free text when the binary predates the prefix — such a binary answers
+/// `unknown command: json <verb>`, and that reply IS the capability probe.
+///
+/// Returns `{json}` when the reply parsed, `{legacy: null}` when the server is
+/// old (caller re-issues the plain verb), and `{legacy: <text>}` when the reply
+/// is real output that simply isn't JSON (an unconverted verb — the `json `
+/// prefix is a request, not a guarantee — or a Lua `error:`/`runtime error:`
+/// string from a verb that routes through LuaRules). Throws on real errors.
+///
+/// Note converted-verb errors come back `success:true` with an `{"error":...}`
+/// body (the server derives success solely from `unknown command:`), so callers
+/// must check `.error` on the parsed object.
+async function execJsonVerb(verb, roomId) {
+    const r = await execOnGameServer('server', `json ${verb}`, roomId);
+    const output = r.output ?? '';
+    if (!r.success) {
+        if (output.startsWith('unknown command: json')) return { legacy: null };
+        throw new Error(output || 'exec failed');
+    }
+    try { return { json: JSON.parse(output) }; }
+    catch { return { legacy: output }; }
+}
+
+// --- Browser lifecycle ----------------------------------------------------
+//
+// The relay above can only answer when a browser is CONNECTED, and nothing in
+// this server could produce one — so the documented loop ended at "navigate a
+// browser to browserUrl" and left the caller to do it by hand. This registry
+// closes that gap: we launch clients, we track them, and we take them down with
+// the same "read the report" discipline end_game uses. Policy and the process-
+// group reasoning live in browser.js.
+const browsers = new BrowserRegistry();
+
+// roomId → the attach-form browserUrl its launch minted. The URL carries the
+// host's session token in its hash, and that token is only ever handed out in
+// the /api/rooms/direct response — so it cannot be reconstructed later, only
+// remembered. This is why open_client({roomId}) works for a room THIS server
+// launched, and needs an explicit `url` for any other.
+const roomBrowserUrls = new Map();
+
+/**
+ * Open a client at `url` and (optionally) wait until the relay can actually
+ * reach it. "The process started" is a much weaker claim than "a client is
+ * connected and answering", and only the second one is useful to a caller.
+ */
+async function openClient({ url, roomId, headless, width, height, waitReadyMs }) {
+    const launched = launchBrowser({ url, roomId, headless, width, height });
+    if (launched.error) return { error: launched.error };
+    const entry = browsers.add(launched.entry);
+
+    const out = {
+        pid: entry.pid, roomId: entry.roomId, url: entry.url,
+        headless: entry.headless, profileDir: entry.profileDir,
+        browserPath: entry.browserPath,
+    };
+    if (!(waitReadyMs > 0)) return { result: { ...out, connected: null } };
+
+    const deadline = Date.now() + waitReadyMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        if (!defaultIsAlive(entry.pid)) {
+            browsers.remove(entry.pid);
+            return { result: { ...out, connected: false, detail: 'the browser exited during startup — see profileDir, or re-run with headless:false to watch it' } };
+        }
+        const relayed = await clientEval('test', 'readyState()', roomId, undefined, 5000);
+        if (!relayed.fallback && relayed.success) {
+            return { result: { ...out, connected: true, clientId: relayed.clientId,
+                               readyState: clientEvalValue(relayed.output) } };
+        }
+        last = relayed.fallback ?? relayed.output;
+        await new Promise(r => setTimeout(r, 500));
+    }
+    return { result: { ...out, connected: false, detail: `still not answering the relay after ${waitReadyMs} ms (last: ${String(last).slice(0, 160)})` } };
+}
+
+// If THIS process goes away, every browser it launched is orphaned — nothing
+// else knows those pids, and an abandoned renderer holds the GPU. So take them
+// down on the way out. Synchronous by necessity: 'exit' handlers cannot await,
+// and a detached group signalled with SIGKILL is the only thing guaranteed to
+// land. SIGTERM first for the ordinary paths (Ctrl-C, a supervisor restart).
+function killAllBrowsersSync(signal = 'SIGKILL') {
+    for (const entry of browsers.list()) {
+        if (!entry.alive) continue;
+        try { process.kill(-entry.pid, signal); } catch { /* already gone */ }
+    }
+}
+process.on('exit', () => killAllBrowsersSync('SIGKILL'));
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { killAllBrowsersSync('SIGTERM'); process.exit(0); });
+}
+
+/** Close every browser this server opened for `roomId`. */
+async function closeRoomBrowsers(roomId, timeoutMs = 5000) {
+    const entries = browsers.forRoom(roomId);
+    const reports = [];
+    for (const e of entries) {
+        const r = await closeBrowser(e, { timeoutMs });
+        browsers.remove(e.pid);
+        reports.push({ ...r, describe: describeClose(r) });
+    }
+    return reports;
+}
+
+/// PLAN-test-automation P7: run code inside a CONNECTED browser client and get
+/// the result back, via the game server's `POST /api/client/eval` relay.
+///
+/// Three gates stand between this call and an eval: the route is compiled out
+/// under SPRING_PROD, only an **admin-role** session is ever addressed, and the
+/// browser itself refuses unless it is a DEV build or was booted with
+/// `?allowClientEval=1`. Each of those answers with a distinct string, and this
+/// helper turns all three into `{fallback: <reason>}` so a caller can print the
+/// paste-into-devtools snippet instead. A real transport/auth failure throws.
+///
+/// `target` is one of:
+///   'js'      — main thread global scope
+///   'worker'  — render worker global scope (the __entityRenderer/__csm hooks)
+///   'widgets' — the in-worker LuaUI runtime (Lua source, via window.widgets.eval)
+///   'test'    — a `window.test` harness expression, e.g. `readyState()`
+async function clientEval(target, code, roomId, clientId, timeoutMs) {
+    const server = await getGameServerUrl(roomId);
+    if (!server) return { fallback: 'no active game server found' };
+    let resp;
+    try {
+        resp = await authedFetch(token => fetch(`${server.url}/api/client/eval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({
+                target, code,
+                ...(clientId ? { clientId } : {}),
+                ...(timeoutMs ? { timeoutMs } : {}),
+            }),
+        }));
+    } catch (e) {
+        return { fallback: `game server unreachable: ${e.message}` };
+    }
+    // 404 = the route does not exist = a production binary (SPRING_PROD).
+    if (resp.status === 404) return { fallback: 'server built without the relay (SPRING_PROD)' };
+    if (!resp.ok) throw new Error(`client eval failed (${resp.status}): ${await resp.text()}`);
+    const r = await resp.json();
+    if (!r.success && (r.output === 'no connected admin client'
+                    || r.output === 'client eval disabled in this build'
+                    || String(r.output || '').startsWith('timeout:'))) {
+        return { fallback: r.output };
+    }
+    return r;   // {success, clientId, output}
+}
+
+/// TestHarness methods that round-trip to the game server's OWN HTTP API
+/// (`/api/exec`). Relaying one DEADLOCKS: the game server serves HTTP on a
+/// single thread, and that thread is parked inside `/api/client/eval` waiting
+/// for the very browser whose request it would have to answer. Verified — with
+/// a relay call in flight, `/api/metrics` on the same server does not respond
+/// until the waiter gives up. Each of these has a server-side MCP tool that
+/// does the same job without a browser in the loop.
+const SERVER_BOUND_HARNESS_METHODS = new Map([
+    ['spawn', 'spawn_unit'], ['spawnAndFocus', 'spawn_unit + browser_test focus'],
+    ['stageCombat', 'spawn_unit + give_order'],
+    ['kill', 'kill_unit'], ['damage', 'damage_unit'], ['clear', 'clear_units'],
+    ['order', 'give_order'], ['state', 'get_game_state'], ['units', 'list_units'],
+    ['unitState', 'get_unit_state'], ['frame', 'get_frame'],
+    ['combatSummary', 'get_combat_summary'], ['cheats', 'set_cheats'],
+    ['log', 'set_debug_logging'], ['logStatus', 'set_debug_logging'],
+    ['setLogging', 'set_debug_logging'], ['lua', 'exec_lua'], ['server', 'exec_lua'],
+    ['serverJson', 'exec_lua'], ['simPause', 'pause_sim'], ['simResume', 'pause_sim'],
+    ['simSpeed', 'set_sim_speed'], ['stockpile', 'set_stockpile'],
+    ['reviveTeam', 'revive_team'],
+]);
+
+/// Parse a relay `output` as JSON when it is JSON, else hand back the string.
+function clientEvalValue(output) {
+    try { return JSON.parse(output); } catch { return output; }
 }
 
 // --- Minimal FlatBuffer decoder for cached UnitDefs/WeaponDefs ---
@@ -451,6 +914,253 @@ function killProcess(pid, signal = 'SIGKILL') {
     catch { return false; }
 }
 
+// EPERM means the process exists but isn't ours — still alive. ESRCH is the
+// only "gone" answer signal 0 gives us.
+function pidAlive(pid) {
+    try { process.kill(pid, 0); return true; }
+    catch (e) { return e.code === 'EPERM'; }
+}
+
+// SIGTERM → poll → SIGKILL, mirroring tools/scripts/spring-services.sh
+// stop_pattern but per-pid and with a longer window: spring-server's signal
+// handler turns SIGTERM into a clean loop exit that drains the war log and
+// writes the exit checkpoint (server_main.cpp) — the one site where a world
+// becomes resumable. A server deep in map/defs precache won't poll keepRunning
+// until the load finishes, hence the escalation.
+async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 250, escalate = true } = {}) {
+    const t0 = Date.now();
+    let escalatedToKill = false;
+    if (graceful) {
+        try { process.kill(pid, 'SIGTERM'); }
+        catch { return { exited: !pidAlive(pid), escalatedToKill, waitedMs: 0 }; }
+        while (Date.now() - t0 < timeoutMs) {
+            if (!pidAlive(pid)) return { exited: true, escalatedToKill, waitedMs: Date.now() - t0 };
+            await new Promise(r => setTimeout(r, pollMs));
+        }
+        // The caller can decline the escalation — a stuck server left alive is
+        // sometimes the point (it is still attachable to a debugger).
+        if (!escalate) return { exited: false, escalatedToKill, waitedMs: Date.now() - t0 };
+        escalatedToKill = true;
+    }
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    // SIGKILL can't be blocked, but the kernel (and the lobby, which reaps its
+    // spring-server children) needs a beat.
+    const killDeadline = Date.now() + 2000;
+    while (Date.now() < killDeadline) {
+        if (!pidAlive(pid)) break;
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return { exited: !pidAlive(pid), escalatedToKill, waitedMs: Date.now() - t0 };
+}
+
+// --- Stack census (P8) ------------------------------------------------------
+//
+// The IO half of list_stack / cleanup_stack; the classification lives in
+// stack-census.js (pure, tested). Every shell-out goes through execFileAsync
+// (argument arrays, no shell), mirroring the restart_client precedent.
+
+/** pgrep -f for one pattern. Exit 1 (no match) is not an error. */
+async function pgrepPids(pattern) {
+    try {
+        const { stdout } = await execFileAsync('pgrep', ['-f', '--', pattern]);
+        return stdout.split('\n').map(s => Number(s.trim())).filter(Boolean)
+            // pgrep spawns no shell here (execFile), so the known "matches its
+            // own zsh wrapper" trap doesn't apply — but a loosened pattern
+            // could still match this node process. Never report ourselves.
+            .filter(pid => pid !== process.pid);
+    } catch { return []; }
+}
+
+async function psRows(pids) {
+    if (!pids.length) return [];
+    try {
+        const { stdout } = await execFileAsync('ps', ['-o', 'pid=,ppid=,lstart=,args=', '-p', pids.join(',')]);
+        return parsePsOutput(stdout);
+    } catch { return []; }
+}
+
+/** One lsof for every listener on the box; the census filters from there. */
+async function listListeners() {
+    try {
+        const { stdout } = await execFileAsync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fpcn']);
+        return { available: true, listeners: parseLsofF(stdout) };
+    } catch (err) {
+        // lsof exits 1 with empty output when nothing matches — that is an
+        // empty census, not a missing tool. ENOENT is the missing tool.
+        if (err && err.code === 'ENOENT') return { available: false, listeners: [] };
+        return { available: true, listeners: parseLsofF(err?.stdout || '') };
+    }
+}
+
+/**
+ * `spring-server --print-engine-hash` prints 16 hex digits and exits before
+ * logging/SQLite/anything (server_main.cpp:162-176). An older binary without
+ * the flag would BOOT instead — hence the timeout, and the "only under
+ * build/{debug,release}" restriction on what we ever exec.
+ */
+async function probeEngineHash(binPath) {
+    try {
+        const { stdout } = await execFileAsync(binPath, ['--print-engine-hash'], { timeout: 5000 });
+        const hash = stdout.trim();
+        return /^[0-9a-f]{16}$/.test(hash) ? hash : null;
+    } catch { return null; }
+}
+
+async function collectBinaries(probeHashes) {
+    const root = projectRoot();
+    const out = {};
+    for (const flavour of ['release', 'debug']) {
+        const p = resolve(root, `build/${flavour}/spring-server`);
+        try {
+            const st = statSync(p);
+            out[flavour] = {
+                path: p, mtimeMs: st.mtimeMs, mtime: new Date(st.mtimeMs).toISOString(),
+                size: st.size, engineHash: probeHashes ? await probeEngineHash(p) : null,
+            };
+        } catch { /* not built */ }
+    }
+    return classifyBinaries(out);
+}
+
+function readGameStatusRows() {
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        try {
+            const now = Math.floor(Date.now() / 1000);
+            const rows = db.prepare(
+                'SELECT room_id, ready, client_count, pid, port, updated_at FROM game_status',
+            ).all();
+            return {
+                available: true,
+                rows: rows.map(r => ({
+                    ...r,
+                    heartbeatAgeSec: r.updated_at ? now - r.updated_at : null,
+                    stale: r.updated_at ? (now - r.updated_at) > STATUS_STALE_SEC : true,
+                    alive: pidAlive(r.pid),
+                })),
+            };
+        } finally { db.close(); }
+    } catch {
+        // `available:false` is honest for a missing file; a broken native
+        // binding additionally names itself so the caller can't read this
+        // as "no games have published status yet".
+        return sqliteUnavailable
+            ? { available: false, rows: [], sqliteUnavailable }
+            : { available: false, rows: [] };
+    }
+}
+
+/** Best-effort `identity` from a running server's /api/metrics. */
+async function fetchIdentity(port) {
+    try {
+        const j = await fetchJson(`http://127.0.0.1:${port}/api/metrics`, 1500);
+        return j?.identity ?? null;
+    } catch { return null; }
+}
+
+/**
+ * Whether the mprocs control server is listening — an lsof LISTEN check ONLY.
+ *
+ * IMPORTANT: never open a socket to it. mprocs deserializes whatever an
+ * accepted connection carries, so a bare connect+close fails it with
+ * `invalid type: … expected internally tagged enum AppEvent` and can take
+ * mprocs down (tools/scripts/spring-services.sh:103-120). A health ping here
+ * would be a regression, not an improvement.
+ */
+function mprocsStatus(listeners) {
+    let yamlText = '';
+    try { yamlText = readFileSync(resolve(projectRoot(), 'mprocs.yaml'), 'utf-8'); } catch { /* none */ }
+    const addr = resolveMprocsAddr({ env: process.env.MPROCS_SERVER || '', yamlText });
+    const ctlPort = Number(addr.split(':').pop());
+    return { ctlPort, reachable: listeners.some(l => l.port === ctlPort) };
+}
+
+/** The whole census, shared verbatim by list_stack and cleanup_stack. */
+async function collectStackFindings({ probeHashes = false } = {}) {
+    const [lobbyPids, serverPids, logserverPids, vitePids] = await Promise.all(
+        [STACK_PATTERNS.lobby, STACK_PATTERNS.server, STACK_PATTERNS.logserver, STACK_PATTERNS.vite]
+            .map(pgrepPids),
+    );
+    const [lobby, server, logserver, vite] = await Promise.all(
+        [lobbyPids, serverPids, logserverPids, vitePids].map(psRows),
+    );
+    const ports = await listListeners();
+    const rows = await getGameServers();
+    // getGameServers() silently folds two sources into one shape; which one
+    // answered changes what "unmanaged" means, so ask separately.
+    let source = 'none';
+    try {
+        const resp = await fetch(`${LOBBY_URL}/api/processes`, { signal: AbortSignal.timeout(2000) });
+        if (resp.ok) source = 'lobby';
+    } catch { /* lobby down */ }
+    if (source === 'none' && rows.length) source = 'sqlite';
+
+    const binaries = await collectBinaries(probeHashes);
+    const gameStatus = readGameStatusRows();
+
+    // Identity probes only when we have something to compare against.
+    let identities = [];
+    if (probeHashes) {
+        const targets = [];
+        for (const r of rows) if (r.port && pidAlive(r.pid)) targets.push({ pid: r.pid, port: r.port });
+        for (const p of server) {
+            if (targets.some(t => t.pid === p.pid)) continue;
+            const port = (ports.listeners || []).find(l => l.pid === p.pid)?.port;
+            if (port) targets.push({ pid: p.pid, port });
+        }
+        const settled = await Promise.allSettled(targets.map(t => fetchIdentity(t.port)));
+        identities = targets.map((t, i) => ({
+            ...t, identity: settled[i].status === 'fulfilled' ? settled[i].value : null,
+        }));
+    }
+
+    const census = {
+        processes: { lobby, server, logserver, vite },
+        ports, authority: { source, rows }, gameStatus, binaries, identities,
+    };
+    const findings = classifyStack(census);
+    const lobbyPid = (ports.listeners || []).find(l => l.port === STACK_PORTS.lobby)?.pid ?? null;
+    return { census, findings, lobbyPid };
+}
+
+/**
+ * The kill helper. The :8011 refusal lives HERE rather than only in the
+ * planner, so no future call path can route around it.
+ */
+async function cleanupKill(action, lobbyPid) {
+    if (lobbyPid && action.pid === lobbyPid) {
+        return { ...action, outcome: 'refused', reason: 'pid holds :8011 (the live lobby)' };
+    }
+    if (!pidAlive(action.pid)) return { ...action, outcome: 'exited', signal: null };
+    // SIGTERM first: spring-server turns it into a clean loop exit that drains
+    // the war log and writes the exit checkpoint (server_main.cpp).
+    const r = await endProcess(action.pid, { graceful: true, timeoutMs: 5000, pollMs: 500, escalate: true });
+    return {
+        ...action,
+        signal: r.escalatedToKill ? 'SIGKILL' : 'SIGTERM',
+        outcome: r.exited ? (r.escalatedToKill ? 'killed' : 'exited') : 'error',
+        waitedMs: r.waitedMs,
+    };
+}
+
+// Destructive verbs never guess which game they mean: without an explicit
+// roomId they refuse and enumerate. (Read-oriented tools keep getGameServerUrl's
+// permissive auto-pick — that's a feature there.)
+function resolveRoomTargetStrict(servers, roomId) {
+    const candidates = servers.filter(s => s.state !== 'ended');
+    const list = (candidates.length ? candidates : servers)
+        .map(s => `  room ${s.room_id} (state=${s.state}, pid=${s.pid}, map=${s.map_id})`)
+        .join('\n') || '  (none)';
+    if (roomId === undefined || roomId <= 0) {
+        return { error: `Error: roomId is required. Candidates:\n${list}\nRe-run with the roomId you mean.` };
+    }
+    const target = servers.find(s => s.room_id === roomId);
+    if (!target) {
+        return { error: `Error: no game server for room ${roomId}. Candidates:\n${list}` };
+    }
+    return { target };
+}
+
 // Every payload spring-server writes under cache/defs/<key>/. The `.bin`
 // entries are the pre-v14 FlatBuffer format; since 63287c0e4e the bake emits
 // brotli-compressed Lua source (`.lua.br`) plus `power.json`. Listing only the
@@ -490,6 +1200,10 @@ function clearDefsCache(gameId) {
 }
 
 // --- Tool definitions ---
+// Shared tail for every tool that goes over the P7 browser-eval relay —
+// documented once so each description stays honest about the three gates.
+const RELAY = 'Runs over the P7 browser-eval relay (POST /api/client/eval on the game server): the code executes in a CONNECTED browser and the result comes back here. Three gates — the route is compiled out under SPRING_PROD, only an admin-role session is addressed (a /api/rooms/direct dev account is role "player" and is NEVER eligible; launch_scenario\'s default player IS admin), and the browser refuses unless it is a DEV build or was booted with ?allowClientEval=1. When any gate refuses, this tool falls back to printing the chrome-devtools snippet to paste by hand.';
+
 const TOOLS = [
     {
         name: 'get_logs',
@@ -538,7 +1252,7 @@ const TOOLS = [
     },
     {
         name: 'get_game_state',
-        description: 'Get current game state summary (frame, teams, unit count) from the game server.',
+        description: 'Get current game state summary from the game server. Returns a JSON object {frame, paused, speed, teams, units, luaHeapKb} (luaHeapKb is 0 when LuaRules is not loaded). Against a game server that predates the `json ` exec prefix it falls back to the legacy one-line text "frame=N teams=N units=N".',
         inputSchema: {
             type: 'object',
             properties: {
@@ -548,7 +1262,7 @@ const TOOLS = [
     },
     {
         name: 'list_units',
-        description: 'List units in the game, optionally filtered by team.',
+        description: 'List units in the game, optionally filtered by team. Returns a JSON object {total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]} — `total` counts every match of the team filter, `units` is capped at 100 rows (`returned`). Falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -559,10 +1273,32 @@ const TOOLS = [
     },
     {
         name: 'list_processes',
-        description: 'List all game server processes (from SQLite database).',
+        description: 'List game server processes as JSON: {servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}. Discovery is the lobby /api/processes with a SQLite fallback; `ready`/`clientCount`/heartbeat come from the game_status table and `identity` ({stamp, engineHash, pid}) from each server\'s /api/metrics (null on a server built before P8). For strays, zombie ports and binary drift use list_stack instead.',
         inputSchema: {
             type: 'object',
             properties: {},
+        },
+    },
+    {
+        name: 'list_stack',
+        description: 'Full dev-stack census in one call — replaces ad-hoc pgrep/lsof hunts. Returns {findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}. `findings[]` classifies everything it sees: managed (lobby/logserver/vite/game servers the lobby owns), stray-server (a spring-server the lobby does not know about — e.g. a hand-launched headless run), zombie-port (a listener on 9100-10099 that is not a managed game server; blocks the next room, since room routing is by port), duplicate-lobby, orphan-vite (a vite on a fallback port — a browser pointed at it silently drives the wrong stack), stale-status-row (report-only), binary-drift (the lobby forks build/release/spring-server when it exists, so a debug-only rebuild is invisible) and stale-binary-running. Each finding carries a severity and a suggestedAction. Read-only: it never connects to the mprocs control port (a bare connect can crash mprocs) and never kills anything — that is cleanup_stack.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                probeHashes: { type: 'boolean', description: 'Also run `spring-server --print-engine-hash` on each on-disk binary and read `identity` from every running server, enabling stale-binary-running detection ("the process you are testing is not the binary you just built"). Adds ~1s. Default false.', default: false },
+            },
+        },
+    },
+    {
+        name: 'cleanup_stack',
+        description: 'Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                dryRun: { type: 'boolean', description: 'Report the plan without killing anything. Default TRUE.', default: true },
+                kinds: { type: 'array', items: { type: 'string', enum: CLEANABLE_KINDS }, description: `Restrict to these classifications (default: all of ${CLEANABLE_KINDS.join(', ')}).` },
+                force: { type: 'boolean', description: 'Allow killing a zombie-port pid whose command line is not spring-server (the 9100-10099 range can catch unrelated dev tools). Default false.', default: false },
+            },
         },
     },
     {
@@ -593,7 +1329,7 @@ const TOOLS = [
         inputSchema: {
             type: 'object',
             properties: {
-                query: { type: 'string', description: 'SQL query (read-only — INSERT/UPDATE/DELETE rejected)' },
+                query: { type: 'string', description: 'SQL query — only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads)' },
             },
             required: ['query'],
         },
@@ -694,17 +1430,104 @@ const TOOLS = [
     },
     {
         name: 'kill_game',
-        description: 'Force-kill the spring-server process for a room (SIGKILL). Use when restart_game cannot reach the server (e.g. stuck in "starting" state). The lobby will mark the room ended on its next health-check cycle.',
+        description: 'DEPRECATED — alias for end_game(graceful:false). Force-kills the spring-server process for a room (SIGKILL, no exit checkpoint). Prefer end_game. roomId is required.',
         inputSchema: {
             type: 'object',
             properties: {
-                roomId: { type: 'number', description: 'Room ID (0 or omit for first non-ended game)' },
+                roomId: { type: 'number', description: 'Room ID (required — omitting it now refuses with a candidate list)' },
             },
         },
     },
     {
+        name: 'end_game',
+        description: "Gracefully stop ONE room's game server. Prefers the lobby's POST /api/admin/rooms/end, which returns a drain-quality report: the exit checkpoint verified against the snapshot store (outcome, frame, lossy) plus resume eligibility. A route-level 404 means a lobby binary older than P4 — falls back to a direct SIGTERM/poll/SIGKILL from the MCP process (source:'sigterm-fallback'); an auth/validation failure is reported, never silently downgraded. NOTE: the room flips to \"ended\" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game if you need to observe it. To stop a room cleanly WITH a report use this, not a same-name launch_direct relaunch (that SIGTERMs, deletes and respawns). kill_game is the deprecated graceful:false alias.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID (required — omitting it refuses with a candidate list).' },
+                graceful: { type: 'boolean', default: true, description: 'false → SIGKILL immediately from the MCP process (same as deprecated kill_game); no server report, no exit checkpoint.' },
+                timeoutMs: { type: 'number', default: 10000, description: 'How long to wait for the exit checkpoint before escalating to SIGKILL. The server caps this at 30000.' },
+                escalate: { type: 'boolean', default: true, description: 'SIGKILL if the server has not exited within timeoutMs. false leaves a stuck server alive and reports outcome "still_alive".' },
+            },
+            required: ['roomId'],
+        },
+    },
+    {
+        name: 'get_frame',
+        description: 'Current sim frame + simFps via the public /api/metrics endpoint (no exec, no auth, works while paused).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+        },
+    },
+    {
+        name: 'probe_game',
+        description: "One-shot readiness probe for a game server. Composes the lobby process row, pid liveness, the game_status heartbeat and /api/metrics into a single phase: spawning (process up, nothing published yet) | loading (heartbeat present, ready=0 or stale) | ready (accepting connections) | ticking (sim advancing) | dead (no process row, or the pid is gone). Use wait_for_game to poll until a phase is reached.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game.' },
+            },
+        },
+    },
+    {
+        name: 'wait_for_game',
+        description: "Poll a game server (via probe_game) until it reaches a readiness phase (ready = accepting connections, ticking = sim advancing) or a target frame. Fails FAST on server death: returns phase 'dead' immediately with the last room-scoped log lines instead of waiting out the timeout. A timeout returns timedOut:true plus the honest last probe rather than throwing.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game (resolved once, then pinned).' },
+                until: { type: 'string', enum: ['ready', 'ticking', 'frame'], default: 'ready', description: "until='ready' is satisfied by ready OR ticking." },
+                frame: { type: 'number', description: "Target sim frame (required when until='frame')." },
+                timeoutMs: { type: 'number', default: 120000 },
+                pollMs: { type: 'number', default: 500 },
+            },
+        },
+    },
+    {
+        name: 'revive_team',
+        description: 'Flip a dead team (or all dead teams) back to alive so units can be spawned onto it. Pairs with set_cheats to stop the game-over check re-killing it.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                team: { type: 'number', description: 'Team ID. Omit to revive all dead teams.' },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+        },
+    },
+    {
+        name: 'set_stockpile',
+        description: "Insta-fill a unit's stockpile weapon (missiles etc.) — skips the build cycle. Wraps the server `stockpile` verb.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number' },
+                count: { type: 'number', description: 'Stockpiled shots to set.' },
+                queued: { type: 'number', default: 0 },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+            required: ['unitId', 'count'],
+        },
+    },
+    {
+        name: 'profile',
+        description: 'Server-side profilers. target=lua → per-callin synced Lua wall-time; target=sim → SimFrame phase split (native sim / unit scripts / Lua call-ins, also surfaced under /api/metrics simFrame). action: on|off|reset|status|report.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                target: { type: 'string', enum: ['lua', 'sim'] },
+                action: { type: 'string', enum: ['on', 'off', 'reset', 'status', 'report'], default: 'report' },
+                topN: { type: 'number', description: 'Row cap for target=lua report (default 25).' },
+                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
+            },
+            required: ['target'],
+        },
+    },
+    {
         name: 'launch_game',
-        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Returns the new room ID and gameServerPort once the spring-server has spawned.',
+        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Waits (via probe_game) until the server is accepting connections, failing fast if it dies during boot. Returns the new room ID, gameServerPort, the readiness `phase`, and — on failure only — `lastLogs`.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -718,6 +1541,61 @@ const TOOLS = [
                 testStartupSelector: { type: 'boolean', description: 'Keep ZK\'s "Startup Info and Selector" commander-chooser overlay enabled. Default false — the suggested browserUrl disables it so the view is clear on launch. Set true only when specifically testing that overlay.', default: false },
             },
             required: ['mapId'],
+        },
+    },
+    {
+        name: 'launch_scenario',
+        description: 'Launch a scenario game directly (no lobby UI, no manifest files): resolves the scenario via GET /api/games/<gameId>/scenarios, builds the /api/rooms/direct manifest in memory with the scenario as the TOP-LEVEL field (modoptions.scenario alone gets overwritten by the map default), POSTs it, and waits for the sim to tick. Re-launching the same scenario replaces the previous room (same room name → teardown + recreate). Returns {roomId, port, sessions, browserUrl} — browserUrl attaches to THIS room (?play= + room + token in the URL hash) and never re-launches; the token is in the hash fragment, so it stays out of server logs but does land in browser history (dev feature). Requires the lobby to run with --dev-direct-start. A players[] entry naming an unknown username creates an is_dev account; the defaults never do.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                scenarioId: { type: 'string', description: 'Scenario id — the file stem of data/games/<gameId>/scenarios/<id>.lua (e.g. "crossing_standoff").' },
+                gameId: { type: 'string', default: 'metalstorm', description: 'Game the scenario belongs to.' },
+                openBrowser: { type: 'boolean', default: false, description: 'Open a browser client on browserUrl and wait for it to connect, then re-probe. The default roster seats a HUMAN, so without this the sim holds at frame -1 and every relay tool answers "no connected admin client" — with it, wait:"ticking" is reachable in one call. The browser is tracked and end_game closes it. Returns its report under `browser`.' },
+                browserHeadless: { type: 'boolean', default: true, description: 'Headless browser for openBrowser (renders identically; opens no window). false to watch the run.' },
+                mapId: { type: 'string', description: 'Map override. Default: the scenario\'s declared world.map.' },
+                ai: { type: 'string', default: 'null', description: 'AI id seated on every non-host playable side ("null", "strategos"). "" = no AI slots (the lobby\'s solo-team safety net may still add a Null AI).' },
+                players: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            username: { type: 'string' },
+                            team: { type: 'number' },
+                            side: { type: 'string', description: 'Playable faction key; resolved to that side\'s team.' },
+                            spectator: { type: 'boolean' },
+                        },
+                        required: ['username'],
+                    },
+                    description: 'Default [{username:"admin"}] seated on the scenario\'s first playable side. players[0] is the room host; extras default to spectators.',
+                },
+                side: { type: 'string', description: 'Shorthand: seat players[0] on this faction\'s side.' },
+                modoptions: { type: 'object', description: 'Extra modoptions. A "scenario" key here is hoisted to the manifest top level (it does NOT work as a modoption).' },
+                roomName: { type: 'string', description: 'Room name. Default "mcp:<scenarioId>". Re-POSTing a name replaces that room.' },
+                headless: { type: 'boolean', default: false, description: 'No browser will connect: omit browserUrl and warn about the idle-grace self-exit (workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS).' },
+                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return immediately, when the game server answers /api/metrics, or when the sim frame advances.' },
+                waitTimeoutMs: { type: 'number', default: 120000 },
+                idleGraceSeconds: { type: 'number', description: 'Written to the manifest as idleStartupGraceSeconds: how long the server waits for its first client before self-exiting (default 120s, which kills a browserless run at frame -1). Silently inert on lobby binaries older than P3 — fallback there is the lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS.' },
+                skipBriefing: { type: 'boolean', default: true, description: 'Append &skipBriefing=1 to browserUrl (S2 splash bypass).' },
+                force: { type: 'boolean', default: false, description: 'Launch even if the scenario is not in the lobby\'s (startup-snapshot) list — the direct path reads the VFS fresh. Requires mapId; sides default to the legacy two-team shape.' },
+            },
+            required: ['scenarioId'],
+        },
+    },
+    {
+        name: 'launch_direct',
+        description: 'Launch a game from a RAW /api/rooms/direct manifest — the manual sibling of launch_scenario (which builds its manifest in memory from a scenarioId; prefer that for scenario tests, and this one for full control: custom rosters, modoptions, sessionKind, idle timers). Takes a manifest by name from manifests/, inline, or both merged, POSTs it, and waits for the sim to tick. Merge order: file manifest → `manifest` deep-merged on top (objects recurse; arrays and scalars replace) → `overrides` shallow-merged last (top-level keys replaced wholesale). Manifest shape: {name, map (required), game, sessionKind, scenario (TOP-LEVEL — modoptions.scenario alone is overwritten by the map default), modoptions{}, players[] (>=1; players[0] is the host; {username, team, startPos, spectator}), aiSlots[] ({aiId, team, startPos, profile}), autoStart, idleStartupGraceSeconds, idleExitSeconds}. `name` is IDEMPOTENT BY REPLACEMENT: re-POSTing a name SIGTERMs that room\'s server and recreates the room (a clean restart, not an error), and a manifest with no name defaults to "dev:direct", so two unnamed launches silently clobber each other — concurrent lanes must set distinct names. Declared players are force-left from any prior room. Requires the lobby to run with --dev-direct-start. Returns {roomId, port, sessions, players, aiSlots, browserUrl, phase, frame, notes}.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                manifestName: { type: 'string', description: 'File stem under manifests/ (e.g. "crossing_standoff_direct"). A miss lists the available names.' },
+                manifest: { type: 'object', description: 'Inline manifest, deep-merged OVER the file one. Use alone for a fully inline launch.' },
+                overrides: { type: 'object', description: 'Shallow merge applied last — top-level keys replace wholesale. The escape hatch when deep-merge is wrong (e.g. swapping the whole players[] array).' },
+                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return after the POST, when the game server answers /api/metrics, or when the sim frame advances. NOTE: a skirmish holds GameStart until its rostered humans connect — an exec-only test with human players must use "ready" (or an AI-only/spectator roster, or sessionKind:"persistent", neither of which waits).' },
+                timeoutMs: { type: 'number', default: 120000, description: 'Wait budget in ms.' },
+                clearCache: { type: 'boolean', default: false, description: 'Delete the defs cache for the manifest\'s game before launching.' },
+                idleGraceSeconds: { type: 'number', description: 'Sugar for manifest.idleStartupGraceSeconds — how long the server waits for its first client before self-exiting (default 120s, which kills exec-driven tests at frame -1). Ignored without error by lobby binaries older than P3; fallback there is to start the LOBBY with SPRING_IDLE_STARTUP_GRACE_SECONDS in its env (applies to every room it spawns, so pair it with end_game teardown).' },
+            },
         },
     },
     {
@@ -746,7 +1624,7 @@ const TOOLS = [
     },
     {
         name: 'spawn_unit',
-        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart.',
+        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart. Returns a JSON object {spawned, ids:[...]}; falls back to the legacy "spawned N unit(s): ..." text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -816,7 +1694,7 @@ const TOOLS = [
     },
     {
         name: 'get_unit_state',
-        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip).',
+        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip). Returns a JSON object {id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]} — `index` is the unit\'s own weapon slot (null slots are skipped, so the array can be shorter). Falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -845,7 +1723,7 @@ const TOOLS = [
     },
     {
         name: 'get_combat_summary',
-        description: 'Quick-look queue depths for combat events, sound events, and unit deaths still pending broadcast. Useful for sanity-checking that combat is actually happening.',
+        description: 'Quick-look queue depths for combat events and sound events still pending broadcast. Useful for sanity-checking that combat is actually happening. Returns a JSON object {combat, sounds}; falls back to legacy text against a pre-`json ` game server.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -914,7 +1792,7 @@ const TOOLS = [
     },
     {
         name: 'spawn_at_camera',
-        description: 'Spawn one or more units at the current browser camera\'s look-at position. The camera lives in the browser, so this tool emits a `mcp__chrome-devtools__evaluate_script` snippet that reads `window.test.cameraPose().lookAt` and forwards to the server `spawn` verb via `window.test.spawn(...)`. Pattern matches `browser_test` — feed the returned snippet into chrome-devtools eval. Requires a game tab in focus with `startGame()` complete.',
+        description: 'Spawn one or more units at the current browser camera\'s look-at position. Reads `window.test.cameraPose().lookAt` in the browser and forwards to `window.test.spawn(...)`, returning {x, z, response}. ' + RELAY,
         inputSchema: {
             type: 'object',
             properties: {
@@ -928,7 +1806,7 @@ const TOOLS = [
     },
     {
         name: 'browser_test',
-        description: 'Generate the chrome-devtools `evaluate_script` snippet for a TestHarness method on `window.test`. The harness lives only in the browser; this MCP tool returns the JS string for you to feed into mcp__chrome-devtools__evaluate_script. Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
+        description: 'Call a TestHarness method on `window.test` in the browser and return its result. ' + RELAY + ' Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -940,13 +1818,194 @@ const TOOLS = [
     },
     {
         name: 'evaluate_widget_lua',
-        description: 'Run a Lua snippet in the LuaUI widget worker (browser-side) via the chrome-devtools bridge. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. Requires a connected browser tab; if none, returns an error and you should fall back to chrome-devtools eval directly.',
+        description: 'Run a Lua snippet in the LuaUI widget runtime (browser-side render worker) and return its result string. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. ' + RELAY,
         inputSchema: {
             type: 'object',
             properties: {
                 code: { type: 'string', description: 'Lua code. Last expression returned via "return …".' },
             },
             required: ['code'],
+        },
+    },
+
+    {
+        name: 'client_eval',
+        description: 'Execute arbitrary code inside a connected browser client and return the result. ' + RELAY + ' Targets: "js" (main-thread global scope — document, window.test, window.widgets), "worker" (render-worker global scope — the __entityRenderer / __csm / __renderPipeline / __fxLightPool debug hooks the render-core move stranded there), "widgets" (Lua source run in the in-worker LuaUI runtime), "test" (an expression with the `test` harness already bound, e.g. `readyState()` or `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. Keep results well under 4 MB — that is the wire control-message cap.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                code:      { type: 'string', description: 'Code to run (JS, or Lua for target "widgets").' },
+                target:    { type: 'string', enum: ['js', 'worker', 'widgets', 'test'], description: 'Which executor runs it.', default: 'js' },
+                roomId:    { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId:  { type: 'number', description: 'Address a specific connected client id; it must still be an admin session. Default: the lowest-id admin client.' },
+                timeoutMs: { type: 'number', description: 'Server-side wait, 500–60000. Default 10000.', default: 10000 },
+            },
+            required: ['code'],
+        },
+    },
+    {
+        name: 'client_ready',
+        description: 'Client-side readiness: relays `window.test.readyState()` to the connected browser and returns its report (renderer up, defs ingested, LuaUI booted, newest game frame, feed age). ' + RELAY + ' This is the BROWSER\'s view — for server-side readiness (sim ticking, players seated) use `wait_for_game` instead; the two answer different questions and a game can be server-ready while the tab is still ingesting defs.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
+        },
+    },
+    {
+        name: 'client_screenshot',
+        description: 'Capture the browser client\'s rendered frame and return it as an image you can actually look at, plus a text block of capture metadata (width/height, frameId, gameFrame, per-phase stats, byte size). Relays `window.test.captureFrame({maxDim, stats:true})`, which waits for a real presented frame rather than grabbing a stale backbuffer. ' + RELAY + ' maxDim is clamped to 2048 to stay well inside the 4 MB wire cap.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                maxDim:   { type: 'number', description: 'Longest edge in pixels, 64–2048.', default: 1280 },
+                quality:  { type: 'number', description: 'JPEG quality 0–1 (passed through to captureFrame).' },
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
+        },
+    },
+
+    // --- Browser lifecycle ---------------------------------------------
+    // The relay tools above need a CONNECTED admin client. These three make
+    // one, without a human at a keyboard and without chrome-devtools MCP
+    // (a second browser stack, launched for a CDP session we do not want).
+    {
+        name: 'open_client',
+        description: 'Open a browser client and connect it to a room — the missing half of the relay tools, which all need a CONNECTED admin client and could not previously make one. Pass `roomId` to attach to a room this server launched (its browserUrl, including the host session token, is remembered from launch_scenario/launch_direct), or pass an explicit `url` for anything else. HEADLESS BY DEFAULT: verified to render this Babylon client identically (same mesh counts, working client_screenshot) while opening no window on the user\'s machine — pass headless:false to watch a run live. With `waitReady` (the default) it returns only once the relay actually answers, reporting {connected:true, clientId, readyState}; "the process started" is a much weaker claim than "a client is connected". The browser is tracked, so end_game closes it and list_clients can see it. Chrome is found automatically (override with SPRING_BROWSER).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                roomId:   { type: 'number', description: 'Attach to this room using the browserUrl remembered from its launch. Required unless `url` is given.' },
+                url:      { type: 'string', description: 'Explicit URL. Overrides the remembered browserUrl; use for a room this server did not launch, or a non-game page.' },
+                headless: { type: 'boolean', default: true, description: 'false opens a visible window (useful to watch a run, or to debug a client that will not connect).' },
+                width:    { type: 'number', default: 1280 },
+                height:   { type: 'number', default: 800 },
+                waitReady:   { type: 'boolean', default: true, description: 'Wait until the relay reaches the new client before returning.' },
+                waitReadyMs: { type: 'number', default: 60000, description: 'How long to wait for that first relay answer.' },
+            },
+        },
+    },
+    {
+        name: 'close_client',
+        description: 'Close a browser this server opened. `{pid}` closes one, `{roomId}` closes every client attached to that room, `{all:true}` closes all of them. SIGTERM to the process GROUP → poll → SIGKILL, because Chrome is a process tree and signalling the bare parent leaves GPU-holding renderers behind (an abandoned renderer has corrupted whole perf sessions here). Returns a per-browser report — read the `outcome`, not just the count: `exited` is clean, `killed_after_timeout` means SIGTERM was ignored, `kill_failed` needs a human. Refuses to signal a pid this server did not launch.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                pid:       { type: 'number', description: 'A pid returned by open_client.' },
+                roomId:    { type: 'number', description: 'Close every client attached to this room.' },
+                all:       { type: 'boolean', description: 'Close every tracked client.' },
+                timeoutMs: { type: 'number', default: 5000, description: 'Grace before SIGKILL.' },
+            },
+        },
+    },
+    {
+        name: 'list_clients',
+        description: 'The browsers this server launched: {pid, roomId, url, headless, profileDir, startedAt, alive}. Liveness is re-probed on every call, never cached, so a browser that died or was killed by hand shows alive:false instead of a stale yes. Only ever lists this server\'s own browsers — a browser you opened yourself is invisible here (and is never signalled by close_client).',
+        inputSchema: { type: 'object', properties: {} },
+    },
+
+    // --- Scenario authoring (S3) ---------------------------------------
+    // The loop these four close: list what exists → validate offline until
+    // clean → write (with the resync the lobby needs to SEE the file) →
+    // launch with launch_scenario. Only validate_scenario works with the
+    // stack down; the other three talk to the lobby.
+    {
+        name: 'list_scenarios',
+        description: 'List the scenarios a game ships, merging the lobby\'s discovery view (id, displayName, '
+            + 'map, tutorial/retired flags, terminal = has a victory objective, playable sides, briefing) with '
+            + 'the admin provenance view for generated wars (seed, generator params/version, createdBy/At). '
+            + 'Rows are tagged source: "authored" (a hand-written scenarios/*.lua) or "generated" (gen_*, owned '
+            + 'by the scenario DB — regenerate rather than edit those). Needs a running lobby; degrades to the '
+            + 'public view alone if the admin call is refused.',
+        inputSchema: {
+            type: 'object',
+            properties: { gameId: { type: 'string', default: 'metalstorm' } },
+        },
+    },
+    {
+        name: 'validate_scenario',
+        description: 'Offline structured validation of a scenario file — replicates BOTH parsers (the lobby\'s '
+            + 'bare lua_State discovery pass AND game_scenario.lua\'s GameStart validate()) without booting '
+            + 'anything, and without a running lobby. Returns findings[] of {severity, rule, path, message} with '
+            + 'severity error|warning|info|skipped. A scenario with zero error findings will be offered by the '
+            + 'lobby and will pass the in-game validator, modulo the live-only checks reported as "skipped". '
+            + 'Note "skipped" means NOT CHECKED, never "fine". Rule ids and what each mirrors: docs/scenarios.md §11.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                scenarioId: { type: 'string', description: 'Reads data/games/<gameId>/scenarios/<scenarioId>.lua. Either this or luaSource.' },
+                luaSource: { type: 'string', description: 'Validate source text directly — the pre-write check. Either this or scenarioId.' },
+                passability: { type: 'boolean', default: false, description: 'Also run regions_from_map.py --verify on world.map (read-only; needs the processed map + python3; slow).' },
+            },
+        },
+    },
+    {
+        name: 'write_scenario',
+        description: 'Validate, then write data/games/<gameId>/scenarios/<scenarioId>.lua, then resync the lobby '
+            + 'so the file is actually OFFERED (lobby scenario lists are a startup snapshot — a new file is '
+            + 'invisible to the picker and to launch_scenario until a resync). Error findings always block the '
+            + 'write; warnings block unless force:true. Refuses the gen_ prefix: those ids belong to the scenario '
+            + 'DB and its orphan sweep DELETES any gen_*.lua no row claims. Reports offered:true|false by '
+            + 're-reading the lobby list afterwards, because a file the lobby then silently declines to offer is '
+            + 'exactly the failure this tool exists to catch.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                scenarioId: { type: 'string', description: 'Grammar: ^[a-z0-9_]+$, max 64 chars, must not start with gen_.' },
+                luaSource: { type: 'string', description: 'The whole file. Must be a PURE Lua table literal returning a table — no VFS/Spring/GG/require at file scope.' },
+                resync: { type: 'boolean', default: true },
+                overwrite: { type: 'boolean', default: false, description: 'Required to replace an existing file.' },
+                force: { type: 'boolean', default: false, description: 'Write despite warning findings. Error findings always block.' },
+            },
+            required: ['scenarioId', 'luaSource'],
+        },
+    },
+    {
+        name: 'generate_scenario',
+        description: 'Generate a war for a map with scenariogen.py via the lobby admin route, store it in the '
+            + 'scenario DB, materialise it to scenarios/gen_*.lua and re-discover it — returning the entry '
+            + 'exactly as the Create Game picker now sees it. The seed defaults server-side to sum(ord(c) for c '
+            + 'in mapId), so re-running with no seed is an idempotent upsert of the same war rather than a new '
+            + 'one. On a map that cannot host a war the route answers 422 with the generator\'s own REJECTED '
+            + 'line naming the violated invariant — surfaced verbatim. Needs a running lobby + admin auth.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                gameId: { type: 'string', default: 'metalstorm' },
+                mapId: { type: 'string', description: 'Processed map id, e.g. "meridian_basin".' },
+                seed: { type: 'integer', description: 'Defaults to sum of mapId char codes (reproducible).' },
+                sides: { type: 'integer', description: '2-8' },
+                towns: { type: 'integer', description: '0-32' },
+                outposts: { type: 'integer', description: '0-32' },
+                bases: { type: 'integer', description: '0-32' },
+                mines: { type: 'integer', description: '0-32' },
+                sites: { type: 'integer', description: '0-32' },
+                relics: { type: 'integer', description: '0-32' },
+                wrecks: { type: 'integer', description: '0-32' },
+                bridges: { type: 'integer', description: '0-32' },
+                works: { type: 'integer', description: '0-32' },
+                harbour: { type: 'integer', description: '0-32' },
+                shanty: { type: 'integer', description: '0-32' },
+                hostility: { type: 'string', description: 'Generator enum (see scenariogen.py --hostility).' },
+                roster: { type: 'string', description: 'Generator enum (see scenariogen.py --roster).' },
+                coverage: {
+                    type: 'boolean',
+                    description: 'Full-coverage war: force the preset that can reach every def ms_defs knows, '
+                        + 'then REFUSE unless the staged war really contains one of each. Explicit knobs still '
+                        + 'win, so coverage+towns:5 means five towns.',
+                },
+                player: {
+                    type: 'boolean',
+                    description: 'Generate for a HUMAN: drop the mutual-ground-reachability gate, so islands, '
+                        + 'rivers and straits produce a scenario instead of a refusal.',
+                },
+            },
+            required: ['mapId'],
         },
     },
 ];
@@ -991,6 +2050,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_game_state': {
+            const r = await execJsonVerb('state', args.roomId);
+            if (r.json) {
+                if (r.json.error) return `Error: ${r.json.error}`;
+                return r.json;
+            }
+            if (r.legacy) return r.legacy;
             const result = await execOnGameServer('server', 'state', args.roomId);
             return result.output || '(no state)';
         }
@@ -998,16 +2063,122 @@ async function executeTool(name, args) {
         case 'list_units': {
             const cmd = args.team !== undefined && args.team >= 0
                 ? `units ${args.team}` : 'units';
+            const r = await execJsonVerb(cmd, args.roomId);
+            if (r.json) {
+                if (r.json.error) return `Error: ${r.json.error}`;
+                return r.json;
+            }
+            if (r.legacy) return r.legacy;
             const result = await execOnGameServer('server', cmd, args.roomId);
             return result.output || '(no units)';
         }
 
         case 'list_processes': {
-            const servers = await getGameServers();
-            if (!servers.length) return 'No game server processes found.';
-            return servers.map(s =>
-                `Room ${s.room_id}: port=${s.port}, pid=${s.pid}, state=${s.state}, game=${s.game_id || '?'}, map=${s.map_id || '?'}`
-            ).join('\n');
+            const { source, rows: servers } = await getGameServersWithSource();
+            // Kept as prose: callers (and skill docs) read this exact string as
+            // "nothing is running", and JSON `{count:0}` would break them. With
+            // the binding broken the SQLite fallback can't be consulted, so an
+            // empty list is NOT proof of nothing running — say so.
+            if (!servers.length) {
+                return sqliteUnavailable
+                    ? `No game server processes found. sqliteUnavailable: ${sqliteUnavailable}`
+                    : 'No game server processes found.';
+            }
+
+            const status = readGameStatusRows();
+            const byRoom = new Map(status.rows.map(r => [r.room_id, r]));
+            // allSettled: one hung server must not stall the whole listing.
+            const ids = await Promise.allSettled(
+                servers.map(s => (s.port ? fetchIdentity(s.port) : Promise.resolve(null))),
+            );
+            const out = {
+                servers: servers.map((s, i) => {
+                    const st = byRoom.get(s.room_id);
+                    return {
+                        roomId: s.room_id, port: s.port, pid: s.pid, state: s.state,
+                        gameId: s.game_id || null, mapId: s.map_id || null,
+                        ready: st ? !!st.ready : null,
+                        clientCount: st ? st.client_count : null,
+                        heartbeatAgeSec: st ? st.heartbeatAgeSec : null,
+                        heartbeatStale: st ? st.stale : null,
+                        identity: ids[i].status === 'fulfilled' ? ids[i].value : null,
+                    };
+                }),
+                count: servers.length,
+            };
+            // Loud-failure annotations (sqlite-health.js): the `null` status
+            // fields above must never read as "no heartbeat published".
+            if (sqliteUnavailable) out.sqliteUnavailable = sqliteUnavailable;
+            // pid > 0: a hibernated room's pid-0 row is not a running server
+            // (and pidAlive(0) would signal our own process group).
+            const missing = (source === 'lobby' && status.available)
+                ? servers.filter(s => s.pid > 0 && pidAlive(s.pid) && !byRoom.has(s.room_id))
+                : [];
+            if (missing.length) out.warning = dbDivergenceWarning(missing[0].port);
+            return JSON.stringify(out, null, 2);
+        }
+
+        case 'list_stack': {
+            const { census, findings } = await collectStackFindings({ probeHashes: !!args.probeHashes });
+            const out = {
+                findings,
+                processes: census.processes,
+                ports: census.ports.available
+                    ? census.ports.listeners.filter(l => isStackPort(l.port))
+                    : { available: false },
+                authority: { source: census.authority.source, rows: census.authority.rows },
+                gameStatus: census.gameStatus.available
+                    ? census.gameStatus.rows
+                    // readGameStatusRows names a broken native binding; keep it.
+                    : { available: false, ...(census.gameStatus.sqliteUnavailable
+                        ? { sqliteUnavailable: census.gameStatus.sqliteUnavailable } : {}) },
+                binaries: census.binaries,
+                mprocs: mprocsStatus(census.ports.listeners || []),
+                summary: summarize(findings),
+            };
+            if (sqliteUnavailable) out.sqliteUnavailable = sqliteUnavailable;
+            // SPRING_DB-divergence signature (sqlite-health.js): the lobby is
+            // the authority for a live server the game_status table has never
+            // heard of. pid > 0 skips hibernated rows.
+            if (census.authority.source === 'lobby' && census.gameStatus.available) {
+                const known = new Set(census.gameStatus.rows.map(r => r.room_id));
+                const missing = census.authority.rows.filter(r =>
+                    r.pid > 0 && pidAlive(r.pid) && !known.has(r.room_id));
+                if (missing.length) out.warning = dbDivergenceWarning(missing[0].port);
+            }
+            return JSON.stringify(out, null, 2);
+        }
+
+        case 'cleanup_stack': {
+            const dryRun = args.dryRun !== false;   // default TRUE
+            const { census, findings, lobbyPid } = await collectStackFindings({ probeHashes: false });
+            const { actions, refusals } = planCleanup(findings, {
+                kinds: args.kinds, force: !!args.force, lobbyPid,
+                authoritySource: census.authority.source,
+            });
+
+            if (!actions.length && !refusals.length) {
+                const managed = findings.filter(f => f.kind === 'managed').length;
+                return JSON.stringify({
+                    dryRun, actions: [], refusals: [],
+                    note: managed
+                        ? `Nothing to clean — all ${managed} processes are managed. To stop a running game use end_game({roomId}), which drains gracefully.`
+                        : 'Nothing to clean — no matching findings.',
+                    summary: summarize(findings),
+                }, null, 2);
+            }
+            if (dryRun) {
+                return JSON.stringify({
+                    dryRun: true, plan: actions, refusals,
+                    note: 'Dry run — nothing was killed. Re-run with dryRun:false to execute this exact plan.',
+                    summary: summarize(findings),
+                }, null, 2);
+            }
+            const results = [];
+            for (const a of actions) results.push(await cleanupKill(a, lobbyPid));
+            return JSON.stringify({
+                dryRun: false, results, refusals, summary: summarize(findings),
+            }, null, 2);
         }
 
         case 'get_lua_source': {
@@ -1029,24 +2200,62 @@ async function executeTool(name, args) {
         }
 
         case 'list_gadgets': {
-            const result = await execOnGameServer('LuaRules', 'return table.concat(Spring.GetGadgetList(), "\\n")', args.roomId);
-            return result.output || '(no gadgets or game not running)';
+            // `Spring.GetGadgetList` does not exist — not in this engine, not
+            // in Recoil, not anywhere in this tree. This tool could therefore
+            // never have worked: every call died with "attempt to call a nil
+            // value (field 'GetGadgetList')". The real registry is the gadget
+            // handler's own `gadgets` array, each entry carrying a read-only
+            // `ghInfo` proxy {name, basename, filename, layer, desc, author} —
+            // the same source the handler's own listing command walks
+            // (cont/base/springcontent/LuaGadgets/gadgets.lua).
+            //
+            // Tab-separated rather than JSON-from-Lua: the exec channel hands
+            // back a plain string, and building JSON in Lua would need an
+            // encoder this scope has no guarantee of.
+            const lua = `
+                if not gadgetHandler or not gadgetHandler.gadgets then
+                    return 'ERR: no gadgetHandler in this LuaRules state'
+                end
+                local out = {}
+                for i, g in ipairs(gadgetHandler.gadgets) do
+                    local gi = g.ghInfo or {}
+                    out[#out+1] = table.concat({
+                        tostring(gi.layer or 0),
+                        tostring(gi.name or '?'),
+                        tostring(gi.basename or ''),
+                        tostring(gi.author or ''),
+                    }, '\\t')
+                end
+                return table.concat(out, '\\n')`;
+            const result = await execOnGameServer('LuaRules', lua, args.roomId);
+            const text = (result.output || '').trim();
+            if (!text) return JSON.stringify({ count: 0, gadgets: [], note: 'the gadget handler reports no loaded gadgets' }, null, 2);
+            if (text.startsWith('ERR: ')) return `Error: ${text.slice(5)}`;
+            if (/attempt to (call|index)/.test(text)) return `Error from LuaRules: ${text}`;
+            const gadgets = text.split('\n').map(line => {
+                const [layer, name, basename, author] = line.split('\t');
+                return { name, basename, layer: Number(layer), ...(author ? { author } : {}) };
+            });
+            return JSON.stringify({ count: gadgets.length, gadgets }, null, 2);
         }
 
         case 'query_db': {
-            // Read-only query directly against SQLite
-            const queryLower = args.query.trim().toLowerCase();
-            if (queryLower.startsWith('insert') || queryLower.startsWith('update') ||
-                queryLower.startsWith('delete') || queryLower.startsWith('drop') ||
-                queryLower.startsWith('alter') || queryLower.startsWith('create')) {
-                return 'Error: only read-only queries are allowed';
-            }
+            // Read-only query directly against SQLite. better-sqlite3 sets
+            // stmt.reader exactly when the prepared statement returns rows —
+            // a parser-level test, unlike the old prefix blacklist which let
+            // `WITH t AS (…) INSERT …`, a leading comment, or `REPLACE INTO`
+            // straight through. The readonly handle stays as defence in depth.
+            if (sqliteUnavailable) return `Error: sqliteUnavailable: ${sqliteUnavailable}`;
             try {
                 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-                const rows = db.prepare(args.query).all();
-                db.close();
-                if (!rows.length) return '(empty result)';
-                return JSON.stringify(rows, null, 2);
+                try {
+                    const stmt = db.prepare(args.query);
+                    if (!stmt.reader)
+                        return 'Error: only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads).';
+                    const rows = stmt.all();
+                    if (!rows.length) return '(empty result)';
+                    return JSON.stringify(rows, null, 2);
+                } finally { db.close(); }
             } catch (err) {
                 return `Error: ${err.message}`;
             }
@@ -1181,20 +2390,172 @@ async function executeTool(name, args) {
         }
 
         case 'kill_game': {
-            const servers = await getGameServers();
-            let target;
-            if (args.roomId !== undefined && args.roomId > 0) {
-                target = servers.find(s => s.room_id === args.roomId);
+            // Deprecated alias. The old no-roomId branch SIGKILLed the first
+            // non-ended server, which on a two-game box kills the wrong one.
+            const out = await executeTool('end_game', { roomId: args.roomId, graceful: false });
+            return typeof out === 'string' && out.startsWith('Error:')
+                ? `${out}\n(Prefer end_game for a graceful stop.)`
+                : out;
+        }
+
+        case 'end_game': {
+            const timeoutMs = args.timeoutMs ?? 10000;
+            const escalate = args.escalate !== false;
+
+            // The MCP-local signal path: used for graceful:false (the kill_game
+            // alias) and as the pre-P4-lobby fallback. It needs a local pid, so
+            // it resolves strictly — a destructive verb never guesses a target.
+            const bySignal = async (graceful) => {
+                const servers = await getGameServers();
+                const { target, error } = resolveRoomTargetStrict(servers, args.roomId);
+                if (error) return { error };
+                const r = await endProcess(target.pid, { graceful, timeoutMs, escalate });
+                return { result: { roomId: target.room_id, pid: target.pid, ...r } };
+            };
+
+            // A browser we opened for this room outlives the server otherwise,
+            // and an abandoned renderer holds the GPU. Closed on every exit
+            // path below, including the SIGKILL alias.
+            const withBrowsers = async (roomId, payload) => {
+                const reports = roomId > 0 ? await closeRoomBrowsers(roomId) : [];
+                if (reports.length) payload.browsers = reports;
+                return JSON.stringify(payload, null, 2);
+            };
+
+            if (args.graceful === false) {
+                const { error, result } = await bySignal(false);
+                if (error) return error;
+                return withBrowsers(result.roomId, {
+                    source: 'sigkill', ...result,
+                    note: 'Lobby marks the room ended on its next health check.',
+                });
+            }
+
+            if (!(args.roomId > 0)) {
+                // Refuse-with-candidates before touching the network.
+                const { error } = await bySignal(true);
+                return error || 'Error: roomId is required.';
+            }
+
+            const resp = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/rooms/end`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ roomId: args.roomId, timeout_ms: timeoutMs, escalate }),
+            }));
+            const decision = classifyEndResponse(resp.status, await resp.text());
+            if (decision.action === 'error') return `Error: ${decision.error}`;
+            if (decision.action === 'report') {
+                return withBrowsers(args.roomId, {
+                    source: '/api/admin/rooms/end', ...decision.report,
+                    note: 'The room flips to "ended" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game to observe it.',
+                });
+            }
+            // Route-level 404 ⇒ a lobby binary older than P4 (this route has no
+            // feature latch, unlike /api/rooms/direct).
+            const { error, result } = await bySignal(true);
+            if (error) return error;
+            return withBrowsers(result.roomId, {
+                source: 'sigterm-fallback',
+                note: 'This lobby predates POST /api/admin/rooms/end — signalled locally, so no checkpoint verification or resume eligibility is available. The room flips to "ended" on the lobby\'s next health check.',
+                ...result,
+            });
+        }
+
+        case 'get_frame': {
+            const server = await getGameServerUrl(args.roomId);
+            if (!server) {
+                const servers = await getGameServers();
+                if (!servers.length) return 'No game servers found. Is the lobby running and is a game in progress?';
+                return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
+            }
+            const m = await fetchMetrics(server.url);
+            return JSON.stringify({
+                roomId: server.room_id,
+                frame: m.frame,
+                simFps: m.simFps,
+                clients: m.clients,
+            }, null, 2);
+        }
+
+        case 'probe_game': {
+            const roomId = await resolveWaitRoom(args.roomId);
+            if (roomId.error) return roomId.error;
+            return JSON.stringify(await probeGame(roomId.roomId), null, 2);
+        }
+
+        case 'wait_for_game': {
+            const resolved = await resolveWaitRoom(args.roomId);
+            if (resolved.error) return resolved.error;
+            // Pinned for the whole wait: a died-and-relaunched *different* room
+            // must never satisfy this wait.
+            const roomId = resolved.roomId;
+            const until = args.until || 'ready';
+            if (until === 'frame' && !(args.frame > 0)) {
+                return "Error: until='frame' requires a positive `frame` target.";
+            }
+            const timeoutMs = args.timeoutMs ?? 120000;
+            const pollMs = args.pollMs ?? 500;
+            const t0 = Date.now();
+            const deadline = t0 + timeoutMs;
+            let polls = 0;
+
+            const finish = async (extra) => {
+                const out = { roomId, until, waitedMs: Date.now() - t0, polls, ...extra };
+                if (until === 'frame') out.targetFrame = args.frame;
+                if (out.met === false) {
+                    const tail = await roomLogTail(roomId);
+                    out.lastLogs = tail.lines;
+                    if (tail.note) out.logsNote = tail.note;
+                }
+                return JSON.stringify(out, null, 2);
+            };
+
+            for (;;) {
+                const probe = await probeGame(roomId);
+                polls++;
+                if (probe.phase === 'dead') return finish({ met: false, probe });
+                const met = until === 'frame'
+                    ? (probe.frame != null && probe.frame >= args.frame)
+                    : PHASE_ORDER[probe.phase] >= PHASE_ORDER[until];
+                if (met) {
+                    const out = { met: true, probe };
+                    if (probe.clientCount === 0) {
+                        out.warning = 'target reached with 0 clients — idle self-exit will kill this '
+                            + 'server after the idle window unless a client connects or '
+                            + 'idleStartupGraceSeconds was raised (server_main.cpp:2189-2198; '
+                            + 'workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS)';
+                    }
+                    return finish(out);
+                }
+                if (Date.now() >= deadline) return finish({ met: false, timedOut: true, probe });
+                await new Promise(r => setTimeout(r, pollMs));
+            }
+        }
+
+        case 'revive_team': {
+            const cmd = args.team !== undefined ? `revive_team ${args.team}` : 'revive_team all';
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'set_stockpile': {
+            const cmd = `stockpile ${args.unitId} ${args.count} ${args.queued ?? 0}`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
+        }
+
+        case 'profile': {
+            const action = args.action || 'report';
+            // Both C++ parsers slice at offset 12 ("lua profile "/"sim profile "),
+            // so the verb strings below are exactly what they expect.
+            let cmd = `${args.target} profile`;
+            if (action === 'report') {
+                if (args.target === 'lua' && args.topN !== undefined) cmd += ` ${args.topN}`;
             } else {
-                target = servers.find(s => s.state !== 'ended');
+                cmd += ` ${action}`;
             }
-            if (!target) {
-                return `No matching game server. Available: ${servers.map(s => `room ${s.room_id} (state=${s.state}, pid=${s.pid})`).join(', ') || '(none)'}`;
-            }
-            const ok = killProcess(target.pid);
-            return ok
-                ? `Killed spring-server pid=${target.pid} for room ${target.room_id}. Lobby will mark it ended on next health check.`
-                : `Failed to send SIGKILL to pid=${target.pid} (process may be gone, or owned by another user).`;
+            const r = await execOnGameServer('server', cmd, args.roomId);
+            return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'launch_game': {
@@ -1282,26 +2643,27 @@ async function executeTool(name, args) {
             const started = await startResp.json();
 
             // Wait for the game server to actually be accepting connections
-            // before returning. The lobby flips the room Loading→Active (state 4)
-            // once spring-server publishes ready=1 (game_status table). Without
-            // this, callers drove the browser into a not-yet-listening QUIC port
-            // and hit the connect-race / 90s defs timeout. ZK cold-start is slow,
-            // so poll up to ~120s.
+            // before returning. Without this, callers drove the browser into a
+            // not-yet-listening QUIC port and hit the connect-race / 90s defs
+            // timeout. ZK cold-start is slow, so poll up to ~120s.
+            //
+            // probeGame rather than the lobby's room list: the room's
+            // Loading→Active flip is *derived from* game_status.ready, so
+            // probing the source drops a lag hop — and the old loop treated a
+            // vanished room (server died on boot) as "keep waiting" for the
+            // full 120s, where probeGame reports 'dead' on the first poll.
             const targetRoomId = started.id || room.id;
-            let ready = false;
-            let finalState = started.state;
+            let probe = await probeGame(targetRoomId);
             const deadline = Date.now() + 120000;
-            while (Date.now() < deadline) {
-                await new Promise((r) => setTimeout(r, 1000));
-                const lr = await fetch(`${LOBBY_URL}/api/rooms`, { headers: authHdr });
-                if (!lr.ok) continue;
-                let list;
-                try { list = await lr.json(); } catch { continue; }
-                const me = (Array.isArray(list) ? list : []).find((r) => r.id === targetRoomId);
-                if (!me) continue;               // room gone (server died on boot)
-                finalState = me.state;
-                if (me.state >= 4) { ready = true; break; }   // 4 = Active = ready
+            while (Date.now() < deadline && probe.phase !== 'dead'
+                   && probe.phase !== 'ready' && probe.phase !== 'ticking') {
+                await new Promise((r) => setTimeout(r, 500));
+                probe = await probeGame(targetRoomId);
             }
+            const ready = probe.phase === 'ready' || probe.phase === 'ticking';
+            // `state` keeps its old meaning for existing callers (4 = Active);
+            // `phase` is the honest value.
+            const finalState = ready ? 4 : started.state;
 
             // Suggested browser URL. Unless the caller is specifically
             // testing the startup commander-chooser, disable it so the view
@@ -1310,18 +2672,280 @@ async function executeTool(name, args) {
                 `?disableWidgets=${encodeURIComponent(STARTUP_SELECTOR_WIDGET)}`;
             const browserUrl = `${CLIENT_URL}/${disable}`;
 
-            return JSON.stringify({
+            const out = {
                 roomId: targetRoomId,
                 gameServerPort: started.gameServerPort,
                 gameId: args.gameId || 'zk',
                 mapId: args.mapId,
                 state: finalState,
                 ready,
+                phase: probe.phase,
                 hint: ready
                     ? 'Game server is accepting connections (room Active). Open browserUrl to view — it disables the ZK commander-selector overlay (pass testStartupSelector=true to keep it).'
-                    : 'WARNING: game server did not report ready within 120s (still warming or failed to boot). Check list_processes / get_logs before connecting a browser.',
+                    : probe.phase === 'dead'
+                        ? `ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`
+                        : `WARNING: game server was still in phase '${probe.phase}' after 120s (${probe.detail}) — still warming or wedged. See lastLogs / probe_game.`,
                 browserUrl,
-            }, null, 2);
+            };
+            // Loud-failure annotations from the probe (sqlite-health.js) —
+            // a phase stuck at 'spawning' must carry its reason to the caller.
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) out.warning = probe.warning;
+            if (!ready) {
+                const tail = await roomLogTail(targetRoomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+            return JSON.stringify(out, null, 2);
+        }
+
+        case 'launch_scenario': {
+            // One call from nothing to a running scenario: resolve → build the
+            // manifest in memory → POST /api/rooms/direct → wait on probeGame.
+            // No lobby UI, no manifest file on disk, no login.
+            const gameId = args.gameId || 'metalstorm';
+            const notes = [];
+
+            // 1. Resolve against the lobby's scenario list (public route).
+            //    The list is the lobby's *startup snapshot*, so a freshly
+            //    authored file is invisible here until a resync — hence the
+            //    two escapes named in the failure text.
+            let scenario = null;
+            let list = [];
+            try {
+                const lr = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (lr.ok) list = await lr.json();
+            } catch { /* lobby down — reported by the direct POST below */ }
+            if (Array.isArray(list)) scenario = list.find(s => s.id === args.scenarioId) ?? null;
+            if (!scenario && !args.force) {
+                const avail = (Array.isArray(list) ? list : []).map(s =>
+                    s.id + (s.retired ? ' (retired)' : s.tutorial ? ' (tutorial)' : '')).join(', ');
+                return `Scenario "${args.scenarioId}" is not in the lobby's list for game "${gameId}". `
+                     + `Available: ${avail || '(none — is the lobby up?)'}. `
+                     + 'New files need POST /api/admin/scenarios/resync (lobby scenario lists are a '
+                     + 'startup snapshot; the direct-boot path itself reads the VFS fresh), '
+                     + 'or pass force:true (+ mapId) to launch blind.';
+            }
+            if (scenario?.retired) notes.push(`scenario "${scenario.id}" is retired — loadable, but the lobby will not offer it in room lists.`);
+            if (scenario?.tutorial) notes.push(`scenario "${scenario.id}" is a tutorial — loadable, but not offered as a normal war.`);
+
+            // 2. Build the manifest (pure; throws with a caller-facing message).
+            let manifest;
+            try {
+                const built = buildScenarioManifest({
+                    scenario,
+                    scenarioId: args.scenarioId,
+                    gameId,
+                    mapId: args.mapId,
+                    players: args.players || [{ username: AUTH_USER }],
+                    side: args.side,
+                    ai: args.ai === undefined ? 'null' : args.ai,
+                    modoptions: args.modoptions,
+                    roomName: args.roomName || `mcp:${args.scenarioId}`,
+                    idleGraceSeconds: args.idleGraceSeconds,
+                });
+                manifest = built.manifest;
+                notes.push(...built.notes);
+            } catch (e) {
+                return `Error: ${e.message}`;
+            }
+            if (args.headless || args.wait === 'none') {
+                notes.push('no browser will attach: the game server self-exits after its startup idle grace '
+                         + `(default 120s)${typeof args.idleGraceSeconds === 'number' ? '' : ' — pass idleGraceSeconds to extend it'}. `
+                         + 'A lobby binary older than P3 ignores the manifest field silently; there, run the '
+                         + 'lobby with SPRING_IDLE_STARTUP_GRACE_SECONDS=3600 in its env instead.');
+            }
+            if (LOBBY_URL !== 'http://localhost:8011') {
+                notes.push(`LOBBY_URL is ${LOBBY_URL} but the client at ${CLIENT_URL} bakes its lobby port at BUILD time `
+                         + '— browserUrl may drive a different stack than the one just launched.');
+            }
+
+            // 3. POST authed even on loopback (the route skips token checks for
+            //    a loopback caller): it costs nothing, names the caller in the
+            //    lobby audit row, and keeps the tool working against a remote
+            //    lobby where an admin Bearer token is mandatory.
+            const posted = await postDirectManifest(manifest);
+            if (!posted.ok) return `Error: ${posted.error}`;
+            const room = posted.room;
+
+            // 4. Wait on probeGame (never the room-state loop: state>=4 is
+            //    known-unreliable, and a dead server must fail fast).
+            const roomId = room.id;
+            let probe = { phase: 'unknown', frame: null, detail: 'wait:none' };
+            let timedOut = false;
+            if (args.wait !== 'none') {
+                const want = args.wait || 'ticking';
+                // With openBrowser, 'ticking' is not reachable YET: the sim
+                // holds at frame -1 until a client connects, and the client is
+                // ours to launch a few lines below. Waiting for it here would
+                // burn the whole timeout and then report a scary (and by then
+                // false) "no browser attached" warning on a run that succeeds.
+                // So stop at 'ready' now, and wait for the caller's real target
+                // after the browser is in.
+                const deferToBrowser = args.openBrowser && want === 'ticking';
+                probe = await waitForPhase(roomId, deferToBrowser ? 'ready' : want,
+                                           args.waitTimeoutMs ?? 120000);
+                timedOut = probe.timedOut;
+                if (probe.phase === 'dead') {
+                    notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
+                } else if (timedOut) {
+                    notes.push(`WARNING: still in phase '${probe.phase}' after the wait timeout (${probe.detail}).`);
+                    if (want === 'ticking' && probe.phase === 'ready' && probe.clientCount === 0) {
+                        notes.push('the sim holds at frame -1 until a client connects — with no browser attached, '
+                                 + "wait:'ready' is the reachable target (open browserUrl, then wait_for_game until:'ticking').");
+                    }
+                }
+            }
+
+            // 5. Attach-form browser URL (never a bare ?play=, which would
+            //    re-POST the same room name and tear down the server we just
+            //    launched and waited on). Token rides the hash fragment.
+            const host = manifest.players[0].username;
+            const hostToken = room.sessions?.[host] ?? '';
+            const browserUrl = args.headless ? undefined
+                : `${CLIENT_URL}/?play=${encodeURIComponent(args.scenarioId)}&game=${encodeURIComponent(gameId)}`
+                  + `&room=${roomId}&user=${encodeURIComponent(host)}`
+                  + (args.skipBriefing === false ? '' : '&skipBriefing=1')
+                  + `#token=${encodeURIComponent(hostToken)}`;
+
+            const out = {
+                roomId,
+                port: room.game_server_port,
+                roomName: manifest.name,
+                sessions: room.sessions,
+                browserUrl,
+                scenario: scenario && {
+                    id: scenario.id, map: scenario.map,
+                    sides: scenario.sides, terminal: scenario.terminal,
+                },
+                phase: probe.phase,
+                frame: probe.frame,
+                notes,
+            };
+            // Loud-failure annotations from the probe (sqlite-health.js).
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) notes.push(probe.warning);
+            if (probe.phase === 'dead' || timedOut) {
+                const tail = await roomLogTail(roomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+
+            // Remember the attach URL even when we are not opening a browser
+            // now — open_client({roomId}) later has no other way to get the
+            // host session token.
+            if (browserUrl) roomBrowserUrls.set(roomId, browserUrl);
+
+            // openBrowser closes the loop this tool used to leave open: the
+            // default roster seats a human, so without a client the sim holds
+            // at frame -1 forever and every relay tool answers "no connected
+            // admin client".
+            if (args.openBrowser && browserUrl && probe.phase !== 'dead') {
+                const opened = await openClient({
+                    url: browserUrl, roomId,
+                    headless: args.browserHeadless !== false,
+                    waitReadyMs: args.wait === 'none' ? 0 : 60000,
+                });
+                if (opened.error) {
+                    out.browser = { error: opened.error };
+                    notes.push(`openBrowser failed: ${opened.error}`);
+                } else {
+                    out.browser = opened.result;
+                    // The sim only starts once the client is in, so the phase
+                    // captured before the browser existed is already stale.
+                    if (opened.result.connected && args.wait && args.wait !== 'none') {
+                        const after = await waitForPhase(roomId, args.wait, 60000);
+                        out.phase = after.phase;
+                        out.frame = after.frame;
+                        if (after.timedOut) {
+                            notes.push(`WARNING: the client connected but the game is still '${after.phase}' `
+                                     + `after waiting for '${args.wait}' (${after.detail}).`);
+                        }
+                    } else if (!opened.result.connected) {
+                        notes.push(`WARNING: the browser was launched but never reached the relay (${opened.result.detail || 'no detail'}) `
+                                 + '— the sim will hold at frame -1. Re-run with browserHeadless:false to watch it.');
+                    }
+                }
+            } else if (args.openBrowser && !browserUrl) {
+                notes.push('openBrowser ignored: headless:true means no browserUrl was minted.');
+            }
+            return out;
+        }
+
+        case 'launch_direct': {
+            // The raw-manifest sibling of launch_scenario: no scenario
+            // resolution, no manifest synthesis — the caller owns every field.
+            if (!args.manifestName && !args.manifest) {
+                const avail = listManifestNames().join(', ');
+                return 'Error: pass manifestName and/or manifest. Available manifestName values: '
+                     + (avail || '(none — is PROJECT_ROOT set?)');
+            }
+            let fileManifest = null;
+            try {
+                if (args.manifestName) fileManifest = loadManifestByName(args.manifestName);
+            } catch (e) {
+                return `Error: ${e.message}`;
+            }
+            const built = buildDirectManifest({
+                fileManifest,
+                manifest: args.manifest,
+                overrides: args.overrides,
+                idleGraceSeconds: args.idleGraceSeconds,
+            });
+            if (built.error) return `Error: ${built.error}`;
+            const manifest = built.manifest;
+            const notes = [...built.notes];
+            if (args.clearCache) clearDefsCache(manifest.game || 'metalstorm');
+
+            const posted = await postDirectManifest(manifest);
+            if (!posted.ok) return `Error: ${posted.error}`;
+            const room = posted.room;
+            const roomId = room.id;
+
+            let probe = { phase: 'unknown', frame: null, detail: 'wait:none', timedOut: false };
+            const wait = args.wait || 'ticking';
+            if (wait !== 'none') {
+                probe = await waitForPhase(roomId, wait, args.timeoutMs ?? 120000);
+                if (probe.phase === 'dead') {
+                    notes.push(`ERROR: the game server died during boot (${probe.detail}) — see lastLogs.`);
+                } else if (probe.timedOut) {
+                    notes.push(`WARNING: still in phase '${probe.phase}' after the wait timeout (${probe.detail}).`);
+                    if (wait === 'ticking' && probe.phase === 'ready' && probe.clientCount === 0) {
+                        notes.push('a skirmish holds the sim at frame -1 until its rostered humans connect — '
+                                 + "with no browser attached, wait:'ready' is the reachable target.");
+                    }
+                }
+            }
+
+            const out = {
+                roomId,
+                port: room.game_server_port,
+                roomName: manifest.name || 'dev:direct',
+                sessions: room.sessions,
+                players: room.players,
+                aiSlots: room.ai_slots,
+                // Deliberately NOT the ?direct=<name> form: that boot re-POSTs
+                // the manifest from client/public/ and would tear down the very
+                // room this call just launched. Log in as any `sessions` user.
+                browserUrl: `${CLIENT_URL}/`,
+                browserHint: 'log in as any username in `sessions` (these are live dev session tokens), '
+                           + 'or use launch_scenario for a one-URL ?play= attach.',
+                phase: probe.phase,
+                frame: probe.frame,
+                notes,
+            };
+            // Loud-failure annotations from the probe (sqlite-health.js).
+            if (probe.sqliteUnavailable) out.sqliteUnavailable = probe.sqliteUnavailable;
+            if (probe.warning) notes.push(probe.warning);
+            if (probe.phase === 'dead' || probe.timedOut) {
+                const tail = await roomLogTail(roomId);
+                out.lastLogs = tail.lines;
+                if (tail.note) out.logsNote = tail.note;
+            }
+            // Same reason as launch_scenario: the token in this URL is issued
+            // once and cannot be rebuilt, so open_client({roomId}) needs it kept.
+            if (out.browserUrl) roomBrowserUrls.set(roomId, out.browserUrl);
+            return out;
         }
 
         case 'api_request': {
@@ -1384,6 +3008,15 @@ async function executeTool(name, args) {
 
         case 'spawn_unit': {
             const cmd = `spawn ${args.defName} ${args.x} ${args.z} ${args.team ?? 0} ${args.count ?? 1}`;
+            const j = await execJsonVerb(cmd, args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            // spawn runs through LuaRules, so a non-JSON reply from the json
+            // path is an error string ("error: LuaRules not loaded", a Lua
+            // syntax/runtime error), NOT old-binary fallback.
+            if (j.legacy) return `Error: ${j.legacy}`;
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -1414,6 +3047,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_unit_state': {
+            const j = await execJsonVerb(`unit_state ${args.unitId}`, args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            if (j.legacy) return j.legacy;
             const r = await execOnGameServer('server', `unit_state ${args.unitId}`, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -1429,6 +3068,12 @@ async function executeTool(name, args) {
         }
 
         case 'get_combat_summary': {
+            const j = await execJsonVerb('combat_summary', args.roomId);
+            if (j.json) {
+                if (j.json.error) return `Error: ${j.json.error}`;
+                return j.json;
+            }
+            if (j.legacy) return j.legacy;
             const r = await execOnGameServer('server', 'combat_summary', args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -1481,8 +3126,25 @@ async function executeTool(name, args) {
                 + ` const out = await window.test.spawn(${defName}, x, z, ${team}, ${count});`
                 + ` return { x, z, response: out };`
                 + ` })()`;
+            // P7: relay ONLY the camera read, then spawn from here over
+            // /api/exec. Relaying the whole snippet would deadlock — the
+            // browser's `window.test.spawn` posts back to the same game
+            // server whose single HTTP thread is parked on this very request
+            // (see SERVER_BOUND_HARNESS_METHODS). Reading the pose touches
+            // nothing but the browser's cached scene state.
+            const relayed = await clientEval('test', 'cameraPose()', args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                const pose = clientEvalValue(relayed.output);
+                if (!pose || !pose.lookAt) return `Unexpected cameraPose reply: ${String(relayed.output).slice(0, 200)}`;
+                const x = pose.lookAt.x + ox, z = pose.lookAt.z + oz;
+                const spawned = await execOnGameServer(
+                    'server', `spawn ${args.defName} ${x} ${z} ${team} ${count}`, args.roomId);
+                return { x, z, clientId: relayed.clientId,
+                         response: spawned.success ? spawned.output : `Error: ${spawned.output}` };
+            }
             return [
-                `Spawn-at-camera: paste this into mcp__chrome-devtools__evaluate_script:`,
+                `Relay unavailable (${relayed.fallback}) — paste this into mcp__chrome-devtools__evaluate_script:`,
                 ``,
                 `  ${snippet}`,
                 ``,
@@ -1501,8 +3163,27 @@ async function executeTool(name, args) {
             };
             const argList = (args.args || []).map(fmt).join(', ');
             const snippet = `(async () => { const r = await window.test.${args.method}(${argList}); return r === undefined ? 'ok' : r; })()`;
+            // P7: refuse the server-bound methods rather than eating a 10s
+            // deadlock (see SERVER_BOUND_HARNESS_METHODS).
+            const serverSide = SERVER_BOUND_HARNESS_METHODS.get(args.method);
+            if (serverSide) {
+                return `\`window.test.${args.method}()\` calls back into the game server's own HTTP API. `
+                    + `Relaying it would deadlock: the server serves HTTP on one thread, and that thread `
+                    + `is parked waiting for this browser. Use the \`${serverSide}\` MCP tool instead `
+                    + `(no browser needed), or paste this into mcp__chrome-devtools__evaluate_script:\n\n  ${snippet}`;
+            }
+            // Relay the harness call to the connected admin browser. The
+            // 'test' target evaluates an expression with the harness's members
+            // in scope, so it takes the method call without the window.* wrapper.
+            const relayed = await clientEval(
+                'test', `${args.method}(${argList})`, args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                const v = clientEvalValue(relayed.output);
+                return v === undefined || v === null ? 'ok' : v;
+            }
             return [
-                `Browser-side TestHarness call. Feed this into mcp__chrome-devtools__evaluate_script:`,
+                `Relay unavailable (${relayed.fallback}) — feed this into mcp__chrome-devtools__evaluate_script:`,
                 ``,
                 `  ${snippet}`,
                 ``,
@@ -1522,14 +3203,329 @@ async function executeTool(name, args) {
             // the lifecycle, but for the common case (a Claude session
             // already has chrome-devtools attached) we just emit a
             // helpful instruction telling the caller to use it.
+            // P7: the LuaUI runtime lives in the browser's render worker, so
+            // this goes over the relay (`widgets` target → window.widgets.eval).
+            // The printed snippet below is the fallback for when no admin
+            // browser is connected or the relay is compiled out.
+            const relayed = await clientEval('widgets', args.code, args.roomId, args.clientId);
+            if (!relayed.fallback) {
+                return relayed.success
+                    ? relayed.output
+                    : `Error (client ${relayed.clientId}): ${relayed.output}`;
+            }
             return [
-                '`evaluate_widget_lua` is a stub: the LuaUI worker runs in the browser, not on the game server.',
+                `Relay unavailable (${relayed.fallback}): the LuaUI runtime is in the browser, not on the game server.`,
                 'Use `mcp__chrome-devtools__evaluate_script` instead with the snippet:',
                 '',
                 '  () => window.widgets.eval(`' + args.code.replace(/`/g, '\\`') + '`)',
                 '',
-                'When CDP is added to spring-debug a real implementation will replace this.',
+                'A DEV client connected as the `admin` account is relayed automatically;',
+                'a /api/rooms/direct dev session is role "player" and is never eligible.',
             ].join('\n');
+        }
+
+        // --- Browser-eval relay (P7) -----------------------------------
+
+        case 'client_eval': {
+            if (!args.code) return 'Error: client_eval needs `code`.';
+            const target = args.target || 'js';
+            if (!['js', 'worker', 'widgets', 'test'].includes(target))
+                return `Error: target must be js | worker | widgets | test (got ${target}).`;
+            const r = await clientEval(target, args.code, args.roomId, args.clientId, args.timeoutMs);
+            if (r.fallback) return `Relay unavailable: ${r.fallback}`;
+            return { success: r.success, clientId: r.clientId, output: clientEvalValue(r.output) };
+        }
+
+        case 'client_ready': {
+            const r = await clientEval('test', 'readyState()', args.roomId, args.clientId);
+            if (r.fallback)
+                return `Relay unavailable: ${r.fallback}. For SERVER-side readiness use \`wait_for_game\` instead.`;
+            if (!r.success) return `Error (client ${r.clientId}): ${r.output}`;
+            return { clientId: r.clientId, ...(clientEvalValue(r.output) ?? {}) };
+        }
+
+        case 'open_client': {
+            let url = args.url;
+            if (!url && args.roomId > 0) url = roomBrowserUrls.get(args.roomId);
+            if (!url) {
+                const known = [...roomBrowserUrls.keys()];
+                return args.roomId > 0
+                    ? `Error: no remembered browserUrl for room ${args.roomId}. `
+                      + `This server only remembers rooms IT launched${known.length ? ` (${known.join(', ')})` : ' (none this session)'}; `
+                      + 'the attach URL carries a session token that only /api/rooms/direct issues. '
+                      + 'Pass an explicit `url`, or launch the room with launch_scenario.'
+                    : 'Error: pass `roomId` (a room this server launched) or an explicit `url`.';
+            }
+            const waitReadyMs = args.waitReady === false ? 0 : (args.waitReadyMs ?? 60000);
+            const { error, result } = await openClient({
+                url, roomId: args.roomId ?? null,
+                headless: args.headless !== false,
+                width: args.width, height: args.height,
+                waitReadyMs,
+            });
+            if (error) return `Error: ${error}`;
+            return JSON.stringify(result, null, 2);
+        }
+
+        case 'close_client': {
+            const timeoutMs = args.timeoutMs ?? 5000;
+            let targets;
+            if (args.pid > 0) {
+                const e = browsers.get(args.pid);
+                if (!e) {
+                    const live = browsers.list().map(x => x.pid);
+                    return `Error: pid ${args.pid} was not launched by this server, so it is not ours to signal. `
+                         + (live.length ? `Tracked pids: ${live.join(', ')}.` : 'No browsers are tracked.');
+                }
+                targets = [e];
+            } else if (args.roomId > 0) {
+                targets = browsers.forRoom(args.roomId);
+            } else if (args.all) {
+                targets = browsers.list().map(e => browsers.get(e.pid)).filter(Boolean);
+            } else {
+                return 'Error: pass `pid`, `roomId`, or `all:true`.';
+            }
+            if (!targets.length) return JSON.stringify({ closed: 0, browsers: [], note: 'nothing tracked matched' }, null, 2);
+
+            const reports = [];
+            for (const e of targets) {
+                const r = await closeBrowser(e, { timeoutMs });
+                browsers.remove(e.pid);
+                reports.push({ ...r, roomId: e.roomId, describe: describeClose(r) });
+            }
+            return JSON.stringify({ closed: reports.length, browsers: reports }, null, 2);
+        }
+
+        case 'list_clients': {
+            const list = browsers.list();
+            return JSON.stringify({
+                count: list.length,
+                clients: list,
+                note: list.length
+                    ? 'Only browsers this server launched. alive:false means it died or was killed outside close_client.'
+                    : 'No tracked browsers. open_client makes one; a browser you opened by hand is never listed here.',
+            }, null, 2);
+        }
+
+        case 'client_screenshot': {
+            const maxDim = Math.max(64, Math.min(2048, Number(args.maxDim ?? 1280)));
+            const opts = { maxDim, stats: true };
+            if (args.quality !== undefined) opts.quality = Number(args.quality);
+            const r = await clientEval(
+                'test', `captureFrame(${JSON.stringify(opts)})`,
+                args.roomId, args.clientId, /*timeoutMs=*/20000);
+            if (r.fallback) return `Relay unavailable: ${r.fallback}`;
+            if (!r.success) return `Error (client ${r.clientId}): ${r.output}`;
+            const shot = clientEvalValue(r.output);
+            if (!shot || typeof shot !== 'object' || !shot.dataUrl)
+                return `Unexpected captureFrame reply: ${String(r.output).slice(0, 400)}`;
+            // `data:image/jpeg;base64,AAAA…` → mime + payload. MCP image blocks
+            // carry the base64 WITHOUT the data: prefix.
+            const m = /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+            if (!m) return `captureFrame returned a non-data-URL image (${shot.dataUrl.slice(0, 60)}…)`;
+            const meta = {
+                clientId: r.clientId,
+                width: shot.width, height: shot.height,
+                frameId: shot.frameId, gameFrame: shot.gameFrame,
+                stats: shot.stats,
+                bytes: Math.round(m[2].length * 3 / 4),
+            };
+            return {
+                content: [
+                    { type: 'image', data: m[2], mimeType: m[1] },
+                    { type: 'text', text: JSON.stringify(meta, null, 2) },
+                ],
+            };
+        }
+
+        // --- Scenario authoring (S3) -----------------------------------
+
+        case 'validate_scenario': {
+            if (!args.scenarioId && args.luaSource === undefined)
+                return 'Error: validate_scenario needs either scenarioId (read from disk) or luaSource (validate text directly).';
+            const result = await runScenarioValidation({
+                projectRoot: projectRoot(),
+                gameId: args.gameId || 'metalstorm',
+                scenarioId: args.scenarioId,
+                luaSource: args.luaSource,
+                passability: args.passability === true,
+            });
+            return JSON.stringify(result, null, 2);
+        }
+
+        case 'list_scenarios': {
+            const gameId = args.gameId || 'metalstorm';
+            const notes = [];
+
+            let discovered = [];
+            try {
+                const r = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (!r.ok) return `Error: lobby answered ${r.status} for /api/games/${gameId}/scenarios.`;
+                discovered = await r.json();
+            } catch (e) {
+                return `Error: lobby at ${LOBBY_URL} unreachable (${e.message}). `
+                     + 'validate_scenario works offline; this tool does not.';
+            }
+
+            // Provenance half. A non-admin token loses it and nothing else —
+            // the discovery view is the part an author actually needs.
+            let stored = [];
+            try {
+                const r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/list`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ gameId }),
+                }));
+                if (r.ok) stored = (await r.json()).scenarios || [];
+                else notes.push(`admin list refused (${r.status}) — generated rows carry no provenance below.`);
+            } catch (e) {
+                notes.push(`admin list unavailable (${e.message}) — generated rows carry no provenance below.`);
+            }
+
+            const byId = new Map(stored.map(s => [s.id, s]));
+            const rows = discovered.map(s => {
+                const row = { ...s, source: byId.has(s.id) || s.id.startsWith('gen_') ? 'generated' : 'authored' };
+                const p = byId.get(s.id);
+                if (p) row.provenance = {
+                    seed: p.seed, params: p.params, generatorVersion: p.generatorVersion,
+                    createdBy: p.createdBy, createdAt: p.createdAt, bytes: p.bytes,
+                };
+                return row;
+            });
+            // A stored row the lobby did NOT discover is the interesting case:
+            // the file failed to parse, or the sweep removed it.
+            for (const p of stored) {
+                if (discovered.some(d => d.id === p.id)) continue;
+                rows.push({ id: p.id, source: 'generated', discovered: false, provenance: p });
+                notes.push(`"${p.id}" has a DB row but the lobby did not discover it — the materialised file `
+                         + 'failed to parse or is missing. Try resync (write_scenario does one) and validate_scenario.');
+            }
+
+            return JSON.stringify({ gameId, count: rows.length, scenarios: rows, notes }, null, 2);
+        }
+
+        case 'write_scenario': {
+            const gameId = args.gameId || 'metalstorm';
+            const id = String(args.scenarioId || '');
+            const notes = [];
+
+            // Two guards on the same trap, on purpose: ScenarioDb owns the
+            // gen_ namespace and SyncToDisk's orphan sweep deletes any
+            // gen_*.lua no row claims, so an authored file with that name is
+            // deleted on the next resync — including the one this tool does.
+            if (id.startsWith('gen_'))
+                return `Error: "${id}" — the gen_ prefix is reserved for DB-owned generated wars. `
+                     + 'The scenario DB\'s orphan sweep deletes any gen_*.lua no row claims, so this file '
+                     + 'would be silently removed on the next resync. Use generate_scenario to make one, or '
+                     + 'pick a name without the prefix.';
+            if (!/^[a-z0-9_]+$/.test(id) || id.length > 64)
+                return `Error: "${id}" is not a valid scenario id. Grammar: ^[a-z0-9_]+$ (lowercase, digits, `
+                     + 'underscore), max 64 chars — it becomes both a filename and the `scenario` modoption.';
+
+            const root = projectRoot();
+            const file = scenarioPath(root, gameId, id);
+            const dir = dirname(file);
+            if (!existsSync(dir))
+                return `Error: ${dir} does not exist — is "${gameId}" a game this checkout ships?`;
+            if (existsSync(file) && !args.overwrite)
+                return `Error: ${file} already exists. Pass overwrite:true to replace it.`;
+
+            const validation = await runScenarioValidation({
+                projectRoot: root, gameId, scenarioId: id, luaSource: args.luaSource,
+            });
+            const blocking = validation.findings.filter(f =>
+                f.severity === 'error' || (f.severity === 'warning' && !args.force));
+            if (blocking.length)
+                return JSON.stringify({
+                    written: false,
+                    reason: validation.counts.error > 0
+                        ? 'validation errors — fix them (errors are never bypassable)'
+                        : 'validation warnings — pass force:true to write anyway',
+                    counts: validation.counts,
+                    findings: validation.findings,
+                }, null, 2);
+
+            // Temp-file + rename, same rationale as ScenarioDb::Materialise:
+            // the lobby may be mid-Discover, and a half-written file reads as
+            // a parse failure and drops the scenario from the picker.
+            const tmp = `${file}.tmp-${process.pid}`;
+            try {
+                writeFileSync(tmp, args.luaSource, 'utf8');
+                renameSync(tmp, file);
+            } catch (e) {
+                try { unlinkSync(tmp); } catch { /* nothing to clean */ }
+                return `Error writing ${file}: ${e.message}`;
+            }
+
+            const out = {
+                written: true, file, scenarioId: id, gameId,
+                counts: validation.counts, findings: validation.findings,
+            };
+
+            if (args.resync === false) {
+                notes.push('resync skipped — the lobby picker and launch_scenario will not see this file until '
+                         + 'a POST /api/admin/scenarios/resync or a lobby restart. Direct and headless boots '
+                         + 'read the VFS fresh, so those work now.');
+                out.notes = notes;
+                return JSON.stringify(out, null, 2);
+            }
+
+            try {
+                const r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/resync`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ gameId }),
+                }));
+                out.resync = r.ok ? await r.json() : `refused (${r.status})`;
+            } catch (e) {
+                out.resync = `unreachable — ${e.message}`;
+                notes.push('the lobby is down, so the file is written but not discovered. Direct/headless boots '
+                         + 'read the VFS fresh; the picker sees it on the next lobby start or manual resync.');
+            }
+
+            // Confirm rather than assume: writing a file the lobby then
+            // declines to offer is exactly the silent failure this tool is for.
+            try {
+                const r = await fetch(`${LOBBY_URL}/api/games/${encodeURIComponent(gameId)}/scenarios`);
+                if (r.ok) {
+                    const list = await r.json();
+                    out.offered = Array.isArray(list) && list.some(s => s.id === id);
+                    if (!out.offered)
+                        notes.push('the resync ran but the lobby still does not offer this scenario — run '
+                                 + 'validate_scenario and check the lobby log for its "not offered" warning.');
+                }
+            } catch { /* already reported by the resync branch */ }
+
+            if (notes.length) out.notes = notes;
+            return JSON.stringify(out, null, 2);
+        }
+
+        case 'generate_scenario': {
+            const gameId = args.gameId || 'metalstorm';
+            if (!args.mapId) return 'Error: generate_scenario needs a mapId.';
+            const body = { gameId, mapId: args.mapId };
+            for (const k of ['seed', 'sides', 'towns', 'outposts', 'bases', 'mines',
+                             'sites', 'relics', 'wrecks', 'bridges', 'hostility', 'roster'])
+                if (args[k] !== undefined) body[k] = args[k];
+
+            let r;
+            try {
+                r = await authedFetch(token => fetch(`${LOBBY_URL}/api/admin/scenarios/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify(body),
+                }));
+            } catch (e) {
+                return `Error: lobby at ${LOBBY_URL} unreachable (${e.message}).`;
+            }
+            const text = await r.text();
+            let payload;
+            try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+            if (!r.ok)
+                // 422 carries the generator's own REJECTED line, which names
+                // the violated invariant — strictly more useful than a summary.
+                return JSON.stringify({ ok: false, status: r.status, ...payload }, null, 2);
+            return JSON.stringify(payload, null, 2);
         }
 
         default:
@@ -1562,7 +3558,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
+        // Enforce the inputSchema before dispatch. Until this existed, a
+        // missing REQUIRED field reached the handler as undefined and surfaced
+        // as whatever the downstream layer said about it (a better-sqlite3
+        // type error, a game-server usage line), and a typo'd optional field
+        // was silently indistinguishable from omitting it. See tool-args.js.
+        const argError = validateToolArgs(TOOLS.find(t => t.name === name), args || {});
+        if (argError) return { content: [{ type: 'text', text: `Error: ${argError}` }], isError: true };
+
         const result = await executeTool(name, args || {});
+        // A tool that builds its own MCP content blocks (image + text —
+        // `client_screenshot`, P7) hands them back whole; everything else is
+        // still wrapped as a single text block.
+        if (result && typeof result === 'object' && Array.isArray(result.content)) return result;
         return {
             content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
         };

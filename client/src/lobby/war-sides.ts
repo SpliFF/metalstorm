@@ -114,3 +114,21 @@ export function defaultTeamForNewSlot(
     if (free) return free.team;
     return sides.length > 0 ? sides[sides.length - 1].team : 1;
 }
+
+/// The side an account's permanent faction binds it to in this room, or
+/// undefined if this war declares no side for it (PLAN-endtoend.md D40).
+///
+/// The server has already seated the player here and refuses
+/// `POST /api/rooms/team` for anything else, so this is what lets the room
+/// screen stop OFFERING the other side — D41's lesson is that a refusal the
+/// player can walk into is worse than a control that isn't there.
+///
+/// An empty faction never matches, and the legacy fallback's sides have no
+/// faction names, so a no-scenario room binds nobody.
+export function sideForFaction(
+    sides: readonly WarSide[],
+    faction: string | undefined,
+): WarSide | undefined {
+    if (!faction) return undefined;
+    return sides.find(s => s.faction !== '' && s.faction === faction);
+}

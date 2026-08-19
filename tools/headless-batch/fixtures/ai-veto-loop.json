@@ -1,0 +1,17 @@
+{
+  "map": "meridian_basin",
+  "game": "metalstorm",
+  "aiSlots": [
+    { "aiId": "strategos", "team": 0, "startPos": 0 },
+    { "aiId": "null", "team": 4, "startPos": 1 }
+  ],
+  "modOptions": {
+    "scenario": "meridian_basin",
+    "objective_density": "normal",
+    "build_time_scale": "1.0"
+  },
+  "headless": {
+    "tickMode": "x8",
+    "stopAt": { "frame": 27000 }
+  }
+}

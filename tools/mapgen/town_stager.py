@@ -1285,16 +1285,43 @@ def validate_staging(staged: StagedTown, town, probe=None,
 def _gateway_probes(town) -> list[tuple[float, float, str]]:
     """A stand just OUTSIDE each gateway, which must be walkable from inside.
 
-    Pushed out from the town centre rather than along the line's own normal:
-    the centre is on the graph, the ring is not, and for a convex line the two
-    agree on which side is out.
+    Pushed along the LINE'S OWN OUTWARD NORMAL at the gap, not radially out
+    from the town centre. For a convex line the two agree on which SIDE is
+    outside, which is why the radial push was written first — but they do not
+    agree on the DIRECTION, and the gap between them is a false alarm rather
+    than a rounding error. Where the boundary runs oblique to the radius (the
+    common case anywhere but the middle of an edge), a radial push travels
+    partly ALONG the wall as well as across it, and lands the stand beside the
+    neighbouring wall segment instead of in the open ground the gate opens
+    onto. Measured on valley/grid_quarter seed 8: the gap_000 stand came to
+    rest 2 elmos off `wal_006`'s footprint and inside its reach padding, and
+    this spec reported a gateway "built over" that a player could walk through
+    perfectly well. The normal crosses the line squarely, so what it samples is
+    the ground the gate actually faces.
+
+    An unwalled town has no gateways, so the ring lookup is never reached
+    without a `wall_line` to build it from; the radial push is kept as the
+    fallback for a walled town whose line went missing rather than raising.
     """
     out = []
+    ring = tp._Ring(town.wall_line) if town.wall_line else None
+    reach = PERIMETER["thickness"] + 3 * REACH_CELL
     for g in town.gateways():
-        dx, dz = g.x - town.x, g.z - town.z
-        m = math.hypot(dx, dz) or 1.0
-        reach = PERIMETER["thickness"] + 3 * REACH_CELL
-        out.append((g.x + dx / m * reach, g.z + dz / m * reach,
+        if ring is not None:
+            # The normal at the HOLE, found by projecting the gap's own
+            # midpoint back onto the ring. Not `(g.s0 + g.s1) / 2`: those two
+            # are stored modulo the ring length, so a gap straddling s = 0 has
+            # s1 < s0 and their mean points at the far side of the town. The
+            # midpoint (g.x, g.z) was taken before that wrap and is exact.
+            _dist, s = ring.project(float(g.x), float(g.z))
+            _rx, _rz, heading = ring.at(s)
+            ix, iz = ring.inward(g.x, g.z, heading)
+            ox, oz = -ix, -iz
+        else:
+            dx, dz = g.x - town.x, g.z - town.z
+            m = math.hypot(dx, dz) or 1.0
+            ox, oz = dx / m, dz / m
+        out.append((g.x + ox * reach, g.z + oz * reach,
                     f"gateway {g.key} ({g.street})"))
     return out
 

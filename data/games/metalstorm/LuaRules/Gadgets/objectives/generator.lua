@@ -30,6 +30,7 @@ function generator.newState()
         ruleCounts = {},        -- rule key -> count of currently-active objectives from that rule
         contestedSince = {},    -- regionKey -> tick first seen contested (control rule debounce)
         seenConvoys = {},       -- convoy id -> true (edge-trigger "convoy created")
+        seenArrivals = {},      -- arrival id -> true (edge-trigger "a wave is on the map")
         seenInfraHealth = {},   -- infra unitID -> last-seen health fraction (edge-trigger damage)
         starvedSince = {},      -- team -> tick first seen with zero completable objectives
     }
@@ -220,6 +221,112 @@ local infraRule = {
 }
 
 -- ============================================================
+-- Rule: TRANSPORTS — the universal generator floor
+-- (PLAN-metalstorm-objectives.md §10.5, PLAN-metalstorm-transports.md §7.1).
+--
+-- WHY THIS IS THE FLOOR. Every other rule above waits on content that most
+-- maps do not have: controlRule needs `mapdata/regions.lua` (6 of 13 shipped
+-- maps), escortRule needs civilian convoy routes (1 of 13, and that map is
+-- retired), districtRule needs planned townships, infraRule needs an
+-- `objective_infra` tag no def in the game carries. So on a typical map the
+-- systemic generator produced nothing but the liveness backstop's forced
+-- control objective.
+--
+-- Transports are different in kind: a battle OPENS when a faction commits a
+-- transport to a POI (transports §7.1), so a battle with no transport in it
+-- is not a battle. This rule therefore works on every map, with no map
+-- content whatsoever, and it generates objectives about the thing the ruling
+-- of 2026-08-19 made the battle's whole in/out economy.
+--
+-- Two shapes, both from §10.5's sentence ("secure a landing zone, defend an
+-- arrival point, escort a departing transport"):
+--
+--   ARRIVAL (a linked pair, exactly escortRule's E4 shape). A wave is on the
+--   map and still carrying: its owner is told to get it down alive (inbound
+--   escort on the drop zone), everyone else is told to kill it. That single
+--   pair is "secure a landing zone" and "defend an arrival point" from the
+--   two sides it actually has, and it is what makes the HVT premise (§3.6)
+--   real rather than aspirational — without a kill objective naming the
+--   carrier, no AI ever prioritises one.
+--
+--   EXTRACT (per team). A side with a live carrier and a departure zone is
+--   told to get a transport out. This one is standing rather than episodic:
+--   it is live for as long as the side can still leave, which is the point —
+--   withdrawal is the decision the world layer prices (§7.5's payout table),
+--   and a decision nobody is ever told they can make is not a decision.
+--
+-- Reward magnitudes are the neighbouring rules' scale (30-160). §10.6 wants
+-- all of these derived from `authority_cost.lua`'s median directive cost
+-- instead of authored as literals; that is a separate, still-open task and
+-- this rule will convert with the rest rather than inventing a third scheme.
+-- ============================================================
+local ARRIVAL_DROP_RADIUS = 500     -- the "landed safely" circle around dropZone
+
+local transportRule = {
+    key = 'transport', cooldown = 900, cap = 6,
+    scan = function(world, state)
+        local out = {}
+
+        local live = {}
+        for _, a in ipairs(world.inFlightArrivals()) do
+            live[a.arrivalID] = true
+            if not state.seenArrivals[a.arrivalID] then
+                state.seenArrivals[a.arrivalID] = true
+                out[#out + 1] = {
+                    dedupKey = 'transport:arrival:' .. a.arrivalID,
+                    build = function()
+                        return {
+                            linkedPair = true,
+                            escort = {
+                                type = 'escort', scope = 'tactical', source = 'systemic',
+                                forTeam = a.team, reward = 90,
+                                params = {
+                                    transportUnitIDs = { a.transportID },
+                                    direction = 'inbound',
+                                    extractArea = { x = a.dropZone.x, z = a.dropZone.z,
+                                                    r = ARRIVAL_DROP_RADIUS },
+                                },
+                            },
+                            kill = {
+                                type = 'kill', scope = 'tactical', source = 'systemic',
+                                reward = 90,
+                                params = { targetUnitID = a.transportID },
+                            },
+                        }
+                    end,
+                }
+            end
+        end
+        -- An arrival that has unloaded (or died) leaves the in-flight list;
+        -- forget it so the table cannot grow for the length of a long war.
+        -- Re-firing is impossible anyway: an arrival id is unique per wave and
+        -- a wave enters the map once.
+        for id in pairs(state.seenArrivals) do
+            if not live[id] then state.seenArrivals[id] = nil end
+        end
+
+        for _, t in ipairs(world.extractableTransports()) do
+            out[#out + 1] = {
+                dedupKey = 'transport:extract:' .. t.team,
+                build = function()
+                    return {
+                        type = 'escort', scope = 'strategic', source = 'systemic',
+                        forTeam = t.team, reward = 120,
+                        params = {
+                            transportUnitIDs = t.transportUnitIDs,
+                            direction = 'outbound',
+                            extractArea = t.extractArea,
+                        },
+                    }
+                end,
+            }
+        end
+
+        return out
+    end,
+}
+
+-- ============================================================
 -- Liveness guarantee: a team with zero completable active objectives for 2
 -- ticks gets a forced control objective on the nearest neutral/contested
 -- region — the economy's dead-game backstop.
@@ -261,7 +368,10 @@ local livenessRule = {
     end,
 }
 
-generator.rules = { controlRule, districtRule, escortRule, infraRule, livenessRule }
+-- transportRule sits before livenessRule deliberately: it is the floor, and
+-- the liveness backstop should be the LAST thing that fires (§10.5).
+generator.rules = { controlRule, districtRule, escortRule, infraRule,
+                    transportRule, livenessRule }
 
 --- Periodic scan; posts objectives through `world.create` /
 --- `world.createLinkedPair`. `world.tick` is a monotonic eval-tick counter

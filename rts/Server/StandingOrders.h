@@ -154,6 +154,15 @@ public:
     /// Wipe everything. Called on game reset.
     void Clear();
 
+    // ── Snapshot restore (PLAN-persistence task 1b) ──
+    // The id counter is part of the state: restoring the orders without it
+    // would let the next Create() re-issue an id a live order already holds,
+    // and every id-keyed Update/Remove would then hit the wrong order.
+    uint32_t NextId() const { return nextId; }
+    /// Replace the whole board. Notifies every team that had orders before or
+    /// after, so a resumed client's board is not a stale broadcast behind.
+    void RestoreState(std::vector<StandingOrder> newOrders, uint32_t newNextId);
+
 private:
     std::vector<StandingOrder> orders;
     uint32_t nextId = 1;

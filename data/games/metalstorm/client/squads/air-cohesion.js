@@ -17,7 +17,12 @@ import { capTurnRate, wrapAngle } from './steering.js';
 
 const TWO_PI = Math.PI * 2;
 
-export function steerMember(squad, member, dt, ctx) {
+/** Out-param form (PLAN-metalstorm-squad-performance.md §11b): identical math,
+ *  writes into a caller-owned `{x,y,z}` instead of returning a fresh literal —
+ *  the SoA kernel calls this once per air member per frame and must not
+ *  allocate (§11d). `steerMember` below delegates to it and stays the
+ *  allocating oracle S6's parity suite compares against. */
+export function steerMemberInto(squad, member, dt, ctx, out) {
   const { profile, slotWorld, nowSec, centroidSpeed } = ctx;
   const cruiseSpeed = squad.def.maxSpeed * (profile.cruiseSpeedMul ?? 1);
   const radius = squad.def.formationRadius;
@@ -56,11 +61,14 @@ export function steerMember(squad, member, dt, ctx) {
   const targetY = squad.cy + profile.cruiseAltitude + member.altitudeOffset;
   const vy = (targetY - member.y) * profile.altitudeCatchUpRate;
 
-  return {
-    x: Math.sin(newHeading) * cruiseSpeed,
-    y: vy,
-    z: Math.cos(newHeading) * cruiseSpeed,
-  };
+  out.x = Math.sin(newHeading) * cruiseSpeed;
+  out.y = vy;
+  out.z = Math.cos(newHeading) * cruiseSpeed;
+  return out;
+}
+
+export function steerMember(squad, member, dt, ctx) {
+  return steerMemberInto(squad, member, dt, ctx, { x: 0, y: 0, z: 0 });
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }

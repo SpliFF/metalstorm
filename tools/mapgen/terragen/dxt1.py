@@ -112,6 +112,49 @@ def downsample2x(img: np.ndarray) -> np.ndarray:
     ).astype(np.uint8)
 
 
+def seam_discontinuity(
+    tiles: np.ndarray,
+    tile_index: np.ndarray,
+    reps: np.ndarray,
+    sample: int = 20000,
+    seed: int = 0,
+) -> dict:
+    """Measure how much the tile dictionary breaks C0 continuity of the bake.
+
+    For each horizontal tile boundary, compare the colour jump ACROSS the seam
+    to the gradient just INSIDE it. A continuous field gives ratio ~1; a
+    dictionary that stitches unrelated tiles together gives a hard edge on the
+    32-elmo grid, which reads as a checkerboard / banding on smooth ground.
+
+    Returns {'jump', 'grad', 'ratio'} for the drawn (quantized) field and the
+    same three for the source field under key prefix 'true_'.
+    """
+    tz, tx = tile_index.shape
+    rng = np.random.Generator(np.random.PCG64(seed))
+    n = min(sample, tz * (tx - 1))
+    zs = rng.integers(0, tz, size=n)
+    xs = rng.integers(0, tx - 1, size=n)
+
+    def stats(left: np.ndarray, right: np.ndarray) -> tuple[float, float]:
+        jump = float(np.abs(right[:, :, 0].astype(np.float32)
+                            - left[:, :, 31].astype(np.float32)).mean())
+        grad = 0.5 * (
+            float(np.abs(left[:, :, 31].astype(np.float32)
+                         - left[:, :, 30].astype(np.float32)).mean())
+            + float(np.abs(right[:, :, 1].astype(np.float32)
+                           - right[:, :, 0].astype(np.float32)).mean())
+        )
+        return jump, grad
+
+    lin = zs * tx + xs
+    tj, tg = stats(np.asarray(tiles[lin]), np.asarray(tiles[lin + 1]))
+    dj, dg = stats(reps[tile_index[zs, xs]], reps[tile_index[zs, xs + 1]])
+    return {
+        "jump": dj, "grad": dg, "ratio": dj / max(dg, 1e-9),
+        "true_jump": tj, "true_grad": tg, "true_ratio": tj / max(tg, 1e-9),
+    }
+
+
 def cluster_tiles(
     tiles: np.ndarray,
     budget: int,
@@ -125,6 +168,24 @@ def cluster_tiles(
     representatives (K, 32, 32, 3) uint8) where representative k is the actual
     source tile nearest the cluster centroid (keeps full-res crispness rather
     than averaging tiles together).
+
+    FIDELITY-STANDIN: Spring/Recoil's own map compiler dedupes SMT tiles
+    EXACTLY (identical tiles share a slot); this is a *lossy* quantizer, traded
+    for an 8.4 MB SMT instead of ~178 MB on a 16k map. The cost is measurable
+    and visible: `seam_discontinuity` on skerry_reach reads jump 2.98 / interior
+    gradient 0.31 = **ratio 9.7**, where the unquantized bake reads 0.86 (that is
+    the whole-map sample this function takes and the build prints; restricted to
+    land seams, where a player actually is, it reads 4.33 / 0.435 = 9.95). In
+    other words the dictionary moves the terrain's colour variation out of tile
+    interiors and onto the 32-elmo tile boundaries, which shows up as a
+    checkerboard on smooth ground (worst on the sand plateaus) and as banding at
+    strategic zoom. Measured 2026-08-08; see PLAN-maps.md M7 item 1.
+
+    Raising `budget` does NOT fix this — doubling it to 24576 (16.7 MB) moved
+    the seam jump only 4.33 -> 4.18 (-3.6%). The effective dimensionality of the
+    feature space is ~9, so seam error falls as budget^(-1/9). Continuity needs
+    per-position data, which a shared dictionary indexed per position cannot
+    provide; the fix is architectural (PLAN-maps.md M7 item 1, options A/B/C).
     """
     N = tiles.shape[0]
     if N <= budget:

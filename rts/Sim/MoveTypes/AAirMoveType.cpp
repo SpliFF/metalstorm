@@ -292,3 +292,48 @@ void AAirMoveType::CheckForCollision()
 		return;
 	}
 }
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+//
+// lastCollidee is a pointer that CheckForCollision re-derives every frame;
+// crashExpGenID is a def-resolved explosion-generator id, not state.
+
+void AAirMoveType::SnapshotCaptureAir(movetypesnapshot::AirState& a) const {
+	a.aircraftState = static_cast<int32_t>(aircraftState);
+	a.collisionState = static_cast<int32_t>(collisionState);
+	a.oldGoalPosX = oldGoalPos.x; a.oldGoalPosY = oldGoalPos.y; a.oldGoalPosZ = oldGoalPos.z;
+	a.reservedLandingPosX = reservedLandingPos.x;
+	a.reservedLandingPosY = reservedLandingPos.y;
+	a.reservedLandingPosZ = reservedLandingPos.z;
+	a.landRadiusSq = landRadiusSq;
+	a.wantedHeight = wantedHeight;
+	a.orgWantedHeight = orgWantedHeight;
+	a.accRate = accRate;
+	a.decRate = decRate;
+	a.altitudeRate = altitudeRate;
+	a.collide = collide;
+	a.autoLand = autoLand;
+	a.dontLand = dontLand;
+	a.useSmoothMesh = useSmoothMesh;
+	a.canSubmerge = canSubmerge;
+	a.floatOnWater = floatOnWater;
+}
+
+void AAirMoveType::SnapshotApplyAir(const movetypesnapshot::AirState& a) {
+	aircraftState = static_cast<AircraftState>(a.aircraftState);
+	collisionState = static_cast<CollisionState>(a.collisionState);
+	oldGoalPos = float3(a.oldGoalPosX, a.oldGoalPosY, a.oldGoalPosZ);
+	reservedLandingPos = float3(a.reservedLandingPosX, a.reservedLandingPosY, a.reservedLandingPosZ);
+	landRadiusSq = a.landRadiusSq;
+	wantedHeight = a.wantedHeight;
+	orgWantedHeight = a.orgWantedHeight;
+	accRate = a.accRate;
+	decRate = a.decRate;
+	altitudeRate = a.altitudeRate;
+	collide = a.collide;
+	autoLand = a.autoLand;
+	dontLand = a.dontLand;
+	useSmoothMesh = a.useSmoothMesh;
+	canSubmerge = a.canSubmerge;
+	floatOnWater = a.floatOnWater;
+}

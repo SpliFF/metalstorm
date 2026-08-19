@@ -128,6 +128,27 @@ export class NamedEntityIndex {
      * @param limit - Max results (default 10)
      */
     search(query: string, typeFilter?: EntityType | EntityType[], limit = 10): NamedEntity[] {
+        return this.searchScored(query, typeFilter, limit).map((r) => r.entity);
+    }
+
+    /**
+     * The same search, with the relevance scores exposed.
+     *
+     * `nl-resolver.ts` needs them: its whole contract is "exact match wins, a
+     * UNIQUE fuzzy hit above a threshold wins, two comparable hits become a
+     * clarification" (PLAN-metalstorm-command-language.md §5). That rule cannot
+     * be expressed against a bare ranked list — "Randtown" beating "Randtown
+     * East" by one scoring tier and tying with it are the difference between an
+     * order and a question, and a resolver that re-derived the scores itself
+     * would be a second scoring function free to disagree with this one.
+     *
+     * Score tiers: 1000 exact, 500 whole-name prefix, 100 substring. Those are
+     * the only three a query can earn — see the note in the loop below about the
+     * fourth that never could.
+     */
+    searchScored(
+        query: string, typeFilter?: EntityType | EntityType[], limit = 10,
+    ): Array<{ entity: NamedEntity; score: number }> {
         if (!query) return [];
 
         const lowerQuery = query.toLowerCase();
@@ -149,27 +170,27 @@ export class NamedEntityIndex {
                 score = 500; // Prefix match
             } else if (lowerName.includes(lowerQuery)) {
                 score = 100; // Contains match
-            } else {
-                // Try fuzzy match (simple word boundary check)
-                const words = lowerName.split(/\s+/);
-                for (const word of words) {
-                    if (word.startsWith(lowerQuery)) {
-                        score = 50;
-                        break;
-                    }
-                }
             }
+            // There used to be a fourth tier here (50, "any word starts with the
+            // query"), and it could never fire: a word of the name is a substring
+            // of the name, so a query that prefixes a word is always caught by the
+            // `includes` tier above at 100. Removed rather than documented,
+            // because `nl-resolver.ts` sets its acceptance threshold against these
+            // tiers and a phantom tier makes that threshold impossible to reason
+            // about. Behaviour is unchanged — the branch was unreachable.
 
             if (score > 0) {
                 results.push({ entity, score });
             }
         }
 
-        // Sort by score descending
-        results.sort((a, b) => b.score - a.score);
+        // Sort by score descending, then by name so equal-scoring hits come back
+        // in a stable order (the resolver's ambiguity check compares the top two
+        // — with an unstable sort, which one "won" would vary between calls).
+        results.sort((a, b) => b.score - a.score || a.entity.name.localeCompare(b.entity.name));
 
         // Return top N
-        return results.slice(0, limit).map(r => r.entity);
+        return results.slice(0, limit);
     }
 
     /**
@@ -282,10 +303,12 @@ export class NamedEntityIndex {
 /**
  * Parse regions from gameRulesParams into named entities.
  *
- * `region_<key>_name` (display string) + `region_<key>_x` / `_z` (polygon
- * centroid, elmos) — published once at setup by game_regions.lua. A region is
- * only emitted once all three are present (grid-provider maps publish none of
- * them, so they contribute no named places). The dynamic `region_<key>_team` /
+ * `region_<key>_name` (display string) + `region_<key>_x` / `_z` (centre point,
+ * elmos) — published once at setup by game_regions.lua, by BOTH partition
+ * providers: a graph map publishes its authored names and polygon centroids, a
+ * grid map publishes derived sector names ("Sector B9") and clipped cell
+ * centres. A region is only emitted once all three are present. The dynamic
+ * `region_<key>_team` /
  * `_contested` control state is intentionally NOT part of the entity — it
  * changes far more often than the composer needs and belongs to the strategic
  * overlay, not the name index.
@@ -406,13 +429,40 @@ export function parseObjectivesFromRulesParams(
     return result;
 }
 
+/** "grain_silo" → "Grain Silo". The fallback display name for a landmark whose
+ *  publisher supplied only coordinates: a key is a slug, and a slug is not
+ *  something a player says. */
+function deslug(key: string): string {
+    return key
+        .split(/[_\-]+/)
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+}
+
 /**
- * Parse landmarks from gameRulesParams (`landmark_<name>_x/_z`).
+ * Parse landmarks from gameRulesParams (`landmark_<key>_x/_z`, optional
+ * `landmark_<key>_name`).
  *
- * No gadget publishes landmarks yet (scenario/map-authored places are a
- * future producer — PLAN-persistence §5); this parser exists so that path is
- * a data change, not a code change, and to keep the free-text accelerator's
- * `landmark` target type meaningful the moment they land.
+ * Landmarks are the "defend the grain silo" places — the named scenery a
+ * scenario places, as opposed to a region (a partition cell) or an objective (a
+ * scored goal). Nothing publishes them yet: the real producer is the
+ * scenario-gen lane's job. This side is the CONSUMER, and its contract is that
+ * the publisher's arrival is a data change, not a code change — so the shape is
+ * pinned here and every degradation is defined:
+ *
+ *   - no landmark params at all → no landmarks, no warning, nothing else
+ *     affected (the state the game shipped in, and still runs in);
+ *   - x without z (or the reverse) → dropped, because a place you can't point
+ *     at is not a target;
+ *   - x/z with no `_name` → named from the key ("grain_silo" → "Grain Silo"),
+ *     which is the shape the parser accepted before `_name` existed;
+ *   - `_name` present → it wins, so a landmark can be called "The Grain Silo"
+ *     without its rulesParam key having to be.
+ *
+ * `_name` mirrors `region_<key>_name` deliberately: two publishers of named
+ * places should not need two different shapes, and the parser that reads them
+ * shouldn't either.
  */
 export function parseLandmarksFromRulesParams(
     params: ReadonlyMap<string, number | string>
@@ -420,17 +470,19 @@ export function parseLandmarksFromRulesParams(
     const landmarks = new Map<string, Partial<NamedEntity>>();
 
     for (const [key, value] of params.entries()) {
-        const match = key.match(/^landmark_(.+)_(x|z)$/);
+        const match = key.match(/^landmark_(.+)_(name|x|z)$/);
         if (!match) continue;
 
-        const [, name, field] = match;
-        let landmark = landmarks.get(name);
+        const [, id, field] = match;
+        let landmark = landmarks.get(id);
         if (!landmark) {
-            landmark = { id: name, name, type: 'landmark' };
-            landmarks.set(name, landmark);
+            landmark = { id, name: deslug(id), type: 'landmark' };
+            landmarks.set(id, landmark);
         }
 
-        if (field === 'x' && typeof value === 'number') {
+        if (field === 'name' && typeof value === 'string' && value) {
+            landmark.name = value;
+        } else if (field === 'x' && typeof value === 'number') {
             landmark.x = value;
         } else if (field === 'z' && typeof value === 'number') {
             landmark.z = value;

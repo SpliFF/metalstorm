@@ -114,6 +114,24 @@ void StandingOrderManager::Clear()
     nextId = 1;
 }
 
+void StandingOrderManager::RestoreState(std::vector<StandingOrder> newOrders,
+                                        uint32_t newNextId)
+{
+    // Collect the teams affected on BOTH sides of the swap. A team whose
+    // orders are being replaced by an empty set still needs the notification —
+    // it is the case where the client's board would otherwise keep showing
+    // orders the restored world does not have.
+    std::unordered_set<int> dirtyTeams;
+    for (const auto& o : orders)    dirtyTeams.insert(o.team);
+    for (const auto& o : newOrders) dirtyTeams.insert(o.team);
+
+    orders = std::move(newOrders);
+    nextId = newNextId;
+
+    for (const int team : dirtyTeams)
+        NotifyChange(team);
+}
+
 // ----------------------------------------------------------------
 // Evaluator
 // ----------------------------------------------------------------

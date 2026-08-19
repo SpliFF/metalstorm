@@ -14,6 +14,9 @@
 // always has.
 
 #include "NetworkServer.h"          // ClientID
+#include "DynamicJoin.h"            // SessionKind, WAR_SIDE_CAPACITY_DEFAULT
+#include "PlayerSlotReservation.h"  // ReservedPlayerSlots (§8.1)
+#include "AI/AISpawn.h"             // AISpawnEnv
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -27,6 +30,7 @@ class SessionManager;
 class RoomManager;
 class AIRuntimePool;
 class LuaExecEngine;
+class ClientEvalBroker;
 
 // Human player roster slot from the lobby (`--player username:team:pos`).
 struct RequestedPlayer {
@@ -62,6 +66,10 @@ struct GameServerContext {
     RoomManager&        rooms;
     AIRuntimePool&      aiPool;
     LuaExecEngine&      luaExecEngine;
+    // PLAN-test-automation P7: waiter table for POST /api/client/eval.
+    // Registered on the HTTP thread, resolved on the sim thread by
+    // ClientMessageHandler's ClientEvalResponse case.
+    ClientEvalBroker&   evalBroker;
 
     uint32_t    roomId = 0;
     std::string gameId;
@@ -94,10 +102,46 @@ struct GameServerContext {
     std::unordered_map<int64_t, int>&         playerNumByAccount;
     std::unordered_set<std::string>&          connectedRosterPlayers;
     size_t                                    rosterPlayersNeeded = 0;
+    /// Whether GameStart is held until `rosterPlayersNeeded` humans have
+    /// connected. True for a skirmish — the classic "all clients loaded" gate.
+    /// False for a persistent war (PLAN-metalstorm-lobby.md §2.1): the war
+    /// starts with whatever seed exists and players trickle in, so a roster is
+    /// an *initial* set rather than a precondition. The roster count itself
+    /// stays honest either way — it is what the logs and the team mapping read.
+    bool                                      waitsForRoster = true;
+    /// This session's kind, from `--session-kind` (task 1). The auth handler
+    /// needs it in its own right and not merely via `waitsForRoster`: task 2's
+    /// dynamic join is a *war* rule, and reading it off the roster-wait flag
+    /// would hand the same behaviour to a skirmish that happened to launch
+    /// with an empty roster (`SessionStartsGameAtSetup`'s second term).
+    SessionKind                               sessionKind = SessionKind::Skirmish;
+    /// Humans allowed per war side before a dynamic joiner is turned back to
+    /// spectating (`--war-side-capacity`, 0 = unlimited). Uniform across sides
+    /// by design — per-side capacities and queue-when-full are task 7.
+    unsigned                                  warSideCapacity =
+                                                  WAR_SIDE_CAPACITY_DEFAULT;
 
     // C1: clients that have sent a protocol-compatible Handshake. AuthRequest
     // is refused until a matching handshake is recorded, so a client that
     // skips the handshake (or sent an incompatible version) can't get a
     // session. Cleared on disconnect alongside the other per-client maps.
     std::unordered_set<ClientID>&             handshakedClients;
+
+    /// The war's pre-allocated player slots (PLAN-metalstorm-wars.md §8.1,
+    /// task 5): `Σ slotCap` player numbers, laid out per side, materialised
+    /// during set-up. Empty for every session that was not sized — a skirmish,
+    /// a legacy room, a war whose sides are unlimited — and the join path reads
+    /// an empty block as "allocate on demand", which is what it always did.
+    ///
+    /// A reference, filled after set-up rather than at construction, because
+    /// the layout needs the `war_sides`/`war_side_capacities` modoptions and
+    /// those are only parsed once the game data is up. No client can be
+    /// connected before then, so nothing reads it half-built.
+    const playerslots::ReservedPlayerSlots&   reservedSlots;
+
+    /// Roots a mid-game AI spawn resolves against (PLAN-metalstorm-ai.md §10
+    /// task 4(b), AISpawn.h). Filled in server_main from the same values the
+    /// start-up `--ai` staging block uses, so the caretaker seated at frame
+    /// 40 000 loads from exactly the paths a lobby-added AI loads from.
+    AISpawnEnv                                aiSpawnEnv;
 };

@@ -19,6 +19,128 @@ DirectiveManager directiveManager;
 const std::vector<uint32_t> OrgGroupManager::kEmptyRoster;
 
 // ================================================================
+// Group names (PLAN-metalstorm-command-language.md §5)
+// ================================================================
+//
+// Two jobs live here and they pull in opposite directions.
+//
+// GIVING a name. `OrgGroup::name` has been on the wire since the macro-orders
+// lane and NOTHING ever set it: AI.createGroup passes none, there is no naming
+// UI, so every group in every client rendered as "Group 7". A number is not
+// something a player says out loud, which put the natural-language layer's
+// "names, not ids" pillar out of reach for the one entity type a player
+// commands most. An unnamed create now draws a callsign from the register.
+//
+// DISTRUSTING a name. A group name is player-supplied text that ends up inside
+// an LLM context payload — the NL proxy ships the named-entity index as part
+// of the prompt (§2), and a group is in that index. It is untrusted input in
+// the prompt-injection sense, and the only defence available at THIS layer is
+// that a name stays short and stays printable: no newlines to fake a message
+// boundary, no control bytes, no paragraph of instructions wearing a squad's
+// hat. So every path that can set a name goes through SanitizeGroupName —
+// Create as well as Update, because Create takes the same untrusted string off
+// the same wire message.
+
+/// Callsigns for auto-named groups. Post-nuclear scavenger register
+/// (PLAN-metalstorm-worldbuilding.md decision 7): predators, carrion birds,
+/// rust and fire — what a crew paints on a hull, not a table of organisation.
+/// The order IS the assignment order, so it is deliberately not alphabetical.
+static const char* const kCallsigns[] = {
+    "Chimera",  "Basilisk", "Warhound", "Jackal",   "Vulture",
+    "Rust",     "Ember",    "Kestrel",  "Mantis",   "Cinder",
+    "Wyvern",   "Scarab",   "Magpie",   "Ash",      "Grendel",
+    "Hyena",    "Cobra",    "Slag",     "Falcon",   "Wraith",
+    "Boar",     "Tinder",   "Adder",    "Raven",    "Ironjaw",
+    "Gargoyle", "Shrike",   "Coyote",   "Thresher", "Kiln",
+    "Locust",   "Direwolf", "Marrow",   "Condor",   "Bramble",
+    "Salt",     "Harrier",  "Gnaw",     "Pyre",     "Scrapper",
+};
+static constexpr size_t kCallsignCount = sizeof(kCallsigns) / sizeof(kCallsigns[0]);
+
+/// Longest name any consumer will ever be handed. Short on purpose — see the
+/// "DISTRUSTING a name" note above; this is a payload budget, not a UI one.
+static constexpr size_t kMaxGroupNameBytes = 32;
+
+size_t OrgGroupManager::CallsignCount() { return kCallsignCount; }
+
+/// Echelon → the word that follows the callsign. v0 rejects Army before it can
+/// reach here (Create fails loud on the reserved tier), so "Battlegroup" is
+/// unreachable today and is spelled out anyway so the day the tier ships it
+/// doesn't ship as "Chimera Army".
+static const char* EchelonSuffix(Echelon echelon)
+{
+    switch (echelon) {
+        case Echelon::Squad:   return "Squad";
+        case Echelon::Platoon: return "Platoon";
+        case Echelon::Army:    return "Battlegroup";
+    }
+    return "Squad";
+}
+
+/// Strip control bytes, cap at kMaxGroupNameBytes, trim the edges.
+///
+/// The cap is applied on a UTF-8 CHARACTER boundary, not a byte one: half a
+/// multi-byte sequence is invalid UTF-8, and invalid UTF-8 is exactly what
+/// breaks the JSON this name is about to be serialised into. (This does not
+/// *validate* the input's encoding — it only guarantees the cap can't be what
+/// corrupts it.)
+static std::string SanitizeGroupName(const std::string& raw)
+{
+    std::string out;
+    out.reserve(std::min(raw.size(), kMaxGroupNameBytes));
+    for (const unsigned char c : raw) {
+        if (c < 0x20 || c == 0x7F) continue;   // control chars, incl. \n \r \t
+        out.push_back(static_cast<char>(c));
+    }
+
+    size_t cut = std::min(out.size(), kMaxGroupNameBytes);
+    // Back off while the byte AT the cut is a continuation byte — cutting there
+    // would leave a lead byte with no tail.
+    while (cut > 0 && cut < out.size() &&
+           (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80)
+        --cut;
+    out.resize(cut);
+
+    const size_t first = out.find_first_not_of(' ');
+    if (first == std::string::npos) return std::string();
+    return out.substr(first, out.find_last_not_of(' ') - first + 1);
+}
+
+std::string OrgGroupManager::AssignCallsign(int team, Echelon echelon) const
+{
+    // The used-set is DERIVED from the team's live groups rather than kept as
+    // separate state. That is not only less bookkeeping: a disbanded group's
+    // callsign returns to the pool, Clear() needs no companion reset, and — the
+    // case a side table gets wrong — a player who renames a group to "Chimera
+    // Platoon" by hand blocks the assigner from handing that same name to
+    // somebody else. Uniqueness is a property of what EXISTS, so read what
+    // exists.
+    std::unordered_set<std::string> taken;
+    for (const auto& g : groups)
+        if (g.team == team) taken.insert(g.name);
+
+    const std::string suffix = EchelonSuffix(echelon);
+    // Start at a team-dependent offset: allied teams broadcast their groups to
+    // each other (OrgGroupState), and two "Chimera Platoon"s across an alliance
+    // is a question the player shouldn't have to be asked.
+    const size_t start = static_cast<size_t>(team > 0 ? team : 0) % kCallsignCount;
+
+    // Rounds are unbounded but termination is not in doubt: `taken` holds at
+    // most groups.size() names, and every round offers kCallsignCount fresh
+    // candidates, so round (groups.size() / kCallsignCount + 1) cannot be full.
+    for (uint32_t round = 0; ; ++round) {
+        for (size_t i = 0; i < kCallsignCount; ++i) {
+            std::string candidate = kCallsigns[(start + i) % kCallsignCount] + (" " + suffix);
+            if (round > 0) candidate += " " + std::to_string(round + 1);
+            // Sanitize BEFORE the uniqueness test so the check runs against the
+            // string that will actually be stored.
+            candidate = SanitizeGroupName(candidate);
+            if (taken.count(candidate) == 0) return candidate;
+        }
+    }
+}
+
+// ================================================================
 // OrgGroupManager
 // ================================================================
 
@@ -51,7 +173,11 @@ uint32_t OrgGroupManager::Create(int team, Echelon echelon, std::string name,
     g.echelon = echelon;
     g.team = team;
     g.parentId = 0;
-    g.name = std::move(name);
+    // An explicit name is capped and stripped but otherwise passes through
+    // untouched; no name at all (the AI path, and an unnamed player create)
+    // draws a callsign, so "Group 7" never has to be rendered.
+    g.name = SanitizeGroupName(name);
+    if (g.name.empty()) g.name = AssignCallsign(team, echelon);
     g.createdAtFrame = currentFrame;
     groups.push_back(std::move(g));
     OrgGroup& created = groups.back();
@@ -95,7 +221,15 @@ bool OrgGroupManager::Update(uint32_t groupId, int team,
         if (t >= 0 && t != team) otherDirtyTeams.insert(t);
         g->members.push_back(uid);
     }
-    if (!name.empty()) g->name = name;
+    // A rename is untrusted input on the same footing as Create's wire name —
+    // capped and stripped before it is stored (see "DISTRUSTING a name"). A
+    // name that sanitizes down to nothing (all control bytes, all spaces) is
+    // treated as "no name given", the same as an empty one: the roster edit
+    // still applies, only the rename is dropped. The player-facing complaint
+    // for that lives client-side, where nl-envelope's checkRef rejects the
+    // name before it is ever sent.
+    const std::string cleanName = SanitizeGroupName(name);
+    if (!cleanName.empty()) g->name = cleanName;
 
     for (int t : otherDirtyTeams) NotifyChange(t);
     NotifyChange(team);
@@ -204,6 +338,19 @@ void OrgGroupManager::Clear()
     nextId = 1;
 }
 
+void OrgGroupManager::RestoreState(std::vector<OrgGroup> newGroups, uint32_t newNextId)
+{
+    std::unordered_set<int> dirtyTeams;
+    for (const auto& g : groups)    dirtyTeams.insert(g.team);
+    for (const auto& g : newGroups) dirtyTeams.insert(g.team);
+
+    groups = std::move(newGroups);
+    nextId = newNextId;
+
+    for (const int team : dirtyTeams)
+        NotifyChange(team);
+}
+
 // ================================================================
 // DirectiveManager
 // ================================================================
@@ -218,9 +365,10 @@ static bool DirIsIdle(const CUnit* u)
     return u->commandAI->commandQue.empty();
 }
 
-/// Non-spatial conditions (idleOnly is handled by the caller so a
-/// group-scoped directive can re-issue only to idle members). Spatial /
-/// type / strength filters mirror StandingOrders' PassesConditions.
+/// Non-spatial conditions (idleOnly is handled by the caller — it decides
+/// both the candidate gate and the release rule, which are inverses of each
+/// other). Spatial / type / strength filters mirror StandingOrders'
+/// PassesConditions.
 static bool DirPassesFilters(const CUnit* u, const StandingOrderConditions& c)
 {
     if (!c.squadTypes.empty()) {
@@ -368,6 +516,21 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
     return false;
 }
 
+// See the declaration in OrgGroups.h for why this is a decision rather than
+// plumbing. Keep it here, next to Evaluate's candidate gate, so the two halves
+// of the idle rule stay readable together.
+StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
+                                             float withinRadius)
+{
+    StandingOrderConditions conds;
+    conds.idleOnly = false;
+    if (withinRadius > 0.0f) {
+        conds.withinCenter = float3(withinX, 0.0f, withinZ);
+        conds.withinRadius = withinRadius;
+    }
+    return conds;
+}
+
 uint32_t DirectiveManager::Create(int team, DirectiveType type, uint8_t priority,
                                   OrderShape shape, std::vector<float> params,
                                   StandingOrderConditions cond, uint32_t groupId,
@@ -471,6 +634,20 @@ void DirectiveManager::Clear()
     nextId = 1;
 }
 
+void DirectiveManager::RestoreState(std::vector<Directive> newDirectives,
+                                    uint32_t newNextId)
+{
+    std::unordered_set<int> dirtyTeams;
+    for (const auto& d : directives)    dirtyTeams.insert(d.team);
+    for (const auto& d : newDirectives) dirtyTeams.insert(d.team);
+
+    directives = std::move(newDirectives);
+    nextId = newNextId;
+
+    for (const int team : dirtyTeams)
+        NotifyChange(team);
+}
+
 void DirectiveManager::Evaluate(uint32_t currentFrame)
 {
     std::unordered_set<int> dirtyTeams;
@@ -496,13 +673,26 @@ void DirectiveManager::Evaluate(uint32_t currentFrame)
 
     // Release assignments for dead / direct-commanded units, then recompute
     // the fulfillment strength from live health.
+    //
+    // The release rule is the inverse of the candidate gate, so it has to read
+    // the same `idleOnly` flag. An idle-gated directive only ever assigns units
+    // with an empty queue, so "has a queue again" means something else took the
+    // unit (Q-D-d §3's suspend / auto-rejoin). A directive that is NOT idle-gated
+    // hands the unit its queue itself: applying the same test there would release
+    // every member on the tick after it was assigned, and — because the released
+    // unit is a candidate again immediately — re-issue the same command forever.
     for (auto& d : directives) {
         if (!d.active) { d.assigned.clear(); d.assignedStrength = 0.0f; continue; }
         float strength = 0.0f;
         for (auto it = d.assigned.begin(); it != d.assigned.end(); ) {
             const CUnit* u = unitHandler.GetUnit(*it);
-            if (u == nullptr || u->isDead || !u->commandAI->commandQue.empty()) {
-                it = d.assigned.erase(it);   // died, or direct-commanded → re-pool
+            const bool gone = (u == nullptr || u->isDead);
+            // idle-gated: taken by someone else. Otherwise: our own order is done.
+            const bool done = !gone && (d.conditions.idleOnly
+                ? !u->commandAI->commandQue.empty()
+                :  u->commandAI->commandQue.empty());
+            if (gone || done) {
+                it = d.assigned.erase(it);
             } else {
                 strength += u->health;
                 ++it;
@@ -524,7 +714,14 @@ void DirectiveManager::Evaluate(uint32_t currentFrame)
             if (u == nullptr || u->isDead) return;
             if (u->team != d.team) return;
             if (d.assigned.count(u->id) != 0) return;
-            if (!DirIsIdle(u)) return;                // suspend/auto-rejoin
+            // `idleOnly` is the wire default (true), so every existing caller
+            // keeps the suspend/auto-rejoin behaviour. A directive that clears
+            // it is an explicit order from the team's commander and overrides
+            // what the unit is already doing — without that, a scenario that
+            // stages its army with opening orders (every Metalstorm war does)
+            // leaves a player unable to redirect a single combat unit for the
+            // whole match. See PLAN-endtoend.md D56.
+            if (d.conditions.idleOnly && !DirIsIdle(u)) return;
             if (!DirPassesFilters(u, d.conditions)) return;
             // Demand model: stop once the requested aggregate strength is met.
             if (d.requestedStrength > 0 && d.assignedStrength >= static_cast<float>(d.requestedStrength))

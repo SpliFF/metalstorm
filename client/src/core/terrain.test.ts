@@ -1,12 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, VertexBuffer } from '@babylonjs/core';
+import { NullEngine, Scene, VertexBuffer, StandardMaterial, Texture } from '@babylonjs/core';
 import {
     planAtlasPages, extractKtx2Levels, compositeAtlasLevel,
     fogTierAlpha255, DEFAULT_FOG_DARKENING,
     planTerrainChunks, buildSurfaceGeometry, computeSurfaceNormals,
     buildTerrainMesh, DeformableTerrain, isTerrainMesh,
+    attachTerrainSplatFromDecals, attachTerrainDetailPlainFromDecals,
+    attachTerrainSplatNormalFromDecals, attachTerrainDetailFromDecals,
+    applyWebGLTexture, applyGroundTexture, loadTerrainTextures,
+    setTerrainDetailPluginEnabled, drainGlErrors,
     type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
+import { TerrainSplatPlugin } from './terrain-splat-plugin.js';
 
 const SQUARE_SIZE = 8;
 
@@ -218,6 +223,36 @@ describe('compositeAtlasLevel', () => {
         expect(skipped).toBe(1);
         // Skipped tile's blocks stay zero.
         expect(page.slice(0, 64).every((b) => b === 0)).toBe(true);
+    });
+});
+
+describe('drainGlErrors', () => {
+    /** Minimal stand-in: `getError` pops one queued code per call, then
+     *  reports NO_ERROR, exactly as WebGL does. */
+    const fakeGl = (queued: number[], stuck = false) => {
+        const q = [...queued];
+        return {
+            NO_ERROR: 0,
+            getError: () => (stuck ? 0x9242 : (q.shift() ?? 0)),
+        } as unknown as WebGL2RenderingContext;
+    };
+
+    it('returns an empty list on a clean context', () => {
+        expect(drainGlErrors(fakeGl([]))).toEqual([]);
+    });
+
+    it('drains every queued error and reports them in order', () => {
+        const gl = fakeGl([0x501, 0x502]);
+        expect(drainGlErrors(gl)).toEqual([0x501, 0x502]);
+        // Queue is now empty, so a later check can only see new failures —
+        // this is the whole point of the drain (pools_of_ilys read a 0x501
+        // that predated the atlas upload).
+        expect(drainGlErrors(gl)).toEqual([]);
+    });
+
+    it('gives up after `limit` on a lost context rather than spinning', () => {
+        expect(drainGlErrors(fakeGl([], true), 4))
+            .toEqual([0x9242, 0x9242, 0x9242, 0x9242]);
     });
 });
 
@@ -641,5 +676,253 @@ describe('DeformableTerrain (per-chunk patches)', () => {
             x1: 900, z1: 900, x2: 902, z2: 902, heights: new Float32Array(9).fill(7),
         });
         expect(deform.appliedPatches).toBe(0);
+    });
+});
+
+// PLAN-terrain-detailtex.md §2.1/§2.3: a map declares the splat pair or the
+// plain `detailTex`, never both — the shader has one `#ifdef`/`#ifndef` pair,
+// so the client must pick with the same precedence. The guard that enforces it
+// is "one detail plugin per material": whichever attaches first wins.
+describe('terrain near-field detail attach', () => {
+    const BASE = 'http://localhost:1/api/maps/m/data';
+    const pluginOf = (mat: unknown): TerrainSplatPlugin | undefined =>
+        ((mat as { pluginManager?: { _plugins?: unknown[] } }).pluginManager?._plugins
+            ?.find((p): p is TerrainSplatPlugin => p instanceof TerrainSplatPlugin));
+
+    it('attaches plain mode from decals.detailTex, resolved against the map URL', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE)).toBe(true);
+        for (const mat of group.materials) {
+            const p = pluginOf(mat);
+            expect(p?.mode).toBe('plain');
+            expect(p?.isEnabled).toBe(true);
+            expect(p?.plainDetailTexture?.name).toBe(`${BASE}/detail.ktx2`);
+        }
+    });
+
+    it('is a no-op for a map that ships no detailTex', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: '' }, BASE)).toBe(false);
+        expect(pluginOf(group.materials[0])).toBeUndefined();
+    });
+
+    it('leaves an absolute detail URL alone', () => {
+        const { scene, group } = makeChunkedTerrain();
+        attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'https://cdn/x/detail.ktx2' }, BASE);
+        expect(pluginOf(group.materials[0])?.plainDetailTexture?.name)
+            .toBe('https://cdn/x/detail.ktx2');
+    });
+
+    it('gives the splat pair precedence over the plain path', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainSplatFromDecals(scene, group, {
+            splatDistrTex: 'splat_distr.ktx2', splatDetailTex: 'splat_detail.ktx2',
+            splatScales: [0.02, 0.02, 0.02, 0.02], splatMults: [1, 1, 1, 1],
+        }, BASE, dims)).toBe(true);
+        // A map declaring both must not end up double-adding signed detail.
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE)).toBe(false);
+        for (const mat of group.materials) {
+            expect(pluginOf(mat)?.mode).toBe('splat');
+        }
+    });
+
+    // --- endtoend D48: the third branch, and the precedence that hid it ---
+
+    // scorched_crossing_v2.4's actual resources block: all three forms
+    // declared at once. Recoil resolves that to the splat-NORMAL branch and
+    // never samples splatDetailTex — whose alpha on that map is a constant
+    // 1.0, i.e. a flat +0.93 on the ground albedo if it ever is sampled.
+    const SCORCHED = {
+        detailTex: 'detail.ktx2',
+        splatDetailTex: 'splat_detail.ktx2',
+        splatDistrTex: 'splat_distr.ktx2',
+        splatNormal: ['splat_normal_0.ktx2', 'splat_normal_1.ktx2',
+            'splat_normal_2.ktx2', 'splat_normal_3.ktx2'] as
+            [string, string, string, string],
+        splatScales: [0.018, 0.005, 0.02, 0.02] as [number, number, number, number],
+        splatMults: [1, 1, 1, 1] as [number, number, number, number],
+        splatDetailNormalDiffuseAlpha: true,
+    };
+
+    it('gives the splat-normal branch precedence over BOTH other paths', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims))
+            .toBe('splatNormal');
+        for (const mat of group.materials) {
+            const p = pluginOf(mat);
+            expect(p?.mode).toBe('splatNormal');
+            expect(p?.diffuseAlpha).toBe(true);
+            // The texture that whitewashed the map must not be loaded at all.
+            expect(p?.detailTexture).toBeNull();
+            expect(p?.plainDetailTexture).toBeNull();
+            expect(p?.normalTextures.map(t => t?.name)).toEqual([
+                `${BASE}/splat_normal_0.ktx2`, `${BASE}/splat_normal_1.ktx2`,
+                `${BASE}/splat_normal_2.ktx2`, `${BASE}/splat_normal_3.ktx2`]);
+        }
+        // ...and nothing may attach a second branch on top.
+        expect(attachTerrainSplatFromDecals(scene, group, SCORCHED, BASE, dims))
+            .toBe(false);
+        expect(attachTerrainDetailPlainFromDecals(scene, group, SCORCHED, BASE))
+            .toBe(false);
+    });
+
+    it('falls through to splat, then plain, as the normal set empties', () => {
+        const noNormals = {
+            ...SCORCHED,
+            splatNormal: ['', '', '', ''] as [string, string, string, string],
+        };
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group, noNormals, BASE, dims))
+                .toBe('splat');
+        }
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group,
+                { ...noNormals, splatDetailTex: '' }, BASE, dims)).toBe('plain');
+        }
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group,
+                { ...noNormals, splatDetailTex: '', detailTex: '' }, BASE, dims))
+                .toBeNull();
+        }
+    });
+
+    it('takes the splat-normal branch on a single declared normal channel', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        const oneNormal = {
+            ...SCORCHED,
+            splatNormal: ['', 'splat_normal_1.ktx2', '', ''] as
+                [string, string, string, string],
+        };
+        expect(attachTerrainDetailFromDecals(scene, group, oneNormal, BASE, dims))
+            .toBe('splatNormal');
+        // Absent channels get a neutral mid-grey stand-in, which the shader's
+        // `tex * 2 - 1` turns into exactly zero contribution.
+        const p = pluginOf(group.materials[0])!;
+        expect(p.normalTextures[1]?.name).toBe(`${BASE}/splat_normal_1.ktx2`);
+        for (const i of [0, 2, 3]) expect(p.normalTextures[i]).not.toBeNull();
+        expect(p.normalTextures[0]).toBe(p.normalTextures[2]);
+    });
+
+    it('needs a distribution map before any splat branch can run', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainSplatNormalFromDecals(
+            scene, group, { ...SCORCHED, splatDistrTex: '' }, BASE, dims))
+            .toBe(false);
+        expect(attachTerrainDetailFromDecals(
+            scene, group, { ...SCORCHED, splatDistrTex: '' }, BASE, dims))
+            .toBe('plain');
+    });
+
+    it('carries splatNormal mode across a material swap', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims);
+        const before = pluginOf(group.materials[0])!;
+        // The atlas load swaps in a fresh terrainTexMat later; the reattach
+        // must carry the mode, or the map comes back on the wrong branch.
+        applyWebGLTexture(scene, group, {} as WebGLTexture, 64, 64, 1);
+        const after = pluginOf(group.materials[0])!;
+        expect(after).not.toBe(before);
+        expect(after.mode).toBe('splatNormal');
+        expect(after.diffuseAlpha).toBe(true);
+        expect(after.normalTextures.map(t => t?.name))
+            .toEqual(before.normalTextures.map(t => t?.name));
+    });
+
+    it('toggles either mode through the A/B hook', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(setTerrainDetailPluginEnabled(group, false)).toBe(false);
+        attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE);
+        expect(setTerrainDetailPluginEnabled(group, false)).toBe(true);
+        expect(pluginOf(group.materials[0])?.isEnabled).toBe(false);
+        expect(setTerrainDetailPluginEnabled(group, true)).toBe(true);
+        expect(pluginOf(group.materials[0])?.isEnabled).toBe(true);
+    });
+});
+
+// PLAN-maps.md §2n ruling 1 (M7f option A): a map may deliver its whole ground
+// albedo as ONE map-space texture instead of the SMT tile dictionary. The
+// dictionary's 32-elmo seam grid is the defect this removes; the client half
+// is a preference, and the thing that would silently undo it is the atlas path
+// running anyway (on a map whose `tiles.ktx2` the server never wrote).
+describe('map-space ground texture (PLAN-maps §2n)', () => {
+    const GROUND = '/api/maps/data/skerry_reach/ground.ktx2';
+    const BASE = 'http://localhost:1/api/maps/m/data';
+    const pluginOf = (mat: unknown): TerrainSplatPlugin | undefined =>
+        ((mat as { pluginManager?: { _plugins?: unknown[] } }).pluginManager?._plugins
+            ?.find((p): p is TerrainSplatPlugin => p instanceof TerrainSplatPlugin));
+    const SCORCHED = {
+        detailTex: 'detail.ktx2',
+        splatDetailTex: 'splat_detail.ktx2',
+        splatDistrTex: 'splat_distr.ktx2',
+        splatNormal: ['splat_normal_0.ktx2', 'splat_normal_1.ktx2',
+            'splat_normal_2.ktx2', 'splat_normal_3.ktx2'] as
+            [string, string, string, string],
+        splatScales: [0.018, 0.005, 0.02, 0.02] as [number, number, number, number],
+        splatMults: [1, 1, 1, 1] as [number, number, number, number],
+        splatDetailNormalDiffuseAlpha: true,
+    };
+
+    it('textures the terrain from the map-space albedo', () => {
+        const { scene, group } = makeChunkedTerrain();
+        applyGroundTexture(scene, group, GROUND);
+        const mat = group.materials[0] as StandardMaterial;
+        expect(mat.diffuseTexture?.name).toBe(GROUND);
+        // it IS the map: a bilinear tap at the edge must not wrap around
+        expect(mat.diffuseTexture!.wrapU).toBe(Texture.CLAMP_ADDRESSMODE);
+        expect(mat.diffuseTexture!.wrapV).toBe(Texture.CLAMP_ADDRESSMODE);
+        expect(mat.diffuseTexture!.anisotropicFilteringLevel).toBe(8);
+    });
+
+    it('carries the near-field detail plugin across the swap, like the atlas does', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims);
+        const before = pluginOf(group.materials[0])!;
+        applyGroundTexture(scene, group, GROUND);
+        const after = pluginOf(group.materials[0])!;
+        expect(after).not.toBe(before);
+        expect(after.mode).toBe('splatNormal');
+    });
+
+    it('takes the ground texture INSTEAD of the tile atlas, never both', async () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        // NullEngine has no WebGL context, so the atlas path bails at
+        // getEngineGl() and leaves the material untextured. Reaching the
+        // ground texture at all therefore proves the short-circuit — and the
+        // fetch that path would make (tiles.ktx2 does not exist for such a
+        // map) is never issued.
+        const fetches: string[] = [];
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = ((u: string) => {
+            fetches.push(String(u));
+            return Promise.reject(new Error('404'));
+        }) as typeof fetch;
+        try {
+            await loadTerrainTextures(scene, group, BASE, dims, GROUND);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        expect(fetches).toEqual([]);
+        expect((group.materials[0] as StandardMaterial).diffuseTexture?.name)
+            .toBe(GROUND);
+    });
+
+    it('falls back to the atlas when the map ships no ground texture', async () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        const before = group.materials[0];
+        await loadTerrainTextures(scene, group, BASE, dims, '');
+        // no WebGL context under NullEngine: the atlas path bails, so the
+        // material is untouched — what matters is that it did NOT take the
+        // ground-texture branch with an empty URL.
+        expect(group.materials[0]).toBe(before);
+        expect((group.materials[0] as StandardMaterial).diffuseTexture?.name)
+            .not.toBe(GROUND);
     });
 });

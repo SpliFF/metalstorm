@@ -38,6 +38,12 @@ function gadget:GetInfo()
         license = "GPL v2",
         layer   = 100,
         enabled = true,
+        -- PLAN-persistence §7.1d: nothing to snapshot. Every value this
+        -- gate reads or writes lives in game_authority.lua's pools
+        -- (GG.Authority) or on the unit def; it keeps no bookkeeping of
+        -- its own between calls.
+        snapshot    = 'stateless',
+        snapshotWhy = 'charging gate; all state belongs to GG.Authority',
     }
 end
 
@@ -146,7 +152,11 @@ function gadget:AllowDirectiveCreate(team, playerID, groupID, directiveType, req
         if isAIPlayer(rawPlayer) then
             -- The AI's own directive → intent report (ai-command-panel.js), so
             -- its spend is socially visible (§5.1). group 0 = area-scoped.
-            GG.AIGuidance.RecordIntent(team, directiveType, groupID or 0, cost or 0)
+            -- rawPlayer (not the nil-coerced `playerID`) is also the key the
+            -- AI's `ai.intent` tag was stored under, so RecordIntent can
+            -- attach the planner goalId this directive came from
+            -- (PLAN-ai-synced-write.md §2.5).
+            GG.AIGuidance.RecordIntent(team, directiveType, groupID or 0, cost or 0, rawPlayer)
         elseif groupID and groupID ~= 0 then
             -- A HUMAN directing a real group → 3-min touch lock so the
             -- co-commander leaves that group alone while the human steers it.

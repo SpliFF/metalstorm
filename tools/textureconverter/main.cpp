@@ -32,6 +32,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "System/FileSystem/DetailTexDc.h"
+#include "System/FileSystem/Ktx2BytesPlane.h"
+#include "System/FileSystem/Ktx2Orientation.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <ktx.h>
@@ -110,20 +113,121 @@ enum class ChannelOp { None, Diffuse, Team, Emissive, Orm };
 /// (assume `rd` if absent) which happens to be the right answer for us
 /// today; the explicit stamp pins the assumption so a future loader
 /// that flips the default can't silently mirror every model texture.
+///
+/// The value is the bare per-dimension letters (`rd`), NOT libktx's
+/// KTX**1** `KTX_ORIENTATION2_FMT` spelling `S=r,T=d`. KTX2 §3.11.4
+/// requires `/^[rl][du]$/` for a 2D texture, so the KTX1 form makes the
+/// file invalid: `ktx validate` rejects it with error-7108/7109 and
+/// `ktx info`/`ktx extract` refuse to open it. Nothing renders wrong —
+/// neither Babylon's KTX2 loader nor basisu reads the key at all — but
+/// it costs every future investigation the standard tooling, which is
+/// exactly what happened in PLAN-maps M8e (the minimap decode had to go
+/// through `basisu -unpack`). Cross-check: the forge encoder writes
+/// `rd` here, and its output validates clean.
+///
+/// The value and its grammar live in `Ktx2Orientation.h` so the
+/// doctest suite (which does not link libktx) can guard the spelling.
 static void StampOrientationRd(ktxTexture2* tex) {
     if (!tex) return;
-    static constexpr char kOrientationValue[] = "S=r,T=d";
+    static_assert(ktx2::IsValidOrientation(ktx2::kOrientation2D, 2),
+                  "KTXorientation value must match the KTX2 2D grammar");
     ktxHashList_AddKVPair(
         &tex->kvDataHead,
         KTX_ORIENTATION_KEY,
-        static_cast<unsigned int>(sizeof(kOrientationValue)),
-        kOrientationValue);
+        static_cast<unsigned int>(sizeof(ktx2::kOrientation2D)),
+        ktx2::kOrientation2D);
 }
+
+/// Our identity in the file's `KTXwriter` key, in place of libktx's fallback
+/// `"Unidentified app"`. libktx appends its own ` / libktx v4.0` either way,
+/// so the value on disk reads `springrts-web textureconverter / libktx v4.0`.
+///
+/// This exists because provenance is the first question every KTX2
+/// investigation asks and we had no way to answer it. The tree carries files
+/// from three encoders — this tool, forge's `Basis Universal`, and `toktx` —
+/// and only ours was anonymous, so "which of these 2 475 files did *we* write,
+/// and therefore which carry the defect we just fixed?" had to be inferred
+/// from side channels (the KTXorientation spelling, mtimes) that answer a
+/// different question and go stale. PLAN-maps M8j spent a fire on exactly that
+/// cross-referencing; with this key it is one grep. Bare tool name, no build
+/// or git stamp of our own: the output must stay byte-deterministic for the
+/// hash-equality checks the map pipeline relies on.
+static constexpr char kWriterId[] = "springrts-web textureconverter";
+
+/// Zstd-supercompress `tex`, then put back the `bytesPlane` field libktx
+/// 4.3.2 zeroes on the way out.
+///
+/// libktx implements KTX2 ≤ 2.0.3, which said a supercompressed file's
+/// `bytesPlane0..7` must read *unsized*; spec 2.0.4 reversed that and
+/// requires the inflated texel block size there, so every file this tool
+/// wrote came out tripping the Khronos validator's `warning-6030`. See
+/// Ktx2BytesPlane.h for the full history and why the header exists.
+///
+/// Save/restore rather than re-derive: the pre-deflate DFD already holds
+/// the right answer for every branch that reaches here (16 for UASTC, 8
+/// for the raw-DXT1 wrap, 4 for the RGBA8 fallback), so copying it back
+/// cannot disagree with the encoder the way a lookup table would. The
+/// only bytes this changes in the output file are the two DFD words.
+static void DeflateZstdKeepingBytesPlanes(ktxTexture2* tex, int level) {
+    uint32_t* bdb = tex->pDfd + 1;
+    const uint32_t plane0 = bdb[ktx2::kBdfdWordBytesPlane0];
+    const uint32_t plane4 = bdb[ktx2::kBdfdWordBytesPlane4];
+    const KTX_error_code rc = ktxTexture2_DeflateZstd(tex, level);
+    if (rc != KTX_SUCCESS) {
+        // Not fatal here — the callers have always treated deflation as
+        // best-effort and go on to write an uncompressed file — but it
+        // must not be silent, and on this path libktx left the DFD alone.
+        SLOG(SPRING_LOG_ERROR, "ktxTexture2_DeflateZstd failed: %s",
+            ktxErrorString(rc));
+        return;
+    }
+    // pDfd is reallocated by nothing in DeflateZstd, but re-read it rather
+    // than reuse the pointer captured above so this stays correct if a
+    // future libktx rebuilds the descriptor during deflation.
+    bdb = tex->pDfd + 1;
+    bdb[ktx2::kBdfdWordBytesPlane0] = plane0;
+    bdb[ktx2::kBdfdWordBytesPlane4] = plane4;
+    if (!ktx2::IsSizedForSupercompression(bdb[ktx2::kBdfdWordBytesPlane0])) {
+        // There was nothing to restore: the encoder handed us an unsized
+        // bytesPlane0 before deflation too, so the file still trips
+        // warning-6030. Say so rather than guess a size the DFD does not
+        // claim — this is the one path where a lookup table would be the
+        // only option, and it is unreachable from any shipped invocation.
+        SLOG(SPRING_LOG_WARNING,
+            "KTX2 bytesPlane0 was already 0 before deflation - output will "
+            "trip warning-6030 (see Ktx2BytesPlane.h)");
+    }
+}
+
+/// libktx fills `KTXwriter` with its own fallback at write time *only* if the
+/// app has not set one, so stamping before the write wins.
+static void StampWriterId(ktxTexture2* tex) {
+    if (!tex) return;
+    ktxHashList_AddKVPair(
+        &tex->kvDataHead,
+        KTX_WRITER_KEY,
+        static_cast<unsigned int>(sizeof(kWriterId)),
+        kWriterId);
+}
+
+/// Per-channel means of the encoder's *input* pixels (level 0) and of the
+/// last level it generates (the 1x1 top mip). Filled only when the caller
+/// asks — see `--signed-dc-report` and DetailTexDc.h for what the numbers
+/// mean and why a detail texture's DC is a permanent, distance-invariant
+/// tint rather than something the mip chain fades away.
+struct DcReport {
+    double baseMean[3] = {0, 0, 0};
+    double topMean[3] = {0, 0, 0};
+    int topWidth = 0;
+    int topHeight = 0;
+    int levels = 0;
+};
 
 // Forward decl — DDS RGBA fallback re-uses the encoder path.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
-                              Encoding enc, bool genMips, bool zstd);
+                              Encoding enc, bool genMips, bool zstd,
+                              DcReport* dcOut = nullptr);
 
 // Forward decls — used by WrapDdsAsKtx2 for the dual-source `--tex2`
 // alpha overlay path. Definitions live below near the dispatch code so
@@ -542,9 +646,10 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
         }
     }
     if (zstd) {
-        ktxTexture2_DeflateZstd(tex, 18);
+        DeflateZstdKeepingBytesPlanes(tex, 18);
     }
     StampOrientationRd(tex);
+    StampWriterId(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {
@@ -571,11 +676,24 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
 /// UASTC is high-quality and the encoder default.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
-                              Encoding enc, bool genMips, bool zstd) {
+                              Encoding enc, bool genMips, bool zstd,
+                              DcReport* dcOut) {
     uint32_t levels = 1;
     if (genMips) {
         uint32_t dim = std::max(w, h);
         while (dim > 1) { dim >>= 1; ++levels; }
+    }
+
+    if (dcOut) {
+        double sum[3] = {0, 0, 0};
+        const size_t texels = (size_t)w * h;
+        for (size_t i = 0; i < texels; ++i)
+            for (int c = 0; c < 3; ++c) sum[c] += rgba[i * 4 + c];
+        for (int c = 0; c < 3; ++c)
+            dcOut->baseMean[c] = dcOut->topMean[c] = sum[c] / (double)texels;
+        dcOut->topWidth = w;
+        dcOut->topHeight = h;
+        dcOut->levels = (int)levels;
     }
 
     ktxTexture2* tex = nullptr;
@@ -625,9 +743,30 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                         const int s10 = prev[(y0 * cw + x1) * 4 + c];
                         const int s01 = prev[(y1 * cw + x0) * 4 + c];
                         const int s11 = prev[(y1 * cw + x1) * 4 + c];
-                        next[(y * nw + x) * 4 + c] = (uint8_t)((s00 + s10 + s01 + s11) / 4);
+                        // Rounded, not truncated. Integer `/4` loses up to 0.75
+                        // of a level per step and the bias compounds down the
+                        // chain (~-3 levels over 9), which for a *signed*
+                        // detail texture is a distance-growing darkening the
+                        // map author never authored. See DetailTexDc.h.
+                        next[(y * nw + x) * 4 + c] =
+                            detailtex::MipBoxAvg4(s00, s10, s01, s11);
                     }
                 }
+            }
+            if (dcOut) {
+                double sum[3] = {0, 0, 0};
+                const size_t texels = (size_t)nw * nh;
+                for (size_t i = 0; i < texels; ++i)
+                    for (int c = 0; c < 3; ++c) sum[c] += next[i * 4 + c];
+                for (int c = 0; c < 3; ++c)
+                    dcOut->topMean[c] = sum[c] / (double)texels;
+                dcOut->topWidth = nw;
+                dcOut->topHeight = nh;
+                // Per-level trajectory: where a DC drift enters the chain is
+                // the difference between a content bug and a filter bug.
+                SLOG(SPRING_LOG_DEBUG, "mip %u (%dx%d) mean %.4f,%.4f,%.4f",
+                    lvl, nw, nh, dcOut->topMean[0], dcOut->topMean[1],
+                    dcOut->topMean[2]);
             }
             rc = ktxTexture_SetImageFromMemory(
                 ktxTexture(tex), lvl, 0, 0, next.data(), next.size());
@@ -657,9 +796,10 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
         return false;
     }
     if (zstd) {
-        ktxTexture2_DeflateZstd(tex, 18);
+        DeflateZstdKeepingBytesPlanes(tex, 18);
     }
     StampOrientationRd(tex);
+    StampWriterId(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {
@@ -844,7 +984,8 @@ static int ConvertGeneric(const std::string& inputPath,
                           Encoding enc, bool genMips, bool zstd,
                           const std::string& pngFallbackPath,
                           ChannelOp channelOp,
-                          const std::string& tex2Path) {
+                          const std::string& tex2Path,
+                          DcReport* dcOut) {
     if (IsDdsMagic(inputPath)) {
         return WrapDdsAsKtx2(inputPath, outputPath, zstd,
                              pngFallbackPath, channelOp, tex2Path) ? 0 : 1;
@@ -873,9 +1014,28 @@ static int ConvertGeneric(const std::string& inputPath,
         }
     }
     const bool ok = EncodeRgba8AsKtx2(pixels, w, h, outputPath,
-                                       enc, genMips, zstd);
+                                       enc, genMips, zstd, dcOut);
     stbi_image_free(pixels);
     return ok ? 0 : 1;
+}
+
+/// Emit the DC measurement as one machine-readable line so a calling
+/// converter can apply its own policy without re-decoding the source.
+/// Only the caller knows whether a texture is sampled signed (`tex*2-1`),
+/// which is what makes a non-neutral mean matter — so this tool measures
+/// and the caller judges. Format, one line, on stdout:
+///
+///   signed-dc: levels=N base=R,G,B top=WxH:R,G,B
+///
+/// where each R,G,B is a 0..255 channel mean, `base` is level 0 and `top`
+/// is the smallest level generated (1x1 with --mipmaps, else level 0).
+static void PrintDcReport(const DcReport& dc) {
+    printf("signed-dc: levels=%d base=%.4f,%.4f,%.4f top=%dx%d:%.4f,%.4f,%.4f\n",
+        dc.levels,
+        dc.baseMean[0], dc.baseMean[1], dc.baseMean[2],
+        dc.topWidth, dc.topHeight,
+        dc.topMean[0], dc.topMean[1], dc.topMean[2]);
+    fflush(stdout);
 }
 
 // ============================================================
@@ -906,6 +1066,13 @@ static void PrintUsage(const char* argv0) {
         "  --encoding uastc|etc1s   Encoder for non-DDS sources (default: uastc)\n"
         "  --mipmaps                Generate mip chain for encoded sources\n"
         "  --mip-levels N           Level count for --raw-dxt1 (default: 1)\n"
+        "  --signed-dc-report       Print the source's level-0 and top-mip\n"
+        "                           channel means as one `signed-dc:` line.\n"
+        "                           For textures the shader samples signed\n"
+        "                           (`tex*2-1`, i.e. Recoil's near-field\n"
+        "                           detail): the top mip's mean is a constant\n"
+        "                           the mip chain never fades, so a mean off\n"
+        "                           127.5 tints the map at every distance.\n"
         "  --no-zstd                Disable Zstd supercompression\n"
         "  --png-fallback <path>    Also write a downscaled PNG sidecar at <path>\n"
         "                           (for glTF readers without KHR_texture_basisu)\n"
@@ -949,6 +1116,7 @@ int main(int argc, char* argv[]) {
     std::string pngFallbackPath;
     ChannelOp channelOp = ChannelOp::None;
     std::string tex2Path;
+    bool dcReport = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -959,6 +1127,8 @@ int main(int argc, char* argv[]) {
             if (v == "uastc") enc = Encoding::Uastc;
             else if (v == "etc1s") enc = Encoding::Etc1s;
             else { SLOG(SPRING_LOG_ERROR, "bad --encoding: %s", v.c_str()); return 2; }
+        } else if (a == "--signed-dc-report") {
+            dcReport = true;
         } else if (a == "--mipmaps") {
             genMips = true;
         } else if (a == "--no-zstd") {
@@ -1042,8 +1212,12 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> bytes = ReadAllBytes(inputPath);
         rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, rawMipLevels, outputPath, zstd) ? 0 : 1;
     } else {
+        DcReport dc;
         rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
-                            pngFallbackPath, channelOp, tex2Path);
+                            pngFallbackPath, channelOp, tex2Path,
+                            dcReport ? &dc : nullptr);
+        if (rc == 0 && dcReport && dc.levels > 0)
+            PrintDcReport(dc);
     }
 
     springlog_shutdown();

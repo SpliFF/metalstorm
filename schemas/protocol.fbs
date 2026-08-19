@@ -38,16 +38,24 @@ struct Vec3 {
 // ============================================================
 
 // First message on the game-server control stream (C1). The server enforces
-// protocol_version against its own CURRENT_PROTOCOL_VERSION and rejects a
-// mismatch (or a missing handshake) with AuthStatus.VersionMismatch before
-// honouring AuthRequest. The canonical version lives in two places that must
-// move together: Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h)
-// and PROTOCOL_VERSION (client/src/core/connection.ts). Bump on any breaking
-// change to this schema or the binary envelope formats; additive,
-// default-valued fields do not require a bump.
+// BOTH fields against its own copies and rejects a mismatch (or a missing
+// handshake) with AuthStatus.VersionMismatch before honouring AuthRequest.
+//
+// schema_hash is the real drift guard (PLAN-protocol-guard §2.2): sha256 of
+// the binary schema, emitted into both sides by scripts/regen-protocol.sh, so
+// any wire-visible change to THIS FILE rejects a stale cached bundle without
+// anyone remembering to bump anything. Never hand-edit either copy.
+//
+// protocol_version survives as a rare, manual epoch counter for the breaks the
+// schema text cannot see: the binary envelope framings (0x02-0x09) and a
+// semantic reinterpretation of an existing field. It lives in two places that
+// must move together — Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/
+// HandshakePolicy.h) and PROTOCOL_VERSION (client/src/core/protocol-version.ts).
+// A schema-visible change no longer needs it; the hash covers that.
 table Handshake {
     protocol_version: uint16;
     client_version: string;
+    schema_hash: string;        // sha256 of the .bfbs; see regen-protocol.sh
 }
 
 table AuthRequest {
@@ -596,6 +604,30 @@ table GameStarted {
 table GameRestarting {
 }
 
+/// Server → client: execute `code` in the browser (dev/test relay,
+/// PLAN-test-automation P7). `target` picks the executor:
+///   "worker"  — the render worker's global scope (same engine hooks as evalJs)
+///   "js"      — the main thread's global scope
+///   "widgets" — the in-worker LuaUI runtime via window.widgets.eval (Lua)
+///   "test"    — window.test harness expression on main
+/// A client that is not a DEV build (and lacks ?allowClientEval=1) answers
+/// success:false without evaluating anything.
+table ClientEvalRequest {
+    request_id: uint32;
+    target: string;
+    code: string;
+}
+
+/// Client → server reply to a ClientEvalRequest. Classified `Ignored` by
+/// SyncedInputJournal (ReplayControl precedent): never journaled, so a
+/// replay can never re-execute an eval; dropped on any server without a
+/// matching waiter.
+table ClientEvalResponse {
+    request_id: uint32;
+    success: bool;
+    output: string;
+}
+
 /// Response to a ConsoleCommand.
 table ConsoleResponse {
     request_id: uint32;
@@ -711,6 +743,7 @@ union ClientPayload {
     GroupDirectiveRemove,
     GroupPosture,
     ReplayControl,
+    ClientEvalResponse,
 }
 
 table ClientMessage {
@@ -1676,6 +1709,17 @@ table LobbyGameInfo {
     /// Mirrors the field on GameDiscovery::GameInfo; the HTTP
     /// /api/games endpoint surfaces the same string verbatim.
     lighting: string;
+    /// True when the game is kept on disk but is not playable — its port
+    /// is unmaintained and starting it does not produce a match
+    /// (PLAN-endtoend.md D26). Discovery still lists it: the folder is
+    /// real, `/api/rooms/direct` still stages it for fixtures, and a game
+    /// that silently vanished from the dropdown would read as a bug. The
+    /// picker renders it disabled instead, and `POST /api/rooms` refuses
+    /// it. Read from the game config's `archived` field.
+    archived: bool = false;
+    /// Why it is archived, in one sentence, shown to the player on the
+    /// disabled option. Empty when `archived` is false.
+    archived_reason: string;
 }
 
 /// Reply to GameListRequest. Lists every game the lobby
@@ -1798,6 +1842,10 @@ table MapDecals {
     detail_normal_tex: string;        // global detail normal map
     splat_scales: [float];            // 4 floats, UV scale per channel
     splat_mults: [float];             // 4 floats, intensity per channel
+    // Recoil SMF_DETAIL_NORMAL_DIFFUSE_ALPHA (mapinfo
+    // resources.splatDetailNormalDiffuseAlpha). Selects which channel of the
+    // splat-normal branch supplies the ground's near-field albedo detail.
+    splat_detail_normal_diffuse_alpha: bool;
 }
 
 /// Full map data sent by the game server on connect.
@@ -1834,6 +1882,17 @@ table MapData {
     /// Paths (relative to map_source_url) of .lua files under LuaUI/Widgets/
     /// that the client should load into fengari on map start.
     widgets: [string];
+    /// HTTP URL of the map-space ground albedo, or "" when the map delivers
+    /// its ground colour through the SMT tile dictionary (`tiles_url`).
+    ///
+    /// DEVIATION from Recoil, ruled in 2026-08-19 (PLAN-maps.md §2n): the
+    /// tile dictionary this project's generator writes is a lossy vector
+    /// quantizer, and M7f measured it against ground truth at 12.5 % of
+    /// texels >4 levels off with a 15.7x seam jump on the 32-elmo tile grid.
+    /// One 2048² map-space texture beats it on error, on seams and on bytes.
+    /// Opt-in per map: a map that ships an exactly-deduped SMT (i.e. every
+    /// real Spring map) leaves this empty and is unaffected.
+    ground_tex_url: string;
 }
 
 /// One queued order for a unit. Mirrors Spring's Command struct.
@@ -2388,6 +2447,7 @@ union ServerPayload {
     RulesParamKeyDictionary,
     PlayerRoster,
     ReplayState,
+    ClientEvalRequest,
 }
 
 table ServerMessage {

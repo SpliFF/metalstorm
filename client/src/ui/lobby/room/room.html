@@ -3,6 +3,17 @@
         <h2>{{name}}</h2>
         <span class="room-badge">{{state}}</span>
         <button id="leave-btn" class="secondary">Leave</button>
+        <!-- D45: logout is reachable from the room too, not just the browser.
+             `logout()` leaves the room first, so this is not a way to strand
+             a seat — see lobby-ui.ts. -->
+        <button id="logout-btn" class="secondary">Log out</button>
+        <!-- "Log out everywhere" (PLAN-metalstorm-lobby.md §7.2, task 8a).
+             A separate control, not a modifier on Log out: this one ends every
+             session AND every refresh family the account holds, which evicts
+             the player's other devices from wars they are standing in. That is
+             the right response to a compromise and the wrong response to
+             handing over a shared machine, so the two are different buttons. -->
+        <button id="logout-all-btn" class="secondary" title="End every session on every device">Log out everywhere</button>
     </div>
     <!-- Map + war line (PLAN-endtoend.md D10). The war a room will stage is
          derived from its map, so it has to be visible before Start — a
@@ -11,4 +22,12 @@
     <div class="room-setup">{{setup_html}}</div>
     <div class="player-list">{{players_html}}</div>
     <div class="room-actions">{{actions_html}}</div>
+    <!-- Refusals from /api/rooms/start land here (PLAN-endtoend.md D41).
+         The room screen had no message surface at all, so a rejected Start
+         Game was silent in both directions. -->
+    <div id="room-msg" class="msg"></div>
+    <!-- The same dock as the browser screen (PLAN-lobby.md §3, task 9b): one
+         chat service, two views. The room and ally tabs appear here because
+         this is the screen where a seat exists. -->
+    <div id="chat-dock" class="chat-dock" style="display:none"></div>
 </div>

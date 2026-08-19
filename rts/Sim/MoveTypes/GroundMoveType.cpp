@@ -3447,3 +3447,149 @@ bool CGroundMoveType::SetMemberValue(unsigned int memberHash, void* memberValue)
 	return false;
 }
 
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+//
+// Not captured, each for a stated reason:
+//   * pathID / nextPathId / deletePathId — live CPathManager handles. A path
+//     is re-requested on apply (see SnapshotApply), which is what the engine
+//     itself does through ReRequestPath(true) many times per match.
+//   * jobId — the multi-threaded move system assigns it before reading it.
+//   * pathController — GMTDefaultPathController is stateless (owner only).
+
+void CGroundMoveType::SnapshotCapture(movetypesnapshot::MoveTypeState& s) const {
+	SnapshotCaptureBase(s.base);
+
+	auto& g = s.ground;
+	g.currWayPointX = currWayPoint.x; g.currWayPointY = currWayPoint.y; g.currWayPointZ = currWayPoint.z;
+	g.nextWayPointX = nextWayPoint.x; g.nextWayPointY = nextWayPoint.y; g.nextWayPointZ = nextWayPoint.z;
+	g.earlyCurrWayPointX = earlyCurrWayPoint.x; g.earlyCurrWayPointY = earlyCurrWayPoint.y; g.earlyCurrWayPointZ = earlyCurrWayPoint.z;
+	g.earlyNextWayPointX = earlyNextWayPoint.x; g.earlyNextWayPointY = earlyNextWayPoint.y; g.earlyNextWayPointZ = earlyNextWayPoint.z;
+	g.waypointDirX = waypointDir.x; g.waypointDirY = waypointDir.y; g.waypointDirZ = waypointDir.z;
+	g.flatFrontDirX = flatFrontDir.x; g.flatFrontDirY = flatFrontDir.y; g.flatFrontDirZ = flatFrontDir.z;
+	g.lastAvoidanceDirX = lastAvoidanceDir.x; g.lastAvoidanceDirY = lastAvoidanceDir.y; g.lastAvoidanceDirZ = lastAvoidanceDir.z;
+	g.mainHeadingPosX = mainHeadingPos.x; g.mainHeadingPosY = mainHeadingPos.y; g.mainHeadingPosZ = mainHeadingPos.z;
+	g.skidRotVectorX = skidRotVector.x; g.skidRotVectorY = skidRotVector.y; g.skidRotVectorZ = skidRotVector.z;
+
+	g.turnRate = turnRate; g.turnSpeed = turnSpeed; g.turnAccel = turnAccel;
+	g.accRate = accRate; g.decRate = decRate; g.myGravity = myGravity;
+	g.maxReverseDist = maxReverseDist; g.minReverseAngle = minReverseAngle;
+	g.maxReverseSpeed = maxReverseSpeed; g.sqSkidSpeedMult = sqSkidSpeedMult;
+	g.wantedSpeed = wantedSpeed; g.currentSpeed = currentSpeed; g.deltaSpeed = deltaSpeed;
+	g.currWayPointDist = currWayPointDist; g.prevWayPointDist = prevWayPointDist;
+	g.goalRadius = goalRadius; g.ownerRadius = ownerRadius; g.extraRadius = extraRadius;
+	g.skidRotSpeed = skidRotSpeed; g.skidRotAccel = skidRotAccel;
+
+	g.forceFromMovingCollideesX = forceFromMovingCollidees.x;
+	g.forceFromMovingCollideesY = forceFromMovingCollidees.y;
+	g.forceFromMovingCollideesZ = forceFromMovingCollidees.z;
+	g.forceFromStaticCollideesX = forceFromStaticCollidees.x;
+	g.forceFromStaticCollideesY = forceFromStaticCollidees.y;
+	g.forceFromStaticCollideesZ = forceFromStaticCollidees.z;
+	g.resultantForcesX = resultantForces.x;
+	g.resultantForcesY = resultantForces.y;
+	g.resultantForcesZ = resultantForces.z;
+
+	g.numIdlingUpdates = numIdlingUpdates;
+	g.numIdlingSlowUpdates = numIdlingSlowUpdates;
+	g.wantedHeading = wantedHeading;
+	g.minScriptChangeHeading = minScriptChangeHeading;
+	g.wantRepathFrame = wantRepathFrame;
+	g.lastRepathFrame = lastRepathFrame;
+	g.bestLastWaypointDist = bestLastWaypointDist;
+	g.bestReattemptedLastWaypointDist = bestReattemptedLastWaypointDist;
+	g.setHeading = setHeading;
+	g.setHeadingDir = setHeadingDir;
+	g.limitSpeedForTurning = limitSpeedForTurning;
+	g.oldSpeed = oldSpeed; g.newSpeed = newSpeed;
+
+	g.atGoal = atGoal; g.atEndOfPath = atEndOfPath; g.wantRepath = wantRepath;
+	g.moveFailed = moveFailed; g.lastWaypoint = lastWaypoint;
+	g.reversing = reversing; g.idling = idling;
+	g.pushResistant = pushResistant;
+	g.pushResistanceBlockActive = pushResistanceBlockActive;
+	g.canReverse = canReverse;
+	g.useMainHeading = useMainHeading; g.useRawMovement = useRawMovement;
+	g.pathingFailed = pathingFailed; g.pathingArrived = pathingArrived;
+	g.positionStuck = positionStuck;
+	g.forceStaticObjectCheck = forceStaticObjectCheck;
+	g.avoidingUnits = avoidingUnits;
+
+}
+
+void CGroundMoveType::SnapshotApply(const movetypesnapshot::MoveTypeState& s) {
+	SnapshotApplyBase(s.base);
+
+	const auto& g = s.ground;
+	currWayPoint = float3(g.currWayPointX, g.currWayPointY, g.currWayPointZ);
+	nextWayPoint = float3(g.nextWayPointX, g.nextWayPointY, g.nextWayPointZ);
+	earlyCurrWayPoint = float3(g.earlyCurrWayPointX, g.earlyCurrWayPointY, g.earlyCurrWayPointZ);
+	earlyNextWayPoint = float3(g.earlyNextWayPointX, g.earlyNextWayPointY, g.earlyNextWayPointZ);
+	waypointDir = float3(g.waypointDirX, g.waypointDirY, g.waypointDirZ);
+	flatFrontDir = float3(g.flatFrontDirX, g.flatFrontDirY, g.flatFrontDirZ);
+	lastAvoidanceDir = float3(g.lastAvoidanceDirX, g.lastAvoidanceDirY, g.lastAvoidanceDirZ);
+	mainHeadingPos = float3(g.mainHeadingPosX, g.mainHeadingPosY, g.mainHeadingPosZ);
+	skidRotVector = float3(g.skidRotVectorX, g.skidRotVectorY, g.skidRotVectorZ);
+
+	turnRate = g.turnRate; turnSpeed = g.turnSpeed; turnAccel = g.turnAccel;
+	accRate = g.accRate; decRate = g.decRate; myGravity = g.myGravity;
+	maxReverseDist = g.maxReverseDist; minReverseAngle = g.minReverseAngle;
+	maxReverseSpeed = g.maxReverseSpeed; sqSkidSpeedMult = g.sqSkidSpeedMult;
+	wantedSpeed = g.wantedSpeed; currentSpeed = g.currentSpeed; deltaSpeed = g.deltaSpeed;
+	currWayPointDist = g.currWayPointDist; prevWayPointDist = g.prevWayPointDist;
+	goalRadius = g.goalRadius; ownerRadius = g.ownerRadius; extraRadius = g.extraRadius;
+	skidRotSpeed = g.skidRotSpeed; skidRotAccel = g.skidRotAccel;
+
+	forceFromMovingCollidees = float3(g.forceFromMovingCollideesX, g.forceFromMovingCollideesY, g.forceFromMovingCollideesZ);
+	forceFromStaticCollidees = float3(g.forceFromStaticCollideesX, g.forceFromStaticCollideesY, g.forceFromStaticCollideesZ);
+	resultantForces = float3(g.resultantForcesX, g.resultantForcesY, g.resultantForcesZ);
+
+	numIdlingUpdates = g.numIdlingUpdates;
+	numIdlingSlowUpdates = g.numIdlingSlowUpdates;
+	wantedHeading = static_cast<short>(g.wantedHeading);
+	minScriptChangeHeading = static_cast<short>(g.minScriptChangeHeading);
+	wantRepathFrame = g.wantRepathFrame;
+	lastRepathFrame = g.lastRepathFrame;
+	bestLastWaypointDist = g.bestLastWaypointDist;
+	bestReattemptedLastWaypointDist = g.bestReattemptedLastWaypointDist;
+	setHeading = g.setHeading;
+	setHeadingDir = static_cast<short>(g.setHeadingDir);
+	limitSpeedForTurning = static_cast<short>(g.limitSpeedForTurning);
+	oldSpeed = g.oldSpeed; newSpeed = g.newSpeed;
+
+	atGoal = g.atGoal; atEndOfPath = g.atEndOfPath; wantRepath = g.wantRepath;
+	moveFailed = g.moveFailed; lastWaypoint = g.lastWaypoint;
+	reversing = g.reversing; idling = g.idling;
+	pushResistant = g.pushResistant;
+	pushResistanceBlockActive = g.pushResistanceBlockActive;
+	canReverse = g.canReverse;
+	useMainHeading = g.useMainHeading; useRawMovement = g.useRawMovement;
+	pathingFailed = g.pathingFailed; pathingArrived = g.pathingArrived;
+	positionStuck = g.positionStuck;
+	forceStaticObjectCheck = g.forceStaticObjectCheck;
+	avoidingUnits = g.avoidingUnits;
+
+	// FIDELITY-STANDIN: pathID stays 0. A path handle indexes a live
+	// CPathManager object that does not cross a process, and re-requesting one
+	// HERE was tried and reverted: StartEngine() writes back over the waypoint
+	// pair, currWayPointDist and forceStaticObjectCheck, so the checkpoint
+	// re-captured straight after being applied stopped matching the one that
+	// was applied - it broke §8's byte-exact restore bar to buy nothing
+	// measurable (PLAN-persistence §7.1c option A, the 300:100 measurement).
+	// The engine re-requests on its own at the owner's next SlowUpdate, which
+	// has a branch for exactly this state ("we want to be moving but don't
+	// have a path"), so the only cost is up to UNIT_SLOWUPDATE_RATE frames of
+	// following the restored waypoint pair - which is the pair the unit really
+	// had.
+	if (progressState == Active) {
+		static bool warnedRepath = false;
+		if (!warnedRepath) {
+			warnedRepath = true;
+			LOG_L(L_WARNING,
+			      "[GMT] snapshot restore leaves unit %d moving with no path handle: "
+			      "a captured path cannot cross a process, so it (and any later one) "
+			      "is routed afresh by the next SlowUpdate",
+			      owner->id);
+		}
+	}
+}

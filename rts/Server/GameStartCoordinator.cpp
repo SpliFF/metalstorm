@@ -96,7 +96,13 @@ std::vector<uint8_t> GameStartCoordinator::BuildTeamStartInfoMsg() {
 void GameStartCoordinator::CheckAndFireGameStart() {
     if (ctx.sim.HasGameStarted())
         return;
-    if (ctx.connectedRosterPlayers.size() < ctx.rosterPlayersNeeded)
+    // A persistent war does not gate on its roster (PLAN-metalstorm-lobby.md
+    // §2.1) — it has normally already started during set-up, so this is the
+    // belt to that braces: reaching here with the game not started means
+    // something started the war late, and a war must not then acquire a
+    // roster gate it was launched without.
+    if (ctx.waitsForRoster &&
+        ctx.connectedRosterPlayers.size() < ctx.rosterPlayersNeeded)
         return;
     SLOG(SPRING_LOG_NOTICE, "all %zu roster players connected, firing GameStart",
         ctx.rosterPlayersNeeded);

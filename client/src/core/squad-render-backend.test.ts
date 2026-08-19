@@ -4,8 +4,8 @@ import {
 } from '@babylonjs/core';
 import {
     SquadRenderBackend, FADE_FRAC, setLegacyBackendPlumbing, setLegacyBufferRebind,
-    setBboxRefreshEvery, setPoolCompaction, setPoolCompactionGate,
-    type MemberModel,
+    setBboxRefreshEvery, setPoolCompaction, setPoolCompactionGate, memberCapsuleHeight,
+    type MemberModel, type MemberStats,
 } from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
 
@@ -105,7 +105,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
         expect(sprite).toBeDefined();
         expect(sprite!.thinInstanceCount).toBe(1);
         // No capsule pool was created for this member.
-        expect(findMesh(scene, 'squadMember_t2')).toBeUndefined();
+        expect(findMesh(scene, 'squadMember_')).toBeUndefined();
     });
 
     it('keeps capsule pools for defs without an atlas', () => {
@@ -115,8 +115,83 @@ describe('SquadRenderBackend impostor sprite members', () => {
         backend.updateMember(h, 0, 0, 0, 0, 0);
         backend.flush();
 
-        expect(findMesh(scene, 'squadMember_t0')).toBeDefined();
+        expect(findMesh(scene, 'squadMember_d7_t0')).toBeDefined();
         expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
+    });
+
+    // The proxy capsule is sized to the def it stands in for (the old fixed
+    // 9-elmo pill dwarfed 1.8-elmo infantry). Height = cbrt of the per-member
+    // mass share: Metalstorm masses sit on a tonnes-like curve at ~1 elmo/m,
+    // so unit density recovers the authored body heights.
+    describe('proxy capsule sizing (memberCapsuleHeight)', () => {
+        it('derives member height from the per-member mass share', () => {
+            // The shipped anchor points this formula was calibrated on:
+            // soldiers s1 (model 1.85), engineers s1 (impostorSize 2.31),
+            // tanks s2 → fable_tank (9.0).
+            expect(memberCapsuleHeight({ mass: 90, squadSize: 16 })).toBeCloseTo(1.7784, 3);
+            expect(memberCapsuleHeight({ mass: 80, squadSize: 8 })).toBeCloseTo(2.1544, 3);
+            expect(memberCapsuleHeight({ mass: 1000, squadSize: 4 })).toBeCloseTo(6.2996, 3);
+        });
+
+        it('keeps the legacy 9-elmo capsule when there are no usable stats', () => {
+            expect(memberCapsuleHeight(undefined)).toBe(9);
+            expect(memberCapsuleHeight({})).toBe(9);
+            expect(memberCapsuleHeight({ mass: 0, squadSize: 8 })).toBe(9);
+        });
+
+        it('clamps degenerate masses into the visible band', () => {
+            expect(memberCapsuleHeight({ mass: 0.001, squadSize: 1 })).toBe(1.2);
+            expect(memberCapsuleHeight({ mass: 1e9, squadSize: 1 })).toBe(30);
+        });
+
+        it('a missing/zero squad size counts as one member', () => {
+            expect(memberCapsuleHeight({ mass: 1000 })).toBeCloseTo(10, 3);
+            expect(memberCapsuleHeight({ mass: 1000, squadSize: 0 })).toBeCloseTo(10, 3);
+        });
+
+        it('builds per-def capsule pools at the derived size, centre-anchored', () => {
+            const stats = new Map<number, MemberStats>([
+                [7, { mass: 90, squadSize: 16 }],    // infantry → ~1.78 elmos
+                [8, { mass: 1000, squadSize: 4 }],   // tanks    → ~6.30 elmos
+            ]);
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            scene.activeCamera = new FreeCamera('cam', new Vector3(0, 50, -50), scene);
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(0, 0, 1),
+                getImpostorAtlas: () => undefined,
+                getMemberStats: (defId) => stats.get(defId),
+            });
+            backend.setSquadTeam(1, 0);
+            const hInf = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const hTank = backend.createMember(1, 1, { defId: 8, variant: 0 });
+            backend.updateMember(hInf, 10, 0, 10, 0, 0);
+            backend.updateMember(hTank, 30, 0, 10, 0, 0);
+            backend.flush();
+
+            // One pool per def, each capsule drawn at ITS OWN half-height —
+            // the bias also rides the pool view for the direct writer.
+            const inf = backend.acquireSlot(hInf)!;
+            const tank = backend.acquireSlot(hTank)!;
+            expect(inf.poolId).not.toBe(tank.poolId);
+            expect(backend.getPoolView(inf.poolId)!.yBias).toBeCloseTo(1.7784 / 2, 3);
+            expect(backend.getPoolView(tank.poolId)!.yBias).toBeCloseTo(6.2996 / 2, 3);
+
+            // The instance matrix lifts each capsule to its own centre…
+            const infMesh = findMesh(scene, 'squadMember_d7_t0')!;
+            const tankMesh = findMesh(scene, 'squadMember_d8_t0')!;
+            expect(infMesh.thinInstanceGetWorldMatrices()[0].m[13]).toBeCloseTo(1.7784 / 2, 3);
+            expect(tankMesh.thinInstanceGetWorldMatrices()[0].m[13]).toBeCloseTo(6.2996 / 2, 3);
+            // …and the geometry itself is the derived size (mesh-local bounds).
+            const infExt = infMesh.getBoundingInfo().boundingBox.extendSize;
+            const tankExt = tankMesh.getBoundingInfo().boundingBox.extendSize;
+            expect(infExt.y * 2).toBeCloseTo(1.7784, 2);
+            expect(tankExt.y * 2).toBeCloseTo(6.2996, 2);
+            // Team tint survives the sizing.
+            const mat = infMesh.material as unknown as { diffuseColor: Color3 };
+            expect(mat.diffuseColor.b).toBe(1);
+        });
     });
 
     it('screen-aligned cards do NOT twist when the camera only moves position', () => {
@@ -448,7 +523,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
             expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
             expect(backend.getMemberFades(h)).toEqual({ model: 1 });
             // The capsule pool is never even created for this def.
-            expect(findMesh(scene, 'squadMember_t0')).toBeUndefined();
+            expect(findMesh(scene, 'squadMember_')).toBeUndefined();
             expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
         });
 
@@ -464,7 +539,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
 
             expect(backend.getMemberFades(h)).toEqual({ model: 1 });
             expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
-            expect(findMesh(scene, 'squadMember_t0')).toBeUndefined();
+            expect(findMesh(scene, 'squadMember_')).toBeUndefined();
         });
 
         it('uses the capsule while the body loads, then migrates to the model', () => {
@@ -479,7 +554,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
             backend.updateMember(h, 100, 0, 6, 0, 0);
             backend.flush();
             expect(findMesh(scene, 'memberModel_d7')).toBeUndefined();
-            const capsule = findMesh(scene, 'squadMember_t0')!;
+            const capsule = findMesh(scene, 'squadMember_d7_t0')!;
             expect(capsule.thinInstanceCount).toBe(1);
             expect(backend.getMemberFades(h)).toEqual({ capsule: true });
 
@@ -502,7 +577,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
             backend.updateMember(h, 100, 0, 6, 0, 0);
             backend.flush();
 
-            expect(findMesh(scene, 'squadMember_t0')!.thinInstanceCount).toBe(1);
+            expect(findMesh(scene, 'squadMember_d7_t0')!.thinInstanceCount).toBe(1);
             expect(backend.getMemberFades(h)).toEqual({ capsule: true });
         });
     });

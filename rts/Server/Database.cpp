@@ -172,6 +172,24 @@ void Database::CreateTables() {
                 nullptr, nullptr, nullptr);
         }
     }
+
+    // PLAN-metalstorm-lobby.md task 8c: guest/provisional accounts. Same
+    // additive migration as the two above — `users` is durable, and a guest
+    // row IS the player's account, so dropping and recreating would delete
+    // people who have never had a password to log back in with.
+    //
+    // DEFAULT 0 is what makes the migration safe for existing rows: every
+    // account that predates this column is a full account, which is exactly
+    // what 0 means.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        int probeRc = sqlite3_prepare_v2(db, "SELECT is_provisional FROM users LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (probeRc != SQLITE_OK) {
+            sqlite3_exec(db, "ALTER TABLE users ADD COLUMN is_provisional INTEGER NOT NULL DEFAULT 0",
+                nullptr, nullptr, nullptr);
+        }
+    }
 }
 
 namespace {
@@ -191,9 +209,10 @@ std::optional<std::string> ColumnOptionalText(sqlite3_stmt* stmt, int col) {
 
 int64_t Database::CreateUser(const std::string& username, const std::string& passwordHash,
                              const std::string& role, bool isDev,
-                             const std::optional<std::string>& factionId)
+                             const std::optional<std::string>& factionId,
+                             bool isProvisional)
 {
-    const char* sql = "INSERT INTO users (username, password_hash, role, is_dev, faction_id) VALUES (?, ?, ?, ?, ?)";
+    const char* sql = "INSERT INTO users (username, password_hash, role, is_dev, faction_id, is_provisional) VALUES (?, ?, ?, ?, ?, ?)";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -207,6 +226,7 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
         sqlite3_bind_text(stmt, 5, factionId->c_str(), -1, SQLITE_TRANSIENT);
     else
         sqlite3_bind_null(stmt, 5);
+    sqlite3_bind_int(stmt, 6, isProvisional ? 1 : 0);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -217,8 +237,32 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
     return sqlite3_last_insert_rowid(db);
 }
 
+bool Database::ConfirmProvisionalUpgrade(int64_t userId, const std::string& username,
+                                         const std::string& passwordHash,
+                                         const std::string& factionId)
+{
+    // `AND is_provisional = 1` is the concurrency control, not a re-check: two
+    // upgrade requests racing on the same guest both pass their route-level
+    // validation, and this clause is what makes the second one write nothing.
+    const char* sql =
+        "UPDATE users SET username = ?, password_hash = ?, faction_id = ?, "
+        "is_provisional = 0 WHERE id = ? AND is_provisional = 1";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, factionId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 4, userId);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+}
+
 std::optional<UserRecord> Database::FindUser(const std::string& username) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id FROM users WHERE username = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id, is_provisional FROM users WHERE username = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -239,13 +283,14 @@ std::optional<UserRecord> Database::FindUser(const std::string& username) {
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
     user.isDev = sqlite3_column_int(stmt, 5) != 0;
     user.factionId = ColumnOptionalText(stmt, 6);
+    user.isProvisional = sqlite3_column_int(stmt, 7) != 0;
 
     sqlite3_finalize(stmt);
     return user;
 }
 
 std::optional<UserRecord> Database::FindUserById(int64_t userId) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id FROM users WHERE id = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id, is_provisional FROM users WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -266,6 +311,7 @@ std::optional<UserRecord> Database::FindUserById(int64_t userId) {
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
     user.isDev = sqlite3_column_int(stmt, 5) != 0;
     user.factionId = ColumnOptionalText(stmt, 6);
+    user.isProvisional = sqlite3_column_int(stmt, 7) != 0;
 
     sqlite3_finalize(stmt);
     return user;
@@ -334,6 +380,36 @@ int64_t Database::ValidateSession(const std::string& token, int maxAgeSeconds) {
 
     sqlite3_finalize(stmt);
     return userId;
+}
+
+/// 8a-follow-on. Seconds of life left in `token`'s session, 0 if it has none.
+///
+/// The client cannot answer this for itself — the token is opaque, not a JWT —
+/// and it needs the answer to schedule a renewal. Every other auth response
+/// already carries `expires_in`, but they all MINT the session, so the full
+/// TTL is the right answer there. `/api/auth/validate` is the one route that
+/// reports on a session it did not create, which is the reload path: the
+/// remaining life is what the returning client has to arm its timer against,
+/// and the full TTL would be an over-estimate that expires it mid-match.
+int64_t Database::SessionRemainingSeconds(const std::string& token,
+                                          int maxAgeSeconds) {
+    const char* sql =
+        "SELECT ? - (strftime('%s','now') - strftime('%s', created_at)) "
+        "FROM sessions WHERE token = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "SessionRemainingSeconds: prepare failed: %s",
+             sqlite3_errmsg(db));
+        return 0;
+    }
+    sqlite3_bind_int(stmt, 1, maxAgeSeconds);
+    sqlite3_bind_text(stmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    int64_t remaining = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        remaining = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return remaining > 0 ? remaining : 0;
 }
 
 bool Database::EnsureAdminRole(const std::string& username) {
@@ -415,7 +491,7 @@ int Database::RevokeUserSessions(int64_t userId) {
 std::vector<UserRecord> Database::GetBannedUsers(int limit) {
     std::vector<UserRecord> out;
     const char* sql =
-        "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id "
+        "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id, is_provisional "
         "FROM users WHERE is_banned = 1 ORDER BY id DESC LIMIT ?";
     sqlite3_stmt* stmt = nullptr;
 
@@ -433,6 +509,7 @@ std::vector<UserRecord> Database::GetBannedUsers(int limit) {
         u.isBanned = sqlite3_column_int(stmt, 4) != 0;
         u.isDev = sqlite3_column_int(stmt, 5) != 0;
         u.factionId = ColumnOptionalText(stmt, 6);
+        u.isProvisional = sqlite3_column_int(stmt, 7) != 0;
         out.push_back(std::move(u));
     }
 
@@ -797,6 +874,34 @@ int Database::CountCommandPresets(int64_t userId) {
 
     sqlite3_finalize(stmt);
     return count;
+}
+
+std::unordered_map<std::string, unsigned> Database::CountAccountsByFaction() {
+    std::unordered_map<std::string, unsigned> out;
+    // `faction_id != ''` as well as NOT NULL: the column is nullable, and the
+    // admin override path writes a string — an empty one would otherwise count
+    // as a faction nobody can ever be seated on.
+    //
+    // `is_provisional = 0` (task 8c): a guest holds a provisional faction and
+    // is minted by the one route that needs no credential, so counting guests
+    // would make the seeding population something an outsider can inflate.
+    // See the header for the full argument.
+    const char* sql =
+        "SELECT faction_id, COUNT(*) FROM users "
+        "WHERE faction_id IS NOT NULL AND faction_id != '' AND is_provisional = 0 "
+        "GROUP BY faction_id";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* f = sqlite3_column_text(stmt, 0);
+        if (f == nullptr)
+            continue;
+        out[reinterpret_cast<const char*>(f)] =
+            static_cast<unsigned>(sqlite3_column_int(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return out;
 }
 
 bool Database::CommandPresetExists(int64_t userId, const std::string& name) {

@@ -34,6 +34,118 @@ describe("grid provider", function()
     end)
 end)
 
+-- Sector naming (PLAN-metalstorm-command-language.md §5). The contract these
+-- guard is "every grid cell has exactly one spoken name, and no two cells share
+-- one" — a duplicate name would leave the NL resolver guessing which sector the
+-- player meant, which is the one thing the named-entity index must never do.
+describe("column labels", function()
+    it("maps the first 26 columns to single letters", function()
+        assert.are.equal('A', Partition.columnLabel(0))
+        assert.are.equal('B', Partition.columnLabel(1))
+        assert.are.equal('Z', Partition.columnLabel(25))
+    end)
+
+    it("rolls into a second letter past Z instead of repeating one", function()
+        assert.are.equal('AA', Partition.columnLabel(26))
+        assert.are.equal('AB', Partition.columnLabel(27))
+        assert.are.equal('AZ', Partition.columnLabel(51))
+        assert.are.equal('BA', Partition.columnLabel(52))
+        assert.are.equal('ZZ', Partition.columnLabel(701))
+        assert.are.equal('AAA', Partition.columnLabel(702))
+    end)
+
+    it("is injective over a range far wider than any real map", function()
+        local seen = {}
+        for ix = 0, 999 do
+            local label = Partition.columnLabel(ix)
+            assert.is_nil(seen[label], 'duplicate column label ' .. tostring(label))
+            seen[label] = ix
+        end
+    end)
+
+    it("rejects non-column inputs rather than inventing a letter", function()
+        assert.is_nil(Partition.columnLabel(-1))
+        assert.is_nil(Partition.columnLabel(nil))
+        assert.is_nil(Partition.columnLabel('3'))
+    end)
+end)
+
+describe("grid sector names", function()
+    it("reads col:row as letter+1-based number", function()
+        assert.are.equal('Sector A1', Partition.gridSectorName('0:0'))
+        assert.are.equal('Sector D6', Partition.gridSectorName('3:5'))
+        assert.are.equal('Sector B9', Partition.gridSectorName('1:8'))
+    end)
+
+    it("handles the column edges", function()
+        assert.are.equal('Sector A1', Partition.gridSectorName('0:0'))     -- col 0
+        assert.are.equal('Sector Z1', Partition.gridSectorName('25:0'))    -- col 25
+        assert.are.equal('Sector AA1', Partition.gridSectorName('26:0'))   -- col 26
+    end)
+
+    it("has no row ceiling", function()
+        assert.are.equal('Sector A100', Partition.gridSectorName('0:99'))
+    end)
+
+    it("leaves authored graph keys alone", function()
+        assert.is_nil(Partition.gridSectorName('west_scarp_n'))
+        assert.is_nil(Partition.gridSectorName('wilds'))
+        assert.is_nil(Partition.gridSectorName('3:'))
+        assert.is_nil(Partition.gridSectorName(nil))
+    end)
+end)
+
+describe("grid provider sectors()", function()
+    it("names every cell the grid can return, uniquely", function()
+        local p = Partition.newGridProvider(8192, 8192, 2048)
+        local sectors = p.sectors()
+        assert.are.equal(#p.keys(), #sectors)
+
+        local byName, byKey = {}, {}
+        for _, s in ipairs(sectors) do
+            assert.is_string(s.name)
+            assert.is_nil(byName[s.name], 'duplicate sector name ' .. tostring(s.name))
+            byName[s.name] = true
+            byKey[s.key] = s
+        end
+        assert.are.equal('Sector A1', byKey['0:0'].name)
+        assert.are.equal('Sector D4', byKey['3:3'].name)
+    end)
+
+    it("puts each centre inside its own cell", function()
+        local p = Partition.newGridProvider(8192, 8192, 2048)
+        for _, s in ipairs(p.sectors()) do
+            assert.are.equal(s.key, p.at(s.x, s.z))
+        end
+    end)
+
+    it("clips the overhanging last row/column back onto the map", function()
+        -- 9000 / 2048 = 4.39 cells: the 5th column runs to 10240, well past the
+        -- map edge. An unclipped centre would be off-map and un-orderable.
+        local p = Partition.newGridProvider(9000, 9000, 2048)
+        for _, s in ipairs(p.sectors()) do
+            assert.is_true(s.x >= 0 and s.x <= 9000, 'x out of map: ' .. tostring(s.x))
+            assert.is_true(s.z >= 0 and s.z <= 9000, 'z out of map: ' .. tostring(s.z))
+        end
+    end)
+
+    it("names a tiny map's clamped 2x2 grid too (E5)", function()
+        local p = Partition.newGridProvider(512, 512, 2048)
+        local sectors = p.sectors()
+        assert.are.equal(4, #sectors)
+        assert.are.equal('Sector A1', sectors[1].name)
+    end)
+
+    it("is not offered by the graph provider — authored names stay primary", function()
+        local regions = {
+            { key = 'north', name = 'Northgate', polygon = square(0, 0, 4096, 4096) },
+            { key = 'south', name = 'Slag Forge', polygon = square(0, 4096, 4096, 8192) },
+        }
+        local p = Partition.newGraphProvider(regions, 8192, 8192)
+        assert.is_nil(p.sectors)
+    end)
+end)
+
 describe("point-in-polygon", function()
     it("detects points inside and outside a square", function()
         local sq = square(0, 0, 100, 100)
@@ -219,6 +331,65 @@ describe("graph provider (point lookup)", function()
         -- point is actually inside.
         assert.are.equal('a', provider.at(280, 280))
         assert.are.equal('wilds', provider.at(320, 320))
+    end)
+end)
+
+describe("graph provider — clipped (M9m) region polygons", function()
+    -- A generated region's polygon is its component's coastline, not the leaf
+    -- rectangle: concave, many-vertexed, and it deliberately does NOT cover
+    -- everything inside its own bounding box. This is a C shape whose mouth
+    -- opens east — the "bay" is ground of another component, which must
+    -- resolve to wilds rather than to the region wrapped around it.
+    local c_shape = {
+        { key = 'bay_arm', neighbors = {}, centre = { x = 100, z = 100 },
+          polygon = {
+              {x=0,z=0}, {x=900,z=0}, {x=900,z=300}, {x=300,z=300},
+              {x=300,z=700}, {x=900,z=700}, {x=900,z=1000}, {x=0,z=1000},
+          } },
+    }
+
+    it("answers wilds for ground inside the bbox but outside the polygon", function()
+        local provider = Partition.newGraphProvider(c_shape, 4096, 4096)
+        assert.is_truthy(provider)
+        assert.are.equal('bay_arm', provider.at(100, 500))    -- the spine
+        assert.are.equal('bay_arm', provider.at(600, 100))    -- north arm
+        assert.are.equal('wilds', provider.at(600, 500))      -- the bay
+    end)
+
+    it("agrees with a bare point-in-polygon sweep everywhere", function()
+        -- The provider pre-filters candidates by bounding box before running
+        -- the polygon test. That is a speed change only, so a sweep of the
+        -- whole map must give the same answer as calling pointInPolygon
+        -- directly — including outside the bbox, where the filter fires.
+        local provider = Partition.newGraphProvider(c_shape, 4096, 4096)
+        for x = 25, 4000, 137 do
+            for z = 25, 4000, 149 do
+                local want = Partition.pointInPolygon(x, z, c_shape[1].polygon)
+                    and 'bay_arm' or 'wilds'
+                assert.are.equal(want, provider.at(x, z))
+            end
+        end
+    end)
+
+    it("accepts an optional centre and rejects one outside the map", function()
+        local ok = Partition.validateGraph(c_shape, 4096, 4096)
+        assert.is_true(ok)
+
+        local outside = {
+            { key = 'a', polygon = square(0, 0, 100, 100), neighbors = {},
+              centre = { x = 5000, z = 50 } },
+        }
+        local bad, errors = Partition.validateGraph(outside, 4096, 4096)
+        assert.is_false(bad)
+        assert.are.equal('a: centre out of map bounds', errors[1])
+
+        local malformed = {
+            { key = 'a', polygon = square(0, 0, 100, 100), neighbors = {},
+              centre = { x = 'nope' } },
+        }
+        local bad2, errors2 = Partition.validateGraph(malformed, 4096, 4096)
+        assert.is_false(bad2)
+        assert.are.equal('a: malformed centre', errors2[1])
     end)
 end)
 

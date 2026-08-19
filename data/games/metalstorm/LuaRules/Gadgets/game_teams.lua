@@ -88,6 +88,10 @@ end
 
 local ALLIED_LOS = { allied = true }   -- matches game_authority.lua's team-param visibility (§1)
 local SCOREBOARD_PERIOD_FRAMES = 900   -- 30s @ GAME_SPEED 30 (§6 "slow cadence")
+local Tick = VFS.Include("LuaRules/Gadgets/tick.lua")
+-- D15: skip-safe cadence (see tick.lua). Observation policy — the scoreboard
+-- publishes current standings, so a stall costs one refresh, not a payout.
+local scoreboardGate = Tick.new(SCOREBOARD_PERIOD_FRAMES)
 -- §6 "objectives completed (participation >= threshold at resolve)". The
 -- plan doesn't pin a number; this picks the smallest meaningful credited
 -- unit (matches game_objectives.lua's own PARTICIPATION_TICK_WEIGHT) rather
@@ -367,6 +371,28 @@ local function creditObjectiveComplete(o, completingTeam)
     end
 end
 
+--- Rejoin restore of participation credit (PLAN-metalstorm-lobby.md §2.5/§5.1,
+--- task 4). The server calls this when an account returns to a persistent war,
+--- with the counters it captured when they last left.
+---
+--- These are LIFETIME STATISTICS, not resources — nothing is conserved, so
+--- unlike the authority pool they are handed back on every rejoin however long
+--- the absence was. A player who fought all week and comes back next month has
+--- still done the fighting.
+---
+--- MAX, never assignment, and that is the guard that matters: a war resumed
+--- from an empty sim and a war still running are the same call here, and in the
+--- second case the live counters are ahead of the saved ones (the sweep that
+--- wrote them runs once a minute). Assigning would roll a still-playing
+--- player's scoreboard backwards on a reconnect.
+function GG.Teams.RestoreScore(playerID, restoredEarned, restoredSpent, restoredObjectives)
+    if not playerID then return end
+    local pid = math.floor(playerID)
+    earned[pid]         = math.max(earned[pid] or 0, restoredEarned or 0)
+    spent[pid]          = math.max(spent[pid] or 0, restoredSpent or 0)
+    objectivesDone[pid] = math.max(objectivesDone[pid] or 0, restoredObjectives or 0)
+end
+
 local function publishScoreboard()
     for _, playerID in ipairs(Spring.GetPlayerList()) do
         -- Integer-normalised key — the SAME AI3 bugfix publishAIProfiles above
@@ -419,7 +445,12 @@ function gadget:GameStart()
     -- joiner takes (mirrors game_authority.lua's own GameStart loop) — sets
     -- initial tenure + leader + starter suggestion for every starting player,
     -- not just drop-ins.
-    for _, playerID in ipairs(Spring.GetPlayerList()) do
+    --
+    -- ACTIVE only, for the reason game_authority.lua's twin loop spells out: a
+    -- war boots with Σ slotCap EMPTY player slots pre-allocated for the people
+    -- who have not arrived yet (PLAN-metalstorm-wars.md §8.1), and giving them
+    -- tenure would age a seat rather than a player.
+    for _, playerID in ipairs(Spring.GetPlayerList(-1, true)) do
         gadget:PlayerAdded(playerID)
     end
     -- Establish the initial co-commander / caretaker split once the whole
@@ -431,7 +462,60 @@ function gadget:GameStart()
     publishAIProfiles()
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — the five per-game tables. Every one of them is a running total or
+-- a first-observation stamp that nothing in the world re-derives:
+--   * `joinFrame`  — tenure, and it is the tie-break reassignLeader sorts on,
+--                    so losing it silently re-elects a different leader.
+--   * `teamLeader` — this gadget's OWN bookkeeping (the header is explicit
+--                    that it is never an engine write), so no engine state
+--                    carries it; `team_leader` is only its published mirror.
+--   * `earned` / `spent` / `objectivesDone` — lifetime counters fed by hooks
+--                    off events that have already happened. A rollback must
+--                    take back the credit for the fighting it rolled back;
+--                    RestoreScore's MAX guard is for a REJOIN (a live process
+--                    ahead of the saved numbers) and is deliberately not what
+--                    happens here — a restore is the one case where the saved
+--                    numbers must win outright.
+--
+-- RE-DERIVED, not captured — `caretakerEnabled` (a modoption, re-read in both
+-- Initialize and GameStart; modoptions cannot change within a war, and if a
+-- resumed war were ever launched with a different one the LIVE launch must
+-- win, not a value fossilised in a payload).
+--
+-- NOT CAPTURED, rebuilt within the tick — the co-commander publish
+-- (`team_active_humans`, the per-AI own-pool-only flag). Those are functions of
+-- who is connected RIGHT NOW, which a snapshot cannot speak for: the roster at
+-- restore is the live one, not the captured one.
+--
+-- NOT REPUBLISHED — `score_*` (game rules params, restored wholesale by the
+-- `gameRules` section applied just before this call) and `team_leader` /
+-- `ai_profile_*` / `team_active_humans` (team rules params, restored by the
+-- `teams` section). Publishing here would write the same bytes twice.
+function gadget:Save(state)
+    state.joinFrame = joinFrame
+    state.teamLeader = teamLeader
+    state.earned = earned
+    state.spent = spent
+    state.objectivesDone = objectivesDone
+    state.scoreboardGate = Tick.save(scoreboardGate)
+end
+
+function gadget:Load(state)
+    joinFrame      = state.joinFrame or {}
+    teamLeader     = state.teamLeader or {}
+    earned         = state.earned or {}
+    spent          = state.spent or {}
+    objectivesDone = state.objectivesDone or {}
+    Tick.load(scoreboardGate, state.scoreboardGate)
+    -- Re-derive the half that belongs to the live roster rather than to the
+    -- payload: whoever is connected now decides caretaker/co-commander, and
+    -- ApplyTeams has just rewritten every team rulesParam underneath us.
+    refreshCoCommanders()
+end
+
 function gadget:GameFrame(frame)
-    if frame % SCOREBOARD_PERIOD_FRAMES ~= 0 then return end
+    if not Tick.due(scoreboardGate, frame) then return end
     publishScoreboard()
 end

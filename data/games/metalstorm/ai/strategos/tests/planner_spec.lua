@@ -127,6 +127,59 @@ describe("budget governor", function()
         assert.is_true(countType(out.directives, 'directive') >= 1)
     end)
 
+    -- D68: the planner has to hand the actuator BOTH scales. The head count is
+    -- what it reasons and narrates in; the hitpoint figure is the only one the
+    -- engine's demand cap can read, and a directive emitted without it is
+    -- uncapped-or-broken at the boundary.
+    it("every emitted directive carries the package's hitpoint figure (D68)", function()
+        local role = fullSideRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin' } },
+                front = { owner = 1, value = 1.0, neighbors = { 'home' } },
+                basin = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            intel  = { front = { strength = 5, confidence = 1.0, lastSeenFrame = 1000 } },
+            -- The real shape a Picture produces: a head count AND its price.
+            ledger = { home = { strength = 6, health = 7200 } },
+            economy = { ownPool = 1000, teamPool = 0, costScale = 1.0 },
+        })
+        local out = plan(p)
+
+        local seen = 0
+        for _, d in ipairs(out.directives) do
+            if d.type == 'directive' or d.type == 'posture' then
+                seen = seen + 1
+                assert.are.equal(6, d.strength)
+                assert.are.equal(7200, d.healthStrength)
+            end
+        end
+        assert.is_true(seen >= 1)
+    end)
+
+    -- A ledger bucket with no price (a Picture from before D68, or a blind one)
+    -- must emit 0 rather than nil: the actuator turns 0 into "no cap", and nil
+    -- into an arithmetic error on a live tick.
+    it("a bucket with no hitpoint figure emits 0, never nil (D68)", function()
+        local role = fullSideRole()
+        local out = plan(makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0, value = 1.5, neighbors = { 'front' } },
+                front = { owner = 1, value = 1.0, neighbors = { 'home' } },
+            },
+            intel  = { front = { strength = 5, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger = { home = { strength = 6 } },     -- no `health`
+            economy = { ownPool = 1000, teamPool = 0, costScale = 1.0 },
+        }))
+        for _, d in ipairs(out.directives) do
+            if d.type == 'directive' or d.type == 'posture' then
+                assert.are.equal(0, d.healthStrength)
+            end
+        end
+    end)
+
     it("a broke AI turtles — only DEFEND postures go out", function()
         local out = plan(economyFixture(0))
         assert.is_true(out.posturesOnly)
@@ -591,5 +644,234 @@ describe("suggested_for ×2 weighting (co-commander soft tasking, §5.1)", funct
             winners(plan(fixture(coCommanderRole()), nil, caretakerProfile))
         assert.is_true(objWon)
         assert.is_false(expandWon)
+    end)
+end)
+
+--=============================================================================
+-- The terminal objective (endtoend Q-E1 / D47, answer A: the AI must want the
+-- prize). The fixture is fire 23's war in miniature: the enemy stands on the
+-- region whose control objective ENDS THE WAR, our army is its equal (so
+-- pSuccess ≈ 0.5, under the 0.6 floor), and a safe side objective is available.
+-- Before the fix the planner could not see `victory` at all, priced the war at
+-- 300 authority against the side objective's 110, and skipped the prize on the
+-- floor — two wars ran to the same frame with 14 player directives and with 0.
+describe("terminal objective is contested (Q-E1 / D47)", function()
+    -- `victory` is passed through as the board publishes it (1 / absent) so
+    -- the same fixture with the flag removed is the null control.
+    local function warFixture(victory, progress, prizeOwner)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,          value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = prizeOwner, value = 1.0, neighbors = { 'home', 'side' } },
+                side  = { owner = nil,        value = 1.0, neighbors = { 'raven' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = progress or 0, victory = victory },
+                ['2'] = { type = 'control', scope = 'tactical', state = 'active',
+                          team = -1, region = 'side', reward = 110, progress = 0 },
+            },
+            -- Equal armies: pSuccess = 1000²/(1000²+1000²) = 0.5 < PSUCCESS_FLOOR.
+            intel   = { raven = { strength = 1000, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function directiveFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: an unflagged 300-reward control is skipped on the floor", function()
+        local out = plan(warFixture(nil, 0, 1))
+        assert.is_nil(directiveFor(out, 'obj:1'))
+    end)
+
+    it("marches on a defended prize the same fixture otherwise skips", function()
+        local out = plan(warFixture(1, 0, 1))
+        local d = directiveFor(out, 'obj:1')
+        assert.is_truthy(d)
+        assert.are.equal('TAKE_AND_HOLD', d.directive)
+    end)
+
+    it("outranks a side objective for the one available package", function()
+        local out = plan(warFixture(1, 0, 1))
+        assert.is_truthy(directiveFor(out, 'obj:1'))
+        assert.is_nil(directiveFor(out, 'obj:2'))
+    end)
+
+    it("a hopeless attack is still refused while the hold clock is young", function()
+        local p = warFixture(1, 0, 1)
+        -- 5:1 against: pSuccess ≈ 0.04, under even VICTORY_PSUCCESS_FLOOR.
+        p.intel.raven.strength = 5000
+        assert.is_nil(directiveFor(plan(p), 'obj:1'))
+    end)
+
+    it("and is taken anyway once the holder is about to bank the war", function()
+        local p = warFixture(1, 0.9, 1)
+        p.intel.raven.strength = 5000
+        assert.is_truthy(directiveFor(plan(p), 'obj:1'))
+    end)
+
+    it("holds a prize of our own against odds that would rout a side objective", function()
+        local p = warFixture(1, 0.5, 0)      -- we own raven and are banking it
+        p.intel.raven.strength = 5000        -- contested by a much larger force
+        local d = directiveFor(plan(p), 'obj:1')
+        assert.is_truthy(d)
+        assert.are.equal('TAKE_AND_HOLD', d.directive)
+    end)
+end)
+
+--=============================================================================
+-- Mass, not thrift, picks the package for the terminal objective (fire 24).
+-- `score = value·pSuccess − cost` with cost scaling in package strength means
+-- the CHEAPEST package maximises the score for any goal whose pSuccess is the
+-- flat no-intel prior — so the planner sent 3 units at the war and left 14 on
+-- a rear posture. Two packages, one prize, no intel: the big one must go.
+describe("the terminal objective takes the strongest package (fire 24)", function()
+    local function twoPackageFixture(victory)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                bend  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = nil, value = 1.0, neighbors = { 'home', 'bend' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = 0, victory = victory },
+            },
+            ledger  = { home = { strength = 3 }, bend = { strength = 14 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function packageFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d.groupId end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: unflagged, thrift wins and the 3-force fragment is sent", function()
+        assert.are.equal('pkg:home', packageFor(plan(twoPackageFixture(nil)), 'obj:1'))
+    end)
+
+    it("flagged, the 14-force package is sent at the prize", function()
+        assert.are.equal('pkg:bend', packageFor(plan(twoPackageFixture(1)), 'obj:1'))
+    end)
+end)
+
+--=============================================================================
+-- Commitment hysteresis must not pin the war to a rump (fire 24). A package is
+-- identified by the region its units stand in, so a marching army is re-bucketed
+-- under a new id and the goal's commitment stays on whatever was left behind;
+-- the ×1.4 reassign bar then makes that permanent. Reproduced with a commitment
+-- on the 3-force home package while 14 units stand one region on.
+describe("the terminal objective is not pinned to a stale package (fire 24)", function()
+    local function marchedFixture(victory)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                bend  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = nil, value = 1.0, neighbors = { 'home', 'bend' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = 0, victory = victory },
+            },
+            ledger  = { home = { strength = 3 }, bend = { strength = 14 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    -- The commitment the whole 17-unit army earned before it marched.
+    local function pinnedToHome()
+        return { ['obj:1'] = { packageId = 'pkg:home', sinceFrame = 0, score = 189 } }
+    end
+
+    local function packageFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d.groupId end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: an unflagged goal stays pinned to the 3-force rump", function()
+        assert.are.equal('pkg:home',
+            packageFor(plan(marchedFixture(nil), pinnedToHome()), 'obj:1'))
+    end)
+
+    it("the terminal objective moves to the marched 14-force package", function()
+        assert.are.equal('pkg:bend',
+            packageFor(plan(marchedFixture(1), pinnedToHome()), 'obj:1'))
+    end)
+end)
+
+describe("a human's veto is excluded AND reported (PLAN-ai-synced-write task 5)", function()
+    -- Two goals the planner would otherwise both pursue, and one package. The
+    -- veto is on the one it prefers, so the observable is not just "the other
+    -- one won" — it is that the plan NAMES the vetoed goal, which is what
+    -- `make test-ai-veto-loop` reads off the tick line.
+    local function vetoFixture(vetoed)
+        local role = fullSideRole()
+        local veto = {}
+        if vetoed then veto[vetoed] = true end
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'plains', 'ridge' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+                ridge  = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            ledger  = { home = { strength = 10 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            guidance = { regionPaint = {}, assetLocks = {}, delegated = {}, veto = veto },
+        })
+    end
+
+    local function ids(list)
+        local out = {}
+        for _, v in ipairs(list or {}) do out[#out + 1] = v end
+        table.sort(out)
+        return out
+    end
+
+    it("NULL CONTROL: with no veto, nothing is reported and the goal is live", function()
+        local out = plan(vetoFixture(nil))
+        assert.are.same({}, ids(out.vetoed))
+        local sawPlains = false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then sawPlains = true end
+        end
+        assert.is_true(sawPlains)
+    end)
+
+    it("the vetoed goal is dropped from the directives and named in the plan", function()
+        local out = plan(vetoFixture('exp:plains'))
+        assert.are.same({ 'exp:plains' }, ids(out.vetoed))
+        for _, d in ipairs(out.directives) do
+            assert.are_not.equal('exp:plains', d.goalId)
+        end
+    end)
+
+    it("the report comes from the exclusion, not from the veto list", function()
+        -- The distinction the live gate depends on: a veto naming a goal that is
+        -- not on this tick's slate must NOT be reported, because nothing was
+        -- excluded. A report recomputed from `guidance.veto` would name it, and
+        -- would then keep naming it for a planner that had stopped acting.
+        local out = plan(vetoFixture('exp:nowhere'))
+        assert.are.same({}, ids(out.vetoed))
     end)
 end)

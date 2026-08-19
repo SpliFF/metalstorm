@@ -89,6 +89,11 @@ export class RTSCamera {
     private orbitSpeed: number;
 
     private keys = new Set<string>();
+    /// P5 item 5: test-harness input lock. While set, USER input intents are
+    /// ignored; programmatic moves (setPose/focusOn/fitMap/…) still run.
+    private inputLocked = false;
+    /// Waiters registered by `waitForSettle()`, resolved by `endTransition()`.
+    private settleWaiters: (() => void)[] = [];
     private mouseX = 0;
     private mouseY = 0;
     private mouseInCanvas = false;
@@ -195,8 +200,53 @@ export class RTSCamera {
         if (dpr > 0) this.dpr = dpr;
     }
 
+    /**
+     * Test-harness input lock. While locked, user input intents (keys,
+     * edge-scroll, wheel, drags) are ignored AND any currently HELD state is
+     * dropped — a CDP-synthesised keydown otherwise pans forever, because the
+     * matching keyup the real user would produce never arrives.
+     *
+     * Programmatic camera moves (setPose / focusOn / fitMap / orbit rig) still
+     * work: the lock is against *user* input, and test camera calls must keep
+     * working under it.
+     *
+     * Note (R5): main's CameraInput keeps its own keyboard bookkeeping. After
+     * unlock, a key still physically held will NOT resume panning until a fresh
+     * keydown arrives — the worker's held-key set was cleared.
+     */
+    setInputLocked(on: boolean): void {
+        this.inputLocked = on;
+        if (on) {
+            this.keys.clear();
+            this.middleDragging = false;
+            this.rightDragging = false;
+            this.mouseInCanvas = false;
+            this.targetDistance = -1;   // kill in-flight wheel-zoom easing
+        }
+    }
+
+    get isInputLocked(): boolean { return this.inputLocked; }
+
+    /** Resolves when no animated transition is running (immediately when
+     *  already idle). Every path that clears `this.transition` goes through
+     *  `endTransition()`, so a waiter can never strand — including cancel,
+     *  instant-jump and dispose. */
+    waitForSettle(): Promise<void> {
+        if (!this.transition) return Promise.resolve();
+        return new Promise((res) => { this.settleWaiters.push(res); });
+    }
+
+    /** The ONE place `this.transition` is cleared. Flushes settle waiters. */
+    private endTransition(): void {
+        this.transition = null;
+        const ws = this.settleWaiters;
+        this.settleWaiters = [];
+        for (const w of ws) w();
+    }
+
     /** Key down. `code` is a lowercased KeyboardEvent.code (e.g. 'arrowup'). */
     keyDown(code: string): void {
+        if (this.inputLocked) return;
         this.keys.add(code);
     }
 
@@ -226,8 +276,9 @@ export class RTSCamera {
 
     /** Mouse wheel. `delta` is the raw WheelEvent.deltaY. */
     wheel(_x: number, _y: number, delta: number): void {
+        if (this.inputLocked) return;
         // User scroll cancels any animated transition
-        this.transition = null;
+        this.endTransition();
         // Initialise targetDistance on first wheel event from the actual
         // camera position, so we pick up wherever the camera currently is.
         if (this.targetDistance < 0) {
@@ -245,6 +296,7 @@ export class RTSCamera {
     /** Pointer move. `x`/`y` are canvas-relative CSS px; `buttons` is the live
      *  button bitmask (1=left, 2=right, 4=middle — DOM PointerEvent.buttons). */
     pointerMove(x: number, y: number, _buttons: number): void {
+        if (this.inputLocked) return;
         this.mouseX = x;
         this.mouseY = y;
         this.mouseInCanvas = x >= 0 && x < this.canvasW && y >= 0 && y < this.canvasH;
@@ -262,7 +314,7 @@ export class RTSCamera {
                 const ty = y - this.rightStartY;
                 if (Math.hypot(tx, ty) < this.rightDragThresholdPx) return;
                 this.rightCrossedThreshold = true;
-                this.transition = null;
+                this.endTransition();
             }
             const dx = x - this.rightLastX;
             const dy = y - this.rightLastY;
@@ -274,6 +326,7 @@ export class RTSCamera {
 
     /** Pointer down. `button` is 0=left 1=middle 2=right (DOM convention). */
     pointerDown(x: number, y: number, button: number, mods: number): void {
+        if (this.inputLocked) return;
         if (button === 1) {
             // Middle button → pan drag.
             this.middleDragging = true;
@@ -400,40 +453,45 @@ export class RTSCamera {
             return;
         }
 
-        // Pan speed scales with camera height so zoomed-out is faster
-        const heightFactor = Math.max(0.3, this.camera.position.y / 1000);
-        const distance = this.panSpeed * heightFactor * dt;
+        // P5 item 5: every input-DRIVEN motion below is gated by the test
+        // input lock. The safety clamps after it are not — they are corrections,
+        // not input, and must keep the camera above ground while locked.
+        if (!this.inputLocked) {
+            // Pan speed scales with camera height so zoomed-out is faster
+            const heightFactor = Math.max(0.3, this.camera.position.y / 1000);
+            const distance = this.panSpeed * heightFactor * dt;
 
-        let moveX = 0, moveZ = 0;
-        // Arrow keys only — Spring/ZK reserve WASD for unit orders.
-        if (this.keys.has('arrowup'))    moveZ += 1;
-        if (this.keys.has('arrowdown'))  moveZ -= 1;
-        if (this.keys.has('arrowleft'))  moveX -= 1;
-        if (this.keys.has('arrowright')) moveX += 1;
+            let moveX = 0, moveZ = 0;
+            // Arrow keys only — Spring/ZK reserve WASD for unit orders.
+            if (this.keys.has('arrowup'))    moveZ += 1;
+            if (this.keys.has('arrowdown'))  moveZ -= 1;
+            if (this.keys.has('arrowleft'))  moveX -= 1;
+            if (this.keys.has('arrowright')) moveX += 1;
 
-        // Edge scrolling
-        if (this.edgeScrollPixels > 0 && this.mouseInCanvas) {
-            const w = this.canvasW;
-            const h = this.canvasH;
-            const t = this.edgeScrollPixels;
-            if (this.mouseX < t)       moveX -= 1;
-            else if (this.mouseX > w - t) moveX += 1;
-            if (this.mouseY < t)       moveZ += 1;
-            else if (this.mouseY > h - t) moveZ -= 1;
+            // Edge scrolling
+            if (this.edgeScrollPixels > 0 && this.mouseInCanvas) {
+                const w = this.canvasW;
+                const h = this.canvasH;
+                const t = this.edgeScrollPixels;
+                if (this.mouseX < t)       moveX -= 1;
+                else if (this.mouseX > w - t) moveX += 1;
+                if (this.mouseY < t)       moveZ += 1;
+                else if (this.mouseY > h - t) moveZ -= 1;
+            }
+
+            if (moveX !== 0 || moveZ !== 0) {
+                // Normalise diagonal movement
+                const len = Math.hypot(moveX, moveZ);
+                moveX /= len;
+                moveZ /= len;
+
+                const dx = this.right.x * moveX * distance + this.forward.x * moveZ * distance;
+                const dz = this.right.z * moveX * distance + this.forward.z * moveZ * distance;
+                this.panBy(dx, dz);
+            }
+
+            this.applyZoomSmoothing(dt);
         }
-
-        if (moveX !== 0 || moveZ !== 0) {
-            // Normalise diagonal movement
-            const len = Math.hypot(moveX, moveZ);
-            moveX /= len;
-            moveZ /= len;
-
-            const dx = this.right.x * moveX * distance + this.forward.x * moveZ * distance;
-            const dz = this.right.z * moveX * distance + this.forward.z * moveZ * distance;
-            this.panBy(dx, dz);
-        }
-
-        this.applyZoomSmoothing(dt);
 
         // Terrain protection: lift the camera if it ended up below the
         // ground or under sea level after any of the above (pan / zoom /
@@ -792,7 +850,7 @@ export class RTSCamera {
      */
     focusOn(x: number, z: number, durationMs = 0): void {
         if (durationMs <= 0) {
-            this.transition = null;
+            this.endTransition();
             const dx = x - this.lookAt.x;
             const dz = z - this.lookAt.z;
             this.panBy(dx, dz);
@@ -822,7 +880,7 @@ export class RTSCamera {
         const endPos = target.add(dir.scale(currentDist));
         const endLookAt = target.clone();
         if (durationMs <= 0) {
-            this.transition = null;
+            this.endTransition();
             this.camera.position.copyFrom(endPos);
             this.lookAt.copyFrom(endLookAt);
             this.camera.setTarget(this.lookAt);
@@ -853,7 +911,7 @@ export class RTSCamera {
         const endPos = new Vector3(view.pos.x, view.pos.y, view.pos.z);
         const endLookAt = new Vector3(view.lookAt.x, view.lookAt.y, view.lookAt.z);
         if (durationMs <= 0) {
-            this.transition = null;
+            this.endTransition();
             this.camera.position.copyFrom(endPos);
             this.lookAt.copyFrom(endLookAt);
             this.camera.setTarget(this.lookAt);
@@ -1201,7 +1259,7 @@ export class RTSCamera {
         );
 
         if (durationMs <= 0) {
-            this.transition = null;
+            this.endTransition();
             this.camera.position.copyFrom(endPos);
             this.camera.setTarget(this.lookAt);
             this.targetDistance = -1;
@@ -1213,7 +1271,7 @@ export class RTSCamera {
 
     /** Cancel any in-progress animated transition. */
     cancelTransition(): void {
-        this.transition = null;
+        this.endTransition();
     }
 
     /** Whether an animated transition is currently running. */
@@ -1229,6 +1287,11 @@ export class RTSCamera {
     /** Current camera position (read-only copy). */
     get position(): Vector3 {
         return this.camera.position.clone();
+    }
+
+    /** Configured zoom-out ceiling (elmos), for normalising camera height into [0,1]. */
+    get zoomMaxHeight(): number {
+        return this.maxHeight;
     }
 
     // ─── Transition internals ───
@@ -1255,7 +1318,7 @@ export class RTSCamera {
 
         // Any user input (keys, middle/right drag, wheel) cancels the animation
         if (this.keys.size > 0 || this.middleDragging || this.rightDragging) {
-            this.transition = null;
+            this.endTransition();
             return;
         }
 
@@ -1269,7 +1332,7 @@ export class RTSCamera {
         this.camera.setTarget(this.lookAt);
 
         if (progress >= 1) {
-            this.transition = null;
+            this.endTransition();
             this.targetDistance = -1;
             this.updateAxes();
         }
@@ -1281,6 +1344,9 @@ export class RTSCamera {
         this.disposed = true;
         this.middleDragging = false;
         this.rightDragging = false;
-        this.transition = null;
+        // A lock must never outlive its camera: worker teardown disposes every
+        // view camera, and a fresh gp:init builds a new (unlocked) one.
+        this.inputLocked = false;
+        this.endTransition();
     }
 }

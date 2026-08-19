@@ -58,7 +58,10 @@ export interface OrgGroupLike {
 export interface CostPreview {
   cost: number;
   affordable: boolean;
-  /** 0 when affordable; otherwise how much more authority is needed. */
+  /**
+   * 0 when affordable; otherwise how much more authority is needed, in whole
+   * authority rounded up (it is displayed verbatim — see below).
+   */
   shortfall: number;
 }
 
@@ -92,7 +95,15 @@ export function previewDirectiveCost(
   return {
     cost,
     affordable,
-    shortfall: affordable ? 0 : cost - (playerPool + teamPool),
+    // Whole authority, rounded UP (PLAN-endtoend.md D49). `cost` is already
+    // integral (the model's predict() ceils it), but the pools are fractional
+    // float32 rulesParam reads, so the difference carried both a real fraction
+    // and float32 debris straight into three player-facing strings
+    // ("short by 12.449996948242188"). CEIL, not round: this number is
+    // displayed as what you still need, and needing 12.45 means 13 will do it
+    // while 12 will not — rounding down would print a shortfall the player
+    // could cover and still be refused.
+    shortfall: affordable ? 0 : Math.ceil(cost - (playerPool + teamPool)),
   };
 }
 

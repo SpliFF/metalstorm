@@ -8,9 +8,9 @@
  *   - gp-context.ts      — shared mutable seam refs (connection, renderers…)
  *   - worker-vfs.ts      — VFS lookup, prefetch, Lua source constants
  *
- * The entry file must remain `core/lua-widget-worker.ts` — main.ts and
- * lua-widget-manager.ts both bundle it by that path (anchor:
- * `import GameWorker from './core/lua-widget-worker.ts?worker'`).
+ * The entry file must remain `core/lua-widget-worker.ts` — main.ts bundles
+ * it by that path (`import GameWorker from './core/lua-widget-worker.ts?worker'`).
+ * The retired lua-widget-manager.ts used to bundle it identically.
  *
  * Extracted as part of PLAN-refactor-p3.md WP2c.
  */
@@ -18,7 +18,7 @@
 import type { WorkerInbound } from './game-worker-protocol.js';
 import {
     gpInit, gpResize, gpShutdown, gpSetShift, gpTestDispatch,
-    gpDetach, gpResync, gpSoftRecover,
+    gpDetach, gpResync, gpSoftRecover, gpAdoptToken,
     gpHandlePointerMove, gpHandlePointerDown, gpHandlePointerUp,
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
@@ -28,6 +28,7 @@ import {
     gpHandleGroupPosture, gpHandleGroupDirectiveUpdate, gpHandleGroupDirectiveRemove,
     gpHandleSelectOrgGroup, gpHandleArmDirectiveShape, gpHandleCancelDirectiveShape,
     gpHandleStandingOrderCreate, gpHandleLuaRulesMsg, gpHandleConsoleCommand,
+    gpHandleClientEvalResult, gpClearPendingClientEvals,
     gpHandlePlayerCommand, gpHandleSelectionState, gpHandleReplayControl,
 } from './game-processor.js';
 // PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
@@ -250,6 +251,12 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
         case 'gp:consoleCommand':
             gpHandleConsoleCommand(msg.scope as string, msg.command as string);
             break;
+        // PLAN-test-automation P7: main finished a relayed js/widgets/test
+        // eval; hand it to the Connection this worker owns.
+        case 'gp:clientEvalResult':
+            gpHandleClientEvalResult(msg.requestId as number, msg.success as boolean,
+                                     msg.output as string);
+            break;
         case 'gp:playerCommand':
             gpHandlePlayerCommand(msg.commandId as number, msg.unitIds as number[], msg.params as number[], msg.options as number);
             break;
@@ -280,15 +287,21 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
             break;
 
         case 'gp:shutdown':
+            gpClearPendingClientEvals();   // P7: no timer outlives the connection
             gpShutdown();
             break;
 
         // PLAN-quickstart.md §3.1/§3.2 (Part B): park / re-enter without a boot.
         case 'gp:detach':
+            gpClearPendingClientEvals();   // P7: the socket is going away
             gpDetach();
             break;
         case 'gp:resync':
             gpResync((msg as { token?: string }).token);
+            break;
+        // 8a-follow-on: main renewed the access session. See gpAdoptToken.
+        case 'gp:token':
+            gpAdoptToken(String((msg as { token?: string }).token ?? ''));
             break;
 
         // PLAN-client-resilience.md task 2 (R1 soft rung): the RecoveryLadder

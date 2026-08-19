@@ -35,6 +35,51 @@ function M.gridRegionSize(mapWidth, mapHeight, desiredSize)
     return desiredSize
 end
 
+-- ------------------------------------------------------------
+-- Sector naming (PLAN-metalstorm-command-language.md §5)
+-- ------------------------------------------------------------
+--
+-- Grid regions are synthetic and carry no authored metadata, so until now
+-- their keys ("3:5") were the only handle anyone had on them — and a bare
+-- "3:5" is not something a player says out loud. "Zoom to sector B9" was
+-- therefore impossible on every map without a hand-authored
+-- mapdata/regions.lua. These two pure functions give each cell a spoken name;
+-- game_regions.lua publishes them through the SAME region_<key>_name
+-- rulesParam the graph provider already uses, so the client needs no change.
+
+--- Spreadsheet-style column label: 0 → "A", 25 → "Z", 26 → "AA", 27 → "AB".
+---
+--- The alphabet caps at 26 letters and the default 2048-elmo region size only
+--- reaches column Z on a ~53 km map, so the second letter is an edge case, not
+--- the norm. It exists anyway because the alternative — wrapping back to "A" —
+--- would give two sectors the same name, and two identically-named places is
+--- precisely the failure the named-entity index exists to prevent: the
+--- resolver would have to guess which one the player meant.
+function M.columnLabel(ix)
+    if type(ix) ~= 'number' or ix < 0 then return nil end
+    local label, n = '', math.floor(ix)
+    repeat
+        label = string.char(65 + (n % 26)) .. label
+        n = math.floor(n / 26) - 1
+    until n < 0
+    return label
+end
+
+--- Grid key → display name: "3:5" → "Sector D6". Columns are letters, rows are
+--- 1-BASED numbers, so the top-left cell of any map is "Sector A1" rather than
+--- "Sector A0" — the grid is addressed the way a map legend is, not the way an
+--- array is.
+---
+--- Returns nil for anything that isn't a grid key. The graph provider's keys
+--- are authored slugs ("west_scarp_n") whose authored names stay primary; this
+--- function must never rename one.
+function M.gridSectorName(key)
+    if type(key) ~= 'string' then return nil end
+    local col, row = key:match('^(%d+):(%d+)$')
+    if not col then return nil end
+    return 'Sector ' .. M.columnLabel(tonumber(col)) .. tostring(tonumber(row) + 1)
+end
+
 function M.newGridProvider(mapWidth, mapHeight, desiredSize)
     local regionSize = M.gridRegionSize(mapWidth, mapHeight, desiredSize)
     local gridW = math.max(MIN_REGIONS_PER_AXIS, math.ceil(mapWidth / regionSize))
@@ -63,6 +108,30 @@ function M.newGridProvider(mapWidth, mapHeight, desiredSize)
             for ix = 0, gridW - 1 do
                 for iz = 0, gridH - 1 do
                     out[#out + 1] = ix .. ':' .. iz
+                end
+            end
+            return out
+        end,
+
+        --- Static descriptor for every cell — the grid's answer to the graph
+        --- provider's authored name + polygon centroid. The centre is the
+        --- centre of the cell CLIPPED to the map: gridW/gridH are ceil()'d, so
+        --- the last column and row hang off the edge, and a sector name is only
+        --- worth having if the point underneath it is somewhere an order can
+        --- actually be sent.
+        sectors = function()
+            local out = {}
+            for ix = 0, gridW - 1 do
+                for iz = 0, gridH - 1 do
+                    local x0, x1 = ix * regionSize, math.min((ix + 1) * regionSize, mapWidth)
+                    local z0, z1 = iz * regionSize, math.min((iz + 1) * regionSize, mapHeight)
+                    local key = ix .. ':' .. iz
+                    out[#out + 1] = {
+                        key  = key,
+                        name = M.gridSectorName(key),
+                        x    = (x0 + x1) / 2,
+                        z    = (z0 + z1) / 2,
+                    }
                 end
             end
             return out
@@ -137,7 +206,8 @@ end
 --- Validate a map-authored region graph. Returns `true, nil` on success or
 --- `false, errors` (a list of strings) on failure. Checks: non-empty list,
 --- well-formed entries, vertices within map bounds, non-self-intersecting
---- polygons, unique keys, `"wilds"` reserved, symmetric neighbor references.
+--- polygons, an optional `centre` that is well-formed and in bounds, unique
+--- keys, `"wilds"` reserved, symmetric neighbor references.
 --- Full coverage is NOT required (gaps become "wilds").
 ---
 --- Defensive by contract (E2): malformed authored data — a non-table entry,
@@ -193,6 +263,22 @@ function M.validateGraph(regionsData, mapWidth, mapHeight)
             end
             if vertsOk and M.isSelfIntersecting(poly) then
                 errors[#errors + 1] = label .. ": self-intersecting polygon"
+            end
+
+            -- `centre` is optional (M9m): the point the region publishes as
+            -- itself. Only its bounds are checked, and the check mirrors
+            -- MapProcessor.cpp's exactly — the two validators have to agree on
+            -- which provider ends up active, or the client mirror would answer
+            -- ownership questions the sim never asked.
+            local centre = r.centre
+            if centre ~= nil then
+                if type(centre) ~= "table" or type(centre.x) ~= "number"
+                        or type(centre.z) ~= "number" then
+                    errors[#errors + 1] = label .. ": malformed centre"
+                elseif centre.x < 0 or centre.x > mapWidth
+                        or centre.z < 0 or centre.z > mapHeight then
+                    errors[#errors + 1] = label .. ": centre out of map bounds"
+                end
             end
 
             for _, nb in ipairs(r.neighbors or {}) do
@@ -274,6 +360,27 @@ function M.newGraphProvider(regionsData, mapWidth, mapHeight)
 
     local lookup = M.buildLookupGrid(regionsData, mapWidth, mapHeight)
 
+    -- Per-region bounding box, so a candidate can be rejected with four
+    -- compares instead of a whole point-in-polygon loop. The lookup cell is
+    -- 256 elmos and a region is kilometres, so most candidates a cell offers
+    -- are near-misses. It matters more since M9m: a region's polygon is its
+    -- component's coastline, ~64 vertices instead of 4 (up to ~400), and a
+    -- point that lands in a gap between coastlines used to walk every
+    -- candidate's full outline before answering "wilds". Answer-identical by
+    -- construction — a point outside a polygon's bounding box is outside the
+    -- polygon.
+    local bbox = {}
+    for _, r in ipairs(regionsData) do
+        local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+        for _, pt in ipairs(r.polygon) do
+            if pt.x < minX then minX = pt.x end
+            if pt.x > maxX then maxX = pt.x end
+            if pt.z < minZ then minZ = pt.z end
+            if pt.z > maxZ then maxZ = pt.z end
+        end
+        bbox[r.key] = { minX, maxX, minZ, maxZ }
+    end
+
     local function at(x, z)
         local cx = math.floor(x / lookup.cellSize)
         local cz = math.floor(z / lookup.cellSize)
@@ -284,7 +391,9 @@ function M.newGraphProvider(regionsData, mapWidth, mapHeight)
         -- NOT necessarily fully covered by it — an isolated polygon's edge
         -- can still cut through a cell with no other region nearby.
         for _, key in ipairs(cellRegions) do
-            if M.pointInPolygon(x, z, byKey[key].polygon) then
+            local bb = bbox[key]
+            if x >= bb[1] and x <= bb[2] and z >= bb[3] and z <= bb[4]
+                    and M.pointInPolygon(x, z, byKey[key].polygon) then
                 return key
             end
         end

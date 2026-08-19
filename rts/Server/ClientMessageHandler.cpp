@@ -11,12 +11,21 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "ClientEvalBroker.h"
+#include "RoomWatchIntent.h"
+#include "AuthTokens.h"
+#include "WarPlayerBindings.h"
+#include "WarRejoinPolicy.h"
+#include "WarStateSim.h"
+#include "PlayerOnboarding.h"
+#include "PlayerTeamEventCollector.h"
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
 #include "ReplayControlDeck.h"
 #include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
+#include "PreAuthPolicy.h"
 #include "PlayerRosterBroadcast.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
@@ -38,7 +47,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define LOG_SECTION "server"
@@ -124,6 +135,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         return;
     }
 
+    // ── Pre-auth gate (PLAN-protocol-guard task 6). ────────────────────────
+    // The allow-list is exactly three verbs — Handshake, AuthRequest, Ping —
+    // and the reasoning for each (plus the one named limit: a connection with
+    // no session has no rate budget at all) lives in PreAuthPolicy.h, which is
+    // also where a newly added union member is forced to declare itself.
+    //
+    // Every other case below ALSO checks its own session, and those checks are
+    // kept: several combine it with a team or role test, and their per-verb
+    // reply text is more useful than this one. This is the by-construction
+    // half — the audit found the hand-written checks complete, but complete as
+    // a property of 40-odd separate lines rather than of the design.
+    //
+    // Placed after the journal record for the same reason the post-game gate
+    // is: a verb refused live must be refused identically on replay.
+    if (preauth::RequiresSession(
+            static_cast<uint8_t>(clientMsg->payload_type())) &&
+        sessions.GetSession(msg.clientId) == nullptr) {
+        SLOG(SPRING_LOG_DEBUG,
+            "refusing verb type=%d from client %u — no session",
+            (int)clientMsg->payload_type(), msg.clientId);
+        auto err = Protocol::BuildServerError(401, "Not authenticated");
+        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+        return;
+    }
+
     switch (clientMsg->payload_type()) {
         case SpringWeb::ClientPayload_Ping: {
             auto* ping = clientMsg->payload_as_Ping();
@@ -136,22 +172,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         case SpringWeb::ClientPayload_Handshake: {
             auto* hs = clientMsg->payload_as_Handshake();
             const uint16_t clientVer = hs->protocol_version();
-            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s",
+            const std::string_view clientSchemaHash =
+                hs->schema_hash() ? std::string_view(hs->schema_hash()->c_str())
+                                  : std::string_view();
+            SLOG(SPRING_LOG_INFO, "handshake from client %u: v%d %s schema %s",
                 msg.clientId,
                 clientVer,
-                hs->client_version() ? hs->client_version()->c_str() : "unknown");
-            // C1: enforce the protocol version. A mismatch (typically a stale
-            // cached JS bundle against a changed schema) is rejected with a
-            // VersionMismatch AuthResponse; the client closes on auth failure.
-            // We deliberately do NOT record the client as handshaked, so even
-            // if it ignores the response its AuthRequest is refused below.
-            if (clientVer != Protocol::CURRENT_PROTOCOL_VERSION) {
+                hs->client_version() ? hs->client_version()->c_str() : "unknown",
+                Protocol::ShortSchemaHash(clientSchemaHash).c_str());
+            // C1 + PLAN-protocol-guard task 3: enforce the epoch AND the wire
+            // schema hash. A mismatch (typically a stale cached JS bundle
+            // against a changed schema) is rejected with a VersionMismatch
+            // AuthResponse; the client closes on auth failure. We deliberately
+            // do NOT record the client as handshaked, so even if it ignores
+            // the response its AuthRequest is refused below.
+            const auto verdict =
+                Protocol::CheckHandshake(clientVer, clientSchemaHash);
+            if (!verdict.accepted) {
                 SLOG(SPRING_LOG_WARNING,
-                    "client %u protocol mismatch: client v%d, server v%d — rejecting",
-                    msg.clientId, clientVer, Protocol::CURRENT_PROTOCOL_VERSION);
+                    "client %u handshake rejected — %s",
+                    msg.clientId, verdict.logDetail.c_str());
                 auto resp = Protocol::BuildAuthResponse(
                     SpringWeb::AuthStatus_VersionMismatch, "", 0,
-                    "Protocol version mismatch — reload the client");
+                    verdict.message.c_str());
                 rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                 break;
             }
@@ -201,6 +244,203 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const bool replaySpectator =
                 replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
 
+            // ── Dynamic join: a war may promote a non-roster account ────────
+            // (PLAN-metalstorm-lobby.md §2.1/§2.3, task 2.) Task 1 let a
+            // persistent war fire GameStart without waiting for its roster;
+            // without this, that war has no way to gain anyone, because an
+            // account the lobby did not put in `--player` resolves to team -1
+            // and lands on the spectator path below.
+            //
+            // NOTE the spec's premise was stale: §2.1 says auth "rejects any
+            // username not in that roster". It does not — it seats them as a
+            // spectator, which PLAN-metalstorm-onboarding.md §4's spectate
+            // flow depends on. So this is a *promotion*, and every decline
+            // below is a fall-through to that same spectator seat, not a
+            // refusal of the connection.
+            //
+            // How many humans this faction's side may hold (§6, task 7).
+            //
+            // `war_side_capacities` is a SECOND additive modoption beside
+            // `war_sides` (see WarSides.h for why it is not a third field on
+            // that one), written by the lobby at war-create time from the
+            // scenario's authored sizes and the seeding rule. Every side the
+            // war does not size falls back to `ctx.warSideCapacity`
+            // (`--war-side-capacity`), so a war that declares none behaves
+            // exactly as it did under task 2's one uniform number.
+            auto warSideCapacityFor = [&](const std::string& faction) -> unsigned {
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wcIt = opts.find("war_side_capacities");
+                if (wcIt == opts.end())
+                    return ctx.warSideCapacity;
+                return CapacityForSideIn(ParseWarSideCapacities(wcIt->second),
+                                         faction, ctx.warSideCapacity);
+            };
+
+            // The decision is a pure function (DynamicJoin.h); everything
+            // impure is gathered here.
+            auto decideDynamicJoin =
+                [&](const std::string& name,
+                    const std::optional<std::string>& factionId)
+                -> DynamicJoinDecision {
+                // A replay's roster belongs to the recording — nobody joins a
+                // re-execution as a player, whatever their faction.
+                if (replaySpectator)
+                    return {DynamicJoinOutcome::NotAWar, -1};
+                // `war_sides` reaches this process as an ordinary modoption
+                // (the lobby writes it at room-create time), decoded by the
+                // same ParseWarSides the lobby's RoomManager uses.
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wsIt = opts.find("war_sides");
+                const WarSides sides =
+                    (wsIt != opts.end()) ? ParseWarSides(wsIt->second)
+                                         : WarSides{};
+                const std::string faction = factionId ? *factionId : std::string{};
+                const auto seat = TeamForFactionIn(sides, faction);
+                // Occupancy is counted here rather than inside the decision so
+                // the decision stays a value function, and it is counted
+                // AFTER the seat is known so a war with many sides does not
+                // walk the player list once per side.
+                //
+                // ── The "atomic reserve" §2.3 asks for ──
+                // Counting and binding both happen inside this one
+                // AuthRequest case, which runs on the single message-pump
+                // thread that drains inbound (server_main's DrainInbound
+                // loop). No other code path seats a human, so no lock is
+                // needed and adding one would be cargo: the reserve is atomic
+                // because nothing can interleave between the count below and
+                // the bindPlayer() the caller performs. This comment is the
+                // guard — if a second thread ever seats players, the count
+                // and the bind must move under a mutex together.
+                unsigned humansOnSide = 0;
+                if (seat) {
+                    const int t = static_cast<int>(*seat);
+                    // Exclude AI virtual players (they hold no human slot) and
+                    // this account's own row: a reload whose old transport has
+                    // not been reaped yet is still active, and must not be
+                    // refused the seat it is already sitting in.
+                    for (int i = 0; i < playerHandler.ActivePlayers(); ++i) {
+                        const CPlayer* p = playerHandler.Player(i);
+                        if (!p->active || p->spectator || p->isAI) continue;
+                        if (p->team != t) continue;
+                        if (p->name == name) continue;
+                        ++humansOnSide;
+                    }
+                }
+                return DecideDynamicJoin(ctx.sessionKind, faction, sides,
+                                         humansOnSide,
+                                         warSideCapacityFor(faction));
+            };
+
+            // ── Rejoin: an account already bound to this war (task 4) ───────
+            // (PLAN-metalstorm-lobby.md §2.5/§5.1.) Task 2 seats a joiner by
+            // faction *every time they connect*, which is correct and also
+            // forgetful: it cannot tell a veteran of this war from a stranger,
+            // so a returning player could be turned away by a full side while
+            // eight people who joined this afternoon hold seats they were
+            // given ahead of the person who has been fighting since Tuesday.
+            // The binding is the war's memory of them.
+            //
+            // Reads only; the bind and the state restore happen after the seat
+            // is actually taken (`applyWarBinding` below), so a decline leaves
+            // the table exactly as it was.
+            struct WarRejoin {
+                std::optional<WarPlayerBinding> binding;
+                RejoinDecision decision;
+            };
+            auto warRejoinFor = [&](int64_t accountId,
+                                    const std::optional<std::string>& factionId)
+                -> WarRejoin {
+                WarRejoin r;
+                if (ctx.sessionKind != SessionKind::PersistentWar) return r;
+                if (replaySpectator || replay::IsReplaying()) return r;
+                r.binding = WarPlayerBindings::Find(ctx.db.Handle(), ctx.roomId,
+                                                    accountId);
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wsIt = opts.find("war_sides");
+                const WarSides sides = (wsIt != opts.end())
+                    ? ParseWarSides(wsIt->second) : WarSides{};
+                const std::string faction = factionId ? *factionId : std::string{};
+                const auto factionTeam = TeamForFactionIn(sides, faction);
+                const int64_t now = static_cast<int64_t>(std::time(nullptr));
+                r.decision = DecideRejoin(
+                    r.binding.has_value(),
+                    r.binding ? r.binding->team : -1,
+                    factionTeam ? static_cast<int>(*factionTeam) : -1,
+                    r.binding ? now - r.binding->lastSeenAt : 0,
+                    r.binding ? r.binding->state.authorityPool : 0.0,
+                    r.binding ? r.binding->HasSavedState() : false);
+                return r;
+            };
+
+            // Resolve the seat one authenticated account gets: its roster team
+            // if the lobby named it, else the seat it already holds in this
+            // war (task 4), else a dynamic-join promotion if this is a war it
+            // has a side in (task 2), else the spectator seat. Shared by the
+            // token and the password path — they had already drifted into two
+            // copies of the roster rule, and this adds two more to keep in
+            // step.
+            struct AuthSeat { int team; bool spectator; };
+            auto resolveSeat = [&](const std::string& name,
+                                   const std::optional<std::string>& factionId,
+                                   int64_t accountId)
+                -> AuthSeat {
+                if (replaySpectator)
+                    return {-1, true};
+                const int rosterTeam = resolveTeam(name);
+                if (!rosterRequired || rosterTeam >= 0)
+                    return {rosterTeam, rosterRequired && rosterTeam < 0};
+                // ── "I came to watch" (§3, task 6) ──
+                // Checked before the seat rules, not after: every one of them
+                // ends in a seat for an account whose faction fields a side,
+                // so a watcher who is asked "may you fight?" first is told
+                // yes and seated. This is the only input to seating that
+                // comes from the player rather than from their account, and
+                // it can only ever take a seat AWAY, never grant one — the
+                // decline path below is the same spectator fall-through
+                // everything else uses.
+                if (ctx.sessionKind == SessionKind::PersistentWar &&
+                    AccountWantsToWatch(ctx.db.Handle(), ctx.roomId, accountId)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "'%s' asked to watch this war — seating as a "
+                        "spectator, not as a player", name.c_str());
+                    return {-1, true};
+                }
+                // A held seat is checked BEFORE capacity, because holding it
+                // against capacity is the entire point: past the hold window
+                // the binding stops bypassing anything and this falls through
+                // to task 2's rule, which may still admit them if the side has
+                // room.
+                const WarRejoin rj = warRejoinFor(accountId, factionId);
+                if (rj.decision.SeatRestored() && rj.decision.bypassCapacity) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "rejoin: '%s' already holds team %d in this war "
+                        "(bound %llds ago) — seat restored ahead of the "
+                        "capacity check",
+                        name.c_str(), rj.decision.team,
+                        (long long)(rj.binding
+                            ? std::time(nullptr) - rj.binding->lastSeenAt : 0));
+                    return {rj.decision.team, false};
+                }
+                const DynamicJoinDecision d = decideDynamicJoin(name, factionId);
+                if (d.Admitted()) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "dynamic join: '%s' is not in the launch roster but its "
+                        "faction '%s' holds side team %d in this war — seating "
+                        "as a player (capacity %u on that side)",
+                        name.c_str(),
+                        factionId ? factionId->c_str() : "",
+                        d.team,
+                        warSideCapacityFor(factionId ? *factionId
+                                                     : std::string{}));
+                    return {d.team, false};
+                }
+                SLOG(SPRING_LOG_NOTICE,
+                    "dynamic join declined for '%s' (%s) — seating as a "
+                    "spectator", name.c_str(),
+                    DynamicJoinOutcomeToString(d.outcome));
+                return {-1, true};
+            };
+
             // ── One CPlayer per ACCOUNT, not per authentication ──
             // (PLAN-long-uptime S12.) `playerHandler.players` is a
             // fixed-capacity vector — MAX_PLAYERS = 251, with the header
@@ -223,9 +463,49 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // The lookup itself lives on CPlayerHandler, next to the invariant
             // it protects. Here it only has to grow a default: a username with
             // no row yet gets the next free number.
-            auto playerNumForUsername = [&](const std::string& name) -> int {
+            //
+            // ── And the war's pre-allocated block comes first (§8.1, task 5)
+            // A war was spawned sized for Σ slotCap: `--player-slots` reserved
+            // one player number per advertised seat, laid out per side, before
+            // anybody connected. A new arrival taking a *playing* seat is
+            // exactly who that block exists for, so they claim a slot of their
+            // own side rather than minting a number above it. This is what
+            // makes the lobby's advertised seat real: without it the seat is
+            // handed out on a first-come basis against every spectator who
+            // came to watch (see PlayerSlotReservation.h for why that is a
+            // ceiling and not a slope).
+            //
+            // A spectator never claims one — they hold no seat by definition
+            // (§3) — and neither does a seat on a team the war declares no
+            // side for; both fall through to `nextPlayerNum`, which the
+            // pre-allocation already advanced past the block.
+            auto playerNumForUsername = [&](const std::string& name, int team,
+                                            bool spectator) -> int {
                 const int existing = playerHandler.HumanPlayer(name);
-                return (existing >= 0) ? existing : nextPlayerNum;
+                if (existing >= 0)
+                    return existing;
+                if (!spectator && team >= 0 && !ctx.reservedSlots.Empty()) {
+                    const int slot = playerslots::ClaimReservedSlot(
+                        ctx.reservedSlots, team, [&](int n) {
+                            return playerHandler.IsUnclaimedSlot(n);
+                        });
+                    if (slot >= 0) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "'%s' seated on pre-allocated slot %d (reserved "
+                            "for team %d at spawn)",
+                            name.c_str(), slot, ctx.reservedSlots.TeamOf(slot));
+                        return slot;
+                    }
+                    // Not an error: the block can be full while the side is
+                    // not (a war whose caps were raised past what this process
+                    // was sized for — task 2's ceiling note). Falling through
+                    // still seats them; it just costs a number above the block.
+                    SLOG(SPRING_LOG_WARNING,
+                        "'%s' takes team %d with no pre-allocated slot left — "
+                        "this process was sized for %u",
+                        name.c_str(), team, ctx.reservedSlots.Size());
+                }
+                return nextPlayerNum;
             };
 
             // Install (or re-install) the sim-side player row at `pNum` and
@@ -267,6 +547,55 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // overwrites in place and the vector does not grow.
                 playerHandler.AddPlayer(p);
                 clientPlayerNum[msg.clientId] = pNum;
+
+                // ── The onboarding hook (task 5, §2.4) ─────────────────────
+                // A player seated after GameStart is a mid-game joiner, and
+                // until now nothing told the game about them: `PlayerAdded` is
+                // an UNSYNCED event that a synced LuaRules handle is refused
+                // registration for (the whole argument is in
+                // PlayerOnboarding.h), so `game_authority.lua`'s join grant
+                // only ever ran from its own GameStart roster loop. A dynamic
+                // joiner (task 2) therefore arrived with no authority pool at
+                // all and could not issue a single order.
+                //
+                // It lives HERE, inside the shared seat installer, rather than
+                // next to `applyWarBinding` in the two live auth paths, and
+                // that placement is the determinism: `bindPlayer` is also the
+                // replay re-execution's seat installer, so a recorded join
+                // grants in the replay exactly where it granted live. The auth
+                // that reaches this point is already journalled
+                // (`RecordAuthIdentity`), so there is no new input to record.
+                //
+                // Ordered BEFORE `applyWarBinding`'s restore on both live
+                // paths, because the two compose in that direction only: the
+                // grant mints a floor and the restore is a TOP-UP to a
+                // remembered level, so grant-then-restore lands on
+                // max(grant, remembered) while restore-then-grant would add a
+                // fresh 100 on top of a fully-restored pool, once per rejoin.
+                const OnboardingHook hook =
+                    DecideOnboardingHook(pNum, team, spectator,
+                                         ctx.sim.HasGameStarted());
+                if (hook == OnboardingHook::Fire) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "onboarding '%s' (player %d, team %d): mid-game join, "
+                        "firing PlayerAdded into synced Lua",
+                        name.c_str(), pNum, team);
+                    FireSyncedPlayerAdded(pNum);
+                    // The unsynced half, for symmetry with the disconnect
+                    // drain: `eventHandler` for any in-process unsynced client,
+                    // and the collector that carries it over the wire to every
+                    // connected LuaUI worker (widget:PlayerAdded). Nothing had
+                    // ever pushed a PlayerAdded event, so the other players'
+                    // widgets learned about a mid-war arrival only from the
+                    // roster broadcast.
+                    eventHandler.PlayerAdded(pNum);
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerAdded, 0,
+                                           static_cast<uint32_t>(pNum)});
+                } else {
+                    SLOG(SPRING_LOG_INFO,
+                        "onboarding '%s' (player %d, team %d): skipped — %s",
+                        name.c_str(), pNum, team, OnboardingHookToString(hook));
+                }
             };
 
             // Register the sim-side player for a LIVE auth and return the
@@ -285,9 +614,77 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         msg.clientId, name.c_str(), specNum);
                     return specNum;
                 }
-                const int pNum = playerNumForUsername(name);
+                const int pNum = playerNumForUsername(name, team, spectator);
                 bindPlayer(name, team, spectator, pNum);
                 return pNum;
+            };
+
+            // ── The war's memory of this player: write it, then act on it ───
+            // (PLAN-metalstorm-lobby.md §2.5/§5.1, task 4.) Runs after the
+            // seat is taken and the sim-side player row exists, for both live
+            // auth paths.
+            //
+            // Order matters twice over. The rejoin decision is re-derived
+            // BEFORE `BindSeat` stamps `last_seen_at`, or the absence it reads
+            // is always zero and every returning player looks like a brief
+            // disconnect. And the restore runs AFTER `bindPlayer`, because
+            // both halves address the player by their sim playerNum and the
+            // gadgets resolve that to a team through Spring.GetPlayerInfo.
+            //
+            // Spectators are deliberately not bound: a binding is a *seat*,
+            // and §3's spectators explicitly hold none. A war a player only
+            // ever watched must not later hand them a held place in it.
+            auto applyWarBinding = [&](int64_t accountId, const std::string& name,
+                                       const std::optional<std::string>& factionId,
+                                       int team, bool spectator, int pNum) {
+                if (ctx.sessionKind != SessionKind::PersistentWar) return;
+                if (spectator || team < 0 || pNum < 0) return;
+                if (replaySpectator || replay::IsReplaying()) return;
+                const WarRejoin rj = warRejoinFor(accountId, factionId);
+                const int64_t now = static_cast<int64_t>(std::time(nullptr));
+                WarPlayerBindings::BindSeat(ctx.db.Handle(), ctx.roomId, accountId,
+                                            name, factionId ? *factionId
+                                                            : std::string{},
+                                            team, now);
+                if (!rj.binding) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "war binding: '%s' (account %lld) bound to team %d of "
+                        "war room %u for the first time",
+                        name.c_str(), (long long)accountId, team, ctx.roomId);
+                    return;
+                }
+                // Participation credit is a lifetime statistic, not a
+                // resource: it comes back on every rejoin, however long the
+                // absence, and the gadget never lowers a live counter with it.
+                RestoreWarPlayerScore(pNum, rj.binding->state);
+                switch (rj.decision.state) {
+                    case RejoinState::RestorePool:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (topped "
+                            "back up to %.1f from the team pool)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            rj.decision.pool);
+                        RestoreWarPlayerPool(pNum, rj.decision.pool);
+                        break;
+                    case RejoinState::OnboardingStipend:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (saved pool "
+                            "%.1f is stale after %llds away)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            rj.binding->state.authorityPool,
+                            (long long)(now - rj.binding->lastSeenAt));
+                        GrantWarRejoinStipend(pNum);
+                        break;
+                    case RejoinState::Nothing:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (%s)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            RejoinSeatToString(rj.decision.seat));
+                        break;
+                }
             };
 
             // One-shots every authenticated session needs — fresh login AND
@@ -461,7 +858,16 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // RECONNECT re-derives the number it had rather than the next
                 // free one. Deriving it any other way would make every
                 // recording that contains a reconnect stop here.
-                const int derivedNum = playerNumForUsername(rid->username);
+                //
+                // The recorded team and spectator flag are passed for the same
+                // reason (§8.1): a war's seats come out of the pre-allocated
+                // block, so a re-execution that allocated from the top of the
+                // list instead would diverge on the first join. The block is
+                // reconstructed during a replay's set-up from the header's own
+                // `war_sides`/`war_side_capacities` modoptions — the same
+                // inputs the lobby sized the original process from.
+                const int derivedNum = playerNumForUsername(
+                    rid->username, rid->team, rid->spectator);
                 if (derivedNum != rid->playerNum) {
                     SLOG(SPRING_LOG_ERROR,
                         "replay: player-number divergence authenticating '%s' — "
@@ -512,7 +918,30 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Try token-based reconnection first
             const bool hasToken = auth->token() && auth->token()->size() > 0;
             if (hasToken) {
-                int64_t userId = db.ValidateSession(auth->token()->str());
+                // 8a-follow-on: the TTL is passed explicitly. This call took
+                // `Database.h`'s 86400 default, which was a silent second copy
+                // of the lobby's constant — shortening one and not the other
+                // would leave every game server honouring a day-old bearer
+                // token while the lobby refused it.
+                int64_t userId = db.ValidateSession(auth->token()->str(),
+                                                    AuthTokens::kAccessTtlSeconds);
+                // Task 8a / §7.3: a war outlives the account session, so
+                // the returning player may be holding the only credential that
+                // is still good — a per-(account, war) reconnect token. Tried
+                // SECOND, so nothing about the ordinary path changes: an
+                // account-wide session still authenticates account-wide.
+                //
+                // `ctx.roomId` is passed into the validator rather than read
+                // back off the token: a token minted for another war must not
+                // authenticate here, and making the war an argument is the
+                // only shape where forgetting that check is impossible.
+                bool viaWarToken = false;
+                if (userId <= 0 && ctx.roomId != 0) {
+                    userId = AuthTokens::ValidateWarReconnect(
+                        db.Handle(), auth->token()->str(), ctx.roomId,
+                        static_cast<int64_t>(std::time(nullptr)));
+                    viaWarToken = userId > 0;
+                }
                 if (userId > 0) {
                     // Look up the username from the userId so we
                     // can cross-check against the lobby roster.
@@ -524,18 +953,21 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         break;
                     }
+                    // Roster team if the lobby named this account; else a
+                    // dynamic-join promotion if this is a war its faction has
+                    // a side in (task 2); else a spectator. An authenticated
+                    // user who isn't in the roster is never a *rejected*
+                    // connection — PLAN-metalstorm-onboarding.md §4's
+                    // "spectate a running game" flow depends on that:
+                    // spawnGameServer never puts spectators in --player, so
+                    // every spectator (pre-game or mid-game) lands here.
                     // On a replay server the roster belongs to the recording,
                     // so this account's place in it is irrelevant: team -1.
-                    const int team = replaySpectator
-                        ? -1 : resolveTeam(reconnectUser->username);
-                    // An authenticated user who isn't in the roster the lobby
-                    // handed us is a spectator, not a rejected connection —
-                    // PLAN-metalstorm-onboarding.md §4's "spectate a running
-                    // game" flow depends on this: spawnGameServer never puts
-                    // spectators in --player, so every spectator (pre-game or
-                    // mid-game) lands here with team < 0.
-                    const bool isSpectator =
-                        replaySpectator || (rosterRequired && team < 0);
+                    const auto seat = resolveSeat(reconnectUser->username,
+                                                  reconnectUser->factionId,
+                                                  reconnectUser->id);
+                    const int  team        = seat.team;
+                    const bool isSpectator = seat.spectator;
                     const std::string& effectiveRole =
                         isSpectator ? kSpectatorRole : reconnectUser->role;
                     // Bind (or re-bind) this account's stable sim playerNum and
@@ -547,8 +979,20 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // every synced key it reads back is scoped by it.
                     const int pNum = registerLivePlayer(
                         reconnectUser->username, team, isSpectator);
+                    applyWarBinding(reconnectUser->id, reconnectUser->username,
+                                    reconnectUser->factionId, team, isSpectator,
+                                    pNum);
+                    // Echo the session token back so the client can keep using
+                    // it — but NEVER a war reconnect token. The client stores
+                    // whatever comes back here as its session token, and a war
+                    // token is not one: it opens exactly this war and would
+                    // fail against /api/auth/validate, so handing it over would
+                    // quietly replace a working account credential with one
+                    // that 401s everywhere else. Empty means "keep what you
+                    // have".
                     auto resp = Protocol::BuildAuthResponse(
-                        SpringWeb::AuthStatus_OK, auth->token()->str(),
+                        SpringWeb::AuthStatus_OK,
+                        viaWarToken ? "" : auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
                         static_cast<int8_t>(team), effectiveRole,
                         defsCacheKey, static_cast<int32_t>(pNum));
@@ -581,9 +1025,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     Protocol::BroadcastPlayerRoster(ctx);
                     SLOG(SPRING_LOG_NOTICE,
                         "client %u reconnected as '%s' (account id=%lld) "
-                        "playerNum=%d team=%d role=%s",
+                        "playerNum=%d team=%d role=%s via=%s",
                         msg.clientId, reconnectUser->username.c_str(),
-                        userId, pNum, team, effectiveRole.c_str());
+                        userId, pNum, team, effectiveRole.c_str(),
+                        viaWarToken ? "war-reconnect-token" : "session");
                     // Track roster connection for GameStart. Never for a replay
                     // spectator: GameStart on a replay is an input in its own
                     // right (journal chokepoint #5) and the recorded record is
@@ -672,15 +1117,14 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 break;
             }
 
-            // Roster membership: an authenticated user not in the lobby's
-            // --player roster is a spectator, not a rejected connection —
-            // see the matching comment on the reconnect path above. Dev-mode
-            // (empty roster) skips this and keeps the "command anything"
-            // smoketest escape hatch for team == -1.
-            // Replay servers: see the reconnect path above — team -1 always.
-            const int team = replaySpectator ? -1 : resolveTeam(user->username);
-            const bool isSpectator =
-                replaySpectator || (rosterRequired && team < 0);
+            // Roster membership, dynamic join, then spectator — the same
+            // three-step seat resolution the reconnect path above uses; see
+            // its comment. Dev-mode (empty roster) skips the whole rule and
+            // keeps the "command anything" smoketest escape hatch for
+            // team == -1. Replay servers: team -1 always.
+            const auto seat = resolveSeat(user->username, user->factionId, user->id);
+            const int  team        = seat.team;
+            const bool isSpectator = seat.spectator;
             const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
 
             // Create session
@@ -697,6 +1141,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // reconnect path above: the response carries `player_num`, and
             // nothing downstream can reconstruct it.
             const int pNum = registerLivePlayer(user->username, team, isSpectator);
+            applyWarBinding(user->id, user->username, user->factionId, team,
+                            isSpectator, pNum);
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",
@@ -1372,6 +1818,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 d.setSeek ? d.seekTarget : -1, sim.GetFrameNum());
             // Shared state changed, so every watcher's bar does.
             Protocol::BroadcastReplayState(ctx);
+            break;
+        }
+        // ── Browser-eval relay reply (PLAN-test-automation P7) ───────────
+        // Classified `Ignored` in SyncedInputJournal.cpp with the same
+        // reasoning as ReplayControl above: an eval RESULT is not an input to
+        // the simulation, so it is never journaled and a replay can never
+        // re-execute an eval. The matching REQUEST cannot be journaled at all
+        // — it is a ServerPayload, and the journal only classifies client
+        // payloads.
+        //
+        // Only the client the broker addressed may resolve the waiter;
+        // anything else is stray (already timed out) or spoofed, and is
+        // dropped with a log line rather than answering someone else's HTTP
+        // request.
+        case SpringWeb::ClientPayload_ClientEvalResponse: {
+            auto* ev = clientMsg->payload_as_ClientEvalResponse();
+            if (!ev) break;
+            if (!ctx.evalBroker.Deliver(ev->request_id(), msg.clientId,
+                                        ev->success(),
+                                        ev->output() ? ev->output()->str() : "")) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "dropped ClientEvalResponse req=%u from client=%u "
+                    "(no waiter, or not the addressed client)",
+                    ev->request_id(), msg.clientId);
+            }
             break;
         }
         case SpringWeb::ClientPayload_PathRequest: {

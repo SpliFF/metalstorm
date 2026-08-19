@@ -74,8 +74,33 @@ lighting(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * True when the game is kept on disk but is not playable — its port
+ * is unmaintained and starting it does not produce a match
+ * (PLAN-endtoend.md D26). Discovery still lists it: the folder is
+ * real, `/api/rooms/direct` still stages it for fixtures, and a game
+ * that silently vanished from the dropdown would read as a bug. The
+ * picker renders it disabled instead, and `POST /api/rooms` refuses
+ * it. Read from the game config's `archived` field.
+ */
+archived():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 14);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
+/**
+ * Why it is archived, in one sentence, shown to the player on the
+ * disabled option. Empty when `archived` is false.
+ */
+archivedReason():string|null
+archivedReason(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+archivedReason(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startLobbyGameInfo(builder:flatbuffers.Builder) {
-  builder.startObject(5);
+  builder.startObject(7);
 }
 
 static addId(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset) {
@@ -98,18 +123,28 @@ static addLighting(builder:flatbuffers.Builder, lightingOffset:flatbuffers.Offse
   builder.addFieldOffset(4, lightingOffset, 0);
 }
 
+static addArchived(builder:flatbuffers.Builder, archived:boolean) {
+  builder.addFieldInt8(5, +archived, +false);
+}
+
+static addArchivedReason(builder:flatbuffers.Builder, archivedReasonOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(6, archivedReasonOffset, 0);
+}
+
 static endLobbyGameInfo(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createLobbyGameInfo(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, versionOffset:flatbuffers.Offset, lightingOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createLobbyGameInfo(builder:flatbuffers.Builder, idOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, descriptionOffset:flatbuffers.Offset, versionOffset:flatbuffers.Offset, lightingOffset:flatbuffers.Offset, archived:boolean, archivedReasonOffset:flatbuffers.Offset):flatbuffers.Offset {
   LobbyGameInfo.startLobbyGameInfo(builder);
   LobbyGameInfo.addId(builder, idOffset);
   LobbyGameInfo.addDisplayName(builder, displayNameOffset);
   LobbyGameInfo.addDescription(builder, descriptionOffset);
   LobbyGameInfo.addVersion(builder, versionOffset);
   LobbyGameInfo.addLighting(builder, lightingOffset);
+  LobbyGameInfo.addArchived(builder, archived);
+  LobbyGameInfo.addArchivedReason(builder, archivedReasonOffset);
   return LobbyGameInfo.endLobbyGameInfo(builder);
 }
 
@@ -119,7 +154,9 @@ unpack(): LobbyGameInfoT {
     this.displayName(),
     this.description(),
     this.version(),
-    this.lighting()
+    this.lighting(),
+    this.archived(),
+    this.archivedReason()
   );
 }
 
@@ -130,6 +167,8 @@ unpackTo(_o: LobbyGameInfoT): void {
   _o.description = this.description();
   _o.version = this.version();
   _o.lighting = this.lighting();
+  _o.archived = this.archived();
+  _o.archivedReason = this.archivedReason();
 }
 }
 
@@ -139,7 +178,9 @@ constructor(
   public displayName: string|Uint8Array|null = null,
   public description: string|Uint8Array|null = null,
   public version: string|Uint8Array|null = null,
-  public lighting: string|Uint8Array|null = null
+  public lighting: string|Uint8Array|null = null,
+  public archived: boolean = false,
+  public archivedReason: string|Uint8Array|null = null
 ){}
 
 
@@ -149,13 +190,16 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const description = (this.description !== null ? builder.createString(this.description!) : 0);
   const version = (this.version !== null ? builder.createString(this.version!) : 0);
   const lighting = (this.lighting !== null ? builder.createString(this.lighting!) : 0);
+  const archivedReason = (this.archivedReason !== null ? builder.createString(this.archivedReason!) : 0);
 
   return LobbyGameInfo.createLobbyGameInfo(builder,
     id,
     displayName,
     description,
     version,
-    lighting
+    lighting,
+    this.archived,
+    archivedReason
   );
 }
 }

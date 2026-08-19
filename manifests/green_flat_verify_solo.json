@@ -1,0 +1,13 @@
+{
+  "comment": "Map/render verification boot for green_flat_x34_v3 — one of the two maps in the imported set that exercise the PLAIN detail branch of SMFFragProg (mapinfo declares resources.detailTex only: no splatDetailTex, no splatDetailNormalTexN), so the client's TerrainSplat plugin must report mode='plain'. That branch shipped in PLAN-maps M7a and had no live cover until this manifest. Square map, 17408 elmos, six start positions, no features. No scenario on purpose: this boots the game_start stub force so it stays a pure terrain/minimap check independent of war content. A copy of this file must also live in client/public/ — that, not manifests/, is what ?direct= fetches (M8b finding 4).",
+  "name": "dev:green-flat-verify-solo",
+  "map": "green_flat_x34_v3",
+  "game": "metalstorm",
+  "aiSlots": [
+    { "aiId": "null", "team": 1, "startPos": 1 }
+  ],
+  "players": [
+    { "username": "dev-verify", "team": 0, "startPos": 0, "spectator": false }
+  ],
+  "autoStart": true
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-    defaultTeamForNewSlot, parseWarSides, renderSideOptions, warSidesForRoom,
+    defaultTeamForNewSlot, parseWarSides, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
 
 // PLAN-metalstorm-wars.md §7.4 / PLAN-endtoend.md D19 — the room screen's
@@ -139,5 +139,32 @@ describe('defaultTeamForNewSlot', () => {
         const legacy = parseWarSides('');
         expect(defaultTeamForNewSlot(legacy, [0])).toBe(1);
         expect(defaultTeamForNewSlot(legacy, [])).toBe(0);
+    });
+});
+
+describe('sideForFaction (D40)', () => {
+    const meridian = parseWarSides('compact:0,union:4');
+
+    it('binds an account to the side its faction is staged on', () => {
+        expect(sideForFaction(meridian, 'union')?.team).toBe(4);
+        expect(sideForFaction(meridian, 'compact')?.team).toBe(0);
+    });
+
+    it('binds nobody when the war declares no side for the faction', () => {
+        expect(sideForFaction(meridian, 'reavers')).toBeUndefined();
+    });
+
+    it('binds nobody without a faction', () => {
+        // Dev and /api/rooms/direct manifest accounts have none, and must keep
+        // the free choice of side the test vehicles depend on.
+        expect(sideForFaction(meridian, '')).toBeUndefined();
+        expect(sideForFaction(meridian, undefined)).toBeUndefined();
+    });
+
+    it('never binds on a legacy room, whose sides have no faction names', () => {
+        // parseWarSides('') yields faction: '' twice; a faction-carrying
+        // account joining a Paper Tanks room must not match the empty key.
+        expect(sideForFaction(parseWarSides(''), '')).toBeUndefined();
+        expect(sideForFaction(parseWarSides(''), 'union')).toBeUndefined();
     });
 });

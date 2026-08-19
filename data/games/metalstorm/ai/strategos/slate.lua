@@ -20,6 +20,29 @@ local Slate = {}
 -- Bounties a teammate staked are literally the human tasking the AI (§5);
 -- they carry source='bounty' so the planner's ×3 (co-commander) can find them.
 --=============================================================================
+--- Truthiness for a published flag. A rulesParam arrives as a number from the
+-- engine and as a string from some readers; hand-built fixtures use `true`.
+local function flag(v)
+    return v == 1 or v == true or v == '1'
+end
+
+--- Victory framing for a terminal objective (endtoend Q-E1 / D47). The board
+-- says WHICH objective ends the war; the region graph says who is currently
+-- banking it. `progress` is the CURRENT OWNER's fraction of the hold clock
+-- (objectives/control.lua's control.progress), so it only means "the enemy is
+-- winning" when the owner is not us — which is why both halves are resolved
+-- here, where the board and the regions are both in hand, and the planner
+-- reads nothing but the resulting meta.
+local function victoryMeta(o, picture, role)
+    if not flag(o.victory) then return nil, nil end
+    local r = o.region and (picture.regions or {})[o.region]
+    local owner = r and r.owner
+    local mine = (owner ~= nil and owner ~= -1 and owner == role.teamId) or false
+    local progress = tonumber(o.progress) or 0
+    if progress < 0 then progress = 0 elseif progress > 1 then progress = 1 end
+    return true, { mine = mine, progress = progress }
+end
+
 local function explicitGoals(picture, role, out)
     for id, o in pairs(picture.board or {}) do
         if o.state == 'active' and (role.explicitMode ~= 'none') then
@@ -30,6 +53,7 @@ local function explicitGoals(picture, role, out)
             -- board entry.
             local eligible = (o.team == nil) or (o.team == -1) or (o.team == role.teamId)
             if eligible then
+                local victory, vic = victoryMeta(o, picture, role)
                 out[#out + 1] = {
                     kind     = 'OBJECTIVE',
                     id       = 'obj:' .. tostring(id),
@@ -46,8 +70,11 @@ local function explicitGoals(picture, role, out)
                     -- (picture BOARD_FIELDS) but never threaded onto the goal;
                     -- carry it on meta.suggested so the ×2 actually fires.
                     meta     = { objType = o.type, pos = o.pos, progress = o.progress,
-                                 suggested = (o.suggested == 1 or o.suggested == true
-                                              or o.suggested == '1') or nil },
+                                 suggested = flag(o.suggested) or nil,
+                                 -- Terminal objective: the planner weights it
+                                 -- as the war rather than as its reward, and
+                                 -- relaxes the pSuccess floor for it (§3.2).
+                                 victory = victory, victoryState = vic },
                 }
             end
         end

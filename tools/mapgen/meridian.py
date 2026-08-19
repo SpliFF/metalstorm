@@ -245,6 +245,14 @@ def bbox_polygon(bbox):
 
 
 def emit_regions_lua(layout, out_path):
+    with open(out_path, "w") as f:
+        f.write(build_regions_lua(layout))
+
+
+def build_regions_lua(layout):
+    """The region contract as Lua text. Depends on the layout JSON only — no
+    seed, no terrain — so `meridian2.py` emits the same bytes into a variant
+    package (PLAN-maps M9h)."""
     regions = list(layout["regions"])
     # heron_ait must be declared before still_mere (first-declared wins the bbox overlap).
     order = {r["key"]: i for i, r in enumerate(regions)}
@@ -274,8 +282,7 @@ def emit_regions_lua(layout, out_path):
     lines.append("    },")
     lines.append("}")
     lines.append("")
-    with open(out_path, "w") as f:
-        f.write("\n".join(lines))
+    return "\n".join(lines)
 
 
 # ============================================================

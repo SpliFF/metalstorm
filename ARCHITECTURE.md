@@ -11,13 +11,68 @@ make dev-client         # npm run dev (Vite dev server on :5173)
 npx vite build          # production client bundle → client/dist/
 npx vite preview        # serve the built bundle (local prod-shape stand-in — see below)
 npx tsc --noEmit        # TypeScript type-check (no emit)
+npx vitest run          # client gate — TWO projects (see below), run from client/
 ```
 
-Regenerate FlatBuffers bindings after editing `schemas/protocol.fbs`:
+`npx vitest run` from `client/` covers two module trees, because
+`client/vite.config.ts` declares them as vitest **projects**:
+`client` (`src/**/*.test.ts`) and `metalstorm-game`
+(`data/games/metalstorm/client/**/*.test.js` — plain ESM, no build step, its own
+`vitest.config.js` for standalone runs). Before that split the second tree was
+reachable only by naming its config by hand, and a suite in no gate is not a
+gate: 13 squad-governor tests sat red for a week after a landing merge dropped
+the code they covered. `data/games/metalstorm/ui/` is still a third root with its
+own config and is NOT yet in this gate.
+
+Regenerate everything derived from `schemas/protocol.fbs` with the one script
+that owns it (PLAN-protocol-guard task 1):
 ```
-build/debug/_deps/flatbuffers-build/flatc --ts --gen-object-api -o client/src/protocol/ schemas/protocol.fbs
-build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
+scripts/regen-protocol.sh
 ```
+It emits the C++ bindings (`rts/protocol_generated.h`), the TypeScript bindings
+(`client/src/protocol/spring-web/`) and a sha256 of the *binary* schema into
+`rts/Server/ProtocolSchemaHash.h` + `client/src/protocol/schema-hash.ts`. All
+outputs are committed; commit them together with the `.fbs` edit.
+
+The two-command recipe this replaces was wrong in two ways, both of which
+shipped. It omitted `--gen-object-api` on the C++ side, so following it produced
+a header without the `*T` native-object types the tree uses; and being a
+command a human remembers to type, it went unrun — the committed
+`rts/protocol_generated.h` sat five days behind an fbs edit that added
+`LobbyGameInfo.archived`. The stale copy still compiled because its only
+consumer, `Protocol.h`'s `BuildGameListUpdate`, is a template nobody
+instantiates.
+
+The schema hash is taken over `flatc -b --schema` output, so it is insensitive
+to comments and formatting and changes on any wire-visible edit (both measured).
+It does depend on the schema's file *basename*, which is why the script always
+runs flatc on `schemas/protocol.fbs` itself rather than on a renamed copy.
+
+**Forgetting to run the script is now a build failure, not a silent hole**
+(PLAN-protocol-guard task 2). Both build systems recompute the hash and refuse
+to build against stale artefacts:
+
+- Server: the `check_protocol_schema` target (`cmake/CheckProtocolSchemaHash.cmake`),
+  which `spring-server` / `spring-lobby` / `spring-tests` / `spring-logserver`
+  all depend on. It checks *both* hash files — a half-applied regen is drift
+  whichever side it landed on.
+- Client: `client/scripts/check-protocol-schema.mjs`, run from the `prebuild`
+  npm hook *and* from a vite plugin's `buildStart` — mprocs launches
+  `vite dev` directly, where npm lifecycle hooks never fire. With no configured
+  build dir there is no flatc, so it degrades to cross-checking the two
+  committed hash files and says so (`mode: 'cross-check'`).
+
+Both fail with `protocol.fbs changed without regen — run scripts/regen-protocol.sh`.
+
+**There is now exactly ONE `protocol_generated.h`: the committed one.** CMake
+used to generate a second copy into `build/<cfg>/generated/`, but every target
+lists `rts/` ahead of that directory, so `#include "protocol_generated.h"`
+always resolved to the committed copy and the generated one was written and
+ignored (`ninja -t deps` named only the `rts/` path) — the dead-producer trap,
+in the build system, and how the five days of drift above went unnoticed.
+Include order had already elected the committed copy, so the generator was
+removed rather than the include dirs reshuffled (which would have left the
+committed bindings as dead files git still diffs).
 
 ## Executables
 
@@ -62,23 +117,31 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/GameHttpRoutes.h/.cpp` | **WP1**: `RegisterGameHttpRoutes(ctx, content, …, restartRequested&, keepRunning&)` — heightmap/map-info/maps/metrics/`/api/restart`/`/api/exec`/`/api/wt/info` registrations moved out of `main()`. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
-| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server (REST/SSE/assets only). Realtime game traffic now runs over WebTransport (`WebTransportServer`), not WebRTC. Send/broadcast helpers. |
+| `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server (REST/SSE/assets only). Realtime game traffic now runs over WebTransport (`WebTransportServer`), not WebRTC. Send/broadcast helpers. **SSE channels come in two kinds since task 9b.** `AddSSE` is the original anonymous broadcast channel (`/api/rooms/stream`). `AddIdentifiedSSE` resolves every connection to an account id before the stream opens — via `SetSSESubscriberResolver`, which is handed the raw query string, because `EventSource` cannot send an `Authorization` header — and **refuses an unresolved stream with 401 rather than admitting it anonymously**; `SendSSETo` then addresses a frame to named subscribers. Chat needs this: a PM has two recipients and an ignore list is enforced on delivery, both of which an anonymous channel can only answer "everybody" to. **An empty recipient list delivers to NOBODY, deliberately** — "everyone in the room ignored this sender" and "the other party is offline" both produce one, and the natural `empty ⇒ broadcast` reading turns exactly those into a broadcast of a private message. `tests/test_sse_identity.cpp` drives it over a real loopback socket, because who receives a frame is decided against per-connection state no in-process hook can stand up honestly. |
 | `Server/WebTransport/WebTransportServer.h/.cpp` | **WebTransport (QUIC/HTTP-3) game transport** — Stage 0 replacement for WebRTC (PLAN-game-worker.md). ngtcp2 + nghttp3 + OpenSSL 3.5 QUIC TLS. Full stack landed + Chrome-verified (GW1-H3): QUIC handshake, hand-rolled HTTP/3 framing + nghttp3 standalone QPACK, WebTransport draft-02 extended-CONNECT + stream/datagram demux (`0x54` uni / `0x41` bidi / quarter-stream-id). Mirrors the WebRTCServer seam + adds `StreamClass` priority tiers. QUIC stack is a **hard build dependency** (no WebRTC fallback). Echo-test it with `spring-quic-derisk serve <port>`. **Dual-mode cert provisioning** (PLAN-security-hardening.md task 5): no `--wt-cert`/`--wt-key` → `Hashes` mode (self-generated ECDSA-P256, ≤14-day rolling pair, `CertHashes()` publishes active+next for `serverCertificateHashes`); `--wt-cert <pem> --wt-key <pem>` → `Webpki` mode (CA cert, browsers validate normally, no hash published). Hourly mtime poll reloads a changed on-disk cert without dropping connections (TLS 1.3 doesn't renegotiate mid-session). `ReloadCert()` exists for a forced immediate check but is deliberately **not** wired to an OS signal — signal delivery to this process while a Webpki-mode cert is loaded was found to corrupt OpenSSL's heap state at exit, reproducibly, regardless of whether the reload logic itself ran; `SIGHUP`/`POST /api/restart` (full restart, which re-reads the cert fresh) remains the manual-immediate fallback — see `docs/deployment.md`. |
-| `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
+| `Server/ClientFrame.h` | **The one inbound decoder** (`wireframe::`) — envelope byte, FlatBuffers verifier, root. Header-light on purpose (generated schema only), so `spring-tests` can reach it; `Protocol.h` cannot be included from a test because it drags in the sim. Every caller that needs a message's tag before dispatch goes through `PeekClientPayloadType` — server_main's replay gate had its own copy and verified the buffer WITH the envelope byte, so it read `NONE` for everything and refused nothing (PLAN-replay §7.19). |
+| `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). Inbound parsing delegates to `Server/ClientFrame.h`. |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
 | `Server/EntityDeltaCache.h/.cpp` | Per-client delta tracking to reduce bandwidth. |
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
+| `Server/AuthTokens.h/.cpp` | **Task 8a**: the two credentials that outlive the 24 h access session — `refresh_tokens` (rotating, single-use, family-scoped revocation on reuse) and `war_reconnect_tokens` (per-(account, war), 7-day). Both store **sha256 of the token, never the token**: a read of the db file is otherwise a month of impersonation. sha256 rather than scrypt because these are 32 bytes of CSPRNG — there is no dictionary — and the cost would land on the validate path the game server hits on every reconnect. `ValidateWarReconnect` takes the roomId as an **argument** so a caller cannot forget to check it. |
+| `Server/Totp.h/.cpp` | **Task 8d**: the optional second factor — RFC 6238 (HMAC-SHA1, 30 s steps, 6 digits, ±1 step of drift) plus `user_totp` / `user_totp_recovery`. **Both the arithmetic and the table live here on purpose**: the replay rule is a comparison in `VerifyCode` and a column (`last_step`), and splitting them would let a caller do the check and forget the write — so `VerifyCode` takes the last accepted step and RETURNS the step it matched, and the caller has something it must store. An enrolment has **three** states: unconfirmed (gates nothing), confirmed (gates login AND Basic auth), absent. Recovery codes are sha256 at rest and spent by the DELETE itself. |
+| `Server/GuestAccounts.h/.cpp` | **Task 8c**: provisional (guest) accounts and the upgrade. A guest is a real `users` row with `is_provisional=1`, **an empty `password_hash`** and a device token (`guest_devices`, sha256 at rest via `AuthTokens::HashToken`). The empty hash is load-bearing rather than lazy: `Crypto::VerifyPassword` compares any non-`scrypt$` stored value as legacy plaintext, so a sentinel like `"!guest"` would be a working password for every guest in the deployment — the empty string is the one value that path refuses unconditionally, which is what makes a guest unreachable by `/api/auth/login` AND by Basic auth without either knowing guests exist. **The upgrade does not move the account** — everything durable is keyed on `users.id` (`war_player_bindings`, `war_reconnect_tokens`, `command_presets`, `admin_audit`), so `ConfirmProvisionalUpgrade` is one guarded UPDATE on the row that already exists and a future table keyed on the id inherits the property for free. The device token does **not** rotate (a lost race between two tabs would delete an account with no password to recover with) and **is** revoked by the upgrade. `DecideUpgrade` is the pure policy: a provisional faction is mutable and a confirmed one is not, so an upgrade that CHANGES the faction inherits §1b and clears the account's bindings + war tokens — "upgrade without losing progress" is true when the faction is kept and deliberately false when it is switched. |
 | `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions, `admin_audit`). Ban primitives (`SetBanned`/`SetBannedByUsername`/`RevokeUserSessions`/`GetBannedUsers`, PLAN-gm-tools task 4). |
 | `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam, now backed by `GameStateStore` (see below). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
-| `Server/GameStateStore.h/.cpp` | **PLAN-persistence task 1**: the durable half of game-state snapshots, and the live `ISnapshotStore` implementation. Owns the `game_snapshots` table, a 112-byte self-describing blob frame (magic/version/engineHash/layoutHash/mapDigest/sha256), zlib compression, one-snapshot-per-transaction atomicity, last-K retention, and the two refusal ladders: **E1** hash mismatch (refuse loudly, never half-load — checked before decompression) and **E2** corruption (sha256 per rung, fall back through the retained K, `unresumable` when all fail). Writes are double-buffered: the sim thread only pays for `ISimSerializer::Serialize`, a worker compresses and commits. A restore reports through `syncedinput::Journal().RecordSnapshotRestore()`. **What produces the payload is not built**: creg is a stub in this tree (all `CR_` macros expand to nothing, `-DNOT_USING_CREG`), so `ISimSerializer` has no implementation, `Available()` is false, and the GM verbs refuse with a reason naming the gap — see PLAN-persistence.md §2.1 (Q-P1). **Rows are partitioned by the pair (`game_id`, `room_id`)**, and retention is last-K *per room*: `game_id` is the content id (`--game`), the lobby launches every room's game-server against the same `--db`, and scoping on `game_id` alone let one room prune another's history away and then restore that room's world (E1 cannot catch it — identical stamps). `roomId` stays a per-call argument rather than a `StoreConfig` field so there is only one source of truth for it; see the header's "ROOM SCOPING". Pure w.r.t. the sim (sqlite3 + zlib + libcrypto only), so it is doctested in `tests/test_game_state_store.cpp` against a synthetic serializer. |
+| `Server/GameStateStore.h/.cpp` | **PLAN-persistence task 1**: the durable half of game-state snapshots, and the live `ISnapshotStore` implementation. Owns the `game_snapshots` table, a **120-byte** self-describing blob frame (magic/version/engineHash/layoutHash/mapDigest/sha256/**defsHash**), zlib compression, one-snapshot-per-transaction atomicity, last-K retention, and the two refusal ladders: **E1** hash mismatch (refuse loudly, never half-load — checked before decompression) and **E2** corruption (sha256 per rung, fall back through the retained K, `unresumable` when all fail). Writes are double-buffered: the sim thread only pays for `ISimSerializer::Serialize`, a worker compresses and commits. A restore reports through `syncedinput::Journal().RecordSnapshotRestore()`. **What produces the payload is `Server/SimSnapshot.h/.cpp`** (below); the walk must cover every declared section AND every loaded gadget's synced Lua state before it is attached, or `Available()` stays false and the GM verbs refuse with a reason naming the gap. **As of task 1d-b both gates pass and the serializer IS attached** — the boot log reads `synced Lua coverage - 0 gadget(s) with no Save/Load pair`, then `serializer attached`. **Rows are partitioned by the pair (`game_id`, `room_id`)**, and retention is last-K *per room*: `game_id` is the content id (`--game`), the lobby launches every room's game-server against the same `--db`, and scoping on `game_id` alone let one room prune another's history away and then restore that room's world (E1 cannot catch it — identical stamps). `roomId` stays a per-call argument rather than a `StoreConfig` field so there is only one source of truth for it; see the header's "ROOM SCOPING". **`defsHash` (PLAN-def-reconciliation task 1) is the one header word that is recorded and NEVER matched**: `DecodeBlob` reads it and compares nothing, because §3 says reconcile is not optional — a snapshot taken before a balance patch has to *reach* the restore path or resuming a campaign across a patch is impossible, so a defs change is an input to the remap and not a refusal. It is `DefsDigestOf(defsCacheKey)` (FNV-1a 64, empty → 0 = "not recorded", and a real key that folded to 0 is nudged to 1 so the two can never be confused), supplied by `SetDefsHash` rather than by `StoreConfig` because **boot order makes it impossible to have at construction**: the store is built ~400 lines before `sim.Init()` has parsed a def, so a config field would be empty for the first part of every process's life. The blob version moved to **v2** for the field; a v1 blob is refused, which costs nothing because the same milestone added a payload section and therefore moved `LayoutHash()` too. The row carries hex of the same word in a new `defs_hash` column (**`''`, not `0000000000000000`, when unrecorded** — a query can then tell "taken before the column existed" from "taken before the key existed" without opening a blob), added to `EnsureTables` both in the `CREATE` and as an ignored-on-duplicate `ALTER TABLE` for a database written before it. Pure w.r.t. the sim (sqlite3 + zlib + libcrypto only), so it is doctested in `tests/test_game_state_store.cpp` against a synthetic serializer. |
+| `Server/SimSnapshot.h/.cpp` | **PLAN-persistence task 1b**: the `ISimSerializer` implementation — a purpose-written walk over the server's own synced state (Q-P1 **option B**; creg is a stub in this tree and is not coming back). The payload is a list of self-describing **sections** (`u16 id`, `u16 version`, `u32 len`), and **every part of the synced state the walk must cover has a `SectionSpec` — including the parts that are not written yet**. Landed: `globals` **v2** (sim frame, `paused`, synced-RNG position+stream, the staggered SlowUpdate cursor), `standingOrders`, `orgGroups`, `directives`, **`teams` + `units` (task 1c, **v4**)**. **`syncedLua` (task 1d, **v2** — the Lua-integer subtype, Q-P6)**, **`features` (task 1e)**, **`gameRules` (task 1d-b)**, **`envResources` (the wind, 2026-08-12)**, **`defNames` (PLAN-def-reconciliation task 1)**, **`defScalars` (PLAN-def-reconciliation task 3)**. **There are no declared gaps left** (`MissingSections()` is empty) and the coverage ledger below it is empty too, so **the serializer is attached**. **The `defNames` section's shape (PLAN-def-reconciliation task 1):** every other section stores def *ids* — a unit's weapon slots, a feature's resurrect target — and an id is only an identity while the def load that produced it is the one being restored into; a balance patch that adds, removes or reorders a def rewrites that mapping silently, because an id stays a perfectly valid id after it starts naming a different def. So the section records what each id MEANT: three parallel tables (`units`/`weapons`/`features`) of (id, name), captured straight off the three live def handlers. **The three capture loops do not share a start index** — weapon id 0 is a real def (`nodefweapon`) and unit/feature id 0 are not — and getting that wrong shifts every weapon index by one, which is the exact corruption the section exists to detect. `CompareDefNames` is keyed **by name, never by id**: an id-keyed diff reports a renumbering as one removal plus one addition, a reassuringly symmetrical description of the single most dangerous event. The delta is **reported and not enforced** — a defs change is an input to the reconcile pass, never a refusal. **Task 2 (2026-08-14) is that pass**, and it runs in the STAGING phase over the decoded payload, before any def is resolved and while there is still a live world to fall back on. Two rules decide all of it: a NAME is the identity, so every id is rewritten old-id → name → new-id and every name first through the game's own renames (`gamedata/migrations.lua`, read by `LoadDefAliases`; a missing file is the normal case, a malformed one refuses); and **a reference that cannot be remapped is REMOVED, never left pointing somewhere**, because an id that survives its def's removal is still a valid id and now names a different def. What the pass rewrites is the census of every def reference the payload actually carries: a unit's and a feature's def and a feature's resurrect target (by name — a removal drops the object, `RemapReport` counts it, a dropped unit is also pulled out of every transport graph so nothing is left attached to a unit that will never be created), `UnitState::featureDefID` (the delayed wreck — a raw feature id), **build orders, whose def id hides in the command id itself** (`cmdID = -unitDefID`, so a build order for a removed def LEAVES the queue rather than building whatever holds that id now), and `BuildBase`'s trailing param list plus `StandingOrderConditions::squadTypes` on both standing orders and directives. **`squadTypes` is the sharp edge and the reason this pass counts what it drops: it is a def-id whitelist whose EMPTY state means "any squad"**, so dropping its last surviving entry would *widen* a recruiting order into a wildcard — the exact opposite of what removing a def should do. An order that loses its whole filter is therefore **deactivated**, not emptied. **`BuildDefRemap`'s one refusal is E1**: an alias whose target is ambiguous (`a = "b"` while the game defines both, or two captured names aliased onto one live name) is an authoring bug with no correct disposition. **An unrecorded vocabulary — an empty table on either side — is `unknown` and changes nothing**, which is load-bearing in one direction: a live table this process has not parsed yet would otherwise read as "every def was removed" and delete the entire world. Weapon slots are the other half and they are remapped at APPLY time, because their pairing needs the live def's weapon list: `units` moved to **v4** to carry `WeaponState::weaponDefName`, and `MatchWeaponSlots` pairs captured slots to live ones **by weapon def name in occurrence order** (a payload with no names at all falls back to the old positional match). Without it the only thing relating captured slot i to live slot i was the integer i, which a def that gains, loses or reorders a weapon makes wrong while leaving it plausible — a full stockpile landing on the wrong launcher. A live slot with no captured counterpart is §E4's up-gunned fleet and starts fresh. §E5's pending-volley ring is **not** remapped and cannot be: there is no ring in the payload, and it is now named in `DerivedNotCaptured()` as a declared loss. **The `defScalars` section's shape (PLAN-def-reconciliation task 3, 2026-08-14):** task 2 fixed every def *reference*; this fixes every def-derived *number* — the balance-patch case where no name and no id moved and every unit still carries a copy of numbers the new defs no longer agree with. The hard part is not the arithmetic: almost every one of these fields is BOTH a def cache and a Lua setter's target (`SetUnitMaxHealth`, `SetUnitCosts`, `SetUnitSensorRadius`, `SetUnitArmored`, `SetUnitStealth`, `SetUnitMaxRange`, `SetUnitHarvestStorage`, `SetUnitFlanking`), so "disagrees with the live def" means either a stale cache or a gadget's deliberate override — and nothing in the object distinguishes them. So the section records, per def name, what a **NEWBORN** object of that def held when the snapshot was taken (`UnitDefScalars`, 26 fields; `FeatureDefScalars`, 4) — deliberately the values a fresh `CUnit` would carry, with `PreInit`'s clamps and derived combinations applied at CAPTURE time, so `ReconcileScalars` is plain field equality and PreInit's arithmetic lives in exactly one place. A captured field still equal to its newborn value was never authored and is re-derived from the live def; anything else is kept. `health` preserves its **fraction** against the new maximum (§2 step 3 — a nerf leaves a unit as wounded as it was rather than healing it, a buff raises absolute health without healing it), and a feature's `resources` gets the same treatment against `defResources`, which `CFeature` caps it by and uses as the reclaimed fraction. **`armorType` and `category` are unconditional re-derives** — neither has a Lua setter and nothing mutates them after PreInit — and that closes task 2's named gap: `armorType` is an index into the armor-type list, which no name table carries and no name-keyed remap can rewrite, so the fix is not a fourth table but **not restoring a stale index at all**. **Experience is part of "newborn":** `AddExperience` re-derives maxHealth, power and reloadSpeed off `unitDef` using three `modInfo` scales that no defsHash can see, so those scales travel in the section and the expected-newborn value is computed with the SNAPSHOT's curve while the re-derived one uses the live curve — without that every veteran reads as authored and keeps its stale maxHealth. **Two fields look like def caches and are accumulators:** `flankingBonusMobility` is seeded from the def and then `+= mobilityAdd` on every SlowUpdate (so it equals its newborn value only on the frame the unit was born — dropped from the audited set, its *rate* is reconciled), and `mass` stays at its constructor value while `beingBuilt` while a transport ADDS its cargo's mass into its own (carved out for those two cases). The first of those was found by the section's own **live tripwire**: the restore logs the authored-field count at NOTICE even when nothing moved, because `CaptureDefScalars` mirrors `CUnit::PreInit` by hand and a drifted mirror makes every field read as authored and the pass silently stop re-deriving. On a real 26-unit world it reported 26 authored fields — exactly one per unit — and after the fix reports 0. An **empty captured table** (a pre-task-3 snapshot) does nothing at all, the same one-directional guard as task 2's `unknown` vocabulary. Two apply-side defects fell out and are fixed in `ApplyUnitState`: `u->AddExperience(0.0f)` was documented as rebuilding `limExperience` and is a **no-op** (`AddExperience` returns early on 0), so every restored veteran carried `limExperience` 0 — `CWeapon`'s accuracy scale and a missile's wobble factor — until its next kill; and a weapon mid-reload now **clamps to the live def's cycle length** (`reloadStatus` is an absolute frame while `reloadTime` comes off the new def). **The cross-process arm is NOT covered here:** `--snapshot-roundtrip` captures and restores under one def load, so captured and live scalars are identical by construction, and `--headless-run` writes no exit checkpoint by design — a snapshot → retune → resume test needs a war-path resume (PLAN-def-reconciliation task 5). **The game's own half (PLAN-def-reconciliation task 4, 2026-08-14):** `BuildDefsReconciledDelta` composes what the three passes learned into the table `gadget:DefsReconciled(delta)` receives, fired from the very end of the commit phase — after `ApplySyncedLua` (a gadget repairs the state it just restored), after the gadget-Load failure check, and after the RNG restore (a handler that draws must draw from the resumed world's stream). It is **Nil, and the call-in does not fire, unless something moved**, which is what keeps the §8 round-trip's byte-identical re-capture intact. Two kinds of field, and the split is the point: the def vocabulary that moved (removed / renamed / retuned, **complete and sorted** rather than the five capped examples the log lines carry — a capped list of names is a gadget that repairs the first five references), and **the object ids that LEFT** (`droppedUnits`/`droppedFeatures`). The second is the load-bearing one: a unit whose def was removed is dropped during staging, so it never existed in the restored world and **no `UnitDestroyed` ever fired for it**, and every gadget in the game holds unit ids. Game-side handlers: `game_objectives.lua` expires (never *fails* — nobody lost it) any active objective naming a dropped unit, asking each objective type module for its own `unitRefs` because the four types with unit references spell them four different ways; `game_warlog.lua` emits the §2 step 6 digest as `patch` events (per-def lines capped at 4 so a 50-def patch cannot lap the 32-slot ring and eat the war's own history, with a summary carrying the true totals) which `client/src/lobby/war-digest.ts` words; `game_authority.lua` re-publishes `authority_cost_version`, the number `ui/lib/authority-cost.js` needs to detect that its cached cost mirror predates the patch and stop predicting — nothing had ever published it. `squad.lua` deliberately has **no** handler: it caches nothing, and §4 E2's squad_size change is derived client-side from the live def on a reconnect that is always fresh. **The `envResources` section's shape (the wind, 2026-08-12):** `EnvResourceHandler` is synced state on a **450-frame cycle** — the frame where `windDirTimer == 0` draws TWO floats from the synced RNG and picks `newWindVec`, the other 449 blend `oldWindVec` → `newWindVec` by a smoothstep of the timer — and **no section carried any of it**, so a restore landed the resumed world on a different phase and drew its next pair on a different frame. Invisible to every measurement this walk has ever taken, for a mechanical reason: a 20- or 100-tick round-trip window does not contain a wind update at all. The field set is exactly the handler's own `CR_REG_METADATA` list (creg is stubbed here, but its member list is still the reference engine's statement of what this handler's state is), captured through `EnvResourceHandler::Snapshot{Capture,Apply}` authored **inside** the class — every member is private — into the plain aggregate `envressnapshot::EnvResourceState` (`Sim/Misc/WindSnapshot.h`) so the field census can destructure it. Two apply-side rules: the timer is **clamped** to `[0, WIND_UPDATE_RATE]` because it is divided by that rate to make a smoothstep argument, and the two **generator id lists are REPLACED rather than merged** with what the roster rebuild produced — `CUnit::PostInit` re-registers every restored wind generator as NEW, i.e. a world whose generators had long since been introduced to the wind comes back claiming they all are, each getting a script `WindChanged()` it was not due. Every id is checked against the restored roster by the pure `envressnapshot::RestoreGenerators` (which also keeps an id appearing in both captured lists exactly once, the invariant `DelGenerator` relies on): `Update()` dereferences `unitHandler.GetUnit(id)` with **no null check**, so a captured generator the restored world does not carry is a crash up to 450 frames later, not a drift — which is why `ApplyEnvResources` runs after `ApplyUnits`. **Measured POSITIVE against a matched control that captures and does not apply**, `--snapshot-roundtrip 440:30` on `soak-ladder` (a window that crosses a wind draw): with the apply, both arms hold identical wind at frame 470 and `envResources` is absent from the disagreeing-sections list; without it, the re-capture **fails the world bar**, the arms sit 30 frames apart in the cycle, and `globals` **byte 4 — the RNG position** — diverges. **Task 1d-b's shape:** the nine remaining gadgets gained `Save`/`Load` pairs (game-side, `data/games/metalstorm/LuaRules/Gadgets/`, each with its census written above it), and writing them surfaced the tenth section: every other rulesParam family hangs off an object the walk already visits (`team->modParams`, `u->modParams`, `f->modParams`), but `Spring.SetGameRulesParam` writes ONE process-wide static, `CSplitLuaHandle::gameParams`, which no section reached — and a section table cannot report a section nobody declared. Republishing them from each gadget's `Load` is NOT equivalent and was rejected: a republish can add the keys a gadget still owns but never remove the keys of an objective created *after* the captured frame. So `gameRules` captures the map whole (`CaptureGameRules`, sorted by key) and **applies it as a replacement, never a merge** (`ApplyGameRules` → `CSplitLuaHandle::SetGameParams`), between `ApplyFeatures` and `ApplySyncedLua` — after the roster rebuild's own publishes, before the gadgets' `Load`, so a gadget with a live Lua mirror can still write on top. Gadget-side, the shared `Gadgets/tick.lua` gained `save`/`load`: a gate's `last` is an absolute frame stamp and an ACCRUAL gate (`Tick.count`) left where the live process had it banks every period between two worlds' frames — an unearned stipend on the first frame after a restore. **Task 1e's shape:** `features` carries the live `CFeature` set — the def and the resurrect-target unitDef by NAME, transform, reclaim/resurrect progress, resources, the `moveCtrl` masks and vectors, the blocking flags, the Lua-overwritable footprint geometry (`radius`/`height`/`relMidPos`/`relAimPos`, which the units section does NOT capture — a 1c gap named in §7.1e) and rulesParams. **`physicalState` is deliberately absent**: every bit a feature sets is recomputed by `CFeature::UpdateTransformAndPhysState` or by `Block()` during the restore, so writing it would claim a fidelity the walk cannot check (`collidableState` IS captured — Lua authors it and nothing recomputes it). Restoring is clear-then-rebuild like the units section, and it runs AFTER `ApplyUnits` so anything the roster teardown leaves in the feature set is discarded rather than added. The clear step needed a new engine entry point, **`CFeatureHandler::ClearAllFeatures()`**: `CanAddFeature` refuses an id the pool has not recycled, the ordinary delete path only recycles ids every 32 frames, and the *pending* `deletedFeatureIDs` list has to be drained in the same call — a pending id re-claimed by the payload would make the deferred pass free a live feature's id a second time. **Task 1d's shape:** the section is the table the gadgets write during the `Save` call-in, keyed by gadget name and by synced handle (`rules`/`gaia` — `luaGaia` is loaded for maps that ship it, and its gadgets' state is synced state too); the bytes go through `luasnapshot::Value` so the codec is doctested without a sim, and `ResolveSyncedLua` refuses during STAGING when the payload names a handle this run has not loaded (or omits one it has). `ApplySyncedLua` runs **last** in the commit phase, after `ApplyUnits`: tearing down and rebuilding the roster fires `UnitDestroyed`/`UnitCreated` across every unit, so gadget bookkeeping is rewritten by those events and the snapshot's version has to win. **A second completeness gate lives below the section table:** `SyncedLuaCoverageGaps()` asks the LIVE gadget handler which gadgets implement both call-ins (`covered`), declare `snapshot = 'stateless'` in `GetInfo()` (`stateless`), or neither (`gaps` — including a gadget with only one of the two, which captures bytes nothing restores). `Serialize()` refuses by those names, and `server_main` logs the ledger at boot: a table of gadget names compiled into the engine could not report a gadget nobody thought of. **Task 1c's shape:** the two sim-object sections are split into a CAPTURE/APPLY half that touches `CTeam`/`CUnit`/`CCommandAI`/`unitLoader` and a CODEC half that only sees plain state structs (`TeamState`, `UnitState`, `CommandState`, `WeaponState`, `RulesParamState`), because no doctest can stand up a map + def handler + team handler — the bytes are therefore fully covered in-process and only capture/apply need a live server. Which `CUnit`/`CTeam` member is captured, re-derived from the def, rebuilt within a tick, or deliberately dropped is **PLAN-persistence.md §7.1c**, and the state structs are that contract in code. Two restore behaviours worth knowing: a unit is created through `unitLoader` and its `CommandAI` queue is reinstalled with **`inCommand` forced false** (via the added `CCommandAI::RestoreCommandQueue`, which also restores the queue's tag counter and the commands' death dependencies) so the front command is re-entered and the move goal/target/build site are rebuilt from the command itself. **Option A (2026-08-12) moved `units` to v3 (v4 is def-reconciliation task 2's per-slot weapon def name) and DOES capture `AMoveType` state** — `UnitState::move`, one tagged arm per move-type class (`movetypesnapshot::MoveTypeState`), because the re-entry rebuilds only the *goal*: current speed, turn speed, the waypoint pair, an aircraft's flight state and every value `Spring.MoveCtrl` wrote used to start at their constructor values. **Measured at zero for the continuation drift**, against a matched control that captures and does not apply: 63/100 units differ in transform either way (max 119.0 vs 122.7 elmos, inside the 117–123 spread of repeated runs). What re-plans a restored unit is the command re-entry above, not the lost move state — so option A is coverage for the state no command rebuilds (Lua move control, aircraft, `maxSpeed` overrides), and the drift stays open; and every `unitDef` name and team id is resolved during STAGING, before the live roster is torn down, because a half-rebuilt world has nothing to roll back to. Restoring a unit graph is **four** passes: clear (`GarbageCollectUnit`, `reclaimed=true` so no wrecks), create+apply, re-attach transportees, then **put `CUnitHandler::activeUnits` back in its captured order**. That last pass is Q-P4 (2026-08-12) and the section versions moved to **v2** for it: the payload is written in ascending-id order so two captures of one world are byte-comparable, but `activeUnits` is in *insertion* order and `SlowUpdateUnits` walks it in a staggered slice — one 1/`UNIT_SLOWUPDATE_RATE` window per frame — so **which slot a unit occupies decides which frame it is slow-updated on, and `CWeapon::SlowUpdate` draws from the synced RNG**. Rebuilding in id order therefore made a resumed world draw a different number of times on its FIRST tick with every unit byte-identical. The order rides as `UnitState::activeIndex` (**a property of the collection, not of the unit** — it is captured before the sort discards it) and is put back by the pure `RestoredActiveOrder`, sorted by (`activeIndex`, `id`) so a payload whose indices are not a clean permutation still yields ONE order rather than an `std::sort`-unstable one. The staggered cursor itself is the other half: `activeSlowUpdateUnit` only rewinds to 0 every `UNIT_SLOWUPDATE_RATE` frames, so on 14 frames in 15 it is live cross-frame state, and it now rides `globals` (clamped to the rebuilt roster on the way in — `activeUnits.size() - idxBeg` underflows a `size_t` otherwise). Recoil serializes both members. **`ApplyUnitState` places the unit with `u->CUnit::ForcedMove(...)`, qualified on purpose** — `CBuilding::ForcedMove` snaps through `Pos2BuildPos` and re-runs `FlattenGround`, so the virtual call silently re-derived where a building "should" have been built (up to 8 elmos of movement per restore for anything staged off the build grid) instead of restoring where it was. Tripwire for the two engine classes: the structured-binding census cannot destructure `CUnit`/`CTeam` (private members, bases), so it is a `static_assert` on `sizeof()` naming §7.1c — a prompt, not a proof (a field fitting existing padding does not move `sizeof`). `Serialize()` **refuses by name** while any declared section is unimplemented, so no configuration produces a payload known to be partial; `SerializeImplemented()` is the ungated body, for tests and for 1c/1d to extend. `LayoutHash()` is **derived from the section table** (FNV-1a over the envelope version plus each implemented section's id+version), so E1's refusal moves mechanically on a shape change rather than by an author remembering. `Deserialize()` stages every section into locals and swaps only after the whole payload reads clean (§2's "never half-load"); an unknown section id, a version the codec does not speak, or trailing bytes inside a section are all **refusals, not skips** (and every "this count cannot fit" guard in the reader must call `Reader::Fail()`: a guard that only returned early left `bad` false, so two cut points out of ~250 in the truncation sweep decoded a half-read struct as SUCCESS — found and fixed by task 1c) — E1 already rejects foreign blobs, so anything unrecognised means the bytes are not what the header claims. The completeness tripwire (Q-P1 constraint 4) is a **field census**: `census::*` destructures every member of each serialized struct, so adding a field to `StandingOrder`/`Directive`/`OrgGroup`/`StandingOrderConditions` is a **build failure**, not a field that silently stops being snapshotted. State deliberately left out because the sim rebuilds it (LOS maps, quad-field membership, path caches) is enumerated in `DerivedNotCaptured()` with what rebuilds it — in-flight projectiles are listed there as a **deliberate loss**, not a rebuild. `tests/test_sim_snapshot.cpp`. |
+| `Server/SnapshotRoundTrip.h/.cpp` | **PLAN-persistence §8**: the populated-fixture round-trip behind `--snapshot-roundtrip <frame>[:<ticks>]` — the assertion `tests/test_sim_snapshot.cpp` structurally cannot make. The codec tests prove the bytes survive; this proves a world RESTORED from them goes on behaving the same way, which needs a map, a def handler, real units and live gadgets. It checkpoints at the first frame past `<frame>`, runs `<ticks>` ticks recording `statsdump::ComputeStateHash` every tick, restores the checkpoint (the sim's frame counter rewinds), runs the same ticks again, and compares. **The bar is Q-P2's decision (option D, 2026-08-12), and it is not identity:** what must hold is that the restore is byte-exact (a **re-capture taken immediately after the restore** equals the checkpoint applied), that the two continuations hold the **same roster**, and that no unit differs in **vitals** — while the movement drift between them is **measured and reported, on a pass as well as a failure** (`Continuation: 64/100 units differ in transform (max pos delta 116.119 elmos, max heading delta 65.7 deg), 0 in vitals, roster identical`). That number is the metric that sizes capturing `AMoveType` state, which is the option the decision defers. `--roundtrip-strict` restores the original identity bar (hash tracks + terminal payloads byte-equal) for a fixture with nothing under a move order. The verdict is reached by `Controller::Finish(Divergence)`, not by arm B's payload arriving: the module is pure, so the decode is the caller's (`simsnapshot::CompareUnits`) — and a continuation that could not be measured **fails**, the same rule `Result::ran` exists for. Rides the headless substrate like `--replay` (uncapped, no client); exits nonzero on divergence, and a run that ends any other way than by its own verdict reports INCOMPLETE rather than passing. **Read the verdict LINE, not the exit code** — every headless run exits 134 in the static-destruction abort (PLAN-replay T2-b). The module is pure (std-lib only, the `HeadlessRun` shape) — server_main performs the capture/restore it asks for. Its failure reports are the reason `SimSnapshot` gained `DescribeOffset` / `DiffSections` / `DescribeUnitsDivergence`: "the payloads differ at byte 51 234" names nothing, "section 'globals', byte 4 of 21" is the synced RNG and "60 of 100 units differ in transform, 0 in vitals" is the movement re-derivation. `DescribeRulesParamsDivergence` (2026-08-14) is the same service for a rules-params section, and it is what a STATIC fixture's failure needs: with no moving units to blame, a failure lands in the gadgets' own state, and "the gameRules section differs" over ~80 keys is not a diagnosis. It is keyed by param name, never by position — the live finding was two maps holding the same information under differently spelled keys, which a positional walk reports as every row changed. **Two real defects on its first run**, both fixed in `SimSnapshot.cpp`: the synced RNG was restored FIRST and then advanced by the roster rebuild's own draws (it is now the last statement of the commit), and `ApplyTeams` ran before a rebuild that bumps `unitsProduced`/`unitsDied` for every unit it deletes and creates (it now runs a second time after it). **A third defect, found 2026-08-12 by re-running it:** `ApplyUnitState` called `ForcedMove` virtually, and **`CBuilding` overrides it to snap the position through `Pos2BuildPos` and re-run `FlattenGround`** — so a building staged off the 16-elmo build grid was moved up to half a square on *every* restore and its terrain cut was made again, which is exactly what `params.flattenGround = false` two functions up exists to avoid. The call is now `u->CUnit::ForcedMove(...)`; everything else the override did (heading from facing, direction vectors, zero velocity) is applied explicitly by the statements after it. It read as "the re-capture differs at section 'units'" and had been masked by the identity bar failing anyway. **Residual, by decision not by defect:** with the restore byte-exact, the two continuations still separate — 0/100 units at frame 60 over 20 ticks, 64/100 (max 116 elmos) at frame 300 over 100, 79/100 (max 121 elmos) at frame 900 — which is task 1c's declared re-derivation. **Capturing `AMoveType` state (option A, 2026-08-12) did not move it** (63/100, max 122.7, against a matched capture-but-do-not-apply control at 63/100, max 119.0), so the residue is the command re-entry itself, and it means a resumed world is world-identical, not track-identical. **The other residual — the synced RNG ending at a different stream position on the first tick even where NO unit moved (`globals`, byte 4) — is closed (Q-P4, 2026-08-12): it was the `activeUnits` order, see `SimSnapshot` above.** **The strict bar's fixture is `roundtrip-static`, and only that (2026-08-14).** `--roundtrip-strict` is meaningful only where nothing is under a move order, and until 2026-08-14 no such fixture existed: the recipe named `soak-ladder`, a war whose civilians and convoys are moving at frame 2, where the strict bar fails in every window (30 of 134 units at `60:20`) — and the **2026-08-12 binary produces byte-identical numbers**, so the "passes at 60:20" claim was never true of the command written beside it. `data/games/metalstorm/scenarios/roundtrip_static.lua` + `tools/headless-batch/fixtures/roundtrip-static.json` stage 26 units with no orders, no civilians, no convoys and no AI; there `60:20 --roundtrip-strict` passes end to end (20/20 hashes, terminal payload identical, 0/26 units differing), and neutralising Q-P4's `(activeIndex, id)` ordering makes it fail with that defect's `globals`+`units` signature, so the bar is not inert. On the moving fixture the world bar at 300 and 900 still diverges, which is the movement re-derivation and nothing else. **The static fixture's first wind window (`440:30`) found Q-P6, and it is CLOSED (2026-08-14):** every hash and every unit identical, `gameRules` alone disagreeing, because the restored arm re-published `warlog_1_kind` as `warlog_1.0_kind` — `luasnapshot::Push` restored every number with `lua_pushnumber` and Lua 5.4 stringifies an integer-valued float as `1.0`, so a resumed war wrote its digest and objective params under keys nothing reads. Fixed by carrying the subtype (`LuaSnapshotState` above, `syncedLua` v2); `440:30 --roundtrip-strict` on the static fixture now PASSES and is the standing regression bar for it alongside `60:20`. See PLAN-persistence §8. `tests/test_snapshot_roundtrip.cpp`. |
+| `Server/Hibernation.h/.cpp` | **PLAN-persistence task 3a**: the two hibernate/resume *decisions*, pulled out of `server_main` so they can be tested at all. `DecideExitCheckpoint` answers "should THIS exit leave a resumable world behind?" from an `ExitReason` (`Signal`/`Idle`/`PostGame`/`Restart`/`HeadlessRun`/`Harness`) plus the world's state, and its return carries a **`lossy`** flag: six refusals are benign (a replay, an unstarted game, a finished match…) and exactly one is a data-loss event (a live war whose serializer never attached), so the exit path logs them at NOTICE and WARNING respectively. The serializer check sits BELOW the benign ones deliberately — a run that had nothing to save must not be reported as a loss. `DoResume` answers the boot side and **every failure is fatal**: `WrongShape` / `NoSerializer` / `NoSnapshot` / `RestoreFailed` all abort the process, because the one outcome that must be unreachable is a server coming up as a FRESH world at frame -1 while the lobby is telling players their room is frozen at frame N. Pure (std-lib only, `IResumeSource` narrows `GameStateStore` to `Available`/`NewestFrame`/`RestoreNewestValid`); `tests/test_hibernation.cpp`. **Wiring, in `server_main.cpp`:** `--resume` (bare flag — the partition key `(gameId, roomId)` is already `--game` + `--room`, so §3's `--resume <gameId>` sketch would have been a second source of truth; mutually exclusive with `--replay`/`--snapshot-roundtrip`, which supply their own world), `--no-hibernate`, `--hibernate-idle-seconds <n>` (**default 0 = off** in the binary: a persistent room that exits when empty is unjoinable until something respawns it. Task 3b made the lobby that something and passes the window per war — see `WarResume.h` and "Game-server lifetime" below — so a bare `spring-server` keeps the safe default and a lobby-spawned war hibernates). The resume applies **after** `FireGameStart` and the scenario staging it runs, and **before** the loop — over a fully-staged world, which is the same path `--snapshot-roundtrip` exercises, rather than a second untested "restore into an empty sim". The exit checkpoint is **one site** after the loop on the sim thread; the four in-loop stop sites only name their `exitReason`. |
 | `Server/GrowthCounters.h/.cpp` | **PLAN-long-uptime task 3**: the growth-counter set + static alarm thresholds (`Evaluate`/`ToJson`/`ParseAlarms`/`ThresholdsFromEnv`). Pure — no sim, no sqlite — so both binaries link it: `server_main.cpp` gathers the engine-coupled readings (RSS, synced Lua heap, interned key dictionary, unit-id occupancy + spawn generations, standing orders, player rows) on the metric cadence and writes them into `game_metrics.extra_json`; `lobby_main.cpp` parses the same blob back for fleet badges and the drill-down charts, and its maintenance loop turns alarm *transitions* into `admin_audit` rows. Thresholds documented in `docs/gm-tools.md`. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam (`NullSnapshotStore` until PLAN-persistence's `GameStateStore` lands → refuses cleanly, audited). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
 | `Server/GmDashboardPage.h` | **PLAN-gm-tools task 3**: the self-contained GM ops dashboard HTML/JS, served by the lobby at `GET /admin`. |
-| `Server/RoomManager.h/.cpp` | Room lifecycle (create/join/leave/start/end), player rosters. |
-| `Server/MapProcessor.h/.cpp` | SMF parsing, heightmap/minimap/feature extraction, model conversion. Only linked by `tools/mapconverter`. |
+| `Server/RoomManager.h/.cpp` | Room lifecycle (create/join/leave/start/end), player rosters. **Seating rule (PLAN-endtoend D19 + D40):** a room's `war_sides` modoption (`"compact:0,union:1"`, written once by the lobby from the scenario) is the only side↔team mapping; `GameRoom::SideTeams()` reads the pairs, `SlotTeams()` is its integer projection (with the legacy `{0,1}` fallback), and `TeamForFaction()` is the lookup that makes `users.faction_id` mean something. An account's faction **outranks the auto-balancer** in `JoinRoom` and in `EnlistSpectator`'s auto-assign — a permanent allegiance is not a balancing input — while an *explicit* team (`SetTeam`, `AddAISlot`, a 255-free `EnlistSpectator`) stays permissive, because `/api/rooms/direct` manifests legitimately seat NPCs and fixture accounts on teams no side declares. Faction rides in as a caller-supplied parameter; RoomManager never reads the accounts tables. **Write-through discipline (PLAN-endtoend D35):** every persist path goes through `WriteTransactionLocked`, which runs its body as one `BEGIN IMMEDIATE .. COMMIT`, **joins an already-open transaction instead of starting a second one**, retries the whole transaction on `SQLITE_BUSY`/`SQLITE_LOCKED` (`SqliteThreading.h`: `kSqliteBusyRetries`, `SqliteBusyBackoffMs`) and reports a genuinely lost write at ERROR. Two rules behind it, both learned the hard way. (1) **A busy timeout is a wait policy, not a durability policy** — `kSqliteBusyTimeoutMs` makes a writer wait 5 s for `data/spring-server.db`'s single write lock; past the expiry the write does not happen, and before D35 every call site logged a warning and dropped it. (2) **The handle is shared with the rest of the lobby**, so an unchecked `COMMIT` failure leaves a transaction open and poisons every later writer with "cannot start a transaction within a transaction" — the rollback after any in-transaction failure is unconditional for that reason. Persisting one room is therefore **one** commit, not the four it used to be (the `rooms` row plus one per child table), which is both the contention fix and what makes a room's row and its roster atomic to a reader. **The policy itself lives in `SqliteThreading.h::SqliteWriteTransaction`, not here**, because RoomManager stopped being the only writer on this handle the moment the War Director arrived: see the shared-handle rule below the component table. |
+| `Server/MapProcessor.h/.cpp` | SMF parsing, heightmap/minimap/feature extraction, model conversion. Only linked by `tools/mapconverter`. Also extracts the SMF **typemap** (half-res, one entry per 2x2 squares = 16 elmos) to `typemap.bin`; `ReadMap` loads it into `CReadMap::typeMap` and it indexes `mapinfo.terrainTypes`. On terragen maps the typemap value is the **road surface class** (`terragen/roads.py` `SURF_*`: 1 bitumen, 2 dirt, 3 mud), which is what gives `ServerTrackEmitter` its per-surface `receiveTracks` gate — sealed roads record no dynamic tyre tracks, soft ground does. **`CMapInfo::ReadTerrainTypes` reads move speeds from a NESTED `moveSpeeds` subtable with no flat fallback** — an emitter writing flat `tankspeed` keys ships a value nothing parses (PLAN-maps §2c). Those speeds are LIVE since roads R3 (bitumen 1.60 / dirt 1.25 / mud 1.00, measured; PLAN-maps §2e): `CMoveMath::GetPosSpeedMod` multiplies `GroundSpeedMod` by the type's per-move-class speed and `CGroundMoveType` raises `wantedSpeed` above the def's `maxSpeed` when the mod exceeds 1. **Which FIELD a Metalstorm unit reads is not what its name suggests**: `gamedata/moveinfo.tdf` declares INFANTRY `speedmodclass = 2` (engine Hover) and SHIP/SUB `= 1` (engine KBot), so tankSpeed is VEH/HEAVY, hoverSpeed is INFANTRY, kbotSpeed is SHIP/SUB and shipSpeed is read by nothing. A deck cell at or below the water plane is typed **0 (a ford)** by `write_package`, so a boat cannot collect the road multiplier over a submerged crossing. **Roadside YARD PADS are ordinary deck** (`terragen/yards.py`, roads R4b) for exactly this reason: a pad carved into the road raster inherits the deck albedo, the rock/aggregate splat channel and this typemap value, and there is no fifth detail channel to give it one of its own. Two traps behind that. (1) **`roads.flatten_network` does not make anything flat** — it blends toward a BLUR, so it is the identity on a uniform slope (a pad on a 3.2-deg ramp kept 31.2 of 31.5 elmos of relief); a flat pad needs `yards.level_yard_pads`, which plateaus it and must run AFTER the flatten, since on the deck the grader's weight is 1 and it overwrites anything applied before it. (2) **`mapdata/roads.lua` now carries THREE blocks — `links`, `yards`, `crossings`, in that order** — and each `scenariogen.read_road_*` reader bounds its regex by finding the name of the block after its own, so the file's block ORDER is part of those readers' contract. |
 | `Server/MapMetadataDb.cpp` | Read-only SQLite access for map metadata. Used by lobby and game server. |
+| `Server/FeatureProcessor.h/.cpp` | Featuredefs + the Lua **featureplacer** (`mapconfig/featureplacer/config.lua`) + feature asset conversion. An objectlist entry carries `name`, `x`, `z` and `rot` (a 16-bit heading) and **nothing else — there is no `y`**: `CFeatureHandler::LoadFeaturesFromMap` spawns every map-authored feature at `CGround::GetHeightReal(x, z)`, and `floating = true` only zeroes the gravity term (`Feature.cpp`), it does not buoy anything up. **A map cannot therefore place a bridge span over water** — the chain lies on the riverbed. `game_scenario.lua`'s `stageFeatures` takes an explicit `y`, so the SCENARIO is the only path that can lay a level deck at the waterline; the map's job is to publish WHERE (`mapdata/roads.lua` `crossings`, roads R3b). Heading convention for both paths: 0 = FACING_NORTH, chain direction `(sin t, -cos t)`, i.e. the model's local **-Z** (`tools/mapgen/terragen/bridges.py`). |
 | `Server/GameProcessor.h/.cpp` | Scans `objects3d/`, converts S3O→glb via modelimporter, converts textures. |
 | `Server/CombatEventCollector.h/.cpp` | Hooks DoDamage, collects hit/miss/kill events for broadcast. |
 | `Server/SoundEventCollector.h/.cpp` | Per-tick collector for `SoundEventData` (sound id, source def + kind, position, channel, priority). Drained into `GameEventBatch.sounds`. |
@@ -89,11 +152,65 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/LuaDebugger.h/.cpp` | Lua breakpoints, stack inspection, step/continue, sim pause. |
 | `Server/AI/AIRuntimePool.h/.cpp` | Pool of Lua AI runtimes, one per AI player. |
 | `Server/AI/AIDiscovery.h/.cpp` | Scans `content/engine/ai/` + game ai dirs for plugins. |
+| `Server/AI/AISpawn.h/.cpp` | **Mid-game AI seating** (PLAN-metalstorm-ai.md §10 task 4(b)). `AISpawnRelay` is the sim-thread relay `Spring.SpawnAIPlayer` (synced Lua) declares into, drained once per tick — same shape as `GameOverState.h`, and for the same reason: synced Lua owns the *decision* ("this side has emptied") and the server owns the *act* (discovery, the runtime pool, the roster). `DecideAISpawn` is the policy, testable without a sim; `ResolveAIPlugin` is the id→plugin+entry-buffer resolver that the start-up `--ai` staging block in `server_main.cpp` and the runtime spawn **share**, so an AI the lobby can seat at frame 0 is one the caretaker hook can seat at frame N. FIDELITY-STANDIN: no synced call creates a SkirmishAI in Spring/Recoil. |
+| `Server/AI/AISpawnService.h/.cpp` | The drain, split out because it needs `playerHandler`/`teamHandler` and therefore cannot link into `spring-tests`. Registers the AI's virtual player (AI3), fires `PlayerAdded` into synced Lua through `PlayerOnboarding` — without which the new AI has no authority pool and plans directives it can never pay for — then loads the VM. **Under replay the virtual player is registered and the VM is NOT**: the AI's output is an input fed from the recording (`TickAI`), so a second brain would observe a world it never saw live. Also **records the seat** (`RuntimeAIRoster`, live path only) and, on a resume, **restores every recorded seat at its stored playerNum** before the `--ai` slots load theirs — `FireSyncedPlayerAdded` is idempotent there because `game_authority.lua` guards on the restored `authority_granted_<n>`, so a restored pool is never re-minted or topped up. |
+| `Server/RuntimeAIRoster.h/.cpp` | `room_runtime_ai`: the AI seats a war acquires while it is RUNNING, so a hibernated war resumes with a brain behind each of them (PLAN-metalstorm-ai.md §10 task 4(b)'s open thread). Unlike `room_ai_slots` — the lobby's pre-game roster, which becomes `--ai` args — the row's identity is the sim **playerNum**, and that is why the GAME server is both writer and reader: the number is minted by the process that seats the AI, every synced key about it is scoped by it (`authority_player_<n>`, `authority_granted_<n>`, the ledger's spend identity), and the restored snapshot brings those keys back verbatim — re-seating at a different number would strand the pool under the retired one, exactly as D16 forbids for a reconnecting human. `DecideRuntimeAIRestore` is the policy (testable without a sim); `RestoreRuntimeAISeats` in `AISpawnService.cpp` is the half that needs one. The lobby's whole stake is the DELETE that goes with the room. Additive migration only: while a war is frozen this is the only record the seat ever existed. |
 | `Server/FactionData.h/.cpp` | Reads a game's `gamedata/sidedata.lua` into `FactionInfo{key,name,fullName,description,startUnit}`. Bare-`lua_State` reader like `ConfigReader`/`AIDiscovery`, plus a minimal `VFS.Include` shim (BAR's sidedata includes `sides_enum.lua`). `key` is `name` lowercased, matching `SideParser`'s side-key derivation, so it stays in parity with the value stored in `users.faction_id`. Feeds `/api/factions/<gameId>` and the registration/admin faction validation. Missing or broken data yields an empty list, never an error. |
+| `Server/WarPlayerBindings.h/.cpp` | `war_player_bindings`: one row per (war room, account) — the side the account holds, first/last seen, and its per-player war state (authority pool + `score_*` participation credit). Written by the game server, read by the lobby, deleted by the audited faction override and by room deletion (room ids are reused). Pure sqlite, no sim. Migrated additively, never probe-and-dropped: it is the only copy of the state. `username` is a **denormalised copy** for operator reads and log lines — every functional reader keys on `account_id` — and `RenameAccount` is its only maintainer, added by task 8c because the guest upgrade is the first path in the system that can rename an account at all. |
+| `Server/WarDirector.h/.cpp` | **PLAN-metalstorm-wars.md §2/§9 task 1**: the lobby-side service that owns the SET of live wars — and, stated first because everything else follows from it, **it never touches sim state**. Its two outputs are DB rows and one boot call, so it is testable headless. `wars` is a **strict extension of `rooms`** keyed by `room_id`, carrying only the columns `rooms` has none of: lifecycle `state` (`seeding`→`live`→`resolving`→`archived`, transitions gated by `IsLegalWarTransition`), `origin`, the authoring `scenario` and `theatre`, `season_id`, and `spawned_slot_cap`. Map, game, port, session kind and the member roster stay in `rooms` — duplicating the map id would create two answers to "what map is this war on". `war_sides` is the subtle one and **the reason the prose further down about the modoption is only half the story**: the `war_sides`/`war_side_capacities` **modoption strings remain the WIRE format** (unchanged, still what `war-sides.ts` and the game server's seating code read), while the **`war_sides` TABLE is now the durable authority** and the modoptions are *derived* from it at boot through the existing `EncodeWarSides`/`EncodeWarSideCapacities`. One producer, the existing encoders, the existing readers. `PlanWarSeed` (pure, `WarSeeding.h`'s arithmetic reused rather than re-derived) turns a seed request into the sides; `Register`/`Forget` write the pair of tables in **one** transaction, because a `wars` row whose sides half-failed is a war nobody can join and every seeding pass would re-find. Both go through `SqliteWriteTransaction` — see the shared-handle rule below. `tests/test_war_director.cpp`. |
+| `Server/WarSlotReservation.h/.cpp` | **PLAN-metalstorm-wars.md §4 task 2**: the TTL seat reservation that makes "this side has room" survive the gap between the lobby answering a Deploy and the game server seating the player. `war_slot_reservations` is keyed **(room_id, account_id) — one reservation per WAR, not per side**, because an account has exactly one faction and a per-side key would let a retry hold two seats. The decision is `BEGIN IMMEDIATE` → count durable bindings + live reservations → refuse or upsert, all in one transaction, so the read-then-write is atomic against a competing join: **the lock is SQLite's, deliberately, because the racers are separate processes and no in-process mutex spans them.** A reservation stops counting the moment the account's `war_player_bindings` row exists (`NOT EXISTS` in the count, not an event somebody has to remember to send) and otherwise expires by TTL, so an abandoned join returns its seat without a release call. Called from `POST /api/wars/deploy`; dropped with the room at RoomManager's delete chokepoint. `tests/test_war_slot_reservation.cpp`. |
+| `Server/WarSideMaintenance.h/.cpp` | **PLAN-metalstorm-wars.md §4**: what happens to a live war's side sizes over the hours after seeding, when the populations that produced them have moved. Two rules with deliberately different natures — **the cap is a soft target** (raise it when a faction floods) and **the incentive is a FLAG, never a reassignment**, because a player always fights their own faction, so the outnumbered side can only be made the one its faction's next volunteer is *pulled toward* (Deploy's ranking) and paid a bonus for taking. Pure planning, applied through `WarDirector`'s setters. **The map/slot ceiling is a parameter, not a lookup**: a raise past what the running server pre-allocated (`wars.spawned_slot_cap`) would advertise seats the sim has no player slot for, so the caller — the only code holding the map and the spawn record together — supplies both, and `0` reads as **UNKNOWN, never UNLIMITED**. |
+| `Server/WarTermination.h` | **PLAN-metalstorm-wars.md §7, task 4**: when is a war over, and what state should it be in — pure arithmetic on values, no sqlite/room registry/sim, so "which wars are over" tests without a lobby. Four terminal conditions in a deliberate precedence: **operator retire** (a human saying stop outranks everything) > **the sim's declaration** (a war whose `simWarState` has left `active` is ending on its own terms and the Director follows rather than re-decides — this is what stops the elimination rule naming the wrong reason for a war already winding down) > **faction elimination** > **season end**. `NextWarState` walks `seeding → open → active → winding_down → resolving → archived` **one link per call** (`IsLegalWarTransition` refuses jumps, and the intermediate rows are what the browser renders while the sim settles); the operator retire is the one carve-out and goes straight to `archived`. **Last-player-out is emphatically NOT terminal** (§7, teams §4.5) — a war with nobody in it hibernates and freezes, so `WarTerminationFacts` carries no player count at all, deliberately denying the rule the fact it must not use. Elimination is a **comparison, never an absolute**: zero footholds ends the war only when another side still holds one, guarded twice (`footholdsKnown`, plus an all-zero refusal) because a freshly seeded war's first census reads exactly like a total wipe. `tests/test_war_termination.cpp`. |
+| `Server/WarLifecycleSweep.h/.cpp` | **PLAN-metalstorm-wars.md §7, task 4**: the impure half — it writes down what `WarTermination.h` decided, in the same split `WarSideMaintenance` uses (plan pure, run applies). Called once per live war from the lobby's maintenance cadence (`warLifecycleTick`, every 50 ticks of the 10 Hz loop). Archiving does §7's three consequences: the terminal **reason** goes on the `wars` row (the only field that exists for the endings the sim never sees), the **war-over digest** is appended to `game_events` — the stream the while-you-were-away digest already reads, deliberately not a new per-account mailbox — and **bindings are closed by the war leaving `ListLive`** rather than by a column, since every path that consults a binding filters on live wars first. The rows stay, because §7 keeps the war for history. |
+| `Server/WarOutcome.h/.cpp` | **PLAN-metalstorm-wars.md §7, task 4**: `war_outcome`, the durable record of HOW a war ended — final frame, winning team, settlement disposition and the final scoreboard (`WarScoreRow`, with the account NAME resolved by the game server, because player numbers are recycled and an archived war must still be able to name its participants). Not a field on `war_summary` because that digest is deliberately perishable (dropped at `kWarSummaryStaleSec`, 30 s) and a war that finishes and exits would have the fact that it was won evaporate with it. **Exactly one writer, the game server** (every field is a fact only the sim holds); the lobby only reads. The Director's own half of the ending — `terminal_reason`, the archive stamp — lives on the `wars` row where the Director is likewise the sole writer. A war can end for a reason the sim never sees (operator retire, season end, a faction driven out) and archives with **no `war_outcome` row at all**; that is correct, not a gap. **Durable ⇒ additive migrations only** (CREATE IF NOT EXISTS + ALTER TABLE ADD COLUMN, never probe-and-drop), the same rule as `game_events` and `war_player_bindings`, because this is the only copy of a finished war's scoreboard. |
+| `Server/WarTheatrePool.h` | **PLAN-metalstorm-wars.md §3, task 7**: the "pool pick" one of §3's three ways a war gets its map (the other two — scenario-defined and operator-pick — were already wired). Its absence was invisible because the seeder *looked* like it was choosing: it broke ties on live-war count then on map id, so a box with two idle theatres seeded the alphabetically-first one every time. **LRU, not round-robin, and that removes state rather than adding it**: `wars.theatre` + `wars.created_at` already record every war ever seeded, so "when was this map last used" is a GROUP BY over a table the Director owns — where a stored cursor would point past a theatre that shipped after it was written. A never-seeded theatre sorts FIRST (`0` means NEVER, treated as a distinct winning case, not as a very old timestamp), which is how newly shipped content gets its turn. Also holds `PlanWarFromRoom` — the Director's adoption of an operator-created war, which previously had no `wars` row at all. |
+| `Server/PlayerSlotReservation.h` | **PLAN-metalstorm-wars.md §8.1 task 5**: Σ slotCap, and the side each pre-allocated slot belongs to. Pure functions of values — no sim, no db — because the *lobby* computes the number at spawn (`--player-slots`, recorded as `wars.spawned_slot_cap`) and the *game server* lays the block out at boot, and those two agreeing is the whole contract. It exists because `CPlayerHandler::players` is capacity-pinned and never erased, and spectators, AIs and roster players all draw from the same monotone counter: a war advertising eight seats could otherwise find no player number left for its eighth fighter because two hundred people came to watch. The pre-allocated rows are **nameless, inactive, spectator-flagged and per-side**, which is what the `Spring.GetPlayerList(-1, true)` filter in `game_authority.lua`/`game_teams.lua`'s `GameStart` seed loops exists for — seeding an empty chair mints a join grant into a pool nobody can spend and ages a tenure nobody served. `0` is UNKNOWN (a legacy room, or an unlimited side), read everywhere as *do not pre-allocate*. |
+| `Server/Friends.h/.cpp` + `Server/FriendPresence.h` | **PLAN-metalstorm-lobby task 9a**: the friends graph and the two pure policies over it. `friend_edges` is **LOBBY-ONLY** — unlike `war_player_bindings` the game server neither reads nor writes it — and holds **two directed rows, with no `state` column**: mutuality is derived from "both rows exist", so "pending here, accepted there" is not representable and **accept IS add, from the other end** (one route, not two). Removal deletes both directions for the mirror reason — dropping only the caller's edge would park the remover in the other player's list as a friend request generated by declining one. `ListFor` INNER JOINs `users`, so a deleted account leaves the list immediately and its rows wait for the hourly orphan sweep (ordered *after* the abandoned-guest prune, or that prune's own deletions dangle for an hour). `FriendPresence.h` is pure: `DecidePresence` ranks the three observable sources — a fresh `war_player_bindings.last_seen_at` (`fighting`, the strongest fact in the system: a sim currently holds this account on a side), room membership, then HTTP activity through the one route-auth dispatch funnel (`PresenceTracker`) — and **publishes nothing for a non-mutual edge** (`unknown`, not `offline`, which would be a claim about somebody who never answered the request). A **stale binding is a held seat, not a present player**: task 4's week-long seat hold would otherwise show every veteran as permanently in the war they last fought in. `DecideFriendJoin` names `same_side` and `opposing_side` as **separate outcomes** because §1b makes the faction permanent and §2.3 makes the side follow it — for a cross-faction friend the only join that exists seats you *against* them, and folding that into one `ok` would ship a "play with Bob" button that puts you on Bob's enemy's side. Capacity is checked before the same/opposing question, and a caller who already holds a binding in that war is never refused the seat they are sitting in. `/api/friends/join` **answers, it does not seat** — it names the war and the side and the client then calls the ordinary `/api/rooms/join`, so the fork brakes, the resume decision and the audit row are not bypassed by a second spawn path. `tests/test_friends.cpp`. Costs stated rather than hidden: no client presence ping and no `sessions.last_seen` column, so **a lobby restart shows every friend as offline until they next touch the API**. |
+| `Server/Chat.h/.cpp` + `Server/SSETickets.h` | **PLAN-lobby §3, task 9b**: the one chat service. Six scopes (`main` / named `channel` / `room` / `ally` / `spectator` / `pm`) over one `chat_messages` table, and **the target string is always built by the server** — `PmTarget(a,b)` is order-independent so both ends are provably in one conversation, and an ally target takes its team off the ROSTER (`<roomId>/ally/<team>`), never off the request, because a client that could name its own team could name the enemy's. **Ignore is enforced on delivery AND on backfill** (`FilterIgnored` for the live fan-out, the same rule inside `History`) — a client-side filter is one the sender can measure and it puts the text on the ignorer's machine anyway; system lines (`from_id = 0`) are never ignorable. `from_name` is **denormalised deliberately**, against the rule `Friends` states for the graph: a chat line is a record of something somebody said, so task 8c's guest rename must not re-label five thousand old lines. Retention (§3.3): `#main` is a **500-line ring buffer by id** (a quiet week must not empty it), named channels keep 30 days, PMs are kept (no delete verb exists yet), and **room channels die with the room** in `RoomManager::DeleteRoomFromDb` — room ids are reused, so an inherited log is the previous war's conversation appearing in the next one's scrollback, not a stale row. `ChatFlood` is a **told-the-time** token bucket (1/s, burst 4; five consecutive drops = a 60 s mute, and the mute hands the bucket back FULL so the first thing said afterwards is not dropped for being too soon); a *refused* message costs no token, or a flooder would push their own recovery away with every retry. `ChatChannels` membership is **process-local on purpose**: being in `#help` is a property of a connected client. `SSETickets` is the short-lived sliding-window credential the SSE stream carries in its URL — see `NetworkServer` above for why it must not be the session token. `tests/test_chat.cpp`, `tests/test_sse_identity.cpp`. **Moderation (task 9c)** is the `chat_mutes` table plus `ChatCanModerate`, and it turns on two distinctions. **There are two mutes:** `ChatFlood`'s is rate-limiter state and answers **429**, a moderator's is a durable row and answers **403** — a 429 means *slow down* and every client retries it. **Speaking and hearing are different questions:** `ActiveMute` (may I talk here) reads the account-level row first and then the conversation's, while `ScopedMute` (may I come back in) reads only the conversation's, because a channel mute must refuse the re-join — membership is one POST away, so a kick that only ejected you is undone by the next reconnect — and an account mute must not, since it silences rather than blinds. `until = 0` means **until lifted** (the row IS the mute, so its absence is the only not-muted), and an expired row is inert before `Prune` sees it. Ops: admins everywhere, a room host in that room's three channels only, nobody on an admin, nobody on themselves — and the routes add the rule the pure policy cannot hold, that **you moderate a conversation you are standing in**, the account-level mute being the one verb that belongs to no conversation and so needs no membership. **Not built yet, filed:** the moderation client surface (slash commands, a distinct render for `system` lines and the `moderation` SSE event) and every §3.5 QoL item. |
+| `Server/WarResume.h/.cpp` | **PLAN-persistence task 3b**: the LOBBY's half of the hibernation lifecycle whose server half is `Hibernation.h`. `Classify` turns (a live pid, `game_status.ready`, the room's state, the newest `game_snapshots` row) into the word the room card shows — `live` / `resuming` / `hibernated` / `crashed` / `fresh` — and `PlanJoin` turns the same facts into what a join DOES: connect, or spawn, and whether that spawn carries `--resume`. Two facts make it its own file rather than three more parameters on `WarLifecycle.h`. (1) **`--resume` is only ever passed when a snapshot row was SEEN**: `DoResume` treats a missing snapshot as fatal by design, so an unconditional flag would abort every war's first launch. (2) **hibernated and crashed are told apart by the store's newest LABEL** (`hibernate:*` = an exit checkpoint), never by the exit code — on a debug build the pre-existing `~DynDamageArray` assert makes every exit report 134, so a code-based verdict would call every clean hibernation a crash. The one DB access is a read-only `SELECT ... ORDER BY id DESC` (`sqlite3` only, no sim) and is deliberately tolerant of a missing table: `game_snapshots` belongs to `GameStateStore`, so on a database no game server has ever opened, "no history" is the answer and not an error. Supersedes `DecideWarResume`, which was deleted from `WarLifecycle.h` rather than left beside it; `tests/test_war_resume.cpp`. **Task 3c added the E1 pre-flight** — `DecideResumeEligibility` (`no_history` / `resumable` / `engine_changed` / `map_changed` / `unknown_binary`), the `unresumable` state it makes reachable, and the `blockedReason`/`lostFrame` a refused join carries. It reads `engine_hash` + `map_hash` off the same row and compares them against the spawn's `BinaryIdentity`; an empty hash on either side ABSTAINS rather than refusing (see "Game-server lifetime"). |
+| `Server/DeployDrain.h/.cpp` + `Server/EngineIdentity.h` | **PLAN-persistence task 3c**: the deploy drain (`POST /api/admin/drain`, AdminOnly, audited) and the one definition of the E1 engine hash. `DecideDrainAction` signals every live server regardless of kind — the design call, with `ActionOnLobbyExit`'s opposite rule and the reason for the difference written next to it; `ClassifyDrainExit` requires a **fresh** exit checkpoint (frame, timestamp or label moved) rather than a row being present; `BuildResult` decides `lossy` from what the process was FOR (a skirmish's bounded match and a replay's recording are not losses, a war's world is); `Summarise`/`Describe` produce the sentence and the counts an operator reads before replacing the binary (`drained` is false while anything is still alive). Pure but for `ProbeServerEngineHash`, one `popen` of `spring-server --print-engine-hash` — the lobby cannot compute the value (separate link target, own build stamp, and it may spawn a binary from another build tree), so the binary answers for itself; `ParseEngineHashOutput` accepts only a 16-lowercase-hex token so an old binary's usage noise reads as "cannot check" rather than as a hash. `EngineIdentity.h` holds `StampHash`/`HashHex`, shared by the store's `StoreConfig`, the flag and the lobby's comparison. `tests/test_deploy_drain.cpp`. |
+| `Server/WarRejoinPolicy.h` | Pure decision for a returning player: seat restored / superseded / none, and pool-restore vs onboarding stipend. Two horizons — `WAR_SEAT_HOLD_SEC` (a week, capacity bypass only) and `WAR_BRIEF_ABSENCE_SEC` (5 min, pool staleness). No db, no sim. |
+| `Server/WarStateSim.h/.cpp` | The two directions between the sim and that row: `CaptureWarPlayerState` reads the rules params; the restores call `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in synced Lua (top-ups, not deposits) through `ExecuteInLuaState`. Never over `RecvLuaMsg` — a client can forge those. Also holds the two impure gatherers for the war digest (`GatherWarSummaryPlayers`, `GatherWarSummaryRegions` — the latter scans the gameRulesParams map for `region_<key>_team`, so it needs no call into synced Lua on a wall-clock heartbeat). |
+| `Server/WarLog.h/.cpp` + `Server/GameEventsDb.h/.cpp` | **PLAN-persistence task 4b**: the while-you-were-away digest. `game_warlog.lua` keeps the last 32 strategic events (objectives resolved, regions flipped, pacts made/broken) in a gameRulesParam RING with a monotonic head — a ring rather than a log because it is synced state in a game designed to run for weeks. `warlog::Drain` is the pure arithmetic that turns (head, watermark, ringSize) into the events in between, and it is its own file because the feature's only real claim is *the digest is complete*: a lap between two heartbeats produces a POSITIONED `elided` row carrying the count, never a silent gap, and a slot whose seq disagrees with the one asked for is counted lost rather than stored under the wrong seq. `GameEventsDb` owns the durable `game_events` table — additive migration only (it is the only copy of what happened in a war), `(room_id, seq)` UNIQUE so a re-offered batch is a no-op, count-based per-room retention rather than age-based (a month-long absence is exactly the case the digest exists for). The drain runs on the same 2 s heartbeat as `war_summary` plus once more on the exit path, before the hibernation checkpoint; its watermark is recovered from `MAX(seq)` at boot, because the gadget's cursor rides the snapshot and a fresh cursor would file a gap that is not there. The LOBBY reads it on `POST /api/wars/join-preview`, cut at the caller's own `war_player_bindings.last_seen_at` — which is why the digest is self-clearing for a connected player and why a first-time joiner gets none. Client wording in `client/src/lobby/war-digest.ts`. |
+| `Server/WarSummary.h` | The per-war digest the war browser reads, encoder and decoder in one file across a process boundary: `BuildWarSummary` (pure) → `EncodeWarSummary` → `war_summary` row (spring-server is the only writer, on the 2 s `game_status` heartbeat) → `DecodeWarSummary` in the lobby. Carries only what the sim alone knows — per-side connected humans/AIs, spectators, region control, frame, server uptime. A row older than `kWarSummaryStaleSec` (30 s) is treated as absent, because nothing clears it when a server is SIGKILLed. |
+| `Server/RoomWatchIntent.h` | `AccountWantsToWatch(db, roomId, accountId)` — the one reader of `room_members.spectate_only`, the "I came to watch this war" flag the lobby records on join and the game server honours on auth (§3). Defaults false for every uncertain case: missing the intent seats a watcher who can leave, inventing one benches a fighter silently. |
 | `System/SpringLog/SpringLog.h/.cpp` | Unified logging library (libspringlog). C/C++ API, console + file sinks, pluggable custom sinks. |
 | `System/SpringLog/SpringLogNet.h/.cpp` | Optional WS+FlatBuffers network sink for pushing logs to log server. |
 | `System/SpringLog/SpringLogSqlite.h/.cpp` | Optional SQLite persistence sink for local log storage. |
 | `System/SpringLogBridge.h/.cpp` | Routes legacy Spring LOG() macros through springlog. |
+
+**RULE — one write transaction per shared SQLite handle (`Server/SqliteThreading.h`).**
+Every process here shares a single `sqlite3*` across threads: the lobby's `mapDb`
+is held by the NetworkServer's per-request route threads *and* by `main()`'s
+10 Hz poll/reap loop, and RoomManager, `WarDirector` and `WarSlotReservations`
+all write it. Serialized mode (D33) makes each **statement** on that handle
+thread-safe and does **nothing** for a transaction, because a transaction is a
+property of the CONNECTION, not of the thread that opened it. Two threads
+hand-rolling `BEGIN IMMEDIATE`/`COMMIT` on one handle therefore produce a pair of
+silent defects that no busy timeout touches — the failing code is
+`SQLITE_ERROR` ("cannot start a transaction within a transaction"), not
+`SQLITE_BUSY`: the second `BEGIN` fails, so thread B's writes land inside thread
+A's transaction and **B's `COMMIT` commits A's half-finished work early** (a seat
+granted on a full side, the exact guarantee the reservation exists to give),
+while **A's later `ROLLBACK` discards writes B already reported as persisted**
+(a room that logged nothing and is simply gone).
+
+So: **anything writing a handle more than one thread can reach goes through
+`SqliteWriteTransaction(db, what, body)`. Do not write a `BEGIN`/`COMMIT` pair by
+hand.** It holds a per-handle gate for the whole body (so at most one thread in
+this process is inside a transaction on a given handle), runs **inline** when
+this thread is already inside its own transaction on that handle rather than
+nesting a second one, checks every return code, always `ROLLBACK`s after a failed
+`COMMIT`, retries the whole body on `SQLITE_BUSY`/`SQLITE_LOCKED` (a competing
+*process*), and reports a genuinely lost write at ERROR. A body returns
+`SQLITE_OK` to commit, `SQLITE_ABORT` to roll back **by decision** (a full side is
+not a failure and is not logged as one), anything else to roll back as a failure.
+`RoomManager::WriteTransactionLocked` is a thin wrapper over it and keeps its
+name. The regression test is the shared-handle case in
+`tests/test_war_slot_reservation.cpp` — a `Reserve` rollback racing room
+persistence on **one** handle, asserting the *rooms* survive; note that the
+sibling 12-thread race case opens **one connection per thread**, which is right
+for the cross-process race and is exactly why it cannot see this one.
 
 ### Simulation (`rts/Sim/`)
 
@@ -102,7 +219,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | Units | `Units/Unit.h`, `UnitDef.h`, `UnitDefHandler.h`, `UnitHandler.h` | `unitDefHandler` is the global; `GetUnitDefsVec()` returns all defs. |
 | Commands | `Units/CommandAI/CommandAI.h`, `Command.h`, `MobileCAI.cpp` | Player commands route through `CCommandAI::GiveCommand()`. |
 | Weapons | `Weapons/Weapon.h`, `WeaponDef.h`, `WeaponDefHandler.h` | Weapon types: Cannon, LaserCannon, MissileLauncher, etc. |
-| Movement | `MoveTypes/GroundMoveType.cpp`, `MoveDefHandler.h` | Pathfinding via `Path/Default/PathManager.cpp`. |
+| Movement | `MoveTypes/GroundMoveType.cpp`, `MoveDefHandler.h` | Pathfinding via `Path/Default/PathManager.cpp`. **Snapshot seam (PLAN-persistence option A, 2026-08-12):** `MoveTypes/MoveTypeSnapshot.h` is the POD state one move type restores from, and `AMoveType::Snapshot{Kind,Capture,Apply}` are the virtuals that fill it — authored inside the classes because every interesting member of `CGroundMoveType`/`CHoverAirMoveType` is private and creg is stubbed here. **`pathID` is not state** and is not captured: the restore leaves it 0 and the owner's next `SlowUpdate` re-requests through its own no-path branch (re-requesting during the apply was tried and reverted — `StartEngine()` writes back over the restored waypoint pair, breaking the round-trip's byte-exact bar). |
 | Features | `Features/Feature.h`, `FeatureDefHandler.h` | Static map objects (rocks, trees, wrecks). |
 | Misc | `Misc/QuadField.h`, `Misc/LosHandler.h`, `Misc/TeamHandler.h` | Spatial queries, fog of war, team resources. |
 
@@ -116,7 +233,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/game-worker-protocol.ts` | **Frozen GW4 message contract** (PLAN-game-worker.md): the game-processor worker ⇄ main-thread interfaces (`Gp*ToWorker` init/input/config, `Gp*ToMain` sceneState/audio/config/gameOver). Also (WP2c) `LegacyWorkerMessage` (all legacy `type` strings) + `WorkerInbound` union used to type `self.onmessage`. |
 | `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. Also publishes `getMemberModel(defId, team)` — a member-sized mesh + team material for the squad fan-out. Those meshes live in a **separate** `memberModelMeshes` map, not `renderMeshes`: `tick()`'s hide-pass zeroes every `renderMeshes` entry it didn't write this frame, which would fight a caller driving its own thin instances. |
-| `core/squad-render-backend.ts` | Babylon implementation of the Metalstorm squad `RenderBackend` (`data/games/metalstorm/client/squads/`): draws the cosmetic members one sim squad fans out into. Three visual classes, chosen **per member per frame by camera distance** (impostors M4) — **model** (a def with a 3D body, closer than its `impostorDistance`: the real low-poly body with real `headingY` facing, one thin-instance pool per model piece), **impostor sprite** (the same member beyond `impostorDistance`, or any atlas def whose model has not streamed yet: baked 8-yaw × 3-pitch directional card), **proxy capsule** — the **last resort**, held only when a member's def offers neither tier this frame (no atlas *and* no loadable body; the server names those defs at defs-bake time, see below). The two art tiers gate independently: a def with a body but **no** atlas has no sprite tier to hand over to, so its effective `impostorDistance` is `Infinity` and it holds the model tier at every range. The model↔sprite boundary crossfades via a screen-door dither band just inside `impostorDistance` (M5), so neither tier pops. **A pool slot index is not stable for the life of the member** (PLAN-perf M24): pools compact — live slots move down into freed holes so `highWater` can fall — so a slot must always be addressed through the `MemberSlot` object the pool holds a back-reference to, never through a copied-out index. |
+| `core/squad-render-backend.ts` | Babylon implementation of the Metalstorm squad `RenderBackend` (`data/games/metalstorm/client/squads/`): draws the cosmetic members one sim squad fans out into. Three visual classes, chosen **per member per frame by camera distance** (impostors M4) — **model** (a def with a 3D body, closer than its `impostorDistance`: the real low-poly body with real `headingY` facing, one thin-instance pool per model piece), **impostor sprite** (the same member beyond `impostorDistance`, or any atlas def whose model has not streamed yet: baked 8-yaw × 3-pitch directional card), **proxy capsule** — the **last resort**, held only when a member's def offers neither tier this frame (no atlas *and* no loadable body; the server names those defs at defs-bake time, see below). The two art tiers gate independently: a def with a body but **no** atlas has no sprite tier to hand over to, so its effective `impostorDistance` is `Infinity` and it holds the model tier at every range. The model↔sprite boundary crossfades via a screen-door dither band just inside `impostorDistance` (M5), so neither tier pops. **A pool slot index is not stable for the life of the member** (PLAN-perf M24): pools compact — live slots move down into freed holes so `highWater` can fall — so a slot must always be addressed through the `MemberSlot` object the pool holds a back-reference to, never through a copied-out index. **The one sanctioned exception is S5's direct-write path** (PLAN-metalstorm-squad-performance §13a): `acquireSlot(handle)` PINS a member whose def has exactly one reachable tier (sprite-only, capsule-only, or a loaded single-piece identity-rest body) and hands out `(poolId, index)`, which the SoA kernel copies into the store and writes the member's 16 matrix floats (or its sprite pose) through — no `updateMember` call, no tier decision, no Babylon compose per member. What makes the copy safe is `poolGeneration`: it moves on every `growPool` and every `compactPool`, and a holder must re-fetch its `PoolView` and re-read its index when it does. A member that CANNOT be pinned (its tier is re-decided from the camera each frame, M4/M5) keeps `updateMember` — a per-member property, not an engine mode. Matrices are written by `writeYawMatrix` (§13b's layout, pinned by a test against `Matrix.ComposeToRef`) and **never carry data in the W-row** — the CSM depth shader does not reconstruct `w`, so the failure mode is shadow-only; `auditWRows()` is the scanner. Uploads go by tracked dirty range, and a sprite pool re-billboards only the slots whose pose moved while the camera is still. |
+| `data/games/metalstorm/client/squads/` (game-side, not `client/src`) | The squad system this backend draws. Two independent throttles that must not be confused: the **member budget** (`squad-manager.js` `_applyLodBudget`, PLAN-perf M20/M23) owns which TIER a squad is in and every instance release/rebuild; the **frame-time governor** (`governor.js` + `SquadManager.update`, PLAN-metalstorm-squad-performance.md §12c) owns how much WORK a `full`-tier squad gets this frame and **never writes `sq.lod`** (a test asserts that for all seven rungs). Ladder: L1 drops inter-squad separation, L2 all separation plus the grid rebuild, L3 the potential field, L4-L6 time-slice which full squads step vs `coast()` (rigid centroid-delta shift, so a skipped squad tracks the battle instead of freezing), L6 also centroid-steps the farthest third. Both budget inputs are measured on the machine, so the same constants settle at different levels per hardware. **`steering.separate`'s 10th argument is the neighbour fill `count` and the 11th is `sameSquadOnly`** — the S2 lane's own copy had them the other way round, so re-applying that old patch passes a boolean as the count and silently disables ALL separation. **Two engines share that policy** (`config.engine`, default `'soa'` since PLAN-metalstorm-squad-performance.md §14 S7): the SoA one (`soa-store.js` pool → `soa-squad.js` SquadRec → `soa-kernel.js` `stepMembers` → `soa-grid.js` CSR broad-phase) holds every member in one ArrayBuffer and steps them through free functions; the OO one (`Squad`/`Member` objects) is retained as the S6 parity oracle and as an escape hatch (`config.engine: 'oo'`). **The manager owns policy, the kernel owns mechanism** — tier assignment, the governor ladder and the time-slicing schedule are built in `squad-manager.js` for BOTH engines and handed to `stepMembers` as a work list; squad.js remains the behavioural oracle the SoA path is compared against, so a "simplification" in the kernel is a divergence. |
 | `core/feature-renderer.ts` | Thin-instanced map feature renderer. Types with no baked impostor atlas keep the single whole-map mesh (pattern reference for entity-renderer); types listed in a `models/impostors.json` manifest are handed to `FeatureLodController` instead. Also hosts `DynamicFeatureRenderer` (runtime wrecks/debris). |
 | `core/feature-lod.ts` | PLAN-maps.md M6 — pure spatial-chunking + tier math for the map-feature LOD (tile partition, point→AABB distance, `assignTier` with hysteresis, `farDensity` prefix thinning). No Babylon imports; unit-tested. |
 | `core/feature-lod-renderer.ts` | PLAN-maps.md M6 — Babylon side of the feature LOD: per (type, tile) NEAR (full mesh, casts CSM) / FAR (impostor card, no shadows) / CULLED meshes with static matrix buffers, dither crossfade, per-tile frustum culling. Debug: `window.__gp('__featureLod.get()/.set()/.force()')`. **Clones must `makeGeometryUnique()`** — thin-instance buffers live on the Geometry, which `Mesh.clone()` shares. |
@@ -145,6 +263,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/presentation-clock.ts` | **PLAN-latency L0.** Turns the frame-stamped snapshot stream into a smooth presentation cursor `P = E − D` (E = estimated leading edge, D = auto-adapted display delay). Owns loss/reorder/jitter stats for the F10 timing overlay. (`presentation-clock.test.ts`.) |
 | `core/event-scheduler.ts` | **PLAN-latency L1.** Presentation-timeline for discrete events (explosions, deaths, impact CEGs, sounds): a per-frame binary-heap keyed by sim frame. `game-processor` queues each server event on its stamped frame and `drain(P)`s it when the cursor arrives, so effects present in lockstep with the interpolated units instead of ~D frames early. `window(P,E)` peeks the future window for pre-roll. (`event-scheduler.test.ts`.) |
 | `core/terrain.ts` | Builds terrain mesh from heightmap uint16 array. DXT1 tile atlas is paged into a MultiMaterial grid (`planAtlasPages`) when a map exceeds WebGL2 `MAX_TEXTURE_SIZE`. Carries the material plugins (decal overlay + `water-absorption-plugin.ts`, the Recoil SMF underwater terrain tint from mapinfo `water.absorb/baseColor/minColor`, parsed client-side by `map-lighting.ts`) across its material swaps. |
+| `core/terrain-page-grid.ts`, `core/terrain-page-visibility.ts`, `core/terrain-page-cache.ts` | **Not yet wired in** — the non-GPU core of PLAN-maps §1.2.1 ground-texture page streaming. `terrain-page-grid` is the address space (512² payload + 4-texel border = 520² BC1 pages, a mip pyramid where the pyramid *is* the mip chain, packed page keys, parent chain, global-map-UV → page-UV transform, `MAX_ARRAY_TEXTURE_LAYERS`-clamped layer budget). `terrain-page-visibility` is the CPU visible set — a quadtree descent culling each page's box with `shadow-depth-bounds.ts`'s `viewDepthRangeOfBox` × `HeightRangeGrid.rangeOverRect` (frustum ∩ heightfield; **no GPU feedback readback, deliberately**). `terrain-page-cache` is LRU residency over `TEXTURE_2D_ARRAY` layers with a pinned root, Cesium-style priority groups, `AbortController` cancellation, the page-table indirection texture + cross-fade, a Cache API disk tier, and the `PageSource`/`PageUploader` seams. **DIVERGENCE:** the eventual uploader uses raw-GL `compressedTexSubImage3D` — Babylon has no public compressed 2D-array sub-image API. |
+| `core/terrain-page-gl.ts`, `core/terrain-page-plugin.ts`, `core/terrain-page-synthetic.ts`, `core/terrain-page-streaming.ts` | The GPU half of §1.2.1 streaming (vertical slice, **opt-in via the `__terrainPages` debug handle only** — the shipped `PageSource` is synthetic, one hue per pyramid level; the real page producer is not built). `terrain-page-gl` carries the recorded raw-GL divergence: `TEXTURE_2D_ARRAY` allocation (`texStorage3D`, no internal mips) + `compressedTexSubImage3D` per-layer fills with `buildAtlasPage`'s drain-then-check GL-error discipline, adopted back via `Engine.wrapWebGLTexture` + `is2DArray`; also the RGBA8 page-table texture, re-uploaded only on `cache.revision` change. `terrain-page-plugin` is `TerrainPageSamplePlugin` (priority 180, before splat/decal/water): page-table `texelFetch` → two array taps → `mix(fallback, primary, fade)`; toggle is **`isEnabled`**, and the attach helper asserts the setter took. `terrain-page-streaming` drives visible set → cache → table sync per frame off `scene.onBeforeRenderObservable`. The plugin survives `terrain.ts`'s material swaps via the same find/reattach dance as the splat plugin. |
+| `core/terrain-splat-plugin.ts` | Recoil's near-field terrain detail (`GetDetailTextureColor`, SMFFragProg.glsl) — one plugin, two mutually exclusive modes selected per map exactly as the shader's `#ifdef`/`#ifndef` does: `splat` (`splatDetailTex` × `splatDistrTex`, per-channel `texScales`/`texMults`) and `plain` (a single `detailTex` tiled at the fixed `SMF_DETAILTEX_RES` 0.02). Both add *signed* (`tex*2-1`) detail to `baseColor` before the light loop, so mid-grey contributes nothing and **the mip chain is the distance falloff** — there is no fade uniform, which is why `MapProcessor` must convert every decal texture with `--mipmaps`. Attach precedence lives in `game-processor.ts` (splat pair first, else plain); `terrain.ts`'s reattach carries the mode across material swaps. A/B hook: `window.__gp('__perfToggles.terrainDetail(false)')`. |
 | `core/terrain-texture.ts` | Streams the KTX2 terrain texture(s) and binds them onto the terrain mesh. |
 | `core/rts-camera.ts` | Orbital pan/zoom/rotate camera with viewport updates. **GW4-c5b**: now DOM-free and runs **inside** the game-processor worker (one per view, keyed by viewId); input arrives via intent methods, not DOM events. |
 | `core/camera-input.ts` | **GW4-c5b**: thin main-thread DOM-input owner. Captures pointer/wheel/key on `#game-canvas` and forwards canvas-relative CSS-pixel intents to the worker camera as `gp:*` messages tagged with `viewId` (multi-view). |
@@ -178,6 +299,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/test-harness.ts` | `window.test` runtime API: spawn/kill/damage/order verbs through `/api/exec`, camera focus on a unit, render-loop pause, screenshot capture, debug-flag toggles. Paired with `.claude/skills/spring-test`. **GW8**: split for the worker — server-bound verbs run on main over HTTP; client-bound (camera/selection/netSim/pause/screenshot) forward to the worker via `workerCall()` (`gp:test`/`gp:testResult`); `selection`/`cameraPose` read the cached `gp:sceneState` feed synchronously. `window.widgets.eval` (Lua) + `window.__gp` (JS into the worker global scope, for `__entityRenderer`/`__fxLightPool`/`__frameProfiler`/`__perfToggles`/… debug hooks) are re-exposed in `main.ts`. **P0**: `perfDump()`/`perfReset()` (per-phase frame-time distribution) + the `__perfToggles` isolation handles (`terrainPlugin`/`decalFade`/`lightPool`/`renderScale`/`luaUi`). **N1**: `uiProfileStart()`/`uiProfileDump()`/`uiProfileStop()` (per-widget LuaUI cost profile — `core/widget-profiler.ts`). **PLAN-fx-offload X5**: `entityFxFenceDump()`/`entityFxFenceReset()` (per-def legacy entity-FX script cost — `core/entity-fx-fence.ts`). The spring-debug MCP browser tools (`browser_test`/`spawn_at_camera`/`evaluate_widget_lua`) all route through these. |
 | `core/net-inspector.ts` | Network message inspector: decodes the envelope byte + FlatBuffer payload type for the debug console, and keeps an always-on per-envelope bandwidth tally (feeds PLAN-performance PC-2). **GW8**: runs **inside the game-processor worker** (the connection lives there) — `recordInbound` at `connection.routeIncoming`, `recordOutbound` at `sendOnControl`; surfaced to main via `window.test.netStats()`. Worker-safe: the per-frame debug-console log goes through a registered sink (`setNetLogSink`, set by debug-console on main) instead of importing the DOM-constructing console singleton. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
+| `lobby/chat.ts` | Chat model (PLAN-lobby.md §3, task 9b's client half): tabs, unread, history/live merge, slash commands, and the `EventSource` recovery policy. Pure — `lobby-ui.ts`'s `renderChat()` is the DOM around it. |
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
 | `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
@@ -196,8 +318,12 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - **Two UI class namespaces, don't cross them:** the engine HUD overlay (`ui/hud/hud.css`) owns `.hud-*` (`#game-hud .hud-panel` etc.); the native-UI design system (`ui/native-ui/native-ui.css`) owns `.nui-*`. They style unrelated elements with equal specificity, so reusing `.hud-panel` for a native panel silently restyles the minimap/selection/help chrome (and vice versa). The design system's bare-element control rules are wrapped in `:where(#ui-root)` so they contribute **zero specificity** — widgets get styled inputs without a class, and a plain class rule in a game stylesheet still overrides them. Keep it that way; an unwrapped `#ui-root` prefix forces every future exception back into the engine sheet as an escape-hatch class.
 - **A `transform` on an overlay container breaks `position: fixed` inside it.** A transformed element becomes the containing block for fixed-position *descendants*, so a widget popover positioned in viewport coordinates lands relative to the container instead — off-screen, with no error. This is why the centred `.ui-mount-*` docks centre with flexbox (`left: 0; right: 0; align-items: center`) rather than `left: 50%; transform: translateX(-50%)`. Applies to any overlay that hosts menus/tooltips.
 - **Panel chrome clips.** `.nui-panel` is `overflow: hidden` and `.nui-panel__body` is `overflow-y: auto`, so anything a widget draws outside its own box (dropdowns, toasts) is clipped unless it escapes: `position: fixed` + JS-set coordinates for menus (see `command-composer.js openMenu()`), or an `overflow: visible` opt-out on the panel for toasts (see `.ms-authority-bar`).
+- **A rulesParam number is float32; format it before it reaches the DOM.** Sim values cross the wire as float32, so an honest `114.55` arrives as `114.55000305175781` and a bare `String(v)` puts 18 significant figures on screen (PLAN-endtoend.md D49: the authority bar, the objectives panel, the scoreboard, the award toast). Metalstorm's authority amounts have one spelling — `data/games/metalstorm/ui/lib/authority-format.js` `formatAuthority()`, one decimal with a trailing `.0` stripped — and every widget that displays one calls it, so two panels cannot disagree about the same number. Format by class of **value**, not class of widget: a generic "last change" feed carries strings as often as numbers. Where a derived quantity is *computed* client-side (the composer's shortfall = cost − pools), quantize at the source instead of at each display, and mind the direction — a shortfall rounds **up**, because it is shown as what the player still needs.
 - **Babylon is right-handed — porting Recoil math:** form a third basis axis as `right × up` (RH). `RotationQuaternionFromAxisToRef` collapses to a reflection if handed an LH basis.
 - **`ShaderMaterial` alpha:** `alphaMode` is IGNORED unless `needAlphaBlending: true` is passed in the constructor options — without it, transparent materials draw opaque black.
+- **`StandardMaterial.emissiveTexture` is ADDITIVE, not multiplicative:** the compiled stage is `vec3 emissiveColor = vEmissiveColor; emissiveColor += texture(emissiveSampler, uv).rgb * vEmissiveInfos.y;`. So `emissiveColor = (1,1,1)` is **not** a neutral multiplicand — it saturates the output white whatever the texture holds, and a texture whose RGB is 0 contributes nothing at all. This painted the whole minimap white for the life of the fog overlay (PLAN-endtoend D48, minimap half): the LOS bitmap was a correct all-black RGB + per-texel alpha, bound as *both* `emissiveTexture` and `opacityTexture` with a white `emissiveColor` to "multiply" it. Measured live: an all-0 RGB, an all-255 RGB and a pure-red bitmap all rendered 255. For a tint-only overlay set every colour input to black and let the bitmap in through `opacityTexture` alone. **PBRMaterial's emissive is multiplicative — the two do not agree, so don't carry an idiom across.**
+- **…and in the SAME reduction, the emissive term is MULTIPLIED by the diffuse base:** `vec3 finalDiffuse = clamp(diffuseBase*diffuseColor + emissiveColor + vAmbientColor, 0.0, 1.0) * baseColor.rgb;`. So the natural "unlit textured quad" idiom — bind one texture as *both* `diffuseTexture` and `emissiveTexture`, `disableLighting = true` — renders **texel², not texel**. It cost the minimap backdrop a 2.6× darkening for the life of the file (PLAN-maps M8e: 26.76 mean luminance against an asset that decodes to 69.94). **x² is close enough in shape to an sRGB decode (x^2.2) that it was written up twice as a missing gamma encode** — check the material's own reduction before blaming a colour space. Correct idiom: bind the texture **once** as `diffuseTexture` with `emissiveColor = (1,1,1)`, or once as `emissiveTexture` with no diffuse texture (then `baseColor` is (1,1,1)). That second form is why every solid-colour material in the minimap scene renders its authored `emissiveColor` literally.
+- **The minimap is the only rendered surface outside the worker**, with its own `Engine` + `Scene` + main-thread canvas (`core/minimap.ts`). Consequences that have each cost a session: neither `window.test.screenshot()` (reads the worker's OffscreenCanvas) nor CDP `take_screenshot` (cannot read a WebGL2 canvas) can see it — use `window.test.minimapScreenshot()` / `minimapStats()`, which render and read back in **one synchronous block** because the engine is `preserveDrawingBuffer: false` (a `toDataURL` from a later event-loop turn returns alpha-0 everywhere, which reads exactly like a canvas that was never drawn to). Its scene also has **no post-process chain**, where the main scene's ends in `imageProcessing` — so anything the main scene gets from that chain (tone mapping, bloom, FXAA), the minimap does not. **That difference is not a brightness/colour-space one, and reading it as one cost a fire:** with `applyByPostProcess` false and every image-processing knob neutral, Babylon compiles `IMAGEPROCESSING` **off**, and the shader then does no space conversion in either direction — measured, a solid `emissiveColor` of 0.5 renders as exactly 128 in the minimap scene. Adding an `imageProcessing` pass there would not have been neutral: it would shift every authored blip/ping/metal-spot RGB literal.
 - **GLSL-in-template-literal comment rules:** no backticks in `//` comments (closes the JS template literal → Vite PARSE_ERROR) and no semicolons in `//` comments in raw `ShaderMaterial` source (splits the GLSL → material silently draws nothing).
 - **Lua bridge array marshalling:** a plain JS array returned to Lua spreads as N return values, NOT a table — `ipairs()` on the "return" sees nil. Wrap in `luaTable()` **even when the array is empty** (an empty array marshals as zero return values). Known still-unwrapped: `ordersToLuaArray` (`GetUnitCommands`/`GetFactoryCommands`/`GetCommandQueue`) — see PLAN-bar.md.
 - **Model radius is midpos-relative:** `(maxs − midpos).Length()` (AABB half-diagonal, Recoil-faithful) — origin-relative over-estimates tall models.
@@ -213,6 +339,97 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x02` = Entity state full snapshot (custom binary)
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
+
+**There are two clients on this wire, and neither may copy it.** The browser
+(`client/src/core/connection.ts`) and the scripted wire client
+(`client/wire/wire-client.ts` — the CI/soak harness, PLAN-replay §7.18) both send
+`Handshake` → `AuthRequest` on one ordered control stream, framed
+`[u32 LE len][envelope][payload]` by the single implementation in
+`client/src/core/transport.ts`, and both read the generated FlatBuffers under
+`client/src/protocol/spring-web/`. `PROTOCOL_VERSION` and the `0x01` envelope byte
+live in **`client/src/core/protocol-version.ts`** — one client-side definition,
+paired with `Protocol::CURRENT_PROTOCOL_VERSION` (`rts/Server/HandshakePolicy.h`).
+A third copy is the drift PLAN-protocol-guard.md is about.
+
+**The Handshake carries the schema hash, and the server enforces it**
+(PLAN-protocol-guard task 3). `Handshake.schema_hash` is `SCHEMA_HASH` from the
+regen script's own output; the admission rule is
+`Protocol::CheckHandshake()` in **`rts/Server/HandshakePolicy.h`**, a pure
+function so it can be tested at all — inline in the handler's switch it needed a
+NetworkServer, a Simulation and a live room to reach. It checks the epoch first,
+then the hash for strict equality, and an ABSENT hash is a rejection (a
+pre-guard bundle is stale by definition). Either way the client gets
+`AuthStatus.VersionMismatch` with both values named, and is deliberately NOT
+recorded in `handshakedClients`, so an ignored response still loses the
+following `AuthRequest`. **The browser's answer to that rejection is a reload, exactly once**
+(PLAN-protocol-guard task 4). `Connection` raises `onVersionMismatch` instead of
+the generic `onAuthFailed` (falling back to it for a host that has no handler,
+e.g. `viewport.ts`); the worker forwards it to main as `gp:schemaMismatch`,
+because the remedy needs `sessionStorage` and the DOM and a worker has neither.
+The decision is **`client/src/core/schema-mismatch.ts`** — a `sessionStorage`
+flag spends the tab's one automatic reload, the reload is cache-busted with an
+`sw_cb` query param (a same-URL reload can be answered from the cache that just
+served the rejected bundle), and a second mismatch renders a persistent card
+instead of looping. A successful auth returns the budget and strips the param.
+For driving it, `Connection`'s second constructor argument takes a
+`schemaHash` override — the browser twin of the wire client's `--schema-hash`,
+wired to `?schemaHash=<hex>|none` behind `import.meta.env.DEV`, because the
+build guards refuse a patched hash file, so the refusal can only be driven from
+the value a client claims. `PROTOCOL_VERSION` is therefore no longer the drift
+guard: it is a manual epoch for the breaks the schema text cannot see (the
+`0x02`-`0x09` binary framings, a semantic reinterpretation of an existing
+field), bumped 1 -> 2 when the hash landed. A schema-visible change needs only
+the regen script.
+
+**Which verbs a connection may use before it has a session** is one rule, in
+**`rts/Server/PreAuthPolicy.h`** (PLAN-protocol-guard task 6), applied once
+ahead of the dispatch switch rather than per case. Exactly three of the 45
+`ClientPayload` members are open — `Handshake` (the admission gate itself),
+`AuthRequest` (open to the session gate, but refused without a recorded
+handshake) and `Ping` (the client sends it before auth, every 30 s) — and
+everything else is answered `401 Not authenticated`. Because a session exists
+only via `AuthRequest`, and `AuthRequest` needs a handshake, that is
+transitively a schema-hash requirement on every other verb. The switch's own
+per-case session checks stay as defence in depth; the audit that produced the
+header found them complete, but complete as a property of 40-odd separately
+written lines. `IsOpenPreAuth` has no `default:`, so a new union member fails
+to compile until it is classified. The gate sits **after** the journal record,
+for the same reason the post-game gate does: a verb refused live must be
+refused identically on replay. Driving it needs a client that misbehaves on
+purpose, so the wire harness gained `--pre-auth-probe`: one `PlayerCommand`
+plus one `PlayerLeaveIntent` sent between the Handshake and the AuthRequest,
+asserting two 401s and an auth that still succeeds. The harness's node entry
+point (`client/wire/run-wire-client.mjs`) is where node-only concerns live: node
+has no WebTransport, and the package that supplies one implements cert pinning
+through a global hook rather than `serverCertificateHashes`. Server-side the frame
+has one decoder, `wireframe::` in `rts/Server/ClientFrame.h`; a caller that needs
+only the payload tag asks it rather than re-deriving the framing (PLAN-replay
+§7.19 is what a second copy cost). The harness has a **second** node entry point,
+`client/wire/run-wire-churn.mjs`, which holds N sessions in one process for the
+soak churn arm (PLAN-long-uptime §14) — one process because vite plus the native
+quiche addon cost seconds per connect, so a process-per-cycle harness would
+measure node's start-up rather than the server's churn capacity.
+
+The harness speaks the guidance verbs too (`sendWireCommand` →
+`ClientPayload::LuaRulesMsg`, `--wire-command` / `--wire-field`), and it builds
+the payload with the app's **own** encoder (`encodeWire` in
+`client/src/ui/native-ui/guidance-wire.ts`) rather than a copy: those bytes are
+what a native-ui panel puts on the wire, and a second codec here would let a
+gate keep passing on a shape no panel produces. It is what closes the AI
+guidance loop end to end in `make test-ai-veto-loop`, where the veto has to come
+from a real seated human rather than through `/api/exec`.
+
+**An admitted client is not a seated one.** `AuthRequest` admits an account with
+no roster entry as a **spectator** — status OK, a real `playerNum`, `team=-1` —
+which is what the spectate-a-running-game flow depends on. Every team-scoped
+verb tests the seat rather than the auth (`StandingOrderCreate` refuses
+`session->team < 0` with a 401), so a harness or gate that reads "authenticated"
+as "playing" asserts on a path the server never took. `--player user:team:pos`
+is what seats one, and on a **skirmish** it also makes GameStart wait for that
+roster (`GameStartCoordinator.h`) — a headless arm that must not wait passes
+`--session-kind persistent`.
+
+**A unit id names a slot, not a unit.** `SimObjectIDPool` recycles ids, so anything that keeps an id across the recycle — a client's selection, squad membership, clip/aim poses, PREVLOS ghosts — silently transfers to whatever took the slot. Two consumers, two instruments, chosen by how long each holds an id. *Inside* the sim, deferred work holds an id for a few frames and is guarded per-id by `CUnitHandler::GetUnitSpawnGen` (`DamageField`, `StatisticalCombat`). *Outside* it, the remote client holds ids for the whole match and the sim cannot enumerate what it built on them, so the recycle is **announced** instead: `SimObjectIDPool::GetRecycleEpoch()` bumps when an id becomes re-issuable, `EntityState::IdRecycleAnnouncer` raises **bit 15 of the entity-state `field_mask`** (`FLAG_ID_RECYCLED` — a flag, no payload, outside `FIELD_ALL`) and holds it up until a full snapshot of a *later* tick, and `client/src/core/id-recycle-guard.ts` latches on any flagged message but flushes only on a full snapshot. The window discipline is the lane's fault, not paranoia: the entity lane is unreliable and newest-wins, so a single flagged message can be superseded before it is delivered. See PLAN-long-uptime S5.
 
 **Two player ids, never interchangeable.** `AuthResponse.player_id` is the **DB account id** (stable across games); `AuthResponse.player_num` is Spring's **sim playerNum** (allocated per game server, in connect order, with AI virtual players taking the low numbers). Everything synced keys on `player_num`: rulesParam keys like `authority_player_<id>`, `gadget:PlayerAdded(playerID)`, `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsgRelay.player_id`. The client carries them as `Connection.accountId` / `Connection.playerNum` and hands widgets both as `ctx.identity.accountId` / `ctx.identity.playerId` (the latter being the playerNum). They coincide only by accident on low-id dev accounts — which is why using one for the other went unnoticed for so long; see PLAN-native-ui.md §3.3 and PLAN-endtoend.md D3. **Verify player-scoped behaviour with a fresh, high-id account.**
 
@@ -231,6 +448,20 @@ Full CLI flag list (from `rts/server_main.cpp`):
 Generated bindings:
 - C++: `rts/protocol_generated.h`
 - TypeScript: `client/src/protocol/spring-web/*.ts`
+
+Both are committed and both come out of `scripts/regen-protocol.sh` — run it
+after every `schemas/protocol.fbs` edit and commit its outputs with the schema.
+The build refuses to proceed if you don't; see the drift guard under
+[Build & test](#build--test) above.
+
+> The warning that stood here — "there are TWO copies of `protocol_generated.h`
+> and include order picks between them per translation unit" — is retired. The
+> second (CMake-generated) copy is gone as of PLAN-protocol-guard task 2, and
+> its advice (`cp build/debug/generated/protocol_generated.h rts/`) would now
+> copy a file that is never written. The failure it described was real, but
+> the diagnosis was half wrong: `-I rts` precedes the generated dir for *every*
+> target, so no TU ever read the generated copy — the subset that failed to
+> compile was the subset that referenced a new field at all.
 
 ### Lua Scripting System
 
@@ -266,7 +497,8 @@ IScriptContext instances (priority-ordered)
 | `rts/System/Scripting/ScriptPermissions.h` | Per-context permission model (synced, fullCtrl, fullRead, team access) |
 | `rts/Lua/LuaScriptContext.h/.cpp` | Adapter: wraps CLuaHandle as an IScriptContext. Converts ScriptEvent entity IDs back to C++ pointers for CLuaHandle methods |
 | `rts/Lua/LuaHandle.h/.cpp` | Base class for all Lua contexts. `HasCallIn(L, name)` checks if a Lua function exists; `RunCallIn()` executes it |
-| `rts/Lua/LuaHandleSynced.h` | Split synced/unsynced Lua states. CSyncedLuaHandle for sim-affecting code |
+| `rts/Lua/LuaHandleSynced.h` | Split synced/unsynced Lua states. CSyncedLuaHandle for sim-affecting code. Also owns the **snapshot call-ins** (task 1d): `SnapshotSave`/`SnapshotLoad`/`SnapshotCoverage`, forwarded from `CSplitLuaHandle` (a dead synced state is a refusal, not an empty snapshot). **`DefsReconciled` (PLAN-def-reconciliation task 4)** rides the same dispatch shape and is NOT an upstream call-in: a savegame upstream is only ever loaded by the build that wrote it, while a persistent war outlives its balance patches. It fires once, after `Load`, only when the defs moved, and a handler that raises is logged rather than failing the restore — the world is already rebuilt by then, and a game whose reconcile handler is broken still has to come up. **FIDELITY-STANDIN:** these drive Recoil's `Save`/`Load` call-ins with a **table** where upstream passes a savegame zip handle — a snapshot here is one opaque blob inside `GameStateStore`'s SQLite transaction, so there is no file for a gadget to write into. The call-in NAMES are Recoil's; only the argument type deviates (PLAN-persistence §7.1d decision 1). |
+| `rts/Lua/LuaSnapshotState.h/.cpp` | **PLAN-persistence task 1d**: `luasnapshot::Value` — a deterministic, restorable representation of the synced Lua state a gadget hands to the snapshot walk, plus `Capture`/`Push` against a `lua_State`. Supports nil/boolean/**integer**/number/string/table (with boolean, number or string keys); **refuses by path** anything it could not put back identically — functions, userdata, threads, a table used as a *key* (its identity is the key), cycles (checked against the whole ancestry, not the parent), NaN, and nesting past `kMaxDepth` (32). Table pairs are stored in a **canonical order** (bool < number < string, then by value) because `lua_next` order is hash order: without the sort two checkpoints of one unchanged world differ byte-for-byte. **Lua 5.4's two number subtypes are two `Value` types (Q-P6, 2026-08-14, decision A3):** `Integer` (wire type 5, an int64 payload) is captured on `lua_isinteger` and restored with `lua_pushinteger`, because `Number` alone brought a gadget's counter back as a float and `'warlog_' .. seq .. '_kind'` then spelled `warlog_1.0_kind` — a resumed war published its war-digest and objective rules params under keys nothing reads, with **every value correct**. The two subtypes share one *sort* class and interleave by value (an exact tie puts the integer first), so canonical order does not depend on which subtype a gadget happened to write; a float with an integral value stays a float, which is what the alternative one-line fix (push integral doubles as integers) would have got wrong. A non-integral number is still a double end-to-end. **Both walks call `lua_checkstack` at every level** (D64(a), 2026-08-13): the capture holds **two** Lua stack slots per open level (the `lua_next` key and the value under inspection) and `Push` holds **three** (the table plus a transient key/value), but Lua only guarantees `LUA_MINSTACK` = **20** free slots to a C function — so an unchecked walk ran off the end of the stack array at nesting depth **22**, which is *inside* `kMaxDepth` and therefore state a gadget is entitled to hand us. `api_check` is compiled out in this build, so nothing raised: it was a silent 8-byte out-of-bounds **WRITE** in `luaH_next` that corrupted the heap and killed the process somewhere else, later. Exhausting the stack is now a refusal by path, like every other one. **The doctest case for it cannot fail without a sanitizer** — pre-fix the overflow is silent and the captured tree is still correct; the instrument that *does* fail pre-fix is AddressSanitizer over `LuaSnapshotState.cpp` + `rts/lib/lua/src/*.cpp`, deterministically, and the reproduction command is in the test's comment. Covered by `tests/test_lua_snapshot_state.cpp` against a bare `luaL_newstate()`. |
 | `rts/Lua/LuaRules.h/.cpp` | Game-wide gadget system. Loads `LuaRules/main.lua` (synced) and `LuaRules/draw.lua` (unsynced). Full access permissions |
 | `rts/Lua/LuaGaia.h/.cpp` | Map/environment gadgets. Same structure as LuaRules but for map-specific logic |
 | `rts/Lua/LuaSyncedCtrl.cpp` | C++ functions exposed to Lua as `Spring.*` — the synced API (150+ functions) |
@@ -321,7 +553,10 @@ Events currently bridged through `LuaScriptContext::HandleEvent()` (ScriptEventD
 
 - `GameFrame`, `GameStart`, `GamePreload`, `GameOver`
 - `UnitCreated`, `UnitFinished`, `UnitDestroyed`, `UnitIdle`, `UnitDamaged`, `UnitMoved`
-- `TeamDied`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved`
+- `TeamDied`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved` (⚠ the three
+  player events are `UNSYNCED_BIT`, so this bridge reaches *unsynced* handles
+  only — synced gadgets are served by `Server/PlayerOnboarding.h`'s explicit
+  delivery instead; see the persistent-war section below)
 
 Events **not yet bridged** (Lua still receives these via CLuaHandle's direct CEventHandler registration):
 
@@ -387,6 +622,35 @@ end
 ```
 
 Engine base gadgets live in `cont/base/springcontent/LuaRules/`. Game-specific gadgets live in `content/games/<game>/LuaRules/`. The engine base gadgets load first, providing default behaviors that games can override.
+
+#### Periodic gadget work: never gate on `frame % PERIOD`
+
+**Binding rule for any gadget that does something on a cadence.** When the
+server logs `sim fell behind, skipped N ticks`, `gadget:GameFrame` is *not
+called* for the skipped frames — they do not arrive late, they never arrive. A
+`if frame % PERIOD == 0` gate therefore drops that tick permanently, and this
+was silently unsound across the whole Metalstorm gadget set
+(PLAN-endtoend.md **D15**): a control objective banked zero hold progress over
+40 000 frames at 8× sim, and a diagnostic probe on the same gate emitted 11
+samples in a 24 378-frame war.
+
+Use `data/games/metalstorm/LuaRules/Gadgets/tick.lua` — one shared definition of
+the rule, `VFS.Include`d like any other shared module:
+
+- `Tick.due(gate, frame)` — **observation** policy, at most one fire per call.
+  For anything that samples current state (evaluate objectives, sample region
+  ownership, publish a scoreboard, recompute HP): the world is observable once,
+  so a multi-period stall must not invent duplicate samples.
+- `Tick.count(gate, frame)` — **accrual** policy, one fire per elapsed period.
+  For anything that pays out per period (authority stipend, overflow decay, AI
+  allowance drip): the amount was earned by the passage of frames, so
+  collapsing it lets a team lose income to machine load.
+
+Both preserve the phase grid across a skip, so on an unloaded machine they fire
+on exactly the frames the old modulo gate did. Caveat, documented in the
+module's header: `due()` restores the *tick*, not the samples, so subsystems
+that count ticks to measure duration (`regions/ownership.lua`'s
+FLIP_TICKS/DECAY_TICKS) still stretch in frame terms under sustained overload.
 
 ### Audio System
 
@@ -464,6 +728,18 @@ Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl
 
 `mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
 
+#### Map reachability intent
+
+`mapinfo.lua → metalstorm = { reachability = "connected" | "split" }` is the map's own statement about whether armour can reach every start position from every other. The engine never reads it; `tools/mapgen/regions_from_map.py --verify` does, and judges the connectivity it measures off the passability mask against what the map declares. A split or island map is legal player content (PLAN-maps.md §2k), so the measurement alone is not a verdict — but the check is two-sided: an undeclared map that comes out split fails, and a map declaring `split` that comes out connected fails as a stale declaration. A start position with no passable ground near it at all is refused under both. `terragen/reachability.py` owns the vocabulary, the emitter every generated package writes, the parser, and the verdict; the intent is authored per map id in the generators (`archipelago.SHIPPED_REACHABILITY`, `meridian2.DECLARED_REACHABILITY`), never derived from the terrain a run produced. The sibling gate for machine-run wars is `scenariogen.gate_reachability`'s `mutual` flag.
+
+#### Region graph partition
+
+`tools/mapgen/regions_from_map.py` derives `mapdata/regions.lua` for maps that ship no authored layout, and its partition unit is a rectangle per (grid cell **x connected component**), not per grid cell. A cell holding two real components is subdivided quadtree-style until each leaf belongs to one of them (floor: `MIN_REGION_SAMPLES`, ~1024 elmos a side), each leaf carries its component, and an edge is emitted only between two leaves of the SAME component that share `MIN_CROSSINGS` passable border samples of it. A graph walk therefore cannot leave the component it starts in, by construction. Before this, one rectangle spanned several components and two locally-correct edges chained into a route across an armour split — the AI's movement graph claimed every start reached every other on every archipelago (28 of 28 pairs on an 8-island map). `verify_graph` gates both directions: a same-component start pair the graph leaves unreachable FAILS, and a graph route between mask-different components FAILS. Leaves are a disjoint cover, which is what makes `regions/partition.lua`'s first-declared-wins point lookup unambiguous, and keys are uniquified against the whole used set because a duplicate key makes `validateGraph` reject the graph and drop the sim silently back to the 2048-elmo grid provider.
+
+**Who ships one.** Since M9l the free-form generator emits this file itself: `archipelago.py` derives it at package time through the same `regions_from_map.derive_graph`, off `smf.shipped_heights` (the surface as the SMF's uint16 gives it back — deriving off the generator's floats is one quantisation step away, and ~0.008 elmos is enough to flip a sample that sits on a move class's slope limit). The two paths are byte-identical on real content, which is what lets `regions_from_map.py` be re-run over an installed map without renaming every key. Every terragen map therefore ships `provider = "graph"`; a map that wants the neighbourless 2048-elmo GRID provider instead must ask for it (`--no-region-graph`), and the only reason to is a scenario addressing regions by grid key (`"2:2"` — `scenario_smoke_test.lua` on `green_flat_x34_v3`, which no generator produces). `meridian2.py` keeps passing `meridian.py`'s 24 AUTHORED regions and is untouched by this.
+
+**A region's polygon is its component's footprint, not its rectangle (M9m).** The leaf rectangle is only the search window: what the region publishes is the outline of its own component's passable ground inside that rectangle, rasterised on a 32-elmo lattice (`CLIP_BLOCK`), largest piece only, holes filled, corner pinches fattened — the three repairs that keep it ONE simple ring, which is all `regions/partition.lua` can express and all `validateGraph`/`MapProcessor` will accept. Ground outside every polygon resolves to `wilds`, the reserved catch-all: on an archipelago that is ~50 % of the passable map, and it is the honest answer, because before the clip that ground sat inside a region whose neighbours it could not drive to (49.1 % of claimed ground on `skerry_reach`, 28.2 % on `sundered_arc`; 0.6-1.7 % after, the residual being pockets a region's own footprint encloses). Consequences worth knowing: a polygon now has ~70 vertices instead of 4, so every point lookup (`partition.lua`, `ui/lib/regions.js`, `strategos/picture.regionOf`) rejects a candidate on its bounding box before walking the outline; and a region ships an explicit `centre` — a passable sample of its own component — because the vertex average of a coastline lands wherever its vertices are dense, routinely outside the region. `game_regions.lua` publishes `centre` when present (`region_<key>_x/z`) and falls back to the vertex average, `scenariogen.region_centre` reads it in the same order, and `MapProcessor` carries it into `regions.json`.
+
 #### Music state machine
 
 `MusicStateTracker` samples per-tick combat-event counts into a 30-second ring buffer and derives state from sliding windows:
@@ -492,12 +768,88 @@ data/
                             room_ai_slots (lobby-written); game_servers (lobby-written
                             pid/port); game_status (spring-server-written ready/clients
                             heartbeat — the lobby↔game readiness rendezvous);
+                            war_summary (spring-server-written per-war digest for the
+                            war browser — populations/spectators/region control);
+                            game_events (spring-server-written strategic history of a
+                            war — the lobby's while-you-were-away digest);
+                            room_runtime_ai (spring-server-written AND -read: the AI
+                            seats a war took while running, so a resume re-seats them
+                            at the playerNum the restored world is keyed by);
                             game_metrics (spring-server-written sim-health rows for the
                             GM dashboard, PLAN-gm-tools); admin_audit (append-only)
   maps/<mapId>/             Preprocessed: heightmap.bin, minimap.dxt1, tiles.dxt1, features/*.glb
   games/<gameId>/models/    Preprocessed: <unit>.glb, <unit>.config.json, <texture>.png
   games/<gameId>/sounds/    Preprocessed: *.webm (Opus, audioconverter output)
 ```
+
+**Everything under `data/` is a derived artifact and gitignored** — the only
+tracked binary content is `content/maps/*/` (source `.smf`/`.smt`) and
+`data/games/metalstorm/models/` (forge output, first-party). Regenerating
+`data/` therefore moves no tracked bytes: `mapconverter --force --all
+content/maps` and `gameconverter --force <game-dir>` are safe to re-run.
+
+**KTX2 orientation metadata.** Every `.ktx2` `textureconverter` writes carries
+`KTXorientation` = `rd` (`rts/System/FileSystem/Ktx2Orientation.h`) — the bare
+per-dimension letters of KTX2 §3.11.4, *not* libktx's KTX1 `KTX_ORIENTATION2_FMT`
+spelling `S=r,T=d`. The KTX1 form compiles and renders fine — neither Babylon's
+KTX2 loader nor `basisu` reads the key — but it makes the file invalid, and the
+Khronos `ktx` CLI (`validate` / `info` / `extract`) then refuses to open our own
+assets, which costs asset investigations their standard tool. `data/games/{bar,zk}/models/`
+still carries the old value; those are archived third-party games and closing
+them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
+
+**KTX2 `bytesPlane0` must be sized on supercompressed output.** KTX2 ≤ 2.0.3
+required a supercompressed file's `bytesPlane0..7` to read *unsized* (all
+zero); spec 2.0.4 reversed it, because the DFD describes the **inflated** texel
+block, whose size a reader needs before it has inflated anything. Both encoders
+we control still implement the old rule and must be corrected on the way out:
+`textureconverter` goes through `DeflateZstdKeepingBytesPlanes`, which
+save/restores the two DFD words around libktx 4.3.2's
+`ktxTexture2_DeflateZstd`, and forge's four `encode*.mjs` run their output
+through `fixupEncoded` (`tools/fable-model-forge/ktx2_dfd.mjs`), which derives
+the size from the DFD's own sample descriptions. Offsets and the spec predicate
+live in `rts/System/FileSystem/Ktx2BytesPlane.h` so `spring-tests` — which does
+not link libktx — can pin them. `ktx validate` reports the defect as
+`warning-6030` and still exits 0, so **no gate catches a regression here except
+that test**; the same module also runs as a CLI (`node ktx2_dfd.mjs
+--check|--fix <files>`) to audit or repair files already on disk, one byte per
+file, no pixel data touched (PLAN-maps M9i).
+
+**KTX2 provenance metadata.** Three encoders write `.ktx2` into this tree —
+`textureconverter`, forge's `Basis Universal`, and `toktx` — so every one of
+our outputs stamps `KTXwriter` = `springrts-web textureconverter / libktx v4.0`
+(PLAN-maps M8j). Without it libktx's fallback `Unidentified app` made ours the
+only anonymous files, and "which of these did *we* write, and therefore which
+carry the defect we just fixed?" had to be inferred from mtimes and the
+orientation spelling. One census over the key now answers it:
+`data/games/{bar,zk}` are the untouched archived files, everything else on the
+Metalstorm path is forge/`toktx` output or freshly regenerated.
+
+**Mip generation must not move a texture's DC.** `textureconverter` builds its
+own 2x2 box chain for encoded (non-DDS) sources, and that filter rounds
+half-to-even (`detailtex::MipBoxAvg4`, `rts/System/FileSystem/DetailTexDc.h`).
+Integer truncation — what it did until PLAN-maps M8i — loses up to 0.75 of a
+level per step and compounds: measured **-3 levels** from level 0 to the 1x1 on
+every shipped map. For ordinary art that is an invisible darkening with
+distance; for a map's **`detailTex` it is not**, because SMFFragProg adds the
+sample *signed* (`baseColor += tex*2-1`) with no fade uniform, so the top mip's
+mean is a flat tint applied at **every** viewing distance. Two rules follow:
+the filter is shared, tested code and stays unbiased; and a plain `detailTex`
+must be authored with its mean on **127.5** (not 128 — `x*2-1` is zero at
+`x=0.5`, which no single texel can hold). `mapconverter` measures the mean via
+`textureconverter --signed-dc-report` and warns past ±2 levels, but only when
+the map's `resources` actually select the plain branch — the splat and
+splat-normal branches suppress it, mirroring `attachTerrainDetailFromDecals`.
+
+**`?direct=` manifests live in two places.** A direct-boot manifest is authored
+in `manifests/` (the tracked source of truth) and **must also be copied to
+`client/public/`** — that, not `manifests/`, is what the browser fetches. The
+failure is silent-shaped: an uncopied manifest is not a 404, because the static
+server's SPA history fallback answers any unmatched path with `index.html` at
+HTTP 200, so only the JSON parse fails. `parseDirectManifest`
+(`client/src/core/direct-manifest.ts`) detects the HTML body and says which copy
+is missing; `direct-manifest.test.ts` asserts every `manifests/*.json` has a
+byte-identical served copy.
 
 ## HTTP Routes
 
@@ -513,7 +865,7 @@ data/
 | `/api/maps/source/<mapId>/*` | Raw map source files (Lua, images) |
 | `/api/maps/data/<mapId>/*` | Preprocessed map assets (heightmap, tiles, feature models) |
 | `/api/maps/thumb/<mapId>` | Map thumbnail (WebP/PNG) |
-| `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. |
+| `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting`, `modelMaterialPort`, `archived`/`archivedReason`, `resourceEconomy` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. Client-side capability gates read this payload, never the game id: `archived` disables the create-room option, `resourceEconomy: false` (Metalstorm) suppresses the metal/energy HUD. Both default to the legacy behaviour when absent. |
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/factions/<gameId>` | Public. JSON list of the factions a game declares in `gamedata/sidedata.lua` (`key`, `name`, `fullName`, `description`), discovered once at startup via `FactionData::Discover`. Drives the sign-up form's required faction picker. `[]` for a game that declares none; 404 for an unknown game. |
@@ -523,6 +875,12 @@ data/
 | `POST /api/admin/game` | AdminOnly. Per-game metric timeline (each row carrying its `growth` counters when present) + audit tail (`{roomId}`). |
 | `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
 | `POST /api/admin/set-faction` | AdminOnly, audited. Override an account's permanent faction (`{username, faction}`). The only writer of `users.faction_id` after sign-up — faction is immutable in the normal flow, so there is deliberately no player-facing equivalent. PLAN-metalstorm-lobby §1b. |
+| `POST /api/auth/{login,register,validate}` | All three echo the account's `faction` when it has one (omitted, never empty, for dev/manifest accounts) — login and validate are the only ways a returning session can learn it. PLAN-endtoend D40. |
+| `POST /api/auth/logout` | Public. Deletes the session row named by the request's own `Bearer` token, and answers **200 either way** (`{"ok":true,"revoked":<bool>}`). Public rather than TokenRequired on purpose: `DispatchPost` would 401 a dead token before the handler ran, and an expired session you cannot leave is the defect. `revoked:false` for an unknown token, an empty `Bearer`, no header, or Basic auth (which holds no session row at all). Client side, `LobbyUI.logout()` leaves the room *before* revoking — see [Logout](#logout). PLAN-endtoend D45. |
+| `POST /api/auth/refresh` | Public (a caller whose access session has aged out cannot present one). Rotates `{refresh_token}` into a fresh access session, returning the **same JSON shape as login** so the client has one code path. Single-use: the presented token is marked spent and a successor is minted in the same **family**. Presenting a spent token is a replay — the whole family is revoked and every failure answers one `401`, because telling a caller *which* failure it was tells a thief they hold a live lineage. A ban revokes every family. Failed refreshes (only) consume a global token bucket. PLAN-metalstorm-lobby §7.2, task 8a. |
+| `POST /api/auth/logout-all` | TokenRequired. §7.2's "log out everywhere": every `sessions` row **and** every refresh family the account holds (`{"ok":true,"sessions_revoked":n,"refresh_revoked":n}`). Deliberately a **separate control** from the header's Log out — one browser signing out must not evict the player's phone from a war they are standing in. Client: `LobbyUI.logoutEverywhere()`, `#logout-all-btn`. |
+| `POST /api/wars/reconnect-token` | TokenRequired. Mints this account's long-TTL (7-day) key back into ONE war (`{room_id}` → `{room_id, token, expires_in}`). The **binding is the authority**, not `room->players` — a war's fighters are seated by the game server and never appear in the room's player list. 404 unknown room / 400 not a persistent war (a skirmish dies with its lobby, so a week-long key into one opens nothing) / 403 no seat held. PLAN-metalstorm-lobby §7.3, task 8a. |
+| `POST /api/rooms/team` | A player's own side choice. **403 `{"error":"you fight for <faction>","team":<n>}`** when the room declares a side for their faction and the request names a different team — the seating rule has to hold against the dropdown too, or it is undone by the next click. Enforced at the route (where a human chooses), not in `RoomManager::SetTeam`, which stays permissive for the manifest paths. |
 
 ### Game server (`spring-server`)
 
@@ -548,6 +906,15 @@ data/
 | `/api/logs/sources` | Connected log source status |
 | `/api/logs/stream` | SSE live log stream (params: level, section, scope) |
 | `/api/sessions` | Recent game sessions (from game_sessions table) |
+| `/api/chat/ticket` | POST — mint the stream ticket an `EventSource` can carry (task 9b); joins `#main` |
+| `/api/chat/stream` | Identified SSE chat delivery (`?ticket=…`; 401 without a valid one) |
+| `/api/chat/send` | POST `{scope,target,text}` — 400 bad scope/text, 403 not in that scope, 429 flood |
+| `/api/chat/history` | POST `{scope,target,before,limit}` — newest-first backfill, ignore-filtered |
+| `/api/chat/ignore` | POST `{username,on}` — toggle; body with no username answers the list |
+| `/api/chat/channel` | POST `{channel,join}` — join/leave a named channel (`#main` cannot be left) |
+| `/api/chat/mute` | POST `{username,scope?,target?,seconds?,reason?,on?}` — no scope = account-level; no username = the list (admin only); 403 carries which rule refused |
+| `/api/chat/kick` | POST `{channel,username,seconds?}` — eject + a timed channel mute, which is what makes it stick |
+| `/api/chat/broadcast` | POST `{text}` — AdminOnly; a `system` line to `#main`, the one channel nobody can leave |
 
 ## Data Flow
 
@@ -570,11 +937,538 @@ Client (SSE room-state updates) sees state≥Loading + port>0 → connects:
   All roster players connected → FireGameStart()
     → gadgets spawn starting units (start_unit_setup.lua)
 ```
+**Session kind (skirmish vs persistent war).** A room carries a
+`SessionKind` (`RoomManager.h`), stored in `rooms.session_kind`, offered as
+`sessionKind` on `POST /api/rooms` and `/api/rooms/direct`, echoed as
+`session_kind` on every room JSON, and forwarded to the game server as
+`--session-kind`. It decides **the roster gate above**: a `skirmish` holds
+GameStart until every rostered human has connected (the flow as drawn); a
+`persistent` war fires GameStart during set-up and joins its roster as it
+arrives (PLAN-metalstorm-lobby.md §1/§2.1). The two expressions that decision
+is made from — `SessionWaitsForRoster` / `SessionStartsGameAtSetup` — live in
+`GameStartCoordinator.h` and have four readers, including the replay
+prologue-feed branch, which must agree with the live one exactly.
+
+It is **not** the same field as `GameRoom::persistent`, which is a *reaping*
+policy and is also set on ordinary AI-testing skirmishes. The implication runs
+one way and `CreateRoom` enforces it: a persistent war is always persistent; a
+persistent room is not always a war. An unknown spelling is refused at both
+API entry points (a war silently downgraded to a skirmish waits forever for a
+roster and logs it exactly like a slow browser) but downgraded-with-a-warning
+on the db load path, where the row already exists and losing it is worse.
+
+**Dynamic join (a war's *join* gate).** The kind also decides who may take a
+*playing* seat. An authenticated account that is not in the game server's
+`--player` launch roster has always been admitted — as a **spectator**, which
+is what the "spectate a running game" flow depends on — so the gap a
+persistent war left was that it could start without its roster and then never
+gain anyone. `DynamicJoin.h` promotes that spectator to a player when, and
+only when, all of: this is a `persistent` war; the account carries a faction
+(`users.faction_id`); the war fields a side for that faction; and that side is
+under capacity. Every decline falls through to the spectator seat — none of
+them refuses the connection — and each names its reason in the operator log.
+
+The seat follows the **faction**, never a balancer (PLAN-metalstorm-lobby.md
+§2.3): a player is never moved off their own side. The faction→team map is the
+`war_sides` modoption the lobby wrote at room-create time, decoded by
+`ParseWarSides` (`WarSides.h`) — the *same* function `GameRoom::SideTeams()`
+uses, because the lobby and the game server are separate processes and two
+hand-rolled parsers is the shape that admits a faction on team 0 in one and
+refuses it in the other. The count-then-bind sequence is atomic
+by thread confinement, not by a lock: both halves run inside the single
+`AuthRequest` case on the message-pump thread, and nothing else seats a human.
+
+**Per-side capacity, seeding and Deploy (structural balance).** A player always
+fights for their own faction, so balance cannot be done by moving anyone onto a
+weaker side — it is decided at the only two moments that remain: when a war is
+*seeded*, and when a player picks *which war* to join (PLAN-metalstorm-lobby.md
+§6). So capacity is per side, not per war: `war_side_capacities`
+(`"compact:6,union:2"`) is a **second, additive modoption** written beside
+`war_sides` at room-create time and decoded by `ParseWarSideCapacities`
+(`WarSides.h`) in both processes. It is a separate option and not a third field
+on `war_sides` because every reader of that string rejects a non-numeric team
+outright, so a cached client bundle would silently fall back to the legacy
+two-team room — the exact D19 defect `war_sides` exists to fix. Any side a war
+leaves unsized falls back to `--war-side-capacity` (default 8, `0` = unlimited),
+which is what every pre-task-7 war has.
+
+**Since the War Director (PLAN-metalstorm-wars.md task 1) the modoption is the
+WIRE, not the authority.** Everything above about `war_sides` /
+`war_side_capacities` — the strings, the two decoders, why they are two options
+and not one — is unchanged and still exactly how the game server and the client
+learn a war's shape. What changed is where those strings come from: for a war,
+the **`war_sides` table** is the durable record of which sides exist, how big
+each is, which start box it holds and whether it is flagged as the underdog, and
+the modoptions are *derived* from it at boot by the same `EncodeWarSides` /
+`EncodeWarSideCapacities` pair. A skirmish room still writes them straight from
+the scenario and has no `wars` row at all. Read the table when you need to know a
+war's shape while no game server is running — which is the case the modoption
+could never answer, and the reason the table exists.
+
+The value comes from two places, merged in this order: `WarSeeding.h` sizes each
+side as `clamp(ceil(registered(faction) / (warsFieldingIt + 1)), 2, 32)` from
+`Database::CountAccountsByFaction()`, and the scenario's own per-side
+`capacity` (`ScenarioDiscovery::AuthoredSideCapacities`) overrides it. The `+ 1`
+is self-limiting: a second war for a faction halves the size of every side that
+faction fields, so a surplus faction gets *more wars* rather than one enormous
+one. Only a persistent war gets capacities at all — a skirmish's cast is its
+roster.
+
+`POST /api/wars/deploy` is the one-click "which war should I fight in", decided
+by `WarDeploy.h`. A war this account is already bound to wins outright **unless
+that side has no seat for them**, which is wars §5's own exception ("if that
+side is now full, fall through to `findWar` for another war of the same
+faction") — and "full" means full of OTHER bound players: `myBound` counts every
+binding on the side including the asker's, so the seat test discounts the
+asker's own seat when it is applied to the asker's own war, or a veteran would
+be routed off a front they are already sitting on. Otherwise the ranking is
+wars §5's four keys in strict precedence — **friends-present > most-needed
+(most outnumbered) > highest-stakes > freshest**, then lowest room id.
+`liveHumans` is deliberately **not** a key (it fought "freshest", making
+demand-seeded wars unreachable) and stays on the struct only because the
+browser shows it. "Most-needed" is §6's underdog incentive expressed as routing
+— the only lever that reduces a deficit when nobody can change faction. It
+never refuses: a faction that is full in every war gets `seed`, and
+§6's queue is deliberately **not built** — a queue is a promise to seat someone
+later, and seeding a new war is an answer now. §6's other named incentive,
+*bonus onboarding authority* for the outnumbered side, is not implemented; see
+the note in `WarDeploy.h`'s header and PLAN-metalstorm-lobby.md task 7.
+
+**Rejoin (a war's memory of a player).** Dynamic join is stateless: it seats a
+joiner by faction every time they connect and cannot tell a veteran of this war
+from a stranger. `war_player_bindings` (`Server/WarPlayerBindings.h/.cpp`) is
+the account↔war record that fixes that — one row per (room, account) holding the
+side they hold, when they first fought here, and their per-player war state
+(authority pool + participation credit). The **game server writes it** (it is
+the process that seats players and the only one that can read the sim); the
+lobby reads it, and the audited faction override deletes from it, because a
+binding records the team the *old* faction sat on. It is one of the two tables
+in the shared db that are **migrated, never probe-and-dropped** (`war_outcome`
+below is the other): `rooms`/`game_servers`/`game_status`/`war_summary` are
+mirrors of live in-memory state, and these two are the only copy of the thing.
+
+**How a war ENDED is `war_outcome` (`Server/WarOutcome.h/.cpp`, wars §7 task
+4)**, and it is a separate table from the live `war_summary` digest precisely
+because the two want opposite lifetimes: the digest is dropped once it is
+`kWarSummaryStaleSec` (30 s) old so a killed server stops claiming players are
+online, whereas a war that finishes and whose process exits — which
+`--postgame-exit-seconds` makes happen by design — would otherwise have the
+fact that it was won evaporate half a minute later. One row per war: final
+frame (the frame `game_gameover.lua` stamped at `resolving`, not the frame the
+scrape ran on), winning team, what the escrow settlement disposed of, and the
+final scoreboard with each participant's account **name** copied in, because
+player numbers are recycled and an archived war must still be able to name who
+fought in it. **The game server is the only writer** — every field is a fact
+only the sim holds — and the **lobby only reads**; the Director's half of the
+ending (`terminal_reason`, the archive stamp) lives on the `wars` row, where the
+Director is likewise the only writer. Two processes writing one table is how a
+column becomes unexplainable six weeks later, and `war_sides` is the precedent
+this follows. A war that ends for a reason the sim never sees — operator
+retire, season boundary, a faction driven out of the theatre — archives with no
+`war_outcome` row at all; `wars.terminal_reason` is the field that always
+exists. Durable, so additive migrations only.
+
+`WarRejoinPolicy.h` is the pure decision, and it carries **two horizons** rather
+than one because the two things being restored have different natures. The SEAT
+is an identity: held for `WAR_SEAT_HOLD_SEC` (a week) against the *capacity*
+check only — so a full side cannot turn away a player who has been holding it
+since Tuesday — while which team they get always follows the immutable faction,
+so a war whose sides are re-authored supersedes the binding rather than the
+reverse. The POOL is a conserved resource and goes stale in
+`WAR_BRIEF_ABSENCE_SEC` (5 min); past that §2.5's rule applies and the player
+gets the onboarding stipend instead.
+
+State moves between the sim and the row through `Server/WarStateSim.h/.cpp`.
+Capture is a plain rules-param read, run on disconnect **before** the
+PlayerRemoved delivery (the gadget merges a leaver's pool into the team pool, so
+capturing after it would record zero for everyone) plus a
+60 s sweep, which is what survives a `kill -9`. Restore is deliberately NOT the
+mirror image: it calls `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in
+synced Lua, both **top-ups to a remembered level** rather than deposits, so they
+are idempotent, un-farmable and a no-op when the sim never lost the value. They
+are called directly into the synced state, never over `RecvLuaMsg` — any client
+can forge one of those, which would hand every player a "restore my pool to N"
+verb. Replays skip the whole path (a replay has no db to ask, and a dynamically
+joined session already cannot replay — its team is not in the recorded roster).
+
+**The three player callins do NOT reach synced gadgets through `eventHandler` —
+the server delivers them by hand.** `PlayerChanged`/`PlayerAdded`/`PlayerRemoved`
+are declared `MANAGED_BIT | UNSYNCED_BIT` in `System/Events.def` (verbatim
+upstream), and `CEventHandler::InsertEvent` refuses the registration outright for
+any client that reports itself synced. So `eventHandler.PlayerRemoved(...)`
+iterates a list the synced LuaRules handle is not and cannot be in — which is why
+`game_authority.lua`'s leaver merge had never once run, and why a mid-war dynamic
+joiner arrived with no authority pool at all. Nothing was forgotten; the event is
+unsynced *by classification*.
+
+`Server/PlayerOnboarding.h/.cpp` is the deliberate, named deviation
+(FIDELITY-STANDIN — allowed by the client-server carve-out, and confined to two
+call sites): `FireSyncedPlayerAdded` / `FireSyncedPlayerRemoved` invoke the
+callin on `luaRules->syncedLuaHandle` directly. Safe here and not upstream
+because this engine is server-authoritative, there is exactly one synced Lua
+state, and the seat change is already in the synced input journal
+(`RecordAuthIdentity` / `RecordDisconnect`) — so a replay re-executes the same
+delivery. `PlayerAdded` fires from `bindPlayer` in ClientMessageHandler (the
+seat installer shared by the token, password and replay paths, which is what
+makes it deterministic) gated by `DecideOnboardingHook`: a seated non-spectator
+human, and only **after** GameStart — before it, `gadget:GameStart`'s own roster
+loop onboards them, and a grant issued earlier would land on team pools
+GameStart is about to reset. `PlayerRemoved` fires from the disconnect drain and
+from the replay feed, in both cases immediately after `eventHandler.PlayerRemoved`
+(which still serves any unsynced client) and after the war-state capture.
+
+**Pre-join legibility:** `POST /api/wars/join-preview` (lobby, authed) answers
+"what happens to ME if I join this war" for every persistent war at once — side,
+seat count, and the authority the player arrives with. It composes
+`DecideDynamicJoin` and `DecideRejoin`, the same pure functions the game server
+seats with (`Server/JoinPreview.h`), so the promise cannot drift from the rule;
+per-side population comes from `war_player_bindings`, not the room's player list,
+because a war's fighters are seated by the game server and never appear in the
+room roster at all.
+
+**The war browser** (`client/src/lobby/war-browser.ts`, rendered by `renderWarList`
+from `browser/war-entry.html`) lists persistent wars in their own section above the
+room list, filtered by default to *wars my faction fields a side in*. Every field it
+shows is either durable or live, and which is which is load-bearing: seats held
+(`bound`) and seats left (`open`) come from `war_player_bindings` and are therefore
+correct for a war whose server is not running (an offline veteran's seat is not
+free); connected populations, spectator count, region control and uptime come from
+the `war_summary` digest and are simply absent otherwise, with `live` saying which
+half is on screen. The lobby re-broadcasts the room list every ~5 s while any war
+exists — every other broadcast in `lobby_main.cpp` fires on a room mutation, which is
+right for a room and wrong for a war, whose populations and front move without anyone
+touching the row.
+
+**The friends panel and the "Friends here" filter** (`client/src/lobby/friends.ts`,
+task 9a's client half) are the only readers of the four `/api/friends/*` routes.
+The model is pure and the panel is the DOM around it, for the reason the rest of
+this lane splits that way: every decision here is about what an ABSENCE means.
+Three rules the client re-states rather than inherits. **A pending edge publishes
+no presence** — a non-mutual row arrives as `unknown`, and rendering it as
+"Offline" would republish exactly the tracking the server refused to hand out, so
+an unanswered request renders the request and no faction chip. **A row is
+ordered by what it asks of the player**, not by presence alone: an incoming
+request outranks a friend standing in a war, because it is the only row asking a
+question, and an outgoing one sorts below an offline friend. **The filter is fed
+by presence, not by the graph** — `friendWarRooms` keeps `fighting` rows only
+(`staging` is lobby-room membership, which would empty the list the moment
+anyone looked), and it does NOT narrow to wars the account can be seated in,
+because a friend fighting in a war closed to your faction is precisely the
+refusal `/api/friends/join` exists to say out loud. Join is two steps and stays
+two: the route answers, `/api/rooms/join` seats, so the fork brakes and the audit
+row are not bypassed — and `opposing_side`, the successful outcome that puts you
+against your friend, **costs a second click** (`friendJoinNeedsConfirm`), because
+seating immediately wrote the warning and replaced it with the room screen in the
+same tick.
+Classes built from the wire's own words (`friend-<edge>`,
+`friend-presence-<state>`) are enumerated in `lobby-css-coverage.test.ts`: no
+regex over the markup can find them, so a new server state would otherwise ship
+unstyled.
+
+**The chat panel** (`client/src/lobby/chat.ts`, task 9b's client half) reads the six
+`/api/chat/*` routes, and three properties of that service shape it. **A tab is
+keyed by the SERVER'S target and addressed by a different string.** A PM is POSTed
+to `target: "<username>"` and every frame comes back as `Chat::PmTarget`'s
+`"<lo>:<hi>"`, so a tab keyed on what the player typed never matches its own
+replies and the conversation splits in two the moment the other party answers;
+`ChatTab` therefore carries `target` (matches frames) and `sendTarget` (what
+`send`/`history` want back) — verified live, where `history` on the canonical PM
+target answers `no such player`. The three room-shaped scopes have the same split
+in the other direction: all of them POST the bare room id and come back as `<id>`,
+`<id>/ally/<team>` and `<id>/spec`, and the client must never build the ally target
+itself, because the server appends the team it reads off the roster precisely so a
+client cannot name one. **Room tabs are staged by `syncRoomTabs` and die with the
+room** — leaving takes the membership with it, so a tab left behind is a surface
+whose every request is a 403 — and a spectator gets no ally tab, a player no
+spectator tab. **The stream is identified and its credential is a ticket**
+(`SSETickets.h`): the client mints one with the real token and spends it in the
+url, because `EventSource` cannot set a header. `onerror` reports nothing, so a
+401 from a dead ticket and a dropped connection are the same event and want
+opposite responses — the browser's own retry fixes the second and loops forever on
+the first, since it re-fetches the url the dead ticket is in. `streamRecovery` is
+that decision: one free auto-retry while the ticket is plausibly alive, an
+immediate re-mint once its TTL has passed (the TTL slides on redemption, so an
+un-redeemed window means nothing is connected), exponential backoff after that,
+and a stop with a Reconnect button rather than silent retries for the session.
+`/me` has no wire flag and is sent as ordinary text with its marker intact, so it
+renders as an action for every client and survives history. The dock is an empty
+`#chat-dock` div in BOTH lobby templates and everything inside it is written by
+`renderChat()`, which is why `lobby-css-coverage.test.ts` enumerates the chat
+classes explicitly — no markup scan can see a class built from data.
+
+**What the card says about a frozen war** (PLAN-persistence task 4a): the badge is
+`war.state`, not the `live` bit — Live / Resuming / Hibernated / Interrupted /
+Restarting / Not started — because one bit says the same word about a war that saved
+cleanly, one whose server died with its tail unwritten, and one going back to frame 0.
+`frozen_frame` is rendered as sim time ("2h 06m of war") rather than as a frame number,
+and `frozen_at` as an age. The E1 verdict is deliberately rendered **twice, in two
+registers**: the card's own sentence is derived from `resume_eligibility` ("the game has
+been updated since — this war restarts at the beginning"), while
+`resume_blocked_reason` — operator prose naming two 16-hex engine stamps — rides the
+row's `title`, so the log line and the card agree without the hashes on screen. Every
+formatter falls back to the old `live` reading when `state` is absent, so a client ahead
+of its lobby degrades to the previous card. The **room**-state badge is suppressed
+whenever the war state is known: a hibernated war keeps `state = InGame` (the room
+records what the world was doing when the process left), and the two badges together
+read "In game · Hibernated". Note `esc()` does not escape quotes — attribute values use
+`escAttr()`.
+
+**"Your games"** (PLAN-persistence task 4c): the *My wars* filter lists the wars an
+account is **enlisted** in, which is not the same question `returning` answers.
+`returning` is `seat == RejoinSeat::Restored` — a *seating* verdict — so it goes false
+for a binding whose team the war's re-authored sides no longer seat that faction on,
+and a list keyed on it silently drops the war a player has a week of history in. The
+join-preview row therefore carries both: `enlisted` (the account holds a
+`war_player_bindings` row here at all) and `seat` (`RejoinSeatKey` —
+`no_binding` | `superseded` | `restored`, a wire vocabulary kept separate from
+`RejoinSeatToString`'s log prose). `sortMyWars` orders those rows by *which of mine
+needs me* — live, resuming, interrupted, hibernated, unresumable, never-run, then most
+recently frozen first, with a missing `frozen_at` sorting last in its rank and id
+breaking ties so the list does not reshuffle between broadcasts. `formatYourWar` is the
+one line on the card about the player rather than the war (their side, their absence,
+how much world is frozen waiting), and it names a superseded seat instead of a side the
+account no longer holds — painted `.war-yours-lost` amber rather than the accent green,
+for the same reason the crashed badge does not share the muted colour of a clean freeze.
+The frozen frame is suppressed on a live war, where `frozen_frame` is the last durable
+point rather than the world.
+
+**Spectating a war by choice:** a `POST /api/rooms/join` with `as_spectator` on a
+persistent war records `room_members.spectate_only`, and the game server's auth
+`resolveSeat` checks it *before* every seating rule (`Server/RoomWatchIntent.h`) —
+after them is too late, because dynamic join would already have promoted the account
+to its faction's side. Re-joining the other way converts, in either direction, and
+takes effect on the next connect: the seat is taken at auth, and a role change inside
+a running sim would need a protocol message that does not exist.
+
+**Two client-side rules a running war inverts** (PLAN-persistence Q-P3). (1) **On a
+running room `is_spectator` means "not seated by the lobby"** — which is true of every
+human the *game server* seated: every dynamic joiner and every restored war seat. The
+room screen must therefore resolve a row through `lobby/room-seat.ts`, whose seat source
+for a live war is this account's `POST /api/wars/join-preview` row (`will_fight`,
+`enlisted`, `watching`); nothing publishes per-player seats for a live war, so another
+player's row is `unknown` and renders as a claimless em dash rather than "Spectator".
+(2) **`decideRoomTransition`'s "already entered this room ⇒ do not re-enter" rule is a
+skirmish rule.** A skirmish is played once and winds down; a war is a world that
+outlives the visit, so a *second* visit in one page session is ordinary. The
+discriminator is intent, not state: `LobbyUI.rejoinRequestedRoomId` is set for the
+length of a `joinRoom` call (every caller is a button) and a war re-enters on it, while
+a passive room/war broadcast still refreshes the room view — otherwise quitting a war to
+the lobby would be undone by the next ~5 s war tick.
+
 **Game-server lifetime:** a non-persistent game server self-terminates after
-5 min with zero connected clients (120 s startup grace); persistent rooms run
-forever. The lobby reaps abandoned non-persistent rooms (no live game, idle
->30 min) and, on startup, resets orphaned Loading/Active rooms (no adopted
-server) back to Filling. See PLAN-lobby-game-connection.md.
+5 min with zero connected clients (120 s startup grace). The lobby reaps
+abandoned non-persistent rooms (no live game, idle >30 min) and, on startup,
+resets orphaned Loading/Active rooms (no adopted server) back to Filling. See
+PLAN-lobby-game-connection.md.
+
+A **war** does not run forever any more (PLAN-persistence task 3b). Its server
+gets `--hibernate-idle-seconds` from the lobby's own `--war-hibernate-idle-seconds`
+(default **300 s**, env `SPRING_LOBBY_WAR_HIBERNATE_IDLE_SECONDS`, `0` = off): with
+nobody connected for that window it **checkpoints itself and exits**, handing back a
+process and a port, and the next join spawns it again with `--resume` so the world
+comes back at the frame it froze at. The window is passed by the LOBBY rather than
+defaulted in the server for the same reason `--session-kind` is — hibernating is only
+safe for a room something will respawn, and the lobby is the only thing that can, so a
+bare `spring-server` still never exits a world nobody can bring back. Five minutes,
+not five seconds: the window has to outlast the disconnect a browser reload causes,
+or every refresh would be a resume.
+
+Three states follow from that, all derived by `warresume::Classify` and published as
+`war.state` in the room JSON the SSE stream already carries (plus `frozen_frame` /
+`frozen_at`): **`resuming`** — a process is up but has not published
+`game_status.ready`, which is also the state E5's *second* joiner is told to wait on
+rather than forking a rival sim (route handlers all run on the one network thread, so
+the fork is serialised by construction; what was missing was saying so); **`hibernated`**
+— no process and the store's newest row is a `hibernate:*` exit checkpoint;
+**`crashed`** — no process and no exit checkpoint, so frames were lost even if an older
+snapshot still makes the war resumable. The `game_servers` row is **kept** for the last
+two with `pid = 0, port = 0` and `state = 'hibernated'|'crashed'`, so the fleet view and
+`/api/processes` list a frozen war instead of losing it, and the startup adoption pass
+recognises those rows by their state string rather than testing a pid that is
+deliberately absent.
+
+A fourth state arrives with the deploy (PLAN-persistence task **3c**):
+**`unresumable`** — no process, a frozen world in the store, and the binary that would
+be spawned **may not load it** (E1). The engine hash a snapshot is stamped with is
+FNV-1a of the build stamp (`Server/EngineIdentity.h`, one recipe shared by the store and
+the flag below), so "after an upgrade" and "after any rebuild" are the same event: every
+war frozen by the previous binary is unresumable, by §2's accepted policy. Before 3c that
+policy was enforced only as a side effect — the join saw a snapshot row, passed
+`--resume`, the server's `DecodeBlob` refused with `EngineMismatch` and `DoResume` aborted
+the process (by design), the room kept a dead pid, and because `PlanJoin` gates on a live
+pid the next join planned the identical spawn. A post-upgrade war was **unjoinable
+forever, one aborted process per attempt**, with nothing in the lobby able to say why. So
+the lobby now asks the question the blob would have answered, before the fork:
+`warresume::DecideResumeEligibility` compares the newest row's `engine_hash` / `map_hash`
+against the identity of the binary it is about to spawn — obtained by running that binary
+(`spring-server --print-engine-hash`, cached on the file's path+mtime+size, so a swapped
+binary is observed), because the lobby is a separate link target with its own stamp and
+may spawn a `build/release` server from another build tree entirely. A refused world is
+**not** passed `--resume`: the war comes back at frame 0, the card carries
+`resume_eligibility` + `resume_blocked_reason` beside the `frozen_frame` it will not come
+back at, and both the pre-spawn and join log lines name the lost frame at WARNING. If the
+probe cannot answer (an older binary with no such flag) the pre-flight **abstains** —
+`--resume` is passed and the game server's own E1 check stays the authority — because a
+pre-flight that failed closed would make a probe failure look like an upgrade and reset a
+live campaign on every join.
+
+The drain itself is `Server/DeployDrain.h/.cpp` + `POST /api/admin/drain`: it SIGTERMs
+**every** game server the lobby owns, wars included — deliberately *not*
+`ActionOnLobbyExit`'s rule, which leaves a war running (right for a lobby restart, wrong
+for a deploy, where that process is executing the binary about to be replaced and
+`game_servers` records a pid, not a build). It waits for each exit, escalates to SIGKILL
+past the deadline, and reports per room: a **fresh** exit checkpoint (the store's newest
+row having moved — an old checkpoint still lying there is the trap) means the world
+survived, and a war that exits without one is `lossy`, the count that gates the upgrade.
+It touches no room state: hibernated-vs-crashed, hold-vs-recycle and the re-recorded
+`game_servers` row are the health loop's, and a second copy of that classification is the
+failure mode this lane keeps finding.
+
+Those states are a **datum**, and a datum cannot tell anybody that something
+happened: `war.state` rides the `rooms` broadcast, so a war that comes back flips
+its badge on the next list tick — up to 5 s later, on a card nobody is looking
+at. The same channel therefore carries a second named event, **`war-state`**
+(PLAN-persistence task **4d**, `Server/WarStateEvents.h/.cpp`): `{room, kind,
+state, headline}` with `kind` one of `resuming` / `back` / `hibernated` /
+`lost`. Three rules make it usable: **first sight seeds and never fires** (a
+lobby restart re-observes every war, and a burst of toasts about wars that did
+not move is worse than no toast); the classification is by **destination, not
+path** (`hibernated → resuming → live` is routinely sampled as `hibernated →
+live`, because a resume finishes inside one broadcast period, so a detector
+written over adjacent pairs would go quiet on exactly the fast resumes); and the
+watcher **forgets** departed rooms, because room ids are reused. It is a
+**broadcast** — `/api/rooms/stream` is an *anonymous* SSE channel, and stays one
+because the room list is the same document for everybody (identified channels
+exist since task 9b: `NetworkServer::AddIdentifiedSSE`) — so "is this war
+mine" is answered in the browser (`lobby/war-notice.ts`, off the `enlisted` field
+task 4c publishes) and the notice is shown only to an enlisted account. The
+`rooms` event is always sent first, so the browser's lookup finds the new row.
+
+The durable half of "a reused room id inherits nothing" is
+**`RoomManager::DeleteRoomFromDb`** (task **4e**), the one chokepoint both ways a
+room dies pass through — `DeleteRoom` (abandon, replay played out, recycle) and
+`ReapStaleRooms`, which at *startup* runs before the lobby's game-server
+bookkeeping exists, so a cleanup hung off `removeGameServer` covers one and
+misses the other. `rooms.id` comes from a counter re-seeded as `MAX(id)+1` over
+the survivors, so a deleted id is handed back out. It deletes, each through the
+table's own owner: `war_player_bindings` (a roster with pools),
+`game_events` (`GameEventsDb::DeleteForRoom` — someone else's war story, read
+back as the rejoin digest), `game_snapshots`
+(`warresume::DeleteSnapshotsForRoom` — a **world**, since `LatestSnapshot` is
+what decides a war comes back on a stored one; deliberately *not* filtered by
+`game_id`, unlike the read), `war_reconnect_tokens`
+(`AuthTokens::DeleteWarReconnectForRoom` — a **seat**, since
+`ValidateWarReconnect` scopes a token by room and nothing else),
+`room_runtime_ai` (`RuntimeAIRoster::DeleteForRoom` — a **brain and its synced
+identity**: an inherited row seats a caretaker nobody added, at a playerNum the
+next war's own state means something else by), and the
+`game_servers`/`game_status`/`war_summary` triple
+(`GameServersDb::DeleteForRoom`, now also the body of the lobby's
+`removeGameServer`). `game_metrics` and `debug_logs` are named in the code as
+deliberate exclusions. The live database at the time of the fix held orphaned
+`game_status` rows for five rooms — 95, 124, 310, 317, 330 — against a `rooms`
+table containing only room 1: five "ready" flags on the reissue path.
+
+Liveness in all of this is by **pid**, never by the room's state: the superseded
+`DecideWarResume` answered "already coming up" whenever the room said `Loading`, and
+because `ActionForOrphanedRoom` HOLDS a war in the state it died in, a war whose server
+died mid-launch answered that to every join thereafter — permanently unjoinable, with
+nothing coming up.
+
+### Logout
+```
+Client: header "Log out" (browser + room screens) → LobbyUI.logout()
+  → runLogout() (client/src/lobby/logout.ts) — order is the whole point:
+  1. POST /api/rooms/leave   (only while in a room; needs the live token)
+  2. POST /api/auth/logout   (deletes the session row; carries the refresh
+                              token in its body so the FAMILY dies too)
+  3. clear LOGOUT_CLEARED_KEYS + reset LobbyUI state → showLogin()
+```
+Steps 1 and 2 are best-effort and step 3 is unconditional: a player who asked
+to leave an account must not stay signed in to it because the network was
+down. Step 1 comes first because a host who revokes first strands their own
+seat — and their room — until the lobby reaps it. `LOGOUT_CLEARED_KEYS`
+includes `springrts-game-room`/`-game-port`, which are the *rejoin* keys, not
+auth keys: leaving them behind drops the **next** account on that browser into
+the previous account's room. PLAN-endtoend D45.
+
+Task 8a added `springrts-refresh-token` to that key list, and it is the worst
+of the three to miss: a 30-day credential left in localStorage rotates itself
+into a fresh session on the next page load, so the logout silently undoes
+itself. Clearing it locally is only half — `/api/auth/logout` is also given
+the token so the server revokes the family, because a copy taken off the
+machine is still live. **`logout-all` is a different verb** (§7.2): it ends
+every session and every family the account holds, which evicts the player's
+other devices, and is therefore its own button rather than a modifier.
+
+### Token lifetimes (task 8a, TTL shortened by 8a-follow-on)
+```
+access session  (`sessions`)                 1 h   account-wide bearer
+refresh token   (`refresh_tokens`)          30 d   rotating, single-use, hashed
+war reconnect   (`war_reconnect_tokens`)     7 d   ONE room, hashed
+```
+All three constants live in `AuthTokens.h`. The access TTL moved there from
+`HttpAuth.h` because it had **two** definitions and only one of them was named:
+the lobby passed `kAccessTtlSeconds` explicitly, while the game server's
+`AuthRequest` path took `Database::ValidateSession`'s `86400` **default
+argument**. They agreed by coincidence — shortening the named one alone would
+have left every game server honouring a day-old bearer token.
+Task 8d adds a credential that is not a token and does not appear above: a TOTP
+code, valid for one 30 s step and **once**. It gates `/api/auth/login` — and
+`ValidateAuth`'s **Basic** branch, which is the non-obvious half. Basic auth is
+accepted on every TokenRequired route, carries no code and has nowhere to put
+one, so an enrolled account authenticating by password alone there would make
+the login gate decoration. An enrolled account therefore gets 0 from Basic; the
+Bearer session it already holds is untouched (enrolling is not a logout).
+
+#### Who holds the access token, and how it stays live (8a-follow-on)
+
+Task 8a left the TTL at 24 h because every holder of `springrts-token`
+snapshotted it at construction, so a shorter window would have expired it
+mid-session with nobody re-reading. The census found **seven** holders, not the
+six that note listed: four `localStorage.getItem` reads in `main.ts`, the game
+worker's `gp:init` credential, the LuaUI worker's telemetry channel, and
+`LobbyUI.authToken` — a private field read by ~20 methods that no note had
+named. (The `viewport.ts` / `minimap.ts` / `connection.ts` sites the 8a note
+lists do not read the key at all; they are handed a token by their caller.)
+
+`client/src/lobby/auth-tokens.ts` now owns the token's lifetime:
+
+- **An expiry stored next to it** (`springrts-token-expires`), derived from the
+  `expires_in` every auth response already carried and nobody read. The token
+  is opaque, not a JWT, so this record is the only way the client can answer
+  "is it stale?". **Missing means unknown, and unknown means not expired** — a
+  session adopted by an older build degrades to the pre-8a-follow-on world.
+- **`getAccessToken()`, read at use.** Main-thread holders call it; the two
+  Worker realms cannot (no `localStorage` there) and are pushed a `gp:token`
+  message instead. `LobbyUI.authToken` became an accessor over the same store.
+- **`AccessTokenRenewer`**, a timer at half the *remaining* life. Proactive
+  rather than 8a's on-401 path, because the 401 only exists on the lobby's HTTP
+  surface: the **game server authenticates once at `AuthRequest`** over a
+  connection that then lives for the whole match, so a session ageing out
+  mid-match is observed by nothing until the reconnect asks for a password.
+- **A cross-tab lock plus a post-lock re-read of the expiry.** Refresh tokens
+  are single-use with family-wide reuse detection, so two tabs rotating the
+  same token is indistinguishable from a replayed theft and signs the player
+  out everywhere. That race existed on the 401 path; a timer would make it a
+  scheduled event. The re-read is what actually closes it — it checks the
+  outcome, not the intent. Peers learn via the `storage` event; the tab that
+  logged in learns via an `onTokensStored` hook, because `storage` fires only
+  in *other* tabs.
+
+`gameAuthToken()` now skips an **expired** access token rather than presenting
+it. The game server tries the war reconnect token only when the session lookup
+fails, and the client sends exactly one credential — so a stale string in
+localStorage is what *prevents* the 7-day war token ever being offered.
+
+`/api/auth/validate` reports `expires_in` as the session's **remaining** life,
+not the TTL: it is the only auth route reporting on a session it did not mint,
+and it is the reload path.
+
+The game server tries the access session **first** and the war token second, so
+nothing about the ordinary path changed. When it authenticates via the war
+token it echoes an **empty** token in AuthResponse: the client stores whatever
+comes back as its session token, and a war token would 401 everywhere else.
 
 ### Gameplay Loop
 ```
@@ -585,6 +1479,36 @@ Client → server: PlayerCommand (move, attack, stop)
 Client → server: ViewportUpdate (camera position/zoom)
 Client: interpolates entities between ticks, renders via Babylon.js
 ```
+
+### Macro directives — the two scales and the idle rule
+
+A `GroupDirective` (human or AI) is an area order the engine decomposes onto
+units in `DirectiveManager::Evaluate` (`rts/Server/OrgGroups.cpp`). Two contracts
+cross layers here, and both were broken end-to-end until 2026-08-18 (endtoend
+D68):
+
+* **`requestedStrength` is ABSOLUTE HITPOINTS**, the same scale as
+  `assignedStrength` (accrued from `CUnit::health`). Recruiting stops once
+  `assignedStrength >= requestedStrength`, so a caller that states a unit COUNT
+  caps its directive at the first recruit. The client sends 0 ("take what
+  idles"); the strategos AI must convert, because its own force numbers are sums
+  of the AI runtime's **0-1 health ratios** (`AIStateSnapshot.cpp` reports
+  `health / maxHealth`), i.e. head counts. `picture.lua` therefore carries both
+  numbers per region and only the hitpoint one may reach a directive.
+* **`conditions.idleOnly` decides whether a directive can override standing
+  orders.** "Idle" means an empty command queue everywhere in the engine, and
+  every Metalstorm scenario stages its army with opening orders — so an
+  idle-gated directive addresses only the units a scenario deliberately left
+  unordered. An explicit order from a team's commander (human class-filtered
+  directive, or any AI directive — see `AIDirectiveConditions`) therefore sets
+  `idleOnly = false`. A directive that is NOT idle-gated is released when its own
+  order completes (empty queue), the exact inverse of the idle-gated release
+  rule; both live in `Evaluate`.
+
+A directive with `expiresInFrames = 0` never expires. The strategos planner
+re-states its whole plan every strategic tick, so its directives carry a TTL of
+two tick periods — without one, a team accumulates one live directive per goal
+per tick (measured at 116 by frame 6 000, all commanding the same units).
 
 ### Synced-input funnel (the cause stream)
 
@@ -625,6 +1549,15 @@ reproduces them, and recording them would double-apply. AI output *is* recorded:
 the AI VM runs on its own threads and which tick its commands land on is not part
 of the synced state.
 
+Every record carries a `subKind` — the verb *within* the kind, and the only axis
+that makes a cause stream readable: the `ClientPayload` tag for a client message,
+the `PlayerLeft` reason for a disconnect, and the `AICommandKind` for an AI
+command (`/api/journal` spells the last one out as `verb`). AI records carried
+`subKind` 0 until 2026-08-14, which made every AI verb one anonymous
+`ai-command` row and left the strategos' `ai.intent`-before-its-directive
+ordering — the correlation the whole guidance veto loop rests on — unobservable on
+a live run.
+
 Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
 classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
 `--journal-audit [N]` attaches a bounded in-memory journal; `--journal-file <path>`
@@ -654,6 +1587,21 @@ sections are format-complete but carry no bytes: the blobs are PLAN-persistence'
 `ISimSerializer` output, which is unbuilt. `server_main.cpp` feeds phases 1–3 and the anchor;
 `StateStreamer::TickAI` feeds phase 4 itself, because its position relative to
 standing-order evaluation inside the streamer tick is load-bearing.
+
+**A recording is bound to the wire schema it was made against** (PLAN-protocol-guard
+task 7). `Header::schemaHash` carries `Protocol::SCHEMA_HASH`, and
+`replay::Player::Load` refuses a file whose stamp is missing or different, naming
+both hashes — the rule is `replay::CheckSchemaHash` in **`rts/Server/ReplayCompatPolicy.h`**,
+the handshake guard's rule with the client replaced by the file. It is not
+belt-and-braces on top of `engineHash`: that field is a stand-in nobody acts on,
+while a record's payload is an **undecoded** `ClientMessage` frame, so a field that
+moved in `protocol.fbs` does not fail to parse on re-feed — it parses as whatever
+now occupies its slot, and the replay confidently plays a game nobody played.
+The gate is at **re-execution ingest only**: `Load`/`LoadSummary` decode no payload,
+so `--replay-export` and the replay browser still open any recording, including every
+pre-guard `.msr` already on disk (those are unplayable, not unreadable; §2.2 of the
+plan rules out a converter). A test fixture that builds its own `replay::Header`
+must stamp it or the driver refuses it before any ordering behaviour is reached.
 
 Three invariants the implementation depends on, each of which was a real bug first:
 

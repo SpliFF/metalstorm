@@ -51,6 +51,18 @@ export interface Scenario {
     /** Host start-position index. Omit for auto-assign. */
     playerStartPos?: number;
     /**
+     * Game-side scenario id (`data/games/<gameId>/scenarios/<id>.lua`), sent as
+     * the manifest's TOP-LEVEL `scenario` field — `modoptions.scenario` alone
+     * is overwritten by the map's own default (lobby_main.cpp `chooseScenario`).
+     *
+     * Omit → the map default applies. `''` → explicitly no scenario at all.
+     * Those are different launches, which is why this is `?: string` and not a
+     * truthiness check at the call site.
+     */
+    scenario?: string;
+    /** Extra room modoptions, e.g. `{ startmetal: '5000' }`. */
+    modoptions?: Record<string, string>;
+    /**
      * Stage the scenario. Runs once after `startGame()` has wired
      * `window.test` and the first entity-state tick has arrived. Use
      * `h.spawn`, `h.order`, `h.setLogging`, etc.

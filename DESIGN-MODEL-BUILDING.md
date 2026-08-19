@@ -88,6 +88,10 @@ retired (objects3d/README.md). `ModelConfigLoader::LoadInto` reads:
 - Ground plane at Y = 0.
 - Class-scale table (art/STYLE.md): tanks by length — s1 4.5 m, s2 8.5 m,
   s3 12 m, s4 26 m. Footprint metres = footprintx × 2; overhang is fine.
+  That rule encodes the metre→elmo constant: `SPRING_FOOTPRINT_SCALE = 2` and
+  `SQUARE_SIZE = 8` make one `footprintx` unit **16 elmos**, so 16 elmos = 2 m
+  ⇒ **8 elmos = 1 metre**. See §12 — the constant is measured, but nothing in
+  the import or render path applies it yet.
 
 ### 5. Piece naming — the turret-rotation contract
 
@@ -331,15 +335,35 @@ the mesh generator and the painter:
     Advisory for the code session: applying the bump before half-Lambert
     compression (or widening the sun term) would let subtler bakes read.
 
-### 12. Scale flag for the code session (advisory, unresolved)
+### 12. Scale flag — MEASURED 2026-08-14, decision still open
 
 Models author at 1 unit = 1 m (§4), but no ×8 metre→elmo scale exists
 anywhere in the render path (`entity-renderer.ts` applies none) while the
 sim world is elmos (`ELMOS_TO_METERS = 1/8`). So all metalstorm-native
-models currently render ~8× smaller than their footprints imply. Either a
-render-scale is still pending in Track G / beta-units, or world-units-as-
-metres is intended. **Keep authoring at 1 u = 1 m to match the wz baseline
-either way** — but resolve this before squad rendering lands.
+models currently render ~8× smaller than their footprints imply.
+**Keep authoring at 1 u = 1 m** — that half was never in doubt.
+
+Measured 2026-08-14, and the flag's own "or world-units-as-metres is
+intended" branch is **closed — it is not intended**:
+
+- `ELMOS_TO_METERS` is declared at `Sim/Misc/GlobalConstants.h:45` and
+  referenced **nowhere else in the tree** (whole-repo grep: 1 hit, its own
+  declaration). A conversion constant nothing converts with.
+- The constant is **8 elmos = 1 m**, from §4's footprint rule via
+  `SPRING_FOOTPRINT_SCALE = 2` × `SQUARE_SIZE = 8`. `ms_habitat`'s 12×12
+  footprint is 24 m against a 25.5 m model; at any other constant the
+  buildings stop fitting and the vehicles stop overhanging.
+- The **map feature corpus is already on the engine's scale** (1 unit =
+  1 elmo): `tree_conifer` is 104.62 tall = 13.1 m, `tree_stump` 12.15 =
+  1.5 m. Only the unit/building models are off. A blanket scale applied to
+  every model would break the features.
+- The scale **cannot be render-only**: `ModelConfigLoader.cpp:113` feeds
+  model `radius`/`height` into the def and `Unit.cpp:237` builds the
+  collision and selection volumes from them. It belongs at import.
+
+What remains is the cost decision — 102 models re-imported, plus every
+impostor constant that was measured off pixels on the broken scale. That
+call and its options live in PLAN-world-scale.md §5 (blocked on the owner).
 
 ---
 
@@ -557,6 +581,60 @@ during reload lulls. Defer until v1 is judged in the harness `aim` /
 `volley` showcases (note: the harness `aim` showcase blocks firing via
 far-future reloadState, so **v1 will not slew during `aim`** — judge v1
 with `volley`/`sustained`; `aim` only lights up with v2).
+
+### 16c-i. Authoring rule — muzzle piece rest orientation
+
+**A muzzle piece's rest orientation must leave its local −Z horizontal, and
+pointing the way the barrel it hangs off visually points.**
+
+Why it matters: for a scriptless metalstorm native, `CWeapon` binds the
+muzzle by name convention (`muzzle`, `muzzle2`, …) and reads the emit
+direction straight off the piece — it is the piece's local **−Z**
+(glTF-native forward) pushed through the accumulated model-space transform
+(`LocalModelPiece::GetEmitDirPos`), then rotated into the unit's frame by
+`CSolidObject::GetObjectSpaceVec`, which maps model −Z onto the owner's
+`frontdir`. Everything downstream reads that vector: muzzle flashes, beam
+visuals, and the launch vectors of the `sim`/`mixed` railgun and howitzer
+families. There is no aim-correction step to save a mis-oriented rest pose.
+
+In practice the rule costs nothing, because **the emit direction ignores
+mesh geometry entirely — only the rest rotation matters.** Author the
+muzzle as an empty node with a pure translation to the barrel tip and no
+rotation, and it is horizontal-forward for free. That is what every shipped
+metalstorm rig does today: no model in `data/games/metalstorm/models/`
+carries a rest rotation on any piece (re-censused 2026-08-14 across all
+**102** `.gltf`), so every glTF node matrix in the game is
+identity-rotation-plus-translation and no `SPRINGRTS_geometry.pieces[].rot`
+field is emitted at all.
+
+Two traps this rule is written against:
+
+- **Barrel-up rigs.** Re-exporting from a Z-up tool (or parenting the
+  muzzle under a node that carries the up-axis conversion) bakes a rotation
+  mapping −Z onto +Y. The muzzle then fires at the sky while the client —
+  which applies the same rotation to the mesh — still draws the barrel
+  horizontal. `CWeapon::UpdateWeaponVectors` has a near-vertical safety net
+  (substitute the owner's `frontdir` when `|dir·up| > 0.99`), but it is a
+  net for unwritten content, not a licence to ship a barrel-up rig.
+- **Rear-facing turrets built by translation alone.** Mirroring a turret to
+  the back of a hull by only negating its offsets leaves the muzzle's −Z
+  pointing forward while the barrel points backward. `fable_train_gun`'s
+  slot-2 chain (`turret2`/`barrel2`/`muzzle2`, translated toward +Z) is in
+  exactly this state today — a known, unfixed inconsistency. A rear-facing
+  turret needs a genuine 180° rest rotation on the turret piece (or a
+  mirrored rig), not just flipped offsets.
+
+Guarded by `tests/test_muzzle_emit_dir.cpp`, which loads the shipped
+`.gltf` files through the real `ModelConfigLoader` and fails at content
+build time if any muzzle stops being horizontal. Add new rigs to the sweep
+there when they grow a muzzle piece.
+
+Diagnostic note, since it has cost a debugging session already:
+`Spring.GetUnitWeaponVectors` is **not** a way to check this.  For every
+projectile type except missile/torpedo/starburst it returns `wantedDir`,
+not `weaponDir`, and `wantedDir` is constructor-initialised to `UpVector`
+and only overwritten once the weapon has a target. An idle weapon reports
+`(0, 1, 0)` no matter how its muzzle is authored.
 
 ## 17. Case study — fable_mech (shipped)
 

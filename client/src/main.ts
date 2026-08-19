@@ -15,6 +15,7 @@ import { MusicDirector } from './core/music-director.js';
 import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { EconomyBar } from './core/economy-bar.js';
+import { hasResourceEconomy } from './core/game-capabilities.js';
 import { FactoryQueuePanel } from './core/factory-queue-panel.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -31,6 +32,12 @@ import GameWorker from './core/lua-widget-worker.ts?worker';
 import type { GpInitToWorker, GpMinimapMetalSpots, GpTimingState } from './core/game-worker-protocol.js';
 import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
+import { parseDirectManifest } from './core/direct-manifest.js';
+import {
+    buildPlayManifest, parsePlayParams, pickAttachIdentity, isAttachableRoom,
+    type PlayParams, type ScenarioInfo,
+} from './lobby/play-boot.js';
+import { DEVICE_TOKEN_KEY, clearDeviceToken, storeDeviceToken } from './lobby/guest.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { PerfOverlay } from './core/perf-overlay.js';
@@ -39,7 +46,6 @@ import { PerfOverlay } from './core/perf-overlay.js';
 // The main-thread perf-overlay (F11) re-plumb is deferred to perf checkpoint PC-1.
 import { clientSettings } from './core/client-settings.js';
 import { sendCameraViewport } from './core/viewport.js';
-import { installCameraWindowApi, uninstallCameraWindowApi } from './core/camera-window-api.js';
 import { fetchAndIngestDefs } from './core/defs-fetch.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './core/feature-renderer.js';
 import { CameraInput } from './core/camera-input.js';
@@ -49,12 +55,21 @@ import { ScenarioRunner } from './scenarios/runner.js';
 import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
 import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
+import { showBriefingSplash, type BriefingHandle } from './ui/briefing/briefing.js';
+import { parseScenarioList } from './lobby/scenario-picker.js';
 import { showSpectatorBanner, hideSpectatorBanner } from './ui/spectator-banner.js';
 import { updateReplayBar, hideReplayBar, showReplayRefusal } from './ui/replay-bar.js';
 import { debugConsole } from './core/debug-console.js';
+import {
+    clearSchemaMismatchGuard, decideSchemaMismatch, renderSchemaMismatchCard,
+} from './core/schema-mismatch.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
 import type { ClientErrorReason } from './core/client-error-telemetry.js';
+import {
+    AccessTokenRenewer, browserTokenStore, gameAuthToken, getAccessToken,
+    refreshAccessToken,
+} from './lobby/auth-tokens.js';
 import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
 import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
 import {
@@ -73,6 +88,11 @@ import {
     uiStore,
     mapGestureBridge,
     configureCommandPresets,
+    cameraPortHolder,
+    uiActionRegistry,
+    CensusCache,
+    censusCacheHolder,
+    type Census,
     type CommandConnection,
 } from './ui/native-ui/index.js';
 
@@ -96,7 +116,7 @@ const workerCommandConnection: CommandConnection = {
         gameWorker?.postMessage({
             type: 'gp:groupDirectiveUpdate', directiveId, groupId, directiveType: type, shape, params,
             priority: opts.priority ?? 0, requestedStrength: opts.requestedStrength ?? 0,
-            active: opts.active ?? true,
+            active: opts.active ?? true, conditions: opts.conditions,
         }),
     sendGroupDirectiveRemove: (directiveId) =>
         gameWorker?.postMessage({ type: 'gp:groupDirectiveRemove', directiveId }),
@@ -130,6 +150,11 @@ let evalReqResolve: ((v: string) => void) | null = null;
 let lastSceneState: {
     selectedUnitIds: number[];
     camera: { x: number; y: number; z: number; tx: number; ty: number; tz: number };
+    /// P5 item 2: the frame the feed last reported, plus its receipt time, so
+    /// `test.clientFrame()` is synchronous and `test.readyState()` can report
+    /// how stale that number is without a round-trip.
+    gameFrame: number;
+    atMs: number;
 } | null = null;
 /// PLAN-playable.md G3a: mirrors whether the worker has a build placement armed
 /// (from gp:sceneState.buildGhost). Read by the global ESC handler so ESC
@@ -307,6 +332,11 @@ let musicArmed = false;
 /// pointer/wheel/key events on #game-canvas and forwards them to the
 /// game-processor worker, where the interactive camera + scene.pick live.
 let cameraInput: CameraInput | null = null;
+/// PLAN-metalstorm-command-language.md §6.3 — removal handle for the minimap's
+/// ui-action-registry entry (the one engine-HUD element the command language can
+/// name). Manifest panels register themselves from widget-loader.ts; the minimap
+/// has no manifest, so it registers where its instance lives.
+let minimapUiActionUnregister: (() => void) | null = null;
 /// GW4-c5c-3: unsubscribe handle for the gfx.* → worker `gp:config` push.
 /// Set in startGame, cleared on teardown so we don't leak a subscriber (or
 /// post to a terminated worker) across game sessions.
@@ -425,6 +455,39 @@ let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// (camera/selection/netSim/pause/screenshot) forward to the worker, where the
 /// render loop now lives (the client render-pause is `gpRenderPaused` there).
 let testHarness: TestHarness | null = null;
+
+/**
+ * 8a-follow-on: the one owner of the live access token.
+ *
+ * Task 8a shortened nothing because `springrts-token` had (at least) seven
+ * holders, each of which snapshotted the string at construction and was
+ * therefore right for exactly as long as the token lived — fine at 24 h, wrong
+ * inside one match at 1 h. Two of those holders are Worker realms with no
+ * `localStorage` at all, so "make them re-read" is not a thing that can be
+ * done; the renewer publishes instead, and the main-thread holders take the
+ * same publication rather than a second, subtly different mechanism.
+ *
+ * The renewal timer is the other half: the lobby's HTTP surface observes
+ * expiry as a 401 and reacts (tryAutoLogin), but the game server authenticates
+ * once at `AuthRequest` over a connection that then lives for the whole match,
+ * so there is no 401 there to react to. Nothing else would ever notice.
+ */
+const authRenewer = new AccessTokenRenewer(CONFIG.httpUrl, browserTokenStore);
+(window as any).__authRenewer = authRenewer;
+
+/// Fan a renewed (or cleared) access token out to every holder. Registered
+/// once, at boot; each holder that does not exist yet is simply skipped and
+/// picks the current value up from its own constructor.
+function publishAccessTokenToHolders(token: string | null): void {
+    const t = token ?? '';
+    configureErrorTelemetry({ token: t });
+    configureCommandPresets({ token: t });
+    testHarness?.setToken(t);
+    // Both worker realms authenticate with this; see GpTokenToWorker.
+    if (t) gameWorker?.postMessage({ type: 'gp:token', token: t });
+    // LobbyUI needs nothing — 8a-follow-on turned its `authToken` field into
+    // an accessor over the same store, so it is already reading the new value.
+}
 /// Current sim-speed multiplier for VISUAL FX aging (0 when paused). The
 /// render loop scales its wall-clock dt by this before ticking the FX
 /// systems (CEG particles, dynamic lights, muzzle flares, distortion,
@@ -493,6 +556,11 @@ let parkTtlTimer: number | null = null;
 let firstFrameSeen = false;
 /// Last startGame() target, so a full-boot re-entry fallback knows what to boot.
 let lastGameArgs: { port: number; mapId: string; gameId: string } | null = null;
+/// The scenario briefing splash (S2) mounted over the current boot, if any.
+/// Null whenever no splash is up — which is the normal case: `?skipBriefing=1`,
+/// a room with no `scenario` modoption, a scenario with no briefing, and every
+/// resync re-entry all leave it null.
+let briefingSplash: BriefingHandle | null = null;
 
 // --- Game Scene ---
 
@@ -524,6 +592,8 @@ function quitToLobby(): void {
     // and that container persists across game sessions. Without an
     // explicit dispose the next startGame() would append a second
     // canvas to the container.
+    minimapUiActionUnregister?.();
+    minimapUiActionUnregister = null;
     minimap?.dispose();
     minimap = null;
     pendingMinimapMap = null;
@@ -571,7 +641,12 @@ function quitToLobby(): void {
     recoveryLadder.reset();
     gpRecoverPending.clear();
     r2RespawnInFlight = false;
-    uninstallCameraWindowApi();
+    // The NL local ports (§6.2/§6.4). Both hold worker-bound closures, and the
+    // camera port also holds a follow interval — a follow that outlived its
+    // worker would re-snap a camera that no longer exists, every 400 ms.
+    cameraPortHolder.clear();
+    censusCacheHolder.clear();
+    uiActionRegistry.clear();
     delete (window as any).test;
     delete (window as any).widgets;
     delete (window as any).__gp;
@@ -608,6 +683,10 @@ function quitToLobby(): void {
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
     document.getElementById('recovery-error-overlay')?.remove();
+    // S2: a player who quits while still reading the briefing must not find
+    // the story pinned over the lobby.
+    briefingSplash?.dismiss();
+    briefingSplash = null;
 
     // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
@@ -675,6 +754,65 @@ function showRecoveryErrorScreen(reportId: string): void {
     document.body.appendChild(overlay);
 }
 
+/**
+ * PLAN-protocol-guard.md task 4 — act on a `VersionMismatch` refusal.
+ *
+ * The decision (reload once, then give up) is `decideSchemaMismatch`; this is
+ * only its effects, which are the two things a worker cannot do: navigate and
+ * put a card on the screen. The card is `position:fixed` over everything
+ * because it has to be readable above the WebGL2 canvas — and because CDP
+ * screenshots cannot see that canvas, it is verified with
+ * `window.test.highResScreenshot()`.
+ */
+function applySchemaMismatch(message: string): void {
+    const action = decideSchemaMismatch(
+        safeSessionStorage(),
+        window.location.href,
+        `${Date.now().toString(36)}`,
+        message,
+    );
+    if (action.kind === 'reload') {
+        console.warn(`[protocol] wire schema refused (${message}) — reloading once`);
+        window.location.replace(action.url);
+        return;
+    }
+    console.error(`[protocol] wire schema still refused after a reload: ${message}`);
+    showSchemaMismatchScreen(action.message);
+}
+
+/// The give-up surface. The card itself lives in `core/schema-mismatch.ts`
+/// (testable without a browser); what belongs here is the teardown — a worker
+/// that will keep retrying a connection the server will keep refusing.
+function showSchemaMismatchScreen(message: string): void {
+    gameWorker?.terminate();
+    gameWorker = null;
+    heartbeatWatchdog.stop();
+    renderSchemaMismatchCard(document, message, quitToLobby);
+}
+
+/// A clean auth returns the one-reload budget and tidies the address bar.
+function releaseSchemaMismatchGuard(): void {
+    const clean = clearSchemaMismatchGuard(safeSessionStorage(), window.location.href);
+    if (clean !== window.location.href) {
+        history.replaceState(history.state, '', clean);
+    }
+}
+
+/// `?schemaHash=<hex>` → claim that hash; `?schemaHash=none` → send no hash
+/// (a pre-guard bundle). Anything else ⇒ undefined, i.e. this build's own.
+function schemaHashOverrideFromUrl(): string | undefined {
+    const v = new URLSearchParams(window.location.search).get('schemaHash');
+    if (v === null) return undefined;
+    return v === 'none' ? '' : v;
+}
+
+/// sessionStorage is absent or throwing in some embedded/private contexts;
+/// the policy accepts `null` and degrades explicitly rather than crashing the
+/// handler that was trying to report a problem.
+function safeSessionStorage(): Storage | null {
+    try { return window.sessionStorage ?? null; } catch { return null; }
+}
+
 /// Clear the parked-worker TTL sweep timer (§3.1).
 function clearParkTtl(): void {
     if (parkTtlTimer !== null) { clearTimeout(parkTtlTimer); parkTtlTimer = null; }
@@ -733,7 +871,11 @@ function resyncReenter(): void {
     detachSession.clear();
     lobbyUI?.clearParked();
     // Refresh the token in case the original aged past the park TTL.
-    const token = localStorage.getItem('springrts-token') ?? undefined;
+    // 8a-follow-on: read through getAccessToken, so a token that expired while
+    // the session was parked is not handed to the worker as if it were live —
+    // the worker would present it, be refused, and the failure would surface
+    // as a re-entry that never completes rather than as an expired session.
+    const token = getAccessToken(browserTokenStore) ?? undefined;
     gameWorker?.postMessage({ type: 'gp:resync', token });
     void audioManager?.resume();
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
@@ -763,15 +905,71 @@ function disposeParkedWorker(): void {
  * per E5, or an expired TTL) it is a clean full boot. A stale parked worker, if
  * any, is terminated by startGame's own defensive teardown.
  */
-function enterGame(gameServerPort: number, mapId: string, gameId: string): void {
+function enterGame(
+    gameServerPort: number, mapId: string, gameId: string,
+    modOptions: Record<string, string> = {},
+): void {
     const roomId = localStorage.getItem('springrts-game-room') ?? '';
     if (detachSession.planReentry(roomId, gameServerPort, Date.now()) === 'resync') {
+        // Resync re-entry never shows a briefing: the player has already read
+        // it and is coming back to a battle in progress.
         resyncReenter();
         return;
     }
     clearParkTtl();
     detachSession.clear();
     startGame(gameServerPort, mapId, gameId);
+    // S2: after startGame is kicked off, never before — the splash is an
+    // overlay on a boot that is already happening, not a gate on it. The
+    // recovery/reenter callers pass no modOptions, so an R2 respawn re-boots
+    // straight into the game instead of re-telling the story mid-crash.
+    void maybeShowBriefing(gameId, mapId, modOptions);
+}
+
+/**
+ * Mount the scenario briefing splash for this boot, if this boot deserves one
+ * (PLAN-test-automation S2).
+ *
+ * Every bail is silent and non-fatal: the splash is an enhancement, and a
+ * scenario metadata fetch that 404s or a game that ships no briefings must
+ * cost nothing but the splash. It also races the load — if the game becomes
+ * ready before the metadata arrives, the splash mounts already-armed rather
+ * than showing a spinner over a game that is up.
+ */
+async function maybeShowBriefing(
+    gameId: string, mapId: string, modOptions: Record<string, string>,
+): Promise<void> {
+    briefingSplash?.dismiss();
+    briefingSplash = null;
+    try {
+        // Read once, at the mount decision. Automation sets it so a harness
+        // never waits on a button (launch_scenario's browserUrl appends it).
+        if (new URLSearchParams(window.location.search).get('skipBriefing') === '1') return;
+        const scenarioId = modOptions.scenario;
+        if (!scenarioId || !gameId) return;
+
+        const res = await fetch(`/api/games/${encodeURIComponent(gameId)}/scenarios`);
+        if (!res.ok) return;
+        const entry = parseScenarioList(await res.json())
+            .find(s => s.id === scenarioId);
+        if (!entry?.briefing) return;
+
+        // Authored art if there is any, else the map thumbnail — a scenario
+        // never has to ship a banner to get a splash with a picture.
+        const imageUrl = entry.briefing.image
+            ? `/api/games/data/${encodeURIComponent(gameId)}/${entry.briefing.image}`
+            : (mapId ? `/api/maps/thumb/${encodeURIComponent(mapId)}` : null);
+
+        briefingSplash = showBriefingSplash(gameTemplates, entry.briefing, {
+            fallbackTitle: entry.displayName,
+            imageUrl,
+            onBegin: () => { briefingSplash = null; },
+        });
+        // The fetch above is async; the first frame may already have landed.
+        if (firstFrameSeen) briefingSplash.notifyReady();
+    } catch (err) {
+        console.debug('[briefing] no splash for this boot:', err);
+    }
 }
 
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
@@ -895,6 +1093,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // uses the engine-default model material. Fetched in the same /api/games
     // round-trip as `lighting`.
     let gameModelMaterialPort = '';
+    // PLAN-endtoend.md D9: whether metal/energy mean anything in this game.
+    // Read from the same round-trip; see game-capabilities.ts for why the
+    // fallback is "yes, it has one".
+    let gameHasResourceEconomy = true;
     if (gameId) {
         try {
             const resp = await fetch(`${lobbyHttpUrl}/api/games`);
@@ -903,6 +1105,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 const g = Array.isArray(games) ? games.find((x: any) => x?.id === gameId) : null;
                 if (g?.lighting) gameLighting = g.lighting;
                 if (g?.modelMaterialPort) gameModelMaterialPort = g.modelMaterialPort;
+                gameHasResourceEconomy = hasResourceEconomy(games, gameId);
             }
         } catch { /* default 'gameplay' / engine-default material */ }
     }
@@ -915,7 +1118,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // has its own module instance; see client-error-telemetry.ts's header).
     configureErrorTelemetry({
         endpoint: CONFIG.httpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        // Seeded here and kept current by the authRenewer subscription below.
+        token: getAccessToken(browserTokenStore) ?? '',
         enabled: CONFIG.errorReportingEnabled,
         buildStamp: CONFIG.buildStamp,
     });
@@ -924,7 +1128,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // channel above, just a different route pair.
     configureCommandPresets({
         endpoint: CONFIG.httpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        token: getAccessToken(browserTokenStore) ?? '',
     });
     gameWorker = new GameWorker();
     // PLAN-metalstorm-scripting.md task 4: the map-arm gesture bridge posts
@@ -978,6 +1182,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         switch (m?.type) {
             case 'gp:authenticated': {
                 console.log(`[gameWorker] authenticated accountId=${m.accountId} playerNum=${m.playerNum} team=${m.team} role=${m.role}`);
+                // PLAN-protocol-guard task 4: this bundle's schema was
+                // accepted, so the one-reload budget is spent on nothing and
+                // is returned — a future deploy gets its own reload. Also
+                // drops the cache-buster from the address bar.
+                releaseSchemaMismatchGuard();
                 // G4: the lobby-roster myTeamGuess used to construct economyBar
                 // can be stale/absent (spectator, late roster fetch); this is the
                 // authoritative value, so re-point the bar's team filter at it.
@@ -1047,9 +1256,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // state once it is rendering, so the first one marks the point
                 // detach becomes available.
                 firstFrameSeen = true;
+                // S2: the first scene state is the honest "the battlefield is
+                // there" signal — it only flows once the worker is connected
+                // and rendering. That, and nothing weaker, arms Begin.
+                briefingSplash?.notifyReady();
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
-                lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
+                lastSceneState = {
+                    selectedUnitIds: m.selectedUnitIds, camera: m.camera,
+                    gameFrame: m.gameFrame, atMs: performance.now(),
+                };
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
                 // L-pre.3: cache the worker's presentation-clock snapshot and
@@ -1137,9 +1353,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // canvas.width/height, i.e. CSS px × effectiveDpr(), not CSS px — so
             // this also divides by the same scale factor main.ts used to size the
             // canvas before flipping to DOM (CSS-px, top-down) space. The legacy
-            // lua-widget-manager.applyMinimapGeometry this replaces skipped that
-            // conversion (pre-GW4 the canvas may have been unscaled 1:1); ported
-            // forward correctly rather than reproducing that gap.
+            // legacy applyMinimapGeometry this replaces (lua-widget-manager,
+            // deleted post-GW4) skipped that conversion (pre-GW4 the canvas may
+            // have been unscaled 1:1); ported forward correctly rather than
+            // reproducing that gap.
             case 'minimapGeometry': {
                 if (minimap) {
                     const visible = m.visible !== false && m.w > 0 && m.h > 0;
@@ -1183,8 +1400,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // path (NormalizeSoundPath = `sounds/<name>`), which omits the
             // `sounds/<subdir>/` component — so every sound that lives in a
             // subdirectory (weapons/, bombs/, …) 404s. In the GW4 worker
-            // architecture this message lands here, not on the legacy
-            // LuaWidgetManager; mirror its handler (lua-widget-manager.ts).
+            // architecture this message lands here (the legacy LuaWidgetManager
+            // handler it mirrors was deleted post-GW4).
             case 'soundItems': {
                 const items = m.items as Record<string, import('./core/audio.js').SoundItem>;
                 const map = new Map<string, import('./core/audio.js').SoundItem>();
@@ -1195,6 +1412,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             }
             case 'gp:gameOver':
                 console.warn(`[main] gp:gameOver frame=${m.frame} winners=[${(m.winningAllyTeams ?? []).join(',')}] won=${m.won} — showing overlay`);
+                // S2: a war can end under an unread briefing (a short scenario,
+                // or a player who walked away). The result outranks the story.
+                briefingSplash?.dismiss();
+                briefingSplash = null;
                 showGameOver(gameTemplates, m.frame, {
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,
@@ -1223,6 +1444,46 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     if (m.ok) p.resolve(m.value);
                     else p.reject(new Error(String(m.error ?? 'worker test error')));
                 }
+                break;
+            }
+            // PLAN-test-automation P7: the server relayed an eval whose target
+            // is not `worker`, so it runs here. Always answer — the worker
+            // holds an 8s timer and the server a 10s waiter behind it.
+            case 'gp:clientEval': {
+                const { requestId, target, code } = m as
+                    { requestId: number; target: string; code: string };
+                void (async () => {
+                    let success = true;
+                    let output = '';
+                    try {
+                        let v: unknown;
+                        if (target === 'widgets') {
+                            v = await (window as any).widgets.eval(code);
+                        } else if (target === 'test') {
+                            // An expression evaluated with the harness's own
+                            // members in scope, so a caller writes
+                            // `readyState()` or `captureFrame({maxDim:640})`
+                            // rather than repeating `test.` on every call —
+                            // which is exactly the string `browser_test`
+                            // builds from {method, args}. `with` is what puts
+                            // prototype methods in scope; a `new Function`
+                            // body is non-strict regardless of this module.
+                            // `test` stays bound too, so `test.foo()` works.
+                            v = await new Function(
+                                'test', `with (test) { return (async () => (${code}))(); }`,
+                            )((window as any).test);
+                        } else {   // 'js' — main's global scope
+                            const r = (0, eval)(code);  // eslint-disable-line no-eval
+                            v = r && typeof (r as { then?: unknown }).then === 'function'
+                                ? await (r as Promise<unknown>) : r;
+                        }
+                        output = typeof v === 'string' ? v : (JSON.stringify(v) ?? 'undefined');
+                    } catch (e) {
+                        success = false;
+                        output = `${target} eval error: ${(e as Error).message}`;
+                    }
+                    gameWorker?.postMessage({ type: 'gp:clientEvalResult', requestId, success, output });
+                })();
                 break;
             }
             // PLAN-client-resilience.md task 1: heartbeat watchdog reply.
@@ -1296,6 +1557,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 console.log('[gameWorker] server restarting — reloading page');
                 window.location.reload();
                 break;
+            // PLAN-protocol-guard task 4: the server refused this bundle's
+            // wire schema. First time in this tab → cache-busting reload;
+            // second time → the reload did not pick up a new build, so stop
+            // and say so rather than loop.
+            case 'gp:schemaMismatch':
+                applySchemaMismatch(String(m.message ?? ''));
+                break;
             // GW4-c5b-2: the worker owns selection/pick but the drag-box overlay
             // is a DOM concern — draw it here in CSS-pixel space.
             case 'gp:dragBox':
@@ -1351,9 +1619,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 animatedCursor?.setActive(m.name || null);
                 break;
             // GW4-c5b-3 / WP3b: all worker→main storage writes arrive here.
-            // Mirrors lua-widget-manager.ts:1228–1241 exactly so both paths
-            // (GW4 game-processor worker and legacy LuaWidgetManager) behave
-            // identically. springConfig.* writes are also mirrored into
+            // Mirrors the legacy LuaWidgetManager storage handler (deleted
+            // post-GW4) so both historical paths behaved identically.
+            // springConfig.* writes are also mirrored into
             // clientSettings so live subscribers (shadow quality, etc.) apply
             // the change immediately.
             case 'storage:set':
@@ -1388,7 +1656,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameHttpUrl,
         lobbyUrl: lobbyHttpUrl,
         username: localStorage.getItem('springrts-username') ?? '',
-        token: localStorage.getItem('springrts-token') ?? '',
+        // Task 8a: the access session normally, the per-war reconnect token
+        // when there is no access session left. The game server accepts both;
+        // the war token is the only credential that survives a multi-day
+        // absence when the refresh has also failed, and it opens nothing but
+        // this room.
+        token: gameAuthToken(
+            parseInt(localStorage.getItem('springrts-game-room') ?? '0') || 0,
+            browserTokenStore,
+        )?.token ?? '',
         gameId,
         mapId,
         lighting: gameLighting,
@@ -1405,6 +1681,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // changes back here via a `gp:config` message (Bucket-3).
         standingOrderShowAllies:
             localStorage.getItem('standing-orders-show-allies') !== 'false',
+        // PLAN-protocol-guard task 4 (dev harness): `?schemaHash=<hex>` claims
+        // a drifted wire schema, `?schemaHash=none` sends no hash at all —
+        // the browser twin of the wire client's `--schema-hash`, and the only
+        // way to reach the server's refusal from a browser now that the build
+        // guards refuse a patched hash file. Dev builds only; a production
+        // bundle has no way to misdeclare itself.
+        schemaHashOverride: import.meta.env.DEV
+            ? schemaHashOverrideFromUrl() : undefined,
+        // PLAN-test-automation P7 gate 3. The worker has no page URL, so read
+        // `?allowClientEval=1` here. A DEV build relays evals with or without
+        // it; this is what opens the relay in a production bundle.
+        allowClientEval:
+            new URLSearchParams(window.location.search).get('allowClientEval') === '1',
     };
     gameWorker.postMessage(init, [offscreen]);
 
@@ -1473,6 +1762,26 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         };
         document.getElementById('detach-minimap-btn')
             ?.addEventListener('click', () => minimap?.detach());
+
+        // PLAN-metalstorm-command-language.md §6.3 — "show me the minimap, full
+        // screen". The engine HUD has no manifest, so unlike the native-UI
+        // panels (which self-register from widget-loader.ts) it registers here,
+        // where the Minimap instance and its overlay live. This is the one entry
+        // in the registry that supplies `fullscreen`; every rail panel refuses
+        // that op by name rather than opening at rail width.
+        minimapUiActionUnregister = uiActionRegistry.register({
+            id: 'minimap',
+            label: 'Minimap',
+            aliases: ['mini map', 'map panel', 'tac map', 'tactical map'],
+            open: () => minimap?.setVisible(true),
+            close: () => {
+                minimap?.setFullscreen(false);
+                minimap?.setVisible(false);
+            },
+            toggle: () => minimap?.setVisible(!(minimap?.getGeometry().visible ?? false)),
+            fullscreen: (on) => minimap?.setFullscreen(on) ?? false,
+            isOpen: () => minimap?.getGeometry().visible ?? false,
+        });
     }
 
     // PLAN-playable.md G3a: native build-menu HUD (DOM, on main). The worker owns
@@ -1497,7 +1806,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // dead code in the G3a field notes). `myTeamGuess` is the same best-effort
     // lobby-roster lookup buildMenu uses; corrected to the authoritative value
     // once `gp:authenticated` reports the real team below.
-    economyBar = new EconomyBar({ myTeam: myTeamGuess });
+    // PLAN-endtoend.md D9: only for a game that HAS a metal/energy economy.
+    // Metalstorm declares `resourceEconomy = false`, so the bar is never
+    // constructed there and its `?.update()` callers below no-op — the panel
+    // used to sit at the top of the screen showing two permanently-zero
+    // resources for the whole match. Not a `gameId === 'metalstorm'` test:
+    // the game says this about itself (game-capabilities.ts).
+    if (gameHasResourceEconomy) {
+        economyBar = new EconomyBar({ myTeam: myTeamGuess });
+    }
 
     // PLAN-playable.md G4: native factory-queue panel (DOM, on main). Pure
     // renderer fed via `gp:sceneState.factoryQueue`; row clicks post
@@ -1556,7 +1873,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     //                      (the spring-debug `evaluate_widget_lua` path).
     testHarness = new TestHarness({
         gameHttpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        token: getAccessToken(browserTokenStore) ?? '',
         workerCall,
         getSelection: () => lastSceneState?.selectedUnitIds ?? [],
         getCameraPose: () => {
@@ -1564,8 +1881,86 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             if (!c) return null;
             return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
         },
+        // P5: readiness sources — both read the caches this module already
+        // fills from the gp:sceneState feed, so readyState() costs one
+        // workerCall and clientFrame() costs none.
+        getSceneFrame: () => {
+            const c = lastSceneState;
+            if (!c) return null;
+            return { gameFrame: c.gameFrame, ageMs: performance.now() - c.atMs };
+        },
+        getTiming: () => {
+            const t = lastTimingState;
+            if (!t) return null;
+            return { anchored: t.anchored, newestFrame: t.newestFrame };
+        },
+        // Read through the module-level binding, not a captured value: the
+        // minimap is disposed and rebuilt on every startGame()/quitToLobby().
+        getMinimap: () => minimap,
     });
     (window as any).test = testHarness;
+
+    // P5 item 6: `?disableWidgets=unit_ghost,gui_chat` — dev/test switch to turn
+    // named LuaUI widgets off for this session. The worker's disableWidget
+    // no-ops before the Lua runtime boots (and LuaUI boots only after auth +
+    // defs), so poll the widget list until it answers rather than firing blind.
+    const disableWidgetsParam = new URLSearchParams(window.location.search).get('disableWidgets');
+    if (disableWidgetsParam) {
+        const names = disableWidgetsParam.split(',').map((x) => x.trim()).filter(Boolean);
+        void (async () => {
+            for (let i = 0; i < 60; i++) {
+                const list = await workerCall('widgetList', []).catch(() => '');
+                if (typeof list === 'string' && list.length > 0) {
+                    for (const n of names) {
+                        await workerCall('setWidget', [n, false]).catch(() => {});
+                    }
+                    console.log(`[disableWidgets] disabled: ${names.join(', ')}`);
+                    return;
+                }
+                await new Promise((r) => window.setTimeout(r, 1000));
+            }
+            console.warn('[disableWidgets] LuaUI never booted — nothing disabled');
+        })();
+    }
+
+    // PLAN-metalstorm-command-language.md §6.2/§6.4 (M3) — the two ports the
+    // natural-language console needs from this thread, installed here because
+    // `workerCall` and the cached `gp:sceneState` pose feed both live here.
+    //
+    // These are NOT the test harness. They share its worker ops (the camera has
+    // lived in the worker since GW8 and `gp:test` is the only request channel
+    // main has), but they carry no eval hatch, no server-bound verbs and no
+    // console commands — the player-facing surface is the four framing calls and
+    // one read-only census. Everything a sentence can ORDER still goes through
+    // `createSendCommand`, never through here (design pillar 1).
+    const cameraPort = cameraPortHolder.install({
+        call: (method, args) => {
+            void workerCall(method, args ?? []).catch((e) => {
+                console.warn(`[camera-port] ${method} failed:`, e);
+            });
+        },
+        pose: () => {
+            const c = lastSceneState?.camera;
+            if (!c) return null;
+            return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
+        },
+        // The follow loop's cancel signal. CameraInput owns the DOM listeners
+        // whose events ARE the worker camera's interactive input, so it is the
+        // only honest place to learn that the player took the camera back.
+        onUserInput: (listener) => cameraInput?.onCameraInput(listener) ?? (() => {}),
+        onNote: (note) => console.log(`[camera-port] ${note}`),
+        // A follow tracks the group centroid the census reports, and the census
+        // otherwise only refreshes when a sentence is submitted — so without this
+        // a follow tracks a photograph (found live: the camera snapped once and
+        // then sat still while the squad drove away). Only ticks while following.
+        onFollowTick: () => { void censusCacheHolder.current?.refresh(); },
+    });
+    void cameraPort;
+
+    censusCacheHolder.install(new CensusCache(async () => {
+        const raw = await workerCall('nlCensus');
+        return (raw as Census | null) ?? null;
+    }));
 
     // PLAN-quickstart.md Part B: the drivable detach/re-enter surface (this
     // whole plan is side-lane-M test tooling). The polished lobby "return to
@@ -1627,7 +2022,10 @@ async function bootDirect(manifestUrl: string, lobby: LobbyUI): Promise<void> {
     const manifestResp = await fetch(manifestUrl);
     if (!manifestResp.ok)
         throw new Error(`?direct: failed to fetch manifest '${manifestUrl}': HTTP ${manifestResp.status}`);
-    const manifest = await manifestResp.json();
+    // Not `.json()`: a manifest missing from client/public/ comes back as the
+    // SPA fallback's index.html at HTTP 200, and the bare parse error names
+    // neither the file nor the cause. See direct-manifest.ts.
+    const manifest = parseDirectManifest(manifestUrl, await manifestResp.text()) as any;
 
     const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
         method: 'POST',
@@ -1647,6 +2045,212 @@ async function bootDirect(manifestUrl: string, lobby: LobbyUI): Promise<void> {
         throw new Error('?direct: response missing host session/player');
 
     lobby.attachSession(token, hostPlayer.player_id, hostUsername);
+    lobby.setCurrentRoomFromJson(room);
+}
+
+/// A boot failure on a URL meant to be handed to a human must say something.
+/// `bootDirect`'s original failure mode was a console.error and a permanently
+/// blank page. This is a self-contained fixed overlay — no lobby templates,
+/// because the lobby is suppressed on every path that can reach here.
+function showBootError(title: string, detail: string, hintHtml = ''): void {
+    const existing = document.getElementById('boot-error');
+    if (existing) existing.remove();
+    const panel = document.createElement('div');
+    panel.id = 'boot-error';
+    panel.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:100000',
+        'display:flex', 'align-items:center', 'justify-content:center',
+        'background:#0b0d10', 'color:#e6e6e6',
+        'font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
+        'padding:24px',
+    ].join(';');
+    const box = document.createElement('div');
+    box.style.cssText = 'max-width:720px;border:1px solid #39424d;border-radius:6px;padding:20px 24px;background:#12161b';
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:16px;font-weight:600;color:#ff8f6b;margin-bottom:10px';
+    h.textContent = title;
+    const d = document.createElement('div');
+    // user-select so the text can be copied into a bug report.
+    d.style.cssText = 'white-space:pre-wrap;user-select:text;margin-bottom:10px';
+    d.textContent = detail;
+    box.append(h, d);
+    if (hintHtml) {
+        const hint = document.createElement('div');
+        hint.style.cssText = 'color:#9fb3c8;white-space:pre-wrap;user-select:text';
+        hint.innerHTML = hintHtml;
+        box.append(hint);
+    }
+    panel.append(box);
+    document.body.append(panel);
+}
+
+const DIRECT_START_HINT =
+    'The lobby must run with <code>--dev-direct-start</code> (it is off by default and never set in production).';
+const LOCALHOST_ONLY_HINT =
+    '?play= needs a browser on the lobby host, or an admin login — direct-start is a dev feature (LocalhostOrAdmin).';
+
+/// Options parsed off the `?play=` URL, published for S2's briefing splash.
+export let playBootOptions: PlayParams | null = null;
+
+interface PlayIdentity { token: string; userId: number; username: string }
+
+/// The auto-auth ladder (S1 D2): stored session → guest resume → guest mint.
+/// Returns null only when every rung failed — the caller then unsuppresses
+/// the lobby and shows the login form, the one path on which login renders.
+async function resolvePlayIdentity(): Promise<PlayIdentity | null> {
+    const savedUser = localStorage.getItem('springrts-username');
+    const savedToken = localStorage.getItem('springrts-token');
+    if (savedUser && savedToken) {
+        try {
+            const r = await fetch(`${CONFIG.httpUrl}/api/auth/validate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${savedToken}`, 'Content-Type': 'application/json' },
+                body: '{}',
+            });
+            const d = r.ok ? await r.json() : null;
+            if (d?.valid) return { token: savedToken, userId: d.user_id ?? 0, username: savedUser };
+            if (r.status === 401) {
+                // One attempt only. LobbyUI's retry ladder exists to survive a
+                // lobby restart mid-session; a play link should degrade to a
+                // guest mint rather than stall on it.
+                const o = await refreshAccessToken(CONFIG.httpUrl, browserTokenStore);
+                if (o.kind === 'refreshed')
+                    return { token: o.token, userId: o.data.user_id ?? 0, username: savedUser };
+            }
+        } catch { /* lobby unreachable — fall through to guest */ }
+    }
+
+    const device = browserTokenStore.get(DEVICE_TOKEN_KEY);
+    if (device) {
+        try {
+            const r = await fetch(`${CONFIG.httpUrl}/api/auth/guest/resume`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_token: device }),
+            });
+            const d = r.ok ? await r.json() : null;
+            if (d?.token) {
+                storeDeviceToken(d, browserTokenStore);
+                return { token: d.token, userId: d.user_id ?? 0, username: d.username };
+            }
+            clearDeviceToken(browserTokenStore);
+        } catch { /* fall through to mint */ }
+    }
+
+    try {
+        const g = await fetch(`${CONFIG.httpUrl}/api/auth/guest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const gd = await g.json().catch(() => ({}));
+        if (g.ok && gd.token) {
+            // Store the device token so the *next* ?play= visit resumes instead
+            // of burning the 20/min mint limiter.
+            storeDeviceToken(gd, browserTokenStore);
+            return { token: gd.token, userId: gd.user_id ?? 0, username: gd.username };
+        }
+        if (g.status === 429)
+            console.warn('[play] guest mint rate-limited (20/min):', gd?.error ?? '');
+    } catch (e) {
+        console.warn('[play] guest mint failed:', e);
+    }
+    return null;
+}
+
+/// Map a `/api/rooms/direct` failure onto text a human can act on.
+function reportDirectFailure(status: number, body: any, raw: string): void {
+    if (status === 404) {
+        showBootError('Direct start is not enabled on this lobby',
+            'POST /api/rooms/direct answered 404.', DIRECT_START_HINT);
+    } else if (status === 403) {
+        showBootError('Direct start refused', body?.error ?? raw, LOCALHOST_ONLY_HINT);
+    } else {
+        showBootError(`Direct start failed (HTTP ${status})`, body?.error ?? (raw || '(no body)'));
+    }
+}
+
+/// `?play=<scenarioId>` boot. Two modes:
+///   attach — `room`+`user`+`#token` present (the URL an MCP launch returns):
+///            adopt the already-running room, never re-POST. A bare re-POST
+///            would replace the room by name and tear down the very server
+///            the launcher just waited on.
+///   fresh  — run the auth ladder, resolve the scenario, POST the manifest.
+/// Attach falls through to fresh when the room is gone or ended, so a play
+/// link keeps working forever instead of dangling on a stale room id.
+async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
+    playBootOptions = params;
+
+    if (params.room !== undefined && params.token && params.user) {
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/rooms`);
+            const rooms = resp.ok ? await resp.json() : [];
+            const roomJson = (Array.isArray(rooms) ? rooms : []).find((r: any) => r?.id === params.room);
+            const ident = roomJson && isAttachableRoom(roomJson)
+                ? pickAttachIdentity(roomJson, params.user) : null;
+            if (roomJson && ident) {
+                console.log(`[play] attaching to room ${params.room} as ${params.user}`);
+                lobby.attachSession(params.token, ident.playerId, params.user);
+                lobby.setCurrentRoomFromJson(roomJson);
+                return;
+            }
+            console.warn(`[play] room ${params.room} is gone or not joinable — launching a fresh one.`);
+        } catch (e) {
+            console.warn('[play] attach failed, launching fresh:', e);
+        }
+    }
+
+    const identity = await resolvePlayIdentity();
+    if (!identity) {
+        // Rung 5: the only path on which login renders.
+        lobby.unsuppress();
+        lobby.showLogin();
+        const msg = document.getElementById('login-msg');
+        if (msg) msg.textContent = 'Could not sign you in automatically — please log in to play.';
+        return;
+    }
+
+    let scenarios: ScenarioInfo[] = [];
+    try {
+        const sr = await fetch(`${CONFIG.httpUrl}/api/games/${encodeURIComponent(params.gameId)}/scenarios`);
+        if (sr.ok) scenarios = await sr.json();
+    } catch { /* reported below */ }
+    const scenario = scenarios.find((s) => s.id === params.scenarioId);
+    if (!scenario) {
+        showBootError(`Unknown scenario "${params.scenarioId}"`,
+            `Game "${params.gameId}" offers: ${scenarios.map((s) => s.id).join(', ') || '(none — is the lobby up?)'}`,
+            'Newly authored scenario files need <code>POST /api/admin/scenarios/resync</code> — lobby scenario lists are a startup snapshot.');
+        return;
+    }
+
+    let manifest;
+    try {
+        manifest = buildPlayManifest(scenario, identity.username, params);
+    } catch (e) {
+        showBootError('Cannot build this game', (e as Error).message);
+        return;
+    }
+    // Re-opening the same link replaces your own stale room (the direct
+    // route is idempotent by name), which is why the name is user-scoped.
+    console.log(`[play] launching "${manifest.name}" (${manifest.map}) as ${identity.username}`);
+
+    const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${identity.token}` },
+        body: JSON.stringify(manifest),
+    });
+    const raw = await roomResp.text();
+    let room: any = {};
+    try { room = JSON.parse(raw); } catch { /* non-JSON error body */ }
+    if (!roomResp.ok) { reportDirectFailure(roomResp.status, room, raw); return; }
+
+    // Tail is bootDirect's: the direct-minted session, not the ladder's token.
+    const token = room.sessions?.[identity.username];
+    const hostPlayer = (room.players ?? []).find((p: any) => p.username === identity.username);
+    if (!token || !hostPlayer) {
+        showBootError('Game started but the session is missing',
+            '/api/rooms/direct returned no session or player row for ' + identity.username);
+        return;
+    }
+    lobby.attachSession(token, hostPlayer.player_id, identity.username);
     lobby.setCurrentRoomFromJson(room);
 }
 
@@ -1766,13 +2370,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     // *suppressed* so it never puts login/room UI on screen (the async
     // game-template load would otherwise re-render and un-hide the login
     // form the runner had already hidden).
-    const lobbySuppressed = !!scenario || !!directManifestUrl;
-    lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
+    // Play mode (`?play=<scenarioId>`, PLAN-test-automation S1). Unlike the
+    // two modes above it deliberately does NOT clear localStorage: the stored
+    // session is rung 2 of the auto-auth ladder. `?direct=`/`?scenario=` win
+    // if combined — that combination is a mistake, not a feature.
+    let playParams = parsePlayParams(window.location.search, window.location.hash);
+    if (playParams && (scenario || directManifestUrl)) {
+        console.warn('[play] ?play= ignored — ?direct=/?scenario= owns this boot.');
+        playParams = null;
+    }
+
+    const lobbySuppressed = !!scenario || !!directManifestUrl || !!playParams;
+    lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string,
+                           modOptions: Record<string, string>) => {
         // PLAN-quickstart.md Part B: route through enterGame so a room the
         // player detached from resyncs instead of full-booting (§3.2).
-        enterGame(gameServerPort, mapId, gameId);
+        // The room's modoptions ride along so enterGame can decide whether
+        // this boot stages a scenario with a briefing (S2). Both boot paths
+        // funnel through here: lobby-launched rooms and `?direct=` manifests.
+        enterGame(gameServerPort, mapId, gameId, modOptions);
     }, getDefaultLobbyTemplates(), lobbySuppressed);
     (window as any).lobby = lobbyUI;
+
+    // 8a-follow-on: start renewing. Placed after LobbyUI's constructor (which
+    // kicks off auto-login) rather than before it, so the first publish sees
+    // whatever a saved session left in the store; `subscribe` hands the
+    // current value over immediately, and the refresh-token round trip that
+    // auto-login may be running concurrently republishes through `storage`
+    // and the renewer's own publish.
+    authRenewer.subscribe(publishAccessTokenToHolders);
+    authRenewer.start();
 
     if (directManifestUrl) {
         // Hide synchronously, before any `await` — the constructor above
@@ -1782,6 +2409,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         lobbyUI.hide();
         bootDirect(directManifestUrl, lobbyUI).catch((err) => {
             console.error('[direct] boot failed:', err);
+            showBootError('Direct-start boot failed', String(err?.message ?? err), DIRECT_START_HINT);
+        });
+    }
+
+    if (playParams) {
+        // Same synchronous hide as ?direct=: the constructor already flipped
+        // the container to display:flex and the browser has not painted yet.
+        lobbyUI.hide();
+        bootPlay(playParams, lobbyUI).catch((err) => {
+            console.error('[play] boot failed:', err);
+            showBootError('Could not start this scenario', String(err?.message ?? err));
         });
     }
 

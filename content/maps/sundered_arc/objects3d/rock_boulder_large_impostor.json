@@ -1,0 +1,18 @@
+{
+ "yawBins": 8,
+ "pitchBins": 3,
+ "frames": 1,
+ "pitchDegrees": [
+  18.0,
+  42.0,
+  68.0
+ ],
+ "azimuthPhaseDegrees": 0.0,
+ "cell": 128,
+ "rowOrder": "frame*pitchBins + pitchRow",
+ "forwardAxis": "-Z",
+ "column0": "back",
+ "width": 113.02781905633714,
+ "height": 113.02781905633714,
+ "centreY": 19.695693969726562
+}

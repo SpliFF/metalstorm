@@ -82,6 +82,12 @@ function protect.participants(o, ctx)
     return out
 end
 
+--- The units this objective is defined in terms of — see kill.lua's
+--- unitRefs for why the type module answers this (task 4's DefsReconciled).
+function protect.unitRefs(o)
+    return o.params.targetUnitIDs
+end
+
 function protect.describe(o)
     return 'Protect until expiry'
 end

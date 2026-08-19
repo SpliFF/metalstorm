@@ -48,7 +48,8 @@
 
 /* Objective rows stack (icon+type+reward / progress / actions) rather than
    using the design system's single-line list-item layout. */
-.ms-obj-list > li.ms-obj {
+.ms-obj-list > li.ms-obj,
+.ms-obj-outcome-list > li.ms-obj {
     flex-direction: column;
     align-items: stretch;
     gap: 3px;
@@ -97,6 +98,30 @@
     background: rgba(74, 158, 255, 0.1);
     box-shadow: inset 2px 0 0 var(--nui-accent);
 }
+
+/* Resolved objectives (PLAN-endtoend.md D46) — shown for the server's 30 s
+   retention window in the live list, and kept afterwards in the outcome log.
+   Dimmed relative to a live row, with the outcome spelled out: a failure that
+   only looked like a row disappearing is the defect this row exists to fix. */
+.ms-obj--outcome {
+    opacity: 0.75;
+}
+
+.ms-obj--outcome .ms-obj__icon { color: var(--nui-text-faint); }
+
+.ms-obj__outcome-tag {
+    justify-content: flex-end;
+    font: 600 9px/1 system-ui, sans-serif;
+    letter-spacing: 0.08em;
+    color: var(--nui-text-faint);
+}
+
+.ms-obj--outcome.is-complete { box-shadow: inset 2px 0 0 var(--nui-good); }
+.ms-obj--outcome.is-complete .ms-obj__outcome-tag { color: var(--nui-good); }
+.ms-obj--outcome.is-failed,
+.ms-obj--outcome.is-lost-race { box-shadow: inset 2px 0 0 var(--nui-bad); }
+.ms-obj--outcome.is-failed .ms-obj__outcome-tag,
+.ms-obj--outcome.is-lost-race .ms-obj__outcome-tag { color: var(--nui-bad); }
 
 /* ── Parley ─────────────────────────────────────────────────────────── */
 

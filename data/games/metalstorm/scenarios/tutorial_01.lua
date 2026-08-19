@@ -16,6 +16,24 @@ return {
     tutorial  = true,            -- activates game_tutorial.lua
     ephemeral = true,            -- no hibernation / persistence
 
+    -- Briefing (S2): lobby/client display only; the sim ignores it. Must stay
+    -- a pure table literal — a computed value here makes the whole scenario
+    -- vanish from the lobby list. No parTimeSec and no image on purpose: this
+    -- stub is the living proof that every briefing field is optional.
+    briefing = {
+        title    = 'Basic Training',
+        subtitle = 'Command School — First Session',
+        story    = [[Welcome to command school, officer. Before anyone trusts you with a war, you will learn to move a column across open country without losing it.
+
+This exercise runs on the Scorched Crossing proving grounds. No enemy contact is scheduled. That has been said before.]],
+        tips     = {
+            'Left-click selects a squad; right-click orders it to move.',
+            'Drag with the left button to select everything in a box.',
+            'Hold the camera at mid-height: close enough to read the fight, far enough to see the flanks.',
+            'Orders queue — shift-click to chain waypoints instead of micromanaging each leg.',
+        },
+    },
+
     world = {
         -- Was 'meridian_basin' until 2026-08-06. That map is unplayable — its
         -- start positions sit in three disconnected components of the VEH and

@@ -60,6 +60,11 @@ public:
 
 	void DependentDied(CObject* o);
 
+	/// Fills MoveTypeState::air. Called by the CHoverAirMoveType /
+	/// CStrafeAirMoveType overrides, which own the discriminant.
+	void SnapshotCaptureAir(movetypesnapshot::AirState& a) const;
+	void SnapshotApplyAir(const movetypesnapshot::AirState& a);
+
 protected:
 	void CheckForCollision();
 

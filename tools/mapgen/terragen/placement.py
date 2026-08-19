@@ -29,7 +29,10 @@ Concepts
     * ``along_paths`` — walk the ctx.paths polylines (road network, later
       rail) at a fixed spacing with hashed dropout and lateral offset;
       placements carry the local path heading (fences, roadside debris,
-      later rail sleepers / power poles).
+      later rail sleepers / power poles). The lateral offset clears the
+      polyline's OWN deck (R4d) and is then tested against every other deck
+      within reach, because a normal offset cannot know the road comes back
+      on itself (R5) — see `_DeckIndex`.
 - ``TemplateEmit`` composes a *site* into many features: a template of
   (name, dx, dz) elements rotated by the site's hashed rotation, with
   per-element jitter and dropout — ruin circles, wall lines, later
@@ -64,6 +67,9 @@ class PlacementContext:
     exclusion: np.ndarray     # bool (H, W): no features here (roads, pads, water…)
     water_level: float = 0.0
     paths: list | None = None # list of (N,2) world-coord polylines (roads…)
+    # Deck HALF-width per entry of `paths`, same order. Optional: without it
+    # an along_paths layer keeps its plain centreline offset (pre-R2 behaviour).
+    path_halfwidths: list[float] | None = None
 
     @property
     def map_w(self) -> float:
@@ -157,6 +163,30 @@ class Layer:
     path_offset: float = 30.0               # lateral distance from centreline
     path_offset_jitter: float = 6.0
     path_both_sides: bool = True            # hashed side pick vs always +offset
+    # A lateral offset is measured from the CENTRELINE, but a road's deck is
+    # per class since R2 (a highway is 1.6x the base width), so one constant
+    # offset is on the verge of a track and on the CARRIAGEWAY of a highway —
+    # which is what put 457 of meridian_basin's 474 highway fences on the deck.
+    # When ctx.path_halfwidths is supplied the offset is raised, per polyline,
+    # to clear that polyline's own deck edge by the jitter plus this margin;
+    # a road narrow enough that path_offset already clears it is untouched.
+    #
+    # The margin is DERIVED from what the bake paints, not tuned by eye: the
+    # albedo's deck edge is ragged by up to 2.6 elmos and then fades over 3
+    # more (bake.py `ragged` / the /3.0 ramp), and a log fence is ~8 elmos long
+    # about its own origin — so anything under ~10 leaves a prop standing on
+    # tarmac even when its ORIGIN clears the geometric half-width. 2.0 was the
+    # first value here and it cleared the deck while still reading as on-road
+    # at ground level.
+    path_min_clearance: float = 10.0
+    # ...and that raise is still LOCAL: it clears the deck of the polyline the
+    # station stepped off, which is the only deck a normal offset can know
+    # about. `path_global_clearance` adds the other half — the position is
+    # tested against EVERY nearby deck, so a hairpin's inner side is refused
+    # even though it is correctly offset from its own segment. Off, it is the
+    # R4d sampler exactly, which is how the hairpin defect is reproduced in
+    # tests/test_roadside_offset.py.
+    path_global_clearance: bool = True
 
 
 @dataclass
@@ -233,6 +263,135 @@ def _sample_clusters(layer: Layer, ctx: PlacementContext, suit: np.ndarray, lsee
     return x[live], z[live], rot[live], scale_t[live], pick_t[live]
 
 
+# ---------------------------------------------------------------------------
+# Global deck clearance (roads R5)
+# ---------------------------------------------------------------------------
+
+def _point_segment_dist(px, pz, ax, az, bx, bz):
+    """Distance from one point to each of N segments (a -> b)."""
+    vx = bx - ax; vz = bz - az
+    wx = px - ax; wz = pz - az
+    vv = vx * vx + vz * vz
+    t = np.where(vv > 1e-12, (wx * vx + wz * vz) / np.maximum(vv, 1e-12), 0.0)
+    t = np.clip(t, 0.0, 1.0)
+    dx = wx - t * vx; dz = wz - t * vz
+    return np.hypot(dx, dz)
+
+
+class _DeckIndex:
+    """'Is this point clear of EVERY deck?' — a uniform-grid segment index.
+
+    Raising a roadside offset to clear the deck is a LOCAL computation (roads
+    R4d): it knows the half-width of the polyline it stepped off and nothing
+    else. Where a road doubles back on itself — a hairpin, a switchback, a
+    tight loop — or simply runs close to a neighbour, the normal of one segment
+    points into the carriageway of a DIFFERENT vertex range, or of a different
+    polyline entirely, and no per-polyline offset can see that (§2l FIND 2).
+
+    Answering it exactly is all-pairs, candidates x segments: on a full-res
+    16 k map that is ~1e4 stations against ~2e4 segments. So the segments are
+    bucketed on a uniform grid whose cell is the largest required radius, and
+    each segment is inserted into its own cell's 3x3 neighbourhood at build
+    time. A query then reads ONE bucket and is guaranteed to have seen every
+    segment that could be within its radius — one `searchsorted` per candidate
+    instead of a scan over the network.
+
+    `radii[i]` is the clearance required around polyline i (its deck
+    half-width plus the margin). A polyline with radius <= 0 is not indexed —
+    that is the 'no half-width supplied' case, which keeps pre-R4d behaviour.
+    """
+
+    _SPAN = 1 << 20   # cell coordinates are shifted into [0, 2^21) to key on
+
+    def __init__(self, polylines, radii):
+        self.cell = max(1.0, float(max(radii)) if len(radii) else 1.0)
+        ax, az, bx, bz, rr = [], [], [], [], []
+        keys, gids = [], []
+        base = 0
+        for poly, r in zip(polylines, radii):
+            p = np.asarray(poly, dtype=np.float64)
+            if p.shape[0] < 2 or r <= 0.0:
+                continue
+            a = p[:-1]; b = p[1:]
+            n = a.shape[0]
+            ax.append(a[:, 0]); az.append(a[:, 1])
+            bx.append(b[:, 0]); bz.append(b[:, 1])
+            rr.append(np.full(n, float(r)))
+            # densify at <= half a cell so no cell the segment crosses is missed
+            seglen = np.hypot(b[:, 0] - a[:, 0], b[:, 1] - a[:, 1])
+            steps = np.maximum(2, np.ceil(seglen / (self.cell * 0.5)).astype(np.int64) + 1)
+            si = np.repeat(np.arange(n), steps)
+            starts = np.concatenate([[0], np.cumsum(steps)[:-1]])
+            k = np.arange(int(steps.sum())) - np.repeat(starts, steps)
+            t = k / np.maximum(np.repeat(steps, steps) - 1, 1)
+            px = a[si, 0] + (b[si, 0] - a[si, 0]) * t
+            pz = a[si, 1] + (b[si, 1] - a[si, 1]) * t
+            cx = np.floor(px / self.cell).astype(np.int64)
+            cz = np.floor(pz / self.cell).astype(np.int64)
+            # 3x3 dilation at INSERT time, so a query is a single bucket read
+            for ox in (-1, 0, 1):
+                for oz in (-1, 0, 1):
+                    keys.append(self._key(cx + ox, cz + oz))
+                    gids.append(si + base)
+            base += n
+        if not ax:
+            self.keys = np.empty(0, dtype=np.int64)
+            self.gids = np.empty(0, dtype=np.int64)
+            self.ax = self.az = self.bx = self.bz = self.r = np.empty(0)
+            return
+        self.ax = np.concatenate(ax); self.az = np.concatenate(az)
+        self.bx = np.concatenate(bx); self.bz = np.concatenate(bz)
+        self.r = np.concatenate(rr)
+        key = np.concatenate(keys); gid = np.concatenate(gids)
+        pair = np.unique(np.stack([key, gid], axis=1), axis=0)
+        self.keys = np.ascontiguousarray(pair[:, 0])
+        self.gids = np.ascontiguousarray(pair[:, 1])
+
+    @classmethod
+    def _key(cls, cx, cz):
+        return (cx + cls._SPAN) * (cls._SPAN * 2) + (cz + cls._SPAN)
+
+    def clear(self, x, z, tol=1e-6):
+        """Bool per point: no indexed deck is closer than its own radius."""
+        out = np.ones(x.shape, dtype=bool)
+        if self.keys.size == 0 or x.size == 0:
+            return out
+        cx = np.floor(x / self.cell).astype(np.int64)
+        cz = np.floor(z / self.cell).astype(np.int64)
+        qk = self._key(cx, cz)
+        lo = np.searchsorted(self.keys, qk, side="left")
+        hi = np.searchsorted(self.keys, qk, side="right")
+        for i in range(x.size):
+            if hi[i] <= lo[i]:
+                continue
+            g = self.gids[lo[i]:hi[i]]
+            d = _point_segment_dist(x[i], z[i], self.ax[g], self.az[g],
+                                    self.bx[g], self.bz[g])
+            if np.any(d < self.r[g] - tol):
+                out[i] = False
+        return out
+
+
+def _deck_index_for(layer: "Layer", ctx: "PlacementContext"):
+    """The index a path layer measures against, or None when it has no decks."""
+    if not layer.path_global_clearance or ctx.path_halfwidths is None \
+            or not ctx.paths:
+        return None
+    hw = ctx.path_halfwidths
+    radii = [(hw[i] + layer.path_min_clearance) if i < len(hw) else 0.0
+             for i in range(len(ctx.paths))]
+    if not any(r > 0.0 for r in radii):
+        return None
+    return _DeckIndex(ctx.paths, radii)
+
+
+# Populated by the last `along_paths` run that had deck half-widths to measure
+# against: how many stations the global test moved to the other side, and how
+# many it gave up on. A generator prints these — a rule that never fires on real
+# content should say so out loud rather than be assumed to be working.
+_LAST_PATH_STATS: dict = {}
+
+
 def _sample_along_paths(layer: Layer, ctx: PlacementContext, suit: np.ndarray, lseed: int):
     """Stations along ctx.paths polylines. Placement rotation = local path
     heading (featureplacer convention: rotation about +Y from +X toward +Z),
@@ -240,6 +399,8 @@ def _sample_along_paths(layer: Layer, ctx: PlacementContext, suit: np.ndarray, l
     e = np.empty(0)
     if not ctx.paths:
         return e, e, e, e, e
+    deck = _deck_index_for(layer, ctx)
+    n_total = n_flipped = n_dropped = 0
     xs, zs, rots, sc, pk = [], [], [], [], []
     for pi, poly in enumerate(ctx.paths):
         p = np.asarray(poly, dtype=np.float64)
@@ -263,12 +424,45 @@ def _sample_along_paths(layer: Layer, ctx: PlacementContext, suit: np.ndarray, l
         nrm = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
         side = np.where(_hash01(pkey, si, lseed, 22) < 0.5, -1.0, 1.0) \
             if layer.path_both_sides else np.ones(n)
-        off = layer.path_offset + (
+        base_off = layer.path_offset
+        if ctx.path_halfwidths is not None and pi < len(ctx.path_halfwidths):
+            base_off = max(base_off, ctx.path_halfwidths[pi]
+                           + layer.path_offset_jitter + layer.path_min_clearance)
+        off = base_off + (
             _hash01(pkey, si, lseed, 23) * 2.0 - 1.0) * layer.path_offset_jitter
-        pos = pos + nrm * (side * off)[:, None]
+        lat = nrm * (side * off)[:, None]
+        pos_a = pos + lat
         heading = np.arctan2(tang[:, 1], tang[:, 0])
+        keep = np.ones(n, dtype=bool)
+        if deck is not None:
+            # `base_off` clears THIS polyline's deck and can do no more. Where
+            # the road comes back on itself the hashed side points into another
+            # stretch of deck, so the mirrored side is tried before the station
+            # is given up — on a hairpin that is the outside of the bend, which
+            # is exactly where the fence belongs (roads R5).
+            ok_a = deck.clear(pos_a[:, 0], pos_a[:, 1])
+            if layer.path_both_sides:
+                pos_b = pos - lat
+                ok_b = deck.clear(pos_b[:, 0], pos_b[:, 1])
+            else:
+                # a one-sided layer has a reason to be on that side; it can be
+                # dropped but it must not be mirrored
+                pos_b = pos_a
+                ok_b = ok_a
+            flip = ~ok_a & ok_b
+            pos_a = np.where(flip[:, None], pos_b, pos_a)
+            keep = ok_a | ok_b
+            n_flipped += int(flip.sum()); n_dropped += int((~keep).sum())
+        n_total += n
+        pos = pos_a[keep]
+        heading = heading[keep]
         xs.append(pos[:, 0]); zs.append(pos[:, 1]); rots.append(heading)
-        sc.append(_hash01(pkey, si, lseed, 24)); pk.append(_hash01(pkey, si, lseed, 25))
+        sc.append(_hash01(pkey, si, lseed, 24)[keep])
+        pk.append(_hash01(pkey, si, lseed, 25)[keep])
+    if deck is not None:
+        _LAST_PATH_STATS[layer.name] = {"stations": n_total,
+                                        "flipped": n_flipped,
+                                        "dropped": n_dropped}
     if not xs:
         return e, e, e, e, e
     x = np.concatenate(xs); z = np.concatenate(zs); rot = np.concatenate(rots)
@@ -312,6 +506,13 @@ def _rasterize_stamp(field: np.ndarray, cx: float, cz: float, radius: float,
 # Runner
 # ---------------------------------------------------------------------------
 
+# A layer whose suitability covers less than this fraction of the map is
+# reported as starving. Exported because it is a contract, not a log level:
+# `tests/test_vegetation_palettes.py` holds every climate palette to the same
+# floor, so a palette cannot ship a species the map has no room for.
+STARVE_COVERAGE = 0.001
+
+
 def run(ctx: PlacementContext, layers: list[Layer],
         progress=lambda *_: None) -> PlacementResult:
     """Evaluate all layers. Deterministic for a given (seed, layer set)."""
@@ -320,7 +521,7 @@ def run(ctx: PlacementContext, layers: list[Layer],
         lseed = (ctx.seed * 131 + zlib.crc32(layer.name.encode())) & 0x7FFFFFFF
         suit = np.clip(layer.suitability(ctx), 0.0, 1.0).astype(np.float32)
         cov = float((suit > 0).mean())
-        if cov < 0.001:
+        if cov < STARVE_COVERAGE:
             progress(f"placement[{layer.name}]: WARNING suitability covers "
                      f"{cov:.4%} of the map — layer will starve")
         x, z, rot, scale_t, pick_t = _SAMPLERS[layer.sampler](layer, ctx, suit, lseed)

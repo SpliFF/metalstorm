@@ -1,0 +1,133 @@
+name: Soak — churn arm (ladder 2)
+#
+# PLAN-long-uptime.md **T4-1b**: the churn arm is the only gate in this repo
+# that covers the SEATED-CLIENT path at all, and until now it existed only as
+# `make soak-churn` on a developer's machine.
+#
+# What it runs (tools/headless-batch/soak-churn-run.mjs): the same fixture
+# twice, once with N scripted wire sessions connecting / ordering /
+# disconnecting for the window and once with nobody connecting. Two of §1's
+# growth rows are unreachable without that — `StateStreamer::
+# BroadcastRulesParams` returns at `GetClientCount() == 0` before the interning
+# block (S1's key dictionary) and a standing order is refused without a seat
+# (S6) — so both read 0 at every sample of every client-less soak, and no
+# length of headless ladder can rule them. The matched control is what makes
+# "0 -> non-zero" attributable to the clients rather than to the world.
+#
+# What this gate does NOT do, stated so a green run is not over-read: it
+# asserts the churn window held and that the two surfaces moved only under
+# clients. It does NOT rule S1/S6 bounded. That needs an arm long enough to
+# contain two reclamation cycles (~3 simulated hours, PLAN-long-uptime §15.1
+# T4-1a-2); a 3-minute window observes at most one, which the growth ruling
+# reports as `one-cycle` — inconclusive, neither pass nor fail. `growth-report`
+# is therefore deliberately not run here.
+#
+# Nightly rather than per-PR: two 3-minute windows plus a RELEASE build of
+# spring-server. The release binary is not a preference — the debug build ticks
+# this content ~30x slower, so a 3-minute window would cover minutes of
+# simulated time instead of an hour and the surfaces would barely move.
+#
+# Platform note is security-prod-gate.yml's, unchanged: this fork's QUIC stack
+# is wired to Homebrew pkg-config paths only, so the C++ build cannot configure
+# on a stock ubuntu-latest runner. macos-14 mirrors local dev.
+#
+# The churn DRIVER additionally needs client/'s native WebTransport addon
+# (@fails-components/webtransport-transport-http3-quiche), i.e. an `npm ci` in
+# client/ — the same runner dependency `make test-replay-spectate` introduced.
+# A missing addon is exit 2 from the driver and the runner reports it as an
+# environment failure, distinct from a real gate failure.
+
+on:
+  schedule:
+    # 09:00 UTC, clear of publish-site.yml's 01:1x slot.
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      window-min:
+        description: 'Per-arm wall window in minutes (3 = the shipped arm)'
+        required: false
+        default: '3'
+      sessions:
+        description: 'Concurrent churn accounts (max 6 — the fixture seats)'
+        required: false
+        default: '2'
+
+concurrency:
+  # Two of these at once would fight over the runner's CPU, and the arm's
+  # readings are a function of how many frames the server managed to tick.
+  group: soak-churn
+  cancel-in-progress: false
+
+jobs:
+  churn:
+    runs-on: macos-14
+    # Build (~8 min observed for one release tree in security-prod-gate.yml)
+    # plus two windows plus npm install, with room for a cold Homebrew.
+    timeout-minutes: 60
+    steps:
+      # `submodules: recursive` is load-bearing, not hygiene — see
+      # security-prod-gate.yml: rts/System/simd_compat.h includes
+      # rts/lib/sse2neon on arm64, and entt / nowide / cereal are needed by the
+      # same build.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          set -e
+          # Formula names are libngtcp2 / libnghttp3, NOT ngtcp2 / nghttp3 —
+          # the latter do not exist in homebrew-core and are what killed every
+          # headless-determinism.yml run between 2026-07-11 and 2026-08-05.
+          # Keep them in sync with CMakeLists.txt's `foreach(_qpkg libngtcp2
+          # libngtcp2_crypto_ossl libnghttp3)` prefix probe.
+          brew install cmake ninja libngtcp2 libnghttp3 openssl@3
+          # The QUIC TLS path needs OpenSSL >= 3.5; the runner image ships its
+          # own openssl@3 and `brew install` is a no-op on an already-installed
+          # older one, so upgrade explicitly and print the version.
+          brew upgrade openssl@3 || true
+          "$(brew --prefix openssl@3)/bin/openssl" version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The driver runs through vite from client/, so this is not optional
+      # tooling — without it the run fails as an ENVIRONMENT error (exit 2),
+      # which is a different verdict from the gate failing.
+      - name: Install client dependencies (native WebTransport addon)
+        run: cd client && npm ci
+
+      # `-- -k 0`: report every compile error in one run rather than the
+      # earliest (security-prod-gate.yml's note — this runner's toolchain is
+      # not local dev's, and it is the only place that class of breakage
+      # surfaces).
+      - name: Configure + build spring-server (release)
+        run: |
+          set -e
+          cmake --preset release -DSPRING_SKIP_AUDIOCONVERTER=ON
+          cmake --build build/release --target spring-server -j 4 -- -k 0
+
+      # Via `make` deliberately: the arm's flags (window, sessions, out-dir,
+      # server bin) have exactly one definition, in the Makefile, and CI must
+      # run the same one a developer does. The build line inside the target is
+      # a no-op after the step above.
+      - name: Churn arm + matched control
+        env:
+          CHURN_WINDOW_MIN: ${{ github.event.inputs.window-min || '3' }}
+          CHURN_SESSIONS: ${{ github.event.inputs.sessions || '2' }}
+        run: make soak-churn
+
+      # Uploaded on success too: the per-sample readings are the series
+      # T4-1a-2 needs, and a passing night's peaks are worth as much as a
+      # failing one's.
+      - name: Upload arm artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-churn-artefacts
+          path: |
+            build/soak-churn/*.json
+            build/soak-churn/*.log
+          if-no-files-found: ignore
+          retention-days: 14

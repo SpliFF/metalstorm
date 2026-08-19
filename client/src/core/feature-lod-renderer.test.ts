@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     NullEngine, Scene, FreeCamera, MeshBuilder, StandardMaterial, Vector3, Mesh,
+    DirectionalLight, ShadowGenerator,
 } from '@babylonjs/core';
 import { FeatureLodController } from './feature-lod-renderer.js';
 import { FxLightPool, FX_LIGHT_EXCLUDED_LAYER } from './fx-light-pool.js';
@@ -16,14 +17,17 @@ function place(x: number, z: number, y = 0): LodPlacement {
     return { x, y, z, rotation: 0, scale: 1 };
 }
 
-function makeHarness(placements: LodPlacement[]) {
+function makeHarness(placements: LodPlacement[], withShadows = false) {
     const engine = new NullEngine();
     const scene = new Scene(engine);
     const camera = new FreeCamera('cam', new Vector3(100, 100, 100), scene);
     const template = MeshBuilder.CreateBox('tree', { size: 10 }, scene);
     template.material = new StandardMaterial('treeMat', scene);
 
-    const ctrl = new FeatureLodController(scene, null);
+    const shadows = withShadows
+        ? new ShadowGenerator(512, new DirectionalLight('sun', new Vector3(-1, -2, -1), scene))
+        : null;
+    const ctrl = new FeatureLodController(scene, shadows);
     ctrl.setConfig({
         tileSize: 1000,
         impostorDistance: 2000,
@@ -211,6 +215,82 @@ describe('FeatureLodController', () => {
         ctrl.update(camera, 3000);
         expect(tileMesh(scene, 'feat_stump_near_5:0').isEnabled(false)).toBe(true);
         expect(tileMesh(scene, 'feat_stump_far_5:0').isEnabled(false)).toBe(false);
+    });
+
+    // PLAN-maps §1.4. `shadowDistance` is the lane's only vegetation perf
+    // lever, and it is gated behind the NEAR tier — so for any species whose
+    // `impostorDistance` is already inside it, lowering it removes no caster at
+    // all. The stats row has to expose the caster population next to BOTH
+    // thresholds, or the lever's dose is unobservable and its A/B unreadable.
+    it('reports the caster population, and only NEAR tiles inside shadowDistance cast', () => {
+        const { scene, camera, ctrl, template } =
+            makeHarness([place(100, 100), place(5000, 100)], true);
+        // A short prop that reaches its card well inside the shadow range.
+        ctrl.addType({
+            typeName: 'stump',
+            template: template.clone('stumpTemplate', null, true),
+            placements: [place(1200, 100)],
+            atlas: {
+                diffuseUrl: 'about:blank#stump_impostor.ktx2',
+                layout: DEFAULT_ATLAS_LAYOUT,
+                width: 19, height: 19, topDown: true,
+                impostorDistance: 350,
+            },
+            modelExtent: { radius: 5, height: 10 },
+        });
+        ctrl.setConfig({ shadowDistance: 1500 });
+        ctrl.update(camera, 1000);
+
+        const totals = () => ctrl.getStats().totals as Record<string, number>;
+        const rowFor = (name: string) => (ctrl.getStats().types as
+            { name: string; castingTiles: number; shadowDistance: number }[])
+            .find(r => r.name === name)!;
+
+        // Only the tree tile at 0:0 qualifies: NEAR (inside 2000) and inside
+        // 1500. The 5:0 tree tile is FAR; the stump tile is ~1.0k away, which
+        // is inside shadowDistance but OUTSIDE its own 350 impostorDistance,
+        // so it is FAR and cannot cast however high shadowDistance goes.
+        expect(totals().castingTiles).toBe(1);
+        expect(totals().castingInstances).toBe(1);
+        expect(rowFor('stump').castingTiles).toBe(0);
+        expect(rowFor('stump').shadowDistance).toBe(1500);
+
+        // ...and the count tracks the generator, not just an internal flag.
+        const casters = () => scene.lights[0].getShadowGenerator()!
+            .getShadowMap()!.renderList!.map(m => m.name);
+        expect(casters()).toEqual(['feat_tree_near_0:0']);
+
+        // Lowering the threshold under the tile's distance drops the caster;
+        // raising it back restores it. This is the A/B the lane measures.
+        ctrl.setConfig({ shadowDistance: 10 });
+        ctrl.update(camera, 2000);
+        expect(totals().castingTiles).toBe(0);
+        expect(casters()).toEqual([]);
+        ctrl.setConfig({ shadowDistance: 1500 });
+        ctrl.update(camera, 3000);
+        expect(totals().castingTiles).toBe(1);
+        expect(casters()).toEqual(['feat_tree_near_0:0']);
+    });
+
+    // Measured live 2026-08-08 (PLAN-maps §1.4): `shadowDistance: 0` left 4
+    // tiles / 1,398 instances casting at the S-battle pose, because
+    // `distanceToTile` measures to the tile's 3D AABB and a 2048-elmo tile over
+    // a ridge is ~950 elmos tall — the camera is INSIDE it and reads 0. So the
+    // one setting that means "off" was the one setting a distance test cannot
+    // express. The fixture reproduces the shape: a camera inside the box.
+    it('treats shadowDistance <= 0 as OFF, including for a tile the camera is inside', () => {
+        const { camera, ctrl } = makeHarness([place(100, 100, 0), place(150, 150, 900)], true);
+        camera.position.set(120, 600, 120);   // inside the tile AABB on all 3 axes
+        ctrl.setConfig({ shadowDistance: 1 });
+        ctrl.update(camera, 1000);
+        const casting = () => (ctrl.getStats().totals as Record<string, number>).castingTiles;
+        // Distance is exactly 0, so even a 1-elmo threshold keeps it casting —
+        // this is the behaviour that made the knob unturnoffable.
+        expect(casting()).toBe(1);
+
+        ctrl.setConfig({ shadowDistance: 0 });
+        ctrl.update(camera, 2000);
+        expect(casting()).toBe(0);
     });
 
     // PLAN-perf M2. What matters is not that we set a bit, but that Babylon's

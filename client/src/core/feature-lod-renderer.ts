@@ -285,7 +285,10 @@ export class FeatureLodController {
 
     /** Debug readout for `window.__gp('__featureLod.get()')`. */
     getStats(): Record<string, unknown> {
-        const totals = { tiles: 0, near: 0, far: 0, culled: 0, nearInstances: 0, farInstances: 0, drawnMeshes: 0 };
+        const totals = {
+            tiles: 0, near: 0, far: 0, culled: 0, nearInstances: 0, farInstances: 0,
+            drawnMeshes: 0, castingTiles: 0, castingInstances: 0,
+        };
         const types = this.types.map((t) => {
             const row = {
                 name: t.name,
@@ -293,13 +296,23 @@ export class FeatureLodController {
                 instances: t.instanceCount,
                 near: 0, far: 0, culled: 0,
                 nearInstances: 0, farInstances: 0,
+                // `shadowDistance` only bites a type whose tiles are still NEAR
+                // at that range, so quote both thresholds together: a species
+                // with impostorDistance <= shadowDistance never has a caster
+                // removed by lowering it (PLAN-maps §1.4 hand-off).
+                castingTiles: 0, castingInstances: 0,
                 impostorDistance: t.cfg.impostorDistance,
+                shadowDistance: t.cfg.shadowDistance,
                 atlas: `${t.atlas.layout.yawBins}x${t.atlas.layout.pitchBins}x${t.atlas.layout.frames}`,
             };
             for (const ts of t.tiles) {
                 if (ts.tier === FeatureTier.Near) { row.near++; row.nearInstances += ts.tile.placements.length; }
                 else if (ts.tier === FeatureTier.Far) { row.far++; row.farInstances += ts.farMesh.thinInstanceCount; }
                 else row.culled++;
+                if (ts.castingShadow) {
+                    row.castingTiles++;
+                    row.castingInstances += ts.tile.placements.length;
+                }
                 if (ts.nearMesh.isEnabled(false)) totals.drawnMeshes++;
                 if (ts.farMesh.isEnabled(false)) totals.drawnMeshes++;
             }
@@ -309,6 +322,8 @@ export class FeatureLodController {
             totals.culled += row.culled;
             totals.nearInstances += row.nearInstances;
             totals.farInstances += row.farInstances;
+            totals.castingTiles += row.castingTiles;
+            totals.castingInstances += row.castingInstances;
             return row;
         });
         return { config: this.getConfig(), forceTier: this.forcedTier, totals, types };
@@ -500,7 +515,19 @@ export class FeatureLodController {
             for (const ts of type.tiles) {
                 ts.tier = this.forcedTier ?? tierForTile(ts.tile, cam, ts.tier, type.cfg);
                 // CSM caster membership: near tier AND within shadowDistance.
+                //
+                // `<= 0` is an explicit OFF, not a distance test. `distanceToTile`
+                // measures to the tile's 3D AABB, and on real terrain a 2048-elmo
+                // tile spanning a ridge is ~950 elmos TALL — so a camera at a
+                // normal gameplay altitude sits *inside* the box of whatever tile
+                // it is over and reads distance exactly 0. Without this branch
+                // `shadowDistance: 0` still cast from 4 tiles / 1 398 instances at
+                // the PLAN-perf S-battle pose (measured 2026-08-08), i.e. the knob
+                // could not be turned off. That is also the real reason PLAN-maps
+                // §1.4 saw 300 and 0 "measure the same" — not that every caster was
+                // inside 300 elmos.
                 const wantShadow = ts.tier === FeatureTier.Near
+                    && type.cfg.shadowDistance > 0
                     && distanceToTile(ts.tile, cam.x, cam.y, cam.z) <= type.cfg.shadowDistance;
                 if (wantShadow !== ts.castingShadow && this.shadowGenerator) {
                     if (wantShadow) this.shadowGenerator.addShadowCaster(ts.nearMesh);

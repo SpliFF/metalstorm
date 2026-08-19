@@ -1,0 +1,53 @@
+# wire-fixtures.tsv — the RecvLuaMsg codec contract, shared by BOTH languages.
+#
+# Read by:
+#   client/src/ui/native-ui/guidance-wire.test.ts   (TS must ENCODE these exact strings)
+#   LuaRules/Gadgets/tests/guidance_wire_spec.lua   (Lua must DECODE them, and the real
+#                                                    gadget must act on the guidance.* ones)
+#
+# Neither side can drift without the other's suite going red. That is the whole
+# point: game_ai_guidance.lua is the only consumer of this codec, and it has been
+# live and unreachable from the client since it landed.
+#
+# FORMAT — tab-separated, one fixture per line:
+#   <cmd> <TAB> <wire> [<TAB> key=value]...
+#
+# Parsed with two rules only, so both a 10-line TS reader and a 10-line Lua
+# reader agree:
+#   * a field column splits on its FIRST '=' (values may contain '=', and one
+#     deliberately does)
+#   * a key ending in '[]' means the value is a comma-joined LIST, which the
+#     encoder comma-joins rather than escaping the commas
+#
+# Values may contain anything except a tab or a newline. `%`, `&`, `=` and `,`
+# are exactly the four characters parley/wire.lua escapes, and the escaping
+# fixtures below cover all four.
+#
+# Field ORDER in the wire is sorted. Lua's pairs() order is unspecified, so the
+# Lua encoder cannot produce a stable string — the Lua side therefore asserts on
+# DECODE (order-insensitive) plus a round-trip, while the TS side, which sorts,
+# asserts the exact bytes. Both check the same strings.
+
+guidance.stance	cmd=guidance.stance&value=aggressive	value=aggressive
+guidance.stance	cmd=guidance.stance&value=defensive	value=defensive
+guidance.stance	cmd=guidance.stance&value=balanced	value=balanced
+guidance.paint	cmd=guidance.paint&regionKey=north_gate_ridge&value=priority	regionKey=north_gate_ridge	value=priority
+guidance.paint	cmd=guidance.paint&regionKey=slag_forge&value=forbidden	regionKey=slag_forge	value=forbidden
+guidance.paint	cmd=guidance.paint&regionKey=osprey_fen&value=normal	regionKey=osprey_fen	value=normal
+guidance.lock	cmd=guidance.lock&groupId=5&locked=1	groupId=5	locked=1
+guidance.lock	cmd=guidance.lock&groupId=5&locked=0	groupId=5	locked=0
+guidance.delegate	cmd=guidance.delegate&delegated=1&objectiveId=42	delegated=1	objectiveId=42
+guidance.delegate	cmd=guidance.delegate&delegated=0&objectiveId=42	delegated=0	objectiveId=42
+guidance.fund	cmd=guidance.fund&amount=250	amount=250
+guidance.fund	cmd=guidance.fund&rateCap=200	rateCap=200
+guidance.fund	cmd=guidance.fund&amount=100&rateCap=200	amount=100	rateCap=200
+guidance.roe	cmd=guidance.roe&value=free	value=free
+guidance.roe	cmd=guidance.roe&value=observed_only	value=observed_only
+guidance.roe	cmd=guidance.roe&value=deny_area	value=deny_area
+guidance.veto	cmd=guidance.veto&goalId=99	goalId=99
+parley.accept	cmd=parley.accept
+parley.propose	cmd=parley.propose&corridor=basin_a,basin_b&kind=safe_passage	corridor[]=basin_a,basin_b	kind=safe_passage
+parley.propose	cmd=parley.propose&duration=1800&kind=ceasefire&toTeam=2	duration=1800	kind=ceasefire	toTeam=2
+escaping.all-four	cmd=escaping.all-four&orElse=pay %26 obey%2C or%3Delse&pct=100%25	orElse=pay & obey, or=else	pct=100%
+escaping.only-percent	cmd=escaping.only-percent&note=50%25 held	note=50% held
+escaping.bare-value	cmd=escaping.bare-value&note=	note=

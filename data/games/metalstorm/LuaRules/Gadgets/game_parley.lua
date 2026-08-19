@@ -28,10 +28,11 @@
 -- the proof) — exactly where the ROE order-veto (§2) needs to run: after
 -- squad.lua's own vetoes, strictly before any authority charge.
 --
--- Engine ask I1 (AI-side sendGameMessage) is NOT needed for this gadget
--- itself — humans call the same GG.Parley API via RecvLuaMsg that this file
--- parses below; I1 only gates the AI VM's own ability to originate the same
--- calls (interaction §7/§9), tracked in ai/strategos/actuators.lua.
+-- Engine ask I1 was never needed for this gadget itself — humans call the same
+-- GG.Parley API via RecvLuaMsg that this file parses below — and it has since
+-- landed (`AI.sendMessage`, 2026-08-14), so an AI can now reach these very
+-- handlers on the same channel. What is still missing is the plugin's own
+-- parley verbs (interaction §7/§9), tracked in ai/strategos/actuators.lua.
 
 function gadget:GetInfo()
     return {
@@ -207,6 +208,18 @@ local function emitEvent(kind, proposalId, teamA, teamB, attackerTeam)
     Spring.SetGameRulesParam(p .. 'attacker', attackerTeam or -1)
     Spring.SetGameRulesParam(p .. 'seq', eventSeq)
     Spring.SetGameRulesParam('parley_event', eventSeq)
+end
+
+-- The while-you-were-away digest (PLAN-persistence task 4b) — a SECOND, much
+-- coarser feed, deliberately not folded into the ring above. That one is a
+-- toast buffer a live client drains within a frame or two; this one is drained
+-- by the server every 2 s into a durable table and is read days later, so it
+-- carries the pact's KIND (the thing a returning player needs to know: a
+-- ceasefire lapsing and a tribute lapsing are different news) rather than a
+-- proposal id that will not resolve to anything by then.
+local function emitDigest(p, detail, team)
+    if not GG.WarLog then return end
+    GG.WarLog.Emit('pact', p.kind or 'pact', detail, team or -1)
 end
 
 -- ============================================================
@@ -398,9 +411,15 @@ local function resolveTerminal(p, state, attackerTeam)
     if state == 'fulfilled' then
         adjustTrust(p.fromTeam, p.toTeam, Trust.FULFILLED_DELTA)
         emitEvent('fulfil', p.id, p.fromTeam, p.toTeam, nil)
+        emitDigest(p, 'ended', p.fromTeam)
     elseif state == 'breached' then
         adjustTrust(p.fromTeam, p.toTeam, Trust.BREACHED_DELTA)
         emitEvent('breach', p.id, p.fromTeam, p.toTeam, attackerTeam)
+        -- The breaker is the fact worth keeping: `fromTeam` is whoever
+        -- PROPOSED the pact, which on a breach is as often the victim as the
+        -- culprit, and a digest line that names the wrong side is worse than
+        -- one that names none.
+        emitDigest(p, 'broken', attackerTeam or -1)
     end
     publish(p)
 end
@@ -450,7 +469,11 @@ local function applyAcceptTribute(p, frame)
     -- Not pre-escrowed (a 'to'-direction demand, or a system-originated
     -- 'pay' offer with no player to stake it): charge the payer's team pool
     -- directly at accept time.
-    if not GG.Authority.ChargeOrder(nil, payerTeam, nil, t.amount) then
+    -- 'tribute' (D62), not the order class ChargeOrder would infer from a nil
+    -- cmdID: this is the payer half of the pool-to-pool transfer whose payee
+    -- half is Awarded as 'tribute' on the next line, so it is a `move` on the
+    -- payer team and nothing is burned.
+    if not GG.Authority.ChargeOrder(nil, payerTeam, nil, t.amount, nil, 'tribute') then
         return false, 'insufficient_authority'
     end
     GG.Authority.Award({ team = payeeTeam }, t.amount, 'tribute')
@@ -561,7 +584,11 @@ function GG.Parley.Propose(fromTeam, fromPlayer, toTeam, kind, terms)
     -- game_authority.lua:276 — so nil is a legitimate call here, not a
     -- unit-order charge; "the free-list logic inverted" — proposing would
     -- otherwise be free like any non-order action, this imposes a cost).
-    if not GG.Authority.ChargeOrder(nil, fromTeam, fromPlayer, PROPOSE_FEE) then
+    -- 'proposal_fee' (D62): a fee genuinely leaves the economy, so this one IS
+    -- a burn — but it is not an order, and filing it under an order class both
+    -- mis-names it and left `proposal_fee` a dead entry in the taxonomy that
+    -- names it.
+    if not GG.Authority.ChargeOrder(nil, fromTeam, fromPlayer, PROPOSE_FEE, nil, 'proposal_fee') then
         return nil, 'insufficient_authority'
     end
 
@@ -625,6 +652,9 @@ function GG.Parley.Respond(id, byTeam, byPlayer, decision, extra)
         if not ok then return false, err end
         decLiveOutgoing(p.fromTeam)
         removeFromActive(p.id)
+        -- "Pacts made" for the digest is the ACCEPT, not the proposal: an
+        -- offer nobody took is not something that happened to the war.
+        emitDigest(p, 'made', p.fromTeam)
         if p.state == 'active' then
             addToActive(p.id)   -- stays live for enforcement/GameFrame ticks
         else
@@ -763,6 +793,83 @@ function gadget:RecvLuaMsg(msg, playerID)
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- A parley is a promise between two teams, and a promise is authored — nothing
+-- about the restored board says a ceasefire was ever offered, let alone
+-- accepted. The registry mirrors game_objectives' shape and so does this
+-- census; the differences are the interesting part.
+--
+-- CAPTURED — `proposals`, `nextId`, `archive`, `archiveRing`, `archiveSlot`,
+-- `activeList`, `activeIndex`, `pendingClear`. Same reasoning as objectives:
+-- `lookupProposal` reads across live + archive, the ring needs its cursor, a
+-- reset `nextId` re-issues a live id onto a live rulesParam prefix, and an id
+-- dropped from `pendingClear` never has its params cleared and never gets
+-- archived.
+--
+-- CAPTURED — `liveOutgoingCount`. It is E6's per-team cap on PENDING outgoing
+-- proposals, and it is a counter incremented and decremented against
+-- `activeList`, not read off it. Restore the proposals without it and either
+-- the cap reads zero (a team that has hit its limit may spam four more) or a
+-- decrement underflows a team permanently below it.
+--
+-- CAPTURED — `rejectCooldown`. Absolute frame stamps, keyed by team pair: the
+-- 2-minute cooldown after a rejection. Dropping it lets a team re-propose the
+-- instant a rollback lands, which turns a restore into a way to bypass E6.
+--
+-- CAPTURED — `trustLastDecay`. This is a per-pair cursor into a LAZY decay: the
+-- trust values themselves are game rules params (restored by the `gameRules`
+-- section), but `decayTrustTick` computes how many periods to apply from
+-- `frame - lastFrame`. A cursor left where the live process had it applies the
+-- decay between two different worlds' frames in a single tick — and unlike a
+-- Tick gate this one has no rewind clamp, so restoring backwards yields a
+-- negative period count and simply stops decaying that pair.
+--
+-- CAPTURED — `eventSeq`, for the same reason as authority's: the toast ring's
+-- slots are restored rulesParams, so a reset cursor overwrites the newest one.
+--
+-- DROPPED, and it is the one real drop here — `fireFrameOf`. It is keyed by
+-- projectileID, and in-flight projectiles are §7's named deliberate loss (they
+-- are not in the section table and never will be). Keeping the map would leave
+-- entries for projectiles that no longer exist, and ProjectileDestroyed can
+-- never fire for them, so it would leak one entry per in-flight round per
+-- restore forever. Cleared, not preserved — the E2 fire-frame rule can only
+-- speak about projectiles that exist.
+--
+-- RE-DERIVED, not captured — `PROPOSE_FEE` (a modoption, re-read in
+-- Initialize) and `proposeHooks`.
+function gadget:Save(state)
+    state.proposals = proposals
+    state.nextId = nextId
+    state.archive = archive
+    state.archiveRing = archiveRing
+    state.archiveSlot = archiveSlot
+    state.activeList = activeList
+    state.activeIndex = activeIndex
+    state.pendingClear = pendingClear
+    state.rejectCooldown = rejectCooldown
+    state.liveOutgoingCount = liveOutgoingCount
+    state.trustLastDecay = trustLastDecay
+    state.eventSeq = eventSeq
+end
+
+function gadget:Load(state)
+    proposals    = state.proposals or {}
+    nextId       = tonumber(state.nextId) or 1
+    archive      = state.archive or {}
+    archiveRing  = state.archiveRing or {}
+    archiveSlot  = tonumber(state.archiveSlot) or 0
+    activeList   = state.activeList or {}
+    activeIndex  = state.activeIndex or {}
+    pendingClear = state.pendingClear or {}
+    rejectCooldown    = state.rejectCooldown or {}
+    liveOutgoingCount = state.liveOutgoingCount or {}
+    trustLastDecay    = state.trustLastDecay or {}
+    eventSeq     = tonumber(state.eventSeq) or 0
+    -- See the census: the projectiles these ids name are gone by construction.
+    fireFrameOf = {}
+end
+
 function gadget:GameFrame(frame)
     -- Snapshot: resolution mutates activeList mid-iteration.
     local snapshot = {}
@@ -784,7 +891,9 @@ function gadget:GameFrame(frame)
                     resolveTerminal(p, 'fulfilled', nil)
                 elseif p.data and p.data.nextPayFrame and frame >= p.data.nextPayFrame then
                     -- Recurring tribute payment tick.
-                    if GG.Authority.ChargeOrder(nil, p.data.payerTeam, nil, p.terms.amount) then
+                    -- 'tribute' (D62) — the payer half of the recurring
+                    -- transfer, same argument as the one-shot site above.
+                    if GG.Authority.ChargeOrder(nil, p.data.payerTeam, nil, p.terms.amount, nil, 'tribute') then
                         GG.Authority.Award({ team = p.data.payeeTeam }, p.terms.amount, 'tribute')
                         p.data.nextPayFrame = frame + TRIBUTE_PAY_PERIOD_FRAMES
                     else

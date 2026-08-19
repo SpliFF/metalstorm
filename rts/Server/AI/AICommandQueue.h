@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /// What a queued AI command actually is. The AI's *only* write surface is
@@ -22,6 +23,47 @@ enum class AICommandKind : uint8_t {
     CreateGroup    = 1,   // org-group create  → OrgGroupManager::Create
     IssueDirective = 2,   // macro directive   → DirectiveManager::Create (+ charge)
     SetPosture     = 3,   // group posture     → OrgGroupManager::SetPosture
+    LuaMsg         = 4,   // opaque game-Lua message → luaRules->RecvLuaMsg (I1/SG1)
+};
+
+/// Name of an AICommandKind, for logs and the `/api/journal` audit rows.
+/// Lives beside the enum so a new kind has one place to be named; an unknown
+/// value reports itself rather than an empty string, because the number it
+/// carries is the only clue an operator would have.
+inline const char* AICommandKindName(AICommandKind k) {
+    switch (k) {
+        case AICommandKind::UnitCommand:    return "unit-command";
+        case AICommandKind::CreateGroup:    return "create-group";
+        case AICommandKind::IssueDirective: return "issue-directive";
+        case AICommandKind::SetPosture:     return "set-posture";
+        case AICommandKind::LuaMsg:         return "lua-msg";
+    }
+    return "unknown";
+}
+
+/// I1/SG1 clamps for the LuaMsg verb. Structural backstops below the planner
+/// (PLAN-ai-synced-write §2.4, the §8 E6 philosophy): a defeated or buggy
+/// planner must not be able to flood the journal or the synced Lua state.
+/// Both are engine-side, so no game-Lua change can lift them.
+inline constexpr size_t kAILuaMsgMaxBytes   = 2048;  // rejected at push
+inline constexpr int    kAILuaMsgPerDrain   = 16;    // per AI player, per batch
+
+/// Per-drain LuaMsg budget. Lives here (not inside the drain loop) so the
+/// clamp is unit-testable without a sim, and so the live drain and the replay
+/// feed — which both run through StateStreamer::ApplyAICommands — count with
+/// one implementation and therefore drop the same commands in both.
+class AILuaMsgDrainBudget {
+public:
+    /// True if this player may deliver one more LuaMsg in this batch.
+    bool TryConsume(int playerId) {
+        int& used = perPlayer[playerId];
+        if (used >= kAILuaMsgPerDrain) return false;
+        ++used;
+        return true;
+    }
+
+private:
+    std::unordered_map<int, int> perPlayer;
 };
 
 /// A command from an AI to be applied to the sim on the sim thread. The drain
@@ -69,8 +111,10 @@ struct AICommand {
     // Optional area condition (within-circle) so an area-scoped directive draws
     // only squads near its target; 0 radius = wildcard (draw any idle squad).
     float    withinX = 0.0f, withinZ = 0.0f, withinRadius = 0.0f;
-    // SetPosture payload (also reused for a group name on CreateGroup):
-    std::string text;                      // posture JSON | group name
+    // SetPosture payload (also reused for a group name on CreateGroup, and for
+    // the LuaMsg verb's opaque game-Lua payload — the engine never parses it;
+    // the parley/wire.lua codec and the gadget handlers own that schema):
+    std::string text;                      // posture JSON | group name | LuaMsg bytes
 };
 
 class AICommandQueue {

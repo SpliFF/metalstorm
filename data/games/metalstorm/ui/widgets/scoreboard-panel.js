@@ -24,6 +24,7 @@
 // showing them. Rows are grouped by team so allies read as a block.
 
 import { readScoreboard, scoreboardRoster } from '../lib/scoreboard.js';
+import { formatAuthority } from '../lib/authority-format.js';
 
 let warnedNoRoster = false;
 
@@ -116,8 +117,11 @@ export default {
       items.push(
         `<tr class="ms-score-row${self}">` +
         `<td class="ms-score-player">${this._label(e)}</td>` +
-        `<td class="ms-score-earned">${r.earned}</td>` +
-        `<td class="ms-score-spent">${r.spent}</td>` +
+        // Earn/Spend are accumulated authority, so they carry the same float32
+        // debris the bar did — and a 12-character cell in a 4-column table is
+        // where it is least survivable (D49).
+        `<td class="ms-score-earned">${formatAuthority(r.earned)}</td>` +
+        `<td class="ms-score-spent">${formatAuthority(r.spent)}</td>` +
         `<td class="ms-score-objectives">${r.objectives}</td>` +
         `</tr>`,
       );

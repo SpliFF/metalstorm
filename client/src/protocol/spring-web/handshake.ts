@@ -36,8 +36,15 @@ clientVersion(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+schemaHash():string|null
+schemaHash(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+schemaHash(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startHandshake(builder:flatbuffers.Builder) {
-  builder.startObject(2);
+  builder.startObject(3);
 }
 
 static addProtocolVersion(builder:flatbuffers.Builder, protocolVersion:number) {
@@ -48,22 +55,28 @@ static addClientVersion(builder:flatbuffers.Builder, clientVersionOffset:flatbuf
   builder.addFieldOffset(1, clientVersionOffset, 0);
 }
 
+static addSchemaHash(builder:flatbuffers.Builder, schemaHashOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(2, schemaHashOffset, 0);
+}
+
 static endHandshake(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createHandshake(builder:flatbuffers.Builder, protocolVersion:number, clientVersionOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createHandshake(builder:flatbuffers.Builder, protocolVersion:number, clientVersionOffset:flatbuffers.Offset, schemaHashOffset:flatbuffers.Offset):flatbuffers.Offset {
   Handshake.startHandshake(builder);
   Handshake.addProtocolVersion(builder, protocolVersion);
   Handshake.addClientVersion(builder, clientVersionOffset);
+  Handshake.addSchemaHash(builder, schemaHashOffset);
   return Handshake.endHandshake(builder);
 }
 
 unpack(): HandshakeT {
   return new HandshakeT(
     this.protocolVersion(),
-    this.clientVersion()
+    this.clientVersion(),
+    this.schemaHash()
   );
 }
 
@@ -71,22 +84,26 @@ unpack(): HandshakeT {
 unpackTo(_o: HandshakeT): void {
   _o.protocolVersion = this.protocolVersion();
   _o.clientVersion = this.clientVersion();
+  _o.schemaHash = this.schemaHash();
 }
 }
 
 export class HandshakeT implements flatbuffers.IGeneratedObject {
 constructor(
   public protocolVersion: number = 0,
-  public clientVersion: string|Uint8Array|null = null
+  public clientVersion: string|Uint8Array|null = null,
+  public schemaHash: string|Uint8Array|null = null
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const clientVersion = (this.clientVersion !== null ? builder.createString(this.clientVersion!) : 0);
+  const schemaHash = (this.schemaHash !== null ? builder.createString(this.schemaHash!) : 0);
 
   return Handshake.createHandshake(builder,
     this.protocolVersion,
-    clientVersion
+    clientVersion,
+    schemaHash
   );
 }
 }

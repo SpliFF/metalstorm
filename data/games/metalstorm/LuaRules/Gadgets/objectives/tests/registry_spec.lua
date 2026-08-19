@@ -7,11 +7,73 @@ package.path = './?.lua;' .. package.path
 
 local mock = require('tests.spring_mock')
 
+-- D15 regression. The evaluator was gated on `frame % EVAL_PERIOD == 0`, and on
+-- a server that logs `sim fell behind, skipped N ticks` the engine never calls
+-- gadget:GameFrame for the skipped frames — they do not arrive late. Measured at
+-- 8x sim: a control objective accumulated ZERO hold progress over 40 000 frames.
+-- Both cases below deliver only frames that are NOT multiples of 90, which is
+-- what a stalled server does; under the old gate the objective never evaluated
+-- once and the war could not be won.
+describe("the eval tick survives skipped frames (D15)", function()
+    local function heldRegion()
+        local world, gadgetObj = mock.new()
+        world.frame = 0
+        world.regionOwner.r1 = 1
+        world.keyAt = function() return 'r1' end
+        world.setUnit(10, { x = 0, z = 0, team = 1 })
+        local id = GG.Objectives.Create({
+            type = 'control', forTeam = 1, reward = 50,
+            params = { regionKey = 'r1', holdFrames = 180 },
+        })
+        return world, gadgetObj, id
+    end
+
+    it("evaluates and completes when no exact period boundary is ever delivered", function()
+        local world, gadgetObj, id = heldRegion()
+        for _, f in ipairs({ 91, 137, 182, 271, 293 }) do
+            world.frame = f
+            gadgetObj:GameFrame(f)
+        end
+        assert.are.equal('complete', world.rp(id, 'state'))
+        assert.are.equal(1, #world.awards)
+    end)
+
+    it("banks the whole hold across one multi-period stall", function()
+        local world, gadgetObj, id = heldRegion()
+        world.frame = 91
+        gadgetObj:GameFrame(91)                 -- clock starts
+        assert.are.equal('active', world.rp(id, 'state'))
+        -- 3 509 frames in one delivered frame: D57's accrual banks the elapsed
+        -- interval, so the 180-frame hold is long since satisfied.
+        world.frame = 3600
+        gadgetObj:GameFrame(3600)
+        assert.are.equal('complete', world.rp(id, 'state'))
+    end)
+
+    it("does not evaluate more than once per period when frames are dense", function()
+        local world, gadgetObj = heldRegion()
+        local before = world.frame
+        -- 89 consecutive frames inside one period must yield no eval at all,
+        -- which is what keeps this a cadence fix and not a per-frame evaluator.
+        for f = 1, 89 do
+            world.frame = f
+            gadgetObj:GameFrame(f)
+        end
+        assert.are.equal(0, #world.awards)
+        assert.is_number(before)
+    end)
+end)
+
 describe("control objective: full lifecycle to award", function()
     it("completes on sustained hold and awards the team pool (zero participation)", function()
         local world, gadgetObj = mock.new()
         world.frame = 0
         world.regionOwner.r1 = 1
+        -- D57: the clock accrues only while the owner occupies the region, so
+        -- a garrison is now part of the fixture. No `last_commander` on it —
+        -- that is what makes this the zero-participation case.
+        world.keyAt = function() return 'r1' end
+        world.setUnit(10, { x = 0, z = 0, team = 1 })
         local id = GG.Objectives.Create({
             type = 'control', forTeam = 1, reward = 50,
             params = { regionKey = 'r1', holdFrames = 180 },
@@ -70,6 +132,7 @@ describe("control objective: full lifecycle to award", function()
         world.setUnit(20, { x = 0, z = 0, team = 2 })   -- enemy unit, not team 1
         world.setLastCommander(20, 999)
         world.setPlayer(999, 2, true)
+        world.setUnit(21, { x = 0, z = 0, team = 1 })   -- D57: the owner's own garrison
 
         local id = GG.Objectives.Create({
             type = 'control', forTeam = 1, reward = 40,
@@ -228,6 +291,38 @@ describe("phase chaining (§4.7)", function()
         world.kill(80)
         gadgetObj:UnitDestroyed(80, nil, 3, nil, nil, nil)   -- no attacker -> child expires, not completes
         assert.are.equal('failed', world.rp(parentId, 'state'))
+    end)
+
+    -- S4/D3. `parentId` is forwarded verbatim from scenario files now, so a
+    -- child can name a parent that was created WITHOUT `phases` — that parent
+    -- has no phaseDefs/phaseIdx/phaseChildren, and every line of the advance
+    -- path used to raise on nil. The error surfaced inside resolveObjective,
+    -- which gadgetHandler answers by removing this gadget: one mis-authored
+    -- scenario field killed the entire objectives evaluator, silently, for the
+    -- rest of the war. The parent must simply take no part.
+    it("ignores a child naming a parent that has no phases at all", function()
+        local world, gadgetObj = mock.new()
+        world.frame = 0
+        world.regionOwner.r1 = 1
+        world.setUnit(85, { x = 0, z = 0, team = 3 })
+
+        local plainId = GG.Objectives.Create({
+            type = 'control', forTeam = 1, reward = 100,
+            params = { regionKey = 'r1', holdFrames = 999999 },
+        })
+        local childId = GG.Objectives.Create({
+            type = 'kill', forTeam = 1, reward = 10, parentId = plainId,
+            params = { targetUnitID = 85 },
+        })
+        assert.is_number(plainId)
+        assert.is_number(childId)
+
+        world.kill(85)
+        gadgetObj:UnitDestroyed(85, nil, 3, nil, nil, 1)
+
+        assert.are.equal('complete', world.rp(childId, 'state'))
+        assert.are.equal('active', world.rp(plainId, 'state'))
+        assert.is_nil(world.rp(plainId, 'phase'))
     end)
 end)
 

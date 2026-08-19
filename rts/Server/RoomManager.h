@@ -10,10 +10,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#include "WarSides.h"
 
 struct sqlite3;
 
@@ -28,6 +33,43 @@ enum class ERoomState : uint8_t {
     Ended,
 };
 
+/// What KIND of session a room hosts (PLAN-metalstorm-lobby.md §1, task 1).
+///
+/// Two kinds coexist. `Skirmish` is the classic bounded match this engine was
+/// built around: fill a roster, ready-check, launch, and GameStart waits until
+/// every rostered human has connected. `PersistentWar` is Metalstorm's model:
+/// the war is already running, players trickle in and out, and the session may
+/// outlive any individual player — so it starts with whatever seed exists and
+/// never waits for a roster.
+///
+/// Deliberately NOT the same field as `GameRoom::persistent`, even though a
+/// persistent war is always persistent. `persistent` is a *reaping* policy
+/// ("don't delete this room when the last human leaves"), and it is also used
+/// for AI-testing rooms that are still ordinary skirmishes. Folding the two
+/// together would silently give every such room the no-roster-wait behaviour.
+/// The implication runs one way only and CreateRoom enforces it:
+/// PersistentWar ⇒ persistent.
+enum class SessionKind : uint8_t {
+    Skirmish = 0,
+    PersistentWar,
+};
+
+/// Wire/CLI spelling of a session kind. This exact string crosses three
+/// boundaries — the room JSON, `POST /api/rooms`, and spring-server's
+/// `--session-kind` flag — so it has one encoder and one decoder.
+inline const char* SessionKindToString(SessionKind k) {
+    return k == SessionKind::PersistentWar ? "persistent" : "skirmish";
+}
+
+/// Decode a session-kind spelling. Returns nullopt for anything unrecognised —
+/// callers reject rather than defaulting, because silently downgrading an
+/// unknown kind to Skirmish would make a typo'd war wait forever for a roster.
+inline std::optional<SessionKind> SessionKindFromString(const std::string& s) {
+    if (s == "skirmish") return SessionKind::Skirmish;
+    if (s == "persistent" || s == "persistent_war") return SessionKind::PersistentWar;
+    return std::nullopt;
+}
+
 struct RoomPlayer {
     uint32_t playerId = 0;
     ClientID clientId = 0;
@@ -40,6 +82,37 @@ struct RoomPlayer {
     /// array). -1 means "unassigned" — the lobby auto-fills on
     /// game start if it's still -1 at that point.
     int8_t startPos = -1;
+    /// The account's permanent faction (`users.faction_id`, e.g.
+    /// "compact" / "union"), handed in by the caller at join time —
+    /// RoomManager never touches the database. Empty for accounts that
+    /// have none: dev/test auto-registrations, `/api/rooms/direct`
+    /// manifest accounts, and any pre-faction legacy account.
+    ///
+    /// In-memory only, deliberately: it is a property of the ACCOUNT, not
+    /// of the membership, so persisting a copy in `room_members` would
+    /// create a second version of the truth that could go stale against
+    /// an admin override. A lobby restart restores the seated `team`
+    /// (which is what the room needs) and leaves this empty.
+    ///
+    /// Read by the seating rule — see GameRoom::TeamForFaction
+    /// (PLAN-endtoend.md D40).
+    std::string factionId;
+
+    /// This account asked to WATCH this war rather than fight in it
+    /// (PLAN-metalstorm-lobby.md §3, task 6).
+    ///
+    /// Distinct from `isSpectator`, and the distinction is the whole point:
+    /// for a room that is already running, `isSpectator` is set on every new
+    /// arrival because the LOBBY does not seat them — the game server does,
+    /// by faction, on auth (task 2). So `isSpectator` on a war means "not
+    /// seated here", which is true of every fighter in it, and reading it as
+    /// an intent would put the entire war in the stands.
+    ///
+    /// Persisted, unlike `factionId` above, because it IS a property of the
+    /// membership rather than of the account, and because the process that
+    /// has to honour it — the game server — can only reach it through the
+    /// shared db.
+    bool spectateOnly = false;
 };
 
 /// An AI player slot in a room. Populated by the host via
@@ -91,6 +164,13 @@ struct GameRoom {
     /// AI testing, persistent worlds, etc.
     bool persistent = false;
 
+    /// Skirmish (default) or persistent war — see SessionKind. Decides
+    /// whether the spawned game server waits for its launch roster before
+    /// firing GameStart, and is handed to spring-server as `--session-kind`.
+    /// A PersistentWar room always has `persistent = true` (CreateRoom
+    /// enforces it); the reverse does not hold.
+    SessionKind sessionKind = SessionKind::Skirmish;
+
     std::vector<RoomPlayer> players;
 
     /// AI players slotted into this room by the host. Empty until
@@ -124,18 +204,52 @@ struct GameRoom {
         return (it != originalRoster.end()) ? static_cast<int>(it->second) : -1;
     }
 
-    /// The team indices a slot in this room may be seated on, in the order
-    /// the lobby offers them.
+    /// The sides this room offers, as `(faction, team)` in the order the
+    /// lobby offers them.
     ///
     /// Read out of the `war_sides` modoption
     /// (`"<faction>:<team>[,<faction>:<team>…]"`, written once by the lobby's
     /// applyRoomScenario from the room's scenario — PLAN-metalstorm-wars.md
-    /// §7.4). RoomManager parses only the integers and stays entirely
-    /// scenario-agnostic: as far as it is concerned this is just "which team
-    /// indices does this room use".
+    /// §7.4). RoomManager stays entirely scenario-agnostic: as far as it is
+    /// concerned this is just "which sides does this room use, and on which
+    /// team index does each sit".
     ///
-    /// `{0, 1}` when the modoption is absent or unparseable, which is the
-    /// legacy two-team room every non-scenario game (Paper Tanks, ZK) keeps.
+    /// Empty when the modoption is absent or unparseable — see SlotTeams()
+    /// for the legacy two-team fallback, which is deliberately NOT applied
+    /// here: a legacy room's `{0, 1}` has no faction names, and inventing
+    /// some would let the faction seating rule (TeamForFaction) fire on a
+    /// room that never declared a side.
+    /// The parse itself lives in WarSides.h so the *game server* — which has
+    /// no room row, only the modoption it was launched with — resolves a
+    /// faction to the same team this does (task 2, dynamic join).
+    WarSides SideTeams() const {
+        const auto it = modOptions.find("war_sides");
+        if (it == modOptions.end())
+            return {};
+        return ParseWarSides(it->second);
+    }
+
+    /// The per-side human capacities this room declares, as
+    /// `(faction, capacity)` (PLAN-metalstorm-lobby.md §6, task 7).
+    ///
+    /// Read out of the `war_side_capacities` modoption, written beside
+    /// `war_sides` by the same applyWarSides. Empty when the room declares
+    /// none — every consumer then falls back to the war's uniform capacity,
+    /// which is the behaviour every war had before task 7. Same reason the
+    /// parse lives in WarSides.h: the game server has the modoption and no
+    /// room row, and the two must resolve a side to the same number.
+    WarSideCapacities SideCapacities() const {
+        const auto it = modOptions.find("war_side_capacities");
+        if (it == modOptions.end())
+            return {};
+        return ParseWarSideCapacities(it->second);
+    }
+
+    /// The team indices a slot in this room may be seated on, in the order
+    /// the lobby offers them — SideTeams() with the faction names dropped.
+    ///
+    /// `{0, 1}` when the room declares no parseable side, which is the legacy
+    /// two-team room every non-scenario game (Paper Tanks, ZK) keeps.
     ///
     /// This is what a slot is *offered*, not a whitelist — SetTeam and
     /// AddAISlot still accept anything, because the direct-start manifests
@@ -144,49 +258,37 @@ struct GameRoom {
     /// findable at all.
     std::vector<uint8_t> SlotTeams() const {
         std::vector<uint8_t> out;
-        const auto it = modOptions.find("war_sides");
-        if (it != modOptions.end()) {
-            size_t pos = 0;
-            const std::string& spec = it->second;
-            while (pos < spec.size()) {
-                const size_t comma = spec.find(',', pos);
-                const std::string entry = spec.substr(
-                    pos, comma == std::string::npos ? std::string::npos
-                                                    : comma - pos);
-                // `colon > 0` — an entry with no faction name is not a side,
-                // however parseable its number looks.
-                const size_t colon = entry.find(':');
-                if (colon != std::string::npos && colon > 0 &&
-                    colon + 1 < entry.size()) {
-                    const std::string num = entry.substr(colon + 1);
-                    // Reject anything non-numeric rather than let atoi's 0
-                    // quietly seat two sides on the same team.
-                    if (!num.empty() &&
-                        num.find_first_not_of("0123456789") ==
-                            std::string::npos) {
-                        const int team = std::atoi(num.c_str());
-                        if (team >= 0 && team <= 255) {
-                            const auto t = static_cast<uint8_t>(team);
-                            if (std::find(out.begin(), out.end(), t) ==
-                                out.end())
-                                out.push_back(t);
-                        }
-                    }
-                }
-                if (comma == std::string::npos)
-                    break;
-                pos = comma + 1;
-            }
-        }
+        for (const auto& [faction, team] : SideTeams())
+            out.push_back(team);
         if (out.empty())
             return {0, 1};
         return out;
+    }
+
+    /// The team a given faction is seated on in this room, or nullopt if this
+    /// war declares no side for it (including every legacy no-scenario room,
+    /// whose sides have no names at all).
+    ///
+    /// This is the read that makes `users.faction_id` mean something: an
+    /// account's faction is a permanent allegiance, so a player must never be
+    /// seated against it by a balancer (PLAN-endtoend.md D40,
+    /// PLAN-metalstorm-lobby.md §2.3). An empty `factionId` — a dev account, a
+    /// `/api/rooms/direct` manifest account, a pre-faction legacy account —
+    /// never matches, which is what keeps those paths on the old behaviour.
+    std::optional<uint8_t> TeamForFaction(const std::string& factionId) const {
+        return TeamForFactionIn(SideTeams(), factionId);
     }
 
     // --- Helpers ---
 
     RoomPlayer* FindPlayer(uint32_t playerId) {
         for (auto& p : players)
+            if (p.playerId == playerId) return &p;
+        return nullptr;
+    }
+
+    const RoomPlayer* FindPlayer(uint32_t playerId) const {
+        for (const auto& p : players)
             if (p.playerId == playerId) return &p;
         return nullptr;
     }
@@ -208,6 +310,36 @@ struct GameRoom {
         for (const auto& p : players)
             if (!p.isSpectator && !p.ready) return false;
         return !players.empty();
+    }
+
+    /// Why RoomManager::StartGame would refuse `requesterId`, as a sentence
+    /// for the player. Empty string means it would not refuse.
+    ///
+    /// StartGame folds four distinct refusals into one bool, and the lobby
+    /// route used to answer all of them with a flat "cannot start game" that
+    /// the client then discarded — so a refused Start Game was silent in both
+    /// directions (PLAN-endtoend.md D41). The commonest case is the host's
+    /// own Ready: AllReady() counts the host like anyone else, so a host who
+    /// seats an AI and presses Start is refused with no explanation.
+    ///
+    /// Kept beside AllReady() rather than in the route so the conditions
+    /// cannot drift apart from the ones StartGame actually tests.
+    std::string StartRefusalReason(uint32_t requesterId) const {
+        if (hostPlayerId != requesterId)
+            return "only the host can start the game";
+        if (state != ERoomState::Filling)
+            return "this room has already started";
+        if (players.empty())
+            return "the room is empty";
+        std::string unready;
+        for (const auto& p : players) {
+            if (p.isSpectator || p.ready) continue;
+            if (!unready.empty()) unready += ", ";
+            unready += p.username;
+        }
+        if (!unready.empty())
+            return "waiting for players to ready up: " + unready;
+        return "";
     }
 
     int PlayerCount() const { return static_cast<int>(players.size()); }
@@ -246,12 +378,22 @@ public:
                         const std::string& password,
                         uint32_t hostPlayerId, ClientID hostClientId,
                         const std::string& hostUsername,
-                        bool persistent = false);
+                        bool persistent = false,
+                        const std::string& hostFactionId = "",
+                        SessionKind sessionKind = SessionKind::Skirmish);
 
     /// Join a room. Returns true on success.
+    ///
+    /// `factionId` is the joining account's permanent faction
+    /// (`users.faction_id`); when the room declares a side for it the joiner
+    /// is seated there instead of being auto-balanced (D40). Empty — the
+    /// default — is "this account has no faction", which keeps the pure
+    /// balance behaviour for dev/manifest accounts and legacy rooms. The
+    /// caller supplies it: RoomManager never reads the database.
     bool JoinRoom(uint32_t roomId, uint32_t playerId, ClientID clientId,
                   const std::string& username, const std::string& password,
-                  bool asSpectator = false);
+                  bool asSpectator = false,
+                  const std::string& factionId = "");
 
     /// Leave a room. Returns what happened so the caller can take
     /// appropriate action (e.g. kill game server on Abandoned).
@@ -395,13 +537,51 @@ public:
     /// Remove a client from any room they're in.
     void RemoveClient(ClientID clientId);
 
+    /// Delete every war-keyed row whose room no longer exists (PLAN-persistence
+    /// task 4e). `DeleteRoomFromDb` keeps the rule from here on; this is the
+    /// retroactive half, for the rows deleted rooms already left behind — and
+    /// they are not a leak but an inheritance, because the id counter climbs
+    /// back through their numbers. Call at lobby startup, after
+    /// `LoadFromDatabase` (the `rooms` table is the authority for what exists,
+    /// so it must be loaded and current) and after every table's `EnsureTable`.
+    /// Returns the number of orphaned room ids purged.
+    int PurgeOrphanedWarRows();
+
 private:
+    /// Run `body` as one `BEGIN IMMEDIATE … COMMIT` on `db`, retried as a
+    /// whole when a competing writer outlasts the busy timeout (D35's
+    /// residual; see `SqliteThreading.h` for the policy constants).
+    ///
+    /// Two properties the old hand-rolled `BEGIN`/`COMMIT` pairs did not have:
+    ///
+    ///  - **It joins an open transaction instead of starting a second one.**
+    ///    `PersistRoomLocked` calls all three `Persist*Locked` helpers, and
+    ///    every one of them used to open its own transaction — so persisting
+    ///    one room took the shared DB's single write lock *four* times, gave
+    ///    a reader four windows to observe a half-written room, and gave the
+    ///    contention four independent chances to drop a different piece of it.
+    ///    Nested calls now run inline and commit with the outermost one.
+    ///  - **It checks every return code.** A failed `COMMIT` used to leave the
+    ///    transaction open on a handle shared with the rest of the lobby, so
+    ///    the *next* writer's `BEGIN` failed with "cannot start a transaction
+    ///    within a transaction" — one lost write cascading into all of them.
+    ///
+    /// `body` returns an sqlite result code: `SQLITE_OK` to commit, a busy
+    /// code to have the whole transaction retried, anything else to roll back
+    /// and give up. `what` names the write in the failure log.
+    bool WriteTransactionLocked(const char* what,
+                               const std::function<int()>& body);
+
     // --- SQLite write-through helpers (no-op when db is null) ---
+    // The Persist*Locked helpers return an sqlite result code (SQLITE_OK on
+    // success) so they can compose inside one transaction; the many call
+    // sites that persist one table on its own ignore it, exactly as before.
     void PersistRoomLocked(const GameRoom& room);
+    int  PersistRoomRowLocked(const GameRoom& room);
     void DeleteRoomFromDb(uint32_t roomId);
-    void PersistMembersLocked(const GameRoom& room);
-    void PersistAISlotsLocked(const GameRoom& room);
-    void PersistModOptionsLocked(const GameRoom& room);
+    int  PersistMembersLocked(const GameRoom& room);
+    int  PersistAISlotsLocked(const GameRoom& room);
+    int  PersistModOptionsLocked(const GameRoom& room);
 
     std::recursive_mutex mutex;
     std::unordered_map<uint32_t, GameRoom> rooms;

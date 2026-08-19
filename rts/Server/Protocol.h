@@ -10,6 +10,8 @@
 #pragma once
 
 #include "protocol_generated.h"
+#include "HandshakePolicy.h"
+#include "ClientFrame.h"
 #include "CombatEventCollector.h"
 #include "DecalEventCollector.h"
 #include "MusicStateTracker.h"
@@ -43,13 +45,9 @@
 
 namespace Protocol {
 
-/// Wire-protocol version negotiated in the Handshake (C1). Bump on any
-/// breaking change to the FlatBuffers schema or binary envelope formats; the
-/// server rejects clients that send a different value (a stale cached JS
-/// bundle against a changed schema is exactly the failure this prevents).
-/// Additive, default-valued FlatBuffers fields do NOT require a bump.
-/// Keep in sync with PROTOCOL_VERSION in client/src/core/connection.ts.
-constexpr uint16_t CURRENT_PROTOCOL_VERSION = 1;
+// CURRENT_PROTOCOL_VERSION and the Handshake admission rule live in
+// HandshakePolicy.h — a dependency-free header the tests can include, since
+// nothing that includes this one can be stood up in a doctest.
 
 constexpr uint8_t ENVELOPE_FLATBUFFERS = 0x01;
 constexpr uint8_t ENVELOPE_ENTITY_STATE = 0x02;
@@ -97,17 +95,16 @@ inline std::vector<uint8_t> BuildServerMessage(
 }
 
 /// Parse a framed ClientMessage. Returns nullptr if invalid.
+///
+/// Delegates to `wireframe::ParseClientMessage` (Server/ClientFrame.h) — the
+/// one decoder. See that header for why there is only one: the replay server's
+/// inbound gate had its own copy and got the envelope byte wrong.
 inline const SpringWeb::ClientMessage* ParseClientMessage(
     const uint8_t* data, size_t len)
 {
-    if (len < 2 || data[0] != ENVELOPE_FLATBUFFERS)
-        return nullptr;
-
-    auto verifier = flatbuffers::Verifier(data + 1, len - 1);
-    if (!SpringWeb::VerifyClientMessageBuffer(verifier))
-        return nullptr;
-
-    return SpringWeb::GetClientMessage(data + 1);
+    static_assert(ENVELOPE_FLATBUFFERS == wireframe::kEnvelopeFlatBuffers,
+                  "the framing constant must have one value");
+    return wireframe::ParseClientMessage(data, len);
 }
 
 /// Build a Pong response.
@@ -230,6 +227,20 @@ inline std::vector<uint8_t> BuildConsoleResponse(
     auto resp = SpringWeb::CreateConsoleResponseDirect(fbb,
         requestId, scope.c_str(), success, output.c_str(), level);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_ConsoleResponse, resp.Union());
+}
+
+/// Build a ClientEvalRequest (server → browser; PLAN-test-automation P7).
+/// `target` is one of "js" | "worker" | "widgets" | "test"; the client
+/// answers with a ClientEvalResponse carrying the same requestId.
+inline std::vector<uint8_t> BuildClientEvalRequest(
+    uint32_t requestId,
+    const std::string& target,
+    const std::string& code)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + code.size());
+    auto req = SpringWeb::CreateClientEvalRequestDirect(fbb,
+        requestId, target.c_str(), code.c_str());
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ClientEvalRequest, req.Union());
 }
 
 /// Build a GameStarted message (game server → lobby).
@@ -1411,7 +1422,16 @@ inline std::vector<uint8_t> BuildAIListUpdate(const std::vector<AIInfoT>& ais) {
 /// caller's GameInfo type so we can pass in either the lobby's
 /// GameDiscovery::GameInfo directly or a thin proxy struct —
 /// anything with `id`, `displayName`, `description`, `version`,
-/// `lighting` string members works.
+/// `lighting` string members plus `archived`/`archivedReason` works.
+///
+/// This carries `archived` (PLAN-endtoend.md D26) even though nothing
+/// currently calls this builder — the live lobby serves its game list
+/// over `GET /api/games` and no caller of BuildGameListUpdate exists.
+/// The client still has a GameListUpdate handler, so leaving the flag
+/// off this path would make the two ingestions disagree the moment
+/// anything sent the message: one would show an archived game as
+/// playable. Two ingestion paths where only one can see a field is
+/// exactly the defect shape D59 was (`applyParams` vs `pull()`).
 template<typename GameInfoT>
 inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& games) {
     flatbuffers::FlatBufferBuilder fbb(512);
@@ -1423,8 +1443,10 @@ inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& ga
         auto descOff = fbb.CreateString(g.description);
         auto verOff = fbb.CreateString(g.version);
         auto lightOff = fbb.CreateString(g.lighting);
+        auto archReasonOff = fbb.CreateString(g.archivedReason);
         offsets.push_back(SpringWeb::CreateLobbyGameInfo(
-            fbb, idOff, nameOff, descOff, verOff, lightOff));
+            fbb, idOff, nameOff, descOff, verOff, lightOff, g.archived,
+            archReasonOff));
     }
     auto gamesVec = fbb.CreateVector(offsets);
     auto update = SpringWeb::CreateGameListUpdate(fbb, gamesVec);
@@ -1597,6 +1619,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     db.add_detail_normal_tex(detNrmUrl);
     db.add_splat_scales(scalesOff);
     db.add_splat_mults(multsOff);
+    db.add_splat_detail_normal_diffuse_alpha(m.decals.splatDetailNormalDiffuseAlpha);
     auto decalsOff = db.Finish();
 
     // --- Water ---
@@ -1615,6 +1638,12 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     // --- Texture URLs (lobby HTTP) ---
     auto miniUrl = fbb.CreateString("/api/maps/data/" + m.id + "/minimap.ktx2");
     auto tilesUrl = fbb.CreateString("/api/maps/data/" + m.id + "/tiles.ktx2");
+    // Map-space ground albedo (PLAN-maps §2n ruling 1). Empty for a map that
+    // has none, which leaves the client on `tiles_url` — and for a map that
+    // has one, MapProcessor did not extract `tiles.ktx2` at all.
+    auto groundUrl = m.groundTex.empty()
+        ? fbb.CreateString("")
+        : fbb.CreateString("/api/maps/data/" + m.id + "/" + m.groundTex);
     auto baseUrl = fbb.CreateString("/api/maps/data/" + m.id);
     auto sourceUrl = fbb.CreateString("/api/maps/data/" + m.id);
 
@@ -1649,6 +1678,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     mdb.add_decals(decalsOff);
     mdb.add_water(waterOff);
     mdb.add_widgets(widgetsOff);
+    mdb.add_ground_tex_url(groundUrl);
     mdb.add_has_lua_gaia(m.hasLuaGaia);
     auto data = mdb.Finish();
 

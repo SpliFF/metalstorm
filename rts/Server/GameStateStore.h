@@ -147,7 +147,13 @@ public:
 
 /// Bumped whenever the header layout below changes. A blob with a different
 /// version is refused, never reinterpreted.
-inline constexpr uint16_t kBlobVersion = 1;
+///
+/// v2 (PLAN-def-reconciliation task 1) appended `defsHash`. A v1 blob is
+/// therefore refused by this binary — deliberately, and it costs nothing that
+/// matters: v1 blobs also carry a different LayoutHash (the payload gained the
+/// `defNames` section in the same milestone), so E1 would refuse them one
+/// field later anyway.
+inline constexpr uint16_t kBlobVersion = 2;
 
 /// Payload codec, stored in the header's `flags` field so the choice is
 /// per-blob and future codecs decode alongside old ones.
@@ -166,10 +172,25 @@ struct BlobMeta {
     uint64_t rawSize = 0;      ///< payload size before compression
     Codec    codec = Codec::Deflate;
     uint8_t  rawSha256[32]{};  ///< sha256 of the *uncompressed* payload (E2)
+    /// Identity of the def vocabulary this snapshot was taken under
+    /// (PLAN-def-reconciliation task 1). **Deliberately NOT an E1 hash**: a
+    /// defs change is reported, never refused — §3 "reconcile is not
+    /// optional" means a snapshot taken before a balance patch has to reach
+    /// the restore path, or resuming a campaign across a patch is impossible.
+    /// DecodeBlob therefore returns what the blob carries and compares
+    /// nothing. 0 means "not recorded" (a snapshot taken before the key
+    /// existed, i.e. early in boot).
+    uint64_t defsHash = 0;
 };
 
-/// 4+2+2+8+8+4+4+8+8+32+32 — see EncodeBlob for the field order.
-inline constexpr size_t kHeaderSize = 112;
+/// 4+2+2+8+8+4+4+8+8+32+32+8 — see EncodeBlob for the field order.
+inline constexpr size_t kHeaderSize = 120;
+
+/// Fold a defs content key (`DefsCache::ComputeContentKey`) into the header
+/// word BlobMeta::defsHash carries. FNV-1a 64. Empty in, 0 out — the header
+/// documents 0 as "not recorded", so a key that folded to it would be
+/// indistinguishable from no key at all.
+uint64_t DefsDigestOf(const std::string& defsKey);
 
 /// Why a blob could not be turned back into a payload. The distinction is the
 /// whole point of the E1/E2 split: a mismatch is a *policy* refusal (the
@@ -273,6 +294,16 @@ public:
     void SetSerializer(ISimSerializer* s) { serializer = s; }
     ISimSerializer* Serializer() const { return serializer; }
 
+    /// Record the def vocabulary snapshots are being taken under
+    /// (PLAN-def-reconciliation task 1). Separate from StoreConfig because
+    /// **boot order makes it impossible to supply at construction**: the store
+    /// is built before the def cache has parsed a def, so the alternative is a
+    /// config field that is empty for the first part of every process's life
+    /// and looks like a configuration mistake. A snapshot taken before this is
+    /// called stamps 0 = "not recorded" and is still fully restorable.
+    void SetDefsHash(const std::string& defsKey) { defsHash = DefsDigestOf(defsKey); }
+    uint64_t DefsHash() const { return defsHash; }
+
     // ── ISnapshotStore (the PLAN-gm-tools rollback seam) ──
     bool Available() const override;
     std::vector<SnapshotInfo> List(uint32_t roomId) override;
@@ -356,6 +387,8 @@ private:
     StoreConfig cfg;
     ISimSerializer* serializer = nullptr;
     uint8_t     mapDigest[32]{};
+    /// 0 until SetDefsHash — see it for why this is not in StoreConfig.
+    std::atomic<uint64_t> defsHash{0};
 
     mutable std::mutex      dbMtx;        ///< serialises this store's SQLite use
     mutable std::mutex      mtx;          ///< guards queue + stats + lastError

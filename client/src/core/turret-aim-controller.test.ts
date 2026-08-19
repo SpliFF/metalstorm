@@ -90,6 +90,12 @@ const TARGET = 7;
 const fired = (targetPos: AimVec = { x: 100, y: 0, z: 0 }, extra: { weaponDefId?: number; pos?: AimVec } = {}) => ({
     ownerId: OWNER, targetId: TARGET, targetPos, ...extra,
 });
+/** Standard volley outcome: statistical-combat shot from OWNER at TARGET,
+ *  impact position doubling as the frozen fallback (VolleyOutcome carries no
+ *  separate targetPos field). */
+const volley = (impactPos: AimVec = { x: 100, y: 0, z: 0 }, weaponDefId = 1) => ({
+    attackerId: OWNER, targetId: TARGET, weaponDefId, x: impactPos.x, y: impactPos.y, z: impactPos.z,
+});
 
 describe('slewAngle', () => {
     it('clamps the step and takes the shortest arc', () => {
@@ -297,6 +303,84 @@ describe('TurretAimController — disengage decay', () => {
         expect(c.stateOf(OWNER)!.yaw).toBeGreaterThan(0.1); // not fully rested yet
         c.onFired(fired(), DISENGAGE_MS + 150); // re-fire
         expect(c.stateOf(OWNER)?.releasing).toBe(false);
+    });
+});
+
+describe('TurretAimController — onVolley (statistical combat)', () => {
+    it('engages the correct slot on a volley event, same as a Fired event', () => {
+        const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 } });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onVolley(volley(), 0);
+        expect(c.count).toBe(1);
+        expect(c.engagedSlots(OWNER)).toEqual([1]);
+        for (let t = 0; t <= 2000; t += 100) c.tick(t);
+        expect(sink.turretYaw(OWNER)).toBeCloseTo(Math.PI / 2, 3);
+    });
+
+    it('falls back to the volley impact position when no live target exists', () => {
+        const { deps } = makeDeps({ target: null });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onVolley(volley({ x: 0, y: 0, z: -100 }), 0); // due -Z -> bearing pi
+        for (let t = 0; t <= 3000; t += 100) c.tick(t);
+        expect(Math.abs(sink.turretYaw(OWNER)!)).toBeCloseTo(Math.PI, 3);
+    });
+
+    it('a hidden attacker (attackerId 0, visibility-filtered) never engages', () => {
+        const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 } });
+        const sink = new FakeSink();
+        const c = new TurretAimController(deps, sink);
+        c.onVolley({ attackerId: 0, targetId: TARGET, weaponDefId: 1, x: 100, y: 0, z: 0 }, 0);
+        expect(c.count).toBe(0);
+    });
+
+    it('a unit receiving both Fired and Volley events keeps one engagement per slot', () => {
+        // A unit mixing resolution models (or the same weapon reported both
+        // ways across a transition) must not double-engage the same slot.
+        const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 } });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onFired(fired(), 0);
+        expect(c.count).toBe(1);
+        c.onVolley(volley(), 100);
+        expect(c.count).toBe(1);
+        expect(c.engagedSlots(OWNER)).toEqual([1]);
+        for (let t = 0; t <= 2000; t += 100) c.tick(t);
+        expect(sink.turretYaw(OWNER)).toBeCloseTo(Math.PI / 2, 3);
+        // Keep alternating event kinds well past the disengage window — the
+        // slot must stay engaged as long as EITHER kind keeps refreshing it.
+        c.onFired(fired(), 2000);
+        c.tick(2100);
+        expect(c.stateOf(OWNER)?.releasing).toBe(false);
+        c.onVolley(volley(), DISENGAGE_MS + 1900);
+        c.tick(DISENGAGE_MS + 2000);
+        expect(c.stateOf(OWNER)?.releasing).toBe(false);
+    });
+
+    it('disengages to rest after the quiet window when only volleys fired', () => {
+        const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 } });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onVolley(volley(), 0);
+        for (let t = 0; t <= 2000; t += 100) c.tick(t);
+        expect(sink.turretYaw(OWNER)).toBeCloseTo(Math.PI / 2, 2);
+        // Still engaged just before the timeout.
+        c.tick(DISENGAGE_MS - 100);
+        expect(c.stateOf(OWNER)?.releasing).toBe(false);
+        // Past the timeout: enters releasing and the yaw starts decaying.
+        c.tick(DISENGAGE_MS + 100);
+        expect(c.stateOf(OWNER)?.releasing).toBe(true);
+        const decaying = sink.turretYaw(OWNER)!;
+        expect(decaying).toBeLessThan(Math.PI / 2);
+        // Keep ticking (no new volleys) until it fully releases.
+        for (let t = DISENGAGE_MS + 200; t <= DISENGAGE_MS + 2000; t += 100) c.tick(t);
+        expect(c.count).toBe(0);
+        expect(sink.poses.get(OWNER)).toBeNull();
     });
 });
 

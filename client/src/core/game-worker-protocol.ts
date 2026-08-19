@@ -13,8 +13,9 @@
  *
  * NOTE: this module is the source of truth the GW4-c1…c6 cut builds against; it
  * is intentionally landed first (spec-first) and has no runtime behaviour. The
- * worker (lua-widget-worker.ts, evolving into the game-processor worker) and the
- * manager (lua-widget-manager.ts) import these as they take on each role.
+ * worker (lua-widget-worker.ts, evolving into the game-processor worker) imports
+ * these as it takes on each role; the main-thread lua-widget-manager.ts it
+ * replaced was retired post-GW4.
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
@@ -71,6 +72,17 @@ export interface GpInitToWorker {
     gfx: Record<string, unknown>;
     /** Lifted from `localStorage` on main (standing-order-renderer SHOW_ALLIES). */
     standingOrderShowAllies: boolean;
+    /** PLAN-protocol-guard task 4 (dev harness): override the wire schema hash
+     *  this client claims — `''` sends no `schema_hash` at all. Absent in a
+     *  production build; the only way to drive the server's refusal from a
+     *  browser, since the build guards refuse a patched hash file. */
+    schemaHashOverride?: string;
+    /** PLAN-test-automation P7 gate 3: the page was booted with
+     *  `?allowClientEval=1`. The worker has no page URL, so main reads the
+     *  param and passes it. A DEV build accepts relayed evals with or without
+     *  it (`import.meta.env.DEV`); this is what opens the relay in a
+     *  production bundle. Absent ⇒ false. */
+    allowClientEval?: boolean;
     // NOTE: this used to carry a lobby room roster snapshot to seed
     // `liveState.players` before the LuaUI boot. It claimed lobby `player_id`
     // was the game-server playerID; it is not — it is the DB account id, and
@@ -212,6 +224,24 @@ export interface GpResyncToWorker {
 }
 
 /**
+ * 8a-follow-on: the access token was renewed on the main thread — adopt it.
+ *
+ * A worker realm has no `localStorage`, so "make the holders re-read" is not
+ * available here at any price: the worker's credential is whatever was handed
+ * to it at `gp:init`, and at a 1 h access TTL that string dies inside a normal
+ * match. It is used for two things — the game-server `AuthRequest` on every
+ * (re)connect, and the error-telemetry channel — and the reconnect is the one
+ * that matters, because R1/R2 recovery and `gp:resync` both re-authenticate
+ * with it long after boot.
+ *
+ * Idempotent: the sender drops repeats of the same string.
+ */
+export interface GpTokenToWorker {
+    type: 'gp:token';
+    token: string;
+}
+
+/**
  * PLAN-client-resilience.md task 2 (R1 soft rung): main asks the worker for an
  * in-place soft reset — Babylon `wipeCaches` + transient FX-pool flush + a
  * fresh-snapshot resync — instead of a full respawn. The worker replies
@@ -274,6 +304,11 @@ export interface GpGroupDirectiveUpdateToWorker {
     priority: number;
     requestedStrength: number;
     active: boolean;
+    /** Subject-slot conditions for an ungrouped (condition-scoped) directive.
+     *  `unitClass` is a command-language class name, resolved to the wire's
+     *  `squad_types` inside the worker — the streamed def table it needs lives
+     *  there, not on the UI thread. Absent = unfiltered, the pre-D56 shape. */
+    conditions?: { idleOnly?: boolean; unitClass?: string };
 }
 
 export interface GpGroupDirectiveRemoveToWorker {
@@ -354,6 +389,16 @@ export interface GpConsoleCommandToWorker {
     command: string;
 }
 
+/** PLAN-test-automation P7: main's answer to a `gp:clientEval` request. The
+ *  worker owns the Connection, so a `js`/`widgets`/`test` eval runs on main
+ *  and its result rides back through the worker to the server. */
+export interface GpClientEvalResultToWorker {
+    type: 'gp:clientEvalResult';
+    requestId: number;
+    success: boolean;
+    output: string;
+}
+
 /** Widget-issued unit order (none send this yet; carried for completeness of
  *  the CommandConnection surface). */
 export interface GpPlayerCommandToWorker {
@@ -395,6 +440,7 @@ export type GpMessageToWorker =
     | GpPingToWorker
     | GpDetachToWorker
     | GpResyncToWorker
+    | GpTokenToWorker
     | GpRecoverToWorker
     | GpOrgGroupCreateToWorker
     | GpOrgGroupUpdateToWorker
@@ -408,6 +454,7 @@ export type GpMessageToWorker =
     | GpStandingOrderCreateToWorker
     | GpLuaRulesMsgToWorker
     | GpConsoleCommandToWorker
+    | GpClientEvalResultToWorker
     | GpPlayerCommandToWorker
     | GpSelectionStateToWorker
     | GpReplayControlToWorker
@@ -435,6 +482,15 @@ export interface BuildMenuTile {
     energyCost: number;
     buildTime: number;
     tooltip: string;
+    /** PLAN-latency L4.2 — the build-row queue chip. How many of this def the
+     *  current selection has queued, counted over the *merged* command-queue
+     *  view, so a click puts the chip up on the click rather than on the next
+     *  1 Hz snapshot. 0 ⇒ no chip drawn. */
+    queued: number;
+    /** How many of `queued` are still optimistic (unconfirmed by the server).
+     *  Drives the chip's "unsettled" styling; equals `queued` for the first
+     *  round trip after a click and drops to 0 as the snapshot catches up. */
+    queuedPending: number;
 }
 
 /**
@@ -442,9 +498,9 @@ export interface BuildMenuTile {
  * G4). The worker groups the selected factory's command queue into
  * consecutive same-defId runs (Spring's FactoryCAI stacks repeated identical
  * build commands one-per-slot) and posts these via
- * `gp:sceneState.factoryQueue`. `tags` carries every order tag in the run,
- * oldest→newest, so the panel can pop one (`tags.at(-1)`) or cancel the
- * whole row (`tags`) via `gp:removeFactoryOrder`.
+ * `gp:sceneState.factoryQueue`. `tags` carries every *cancellable* order tag
+ * in the run, oldest→newest, so the panel can pop one (`tags.at(-1)`) or
+ * cancel the whole row (`tags`) via `gp:removeFactoryOrder`.
  */
 export interface FactoryQueueTile {
     /** The factory unit this row belongs to (first own-team factory in the
@@ -454,8 +510,15 @@ export interface FactoryQueueTile {
     name: string;
     humanName: string;
     buildPic: string;
+    /** Total orders in the run — `tags.length + pending`. */
     count: number;
+    /** Server-assigned tags, oldest→newest. Cancellable orders only. */
     tags: number[];
+    /** PLAN-latency L4.2: orders in this run that we have sent but the server
+     *  has not yet echoed in a snapshot. They are drawn (so the row appears on
+     *  the click, not up to a snapshot period later) but are not cancellable —
+     *  their tag is a synthetic placeholder the server would not recognise. */
+    pending: number;
 }
 
 /** Per-selected-unit facts the HTML HUD needs (no Babylon objects cross the wire). */
@@ -625,8 +688,9 @@ export type GpMessageToMain =
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
      *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect
-     *  on main. Both the game-processor worker and legacy LuaWidgetManager paths
-     *  post this shape; main.ts and lua-widget-manager.ts handle it identically. */
+     *  on main. The game-processor worker posts this shape; the legacy
+     *  LuaWidgetManager path that used to post it identically was retired
+     *  post-GW4. */
     | { type: 'storage:set'; key: string; value: string }
     /**
      * Drag-select rectangle for the main-thread overlay div (GW4-c5b-2). The
@@ -653,12 +717,23 @@ export type GpMessageToMain =
     | { type: 'gp:playerRoster'; players: RosterPlayerInfo[] }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
+    /** PLAN-protocol-guard task 4: the game server refused this bundle's wire
+     *  schema. Main owns the remedy because the loop guard is `sessionStorage`
+     *  and the give-up surface is DOM, neither of which exists in a worker.
+     *  `message` is the server's text and carries both hashes. */
+    | { type: 'gp:schemaMismatch'; message: string }
     /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an
      *  attacker the local team can't see → a red "attack" radar blip at the
      *  firing position (x,z world elmos) on the main-thread minimap. */
     | { type: 'gp:counterbatteryPing'; x: number; z: number }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** PLAN-test-automation P7: a relayed eval whose target is not `worker`
+     *  (`js` | `widgets` | `test`) has to run on main. Main answers with
+     *  `gp:clientEvalResult`; the worker forwards it to the server. Main must
+     *  ALWAYS answer — the worker holds an 8s timer and the server a 10s
+     *  waiter behind it. */
+    | { type: 'gp:clientEval'; requestId: number; target: string; code: string }
     /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
     | { type: 'gp:pong'; id: number }
     /**

@@ -47,27 +47,140 @@ export const TARGET_SHAPES_BY_VERB: Record<CommandVerb, TargetShape[]> = {
     hold: ['area', 'entity'],
     patrol: ['route'],
     screen: ['route'],
-    scout: ['area', 'point'],
+    scout: ['area', 'point', 'entity'],
     escort: ['entity'],
-    withdraw: ['point'],
+    withdraw: ['point', 'entity'],
     reinforce: ['area', 'entity'],
-    build: ['point'],
+    build: ['point', 'entity'],
 };
 
-/** Target shapes `verb` can compile against (§5 compile table). */
-export function getAcceptedTargetShapes(verb: CommandVerb): TargetShape[] {
+/**
+ * Target shapes the AI-guidance path can carry (PLAN-endtoend D60).
+ *
+ * `compileIntent` routes `subject.type === 'ai'` to `compileToAIGuidance`
+ * **before** the verb:shape switch, and that payload carries the target as
+ * advice — a `targetEntity`, or a `targetPoint` (an area travels as its
+ * centre). It has no `OrderShape` and no params, so the verb:shape table
+ * describes a wire encoding this path never performs. What it *can* carry is
+ * the same for every verb, and a route is the one shape it cannot: it would
+ * produce neither field, and `generateIntentText` would name no target at all.
+ */
+export const AI_GUIDANCE_TARGET_SHAPES: TargetShape[] = ['entity', 'point', 'area'];
+
+/**
+ * Target shapes this intent can compile against.
+ *
+ * Subject-aware because the compile path is (D60): a directive encodes the
+ * target as an `OrderShape` and reads §5's table; guidance to the AI encodes
+ * it as advice and reads `AI_GUIDANCE_TARGET_SHAPES`. Passing no subject keeps
+ * the directive answer, which is what a half-composed sentence should show.
+ */
+export function getAcceptedTargetShapes(
+    verb: CommandVerb,
+    subject?: CommandSubject,
+): TargetShape[] {
+    if (subject?.type === 'ai') return AI_GUIDANCE_TARGET_SHAPES;
     return TARGET_SHAPES_BY_VERB[verb] ?? [];
 }
 
-/** Flattened `"verb:shape"` lookup, derived from `TARGET_SHAPES_BY_VERB` —
- *  `validateIntent`'s single source of truth for the vocabulary check. */
-const VALID_VERB_SHAPE_COMBINATIONS = new Set(
-    (Object.entries(TARGET_SHAPES_BY_VERB) as [CommandVerb, TargetShape[]][])
-        .flatMap(([verb, shapes]) => shapes.map((shape) => `${verb}:${shape}`)),
-);
+/**
+ * A target shape in the player's words (PLAN-endtoend D51).
+ *
+ * The composer's own vocabulary is `entity` / `area` / `route`; a refusal
+ * spelled in those words names the *type system*, not the thing the player
+ * did. Every string a player can be shown about a shape comes from here so
+ * the menu's offer and the refusal that follows it cannot disagree.
+ */
+export function describeTargetShape(shape: TargetShape): string {
+    switch (shape) {
+        case 'entity': return 'a named place';
+        case 'point':  return 'a point on the map';
+        case 'area':   return 'a painted area';
+        case 'route':  return 'a route drawn on the map';
+        default:       return String(shape);
+    }
+}
+
+/** "a" · "a or b" · "a, b or c" — so a three-shape offer does not read as
+ *  three `or`s in a row. */
+function joinAlternatives(parts: string[]): string {
+    if (parts.length <= 1) return parts[0] ?? '';
+    return `${parts.slice(0, -1).join(', ')} or ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Why this intent cannot take `shape` — names the requirement, not just the
+ * rejection (D51: "the refusal message names a cause that is not the cause").
+ * Shared by `validateIntent` and the target menu's disabled offer.
+ *
+ * The refused *thing* is named too (D60): a directive is refused by the verb,
+ * but guidance to the AI is refused by the guidance payload, and blaming the
+ * verb there points the player at a rule that does not apply to their sentence.
+ */
+export function explainShapeMismatch(
+    verb: CommandVerb,
+    shape: TargetShape,
+    subject?: CommandSubject,
+): string {
+    const accepted = getAcceptedTargetShapes(verb, subject).map(describeTargetShape);
+    const needs = accepted.length
+        ? joinAlternatives(accepted)
+        : 'a target this build cannot compose';
+    const refusedBy = subject?.type === 'ai' ? 'guidance to the AI' : verb;
+    return `${refusedBy} cannot take ${describeTargetShape(shape)} — it needs ${needs}`;
+}
+
+/**
+ * One option in the target slot's menu.
+ *
+ * `kind: 'map'` arms a map gesture for `shape`; `kind: 'search'` opens the
+ * named-place search. A disabled option is still *shown*, carrying `reason` —
+ * a verb whose target the player cannot supply has to say so, and silently
+ * dropping the search offer would leave the same dead surface D41 filed.
+ */
+export interface TargetMenuOption {
+    kind: 'map' | 'search';
+    shape?: TargetShape;
+    enabled: boolean;
+    reason?: string;
+}
+
+/**
+ * The target slot's offer for `verb` (D51).
+ *
+ * Derived from the same `TARGET_SHAPES_BY_VERB` the compile table and
+ * `validateIntent` read, so the menu can no longer offer a target the
+ * Commit button will refuse: before this, the name search was offered for
+ * every verb, and `patrol Grey Flat` filled all three chips and then died on
+ * a verb:shape rule the menu knew nothing about.
+ *
+ * Subject-aware for the same reason (D60): with `subject = the AI` the verb's
+ * table is not the rule that will be applied, so offering from it refuses
+ * `patrol Grey Flat` — which the guidance payload encodes perfectly well — and
+ * offers a route it cannot encode at all.
+ */
+export function targetMenuOptions(
+    verb: CommandVerb,
+    subject?: CommandSubject,
+): TargetMenuOption[] {
+    const accepted = getAcceptedTargetShapes(verb, subject);
+    const options: TargetMenuOption[] = accepted
+        .filter((shape) => shape !== 'entity')
+        .map((shape) => ({ kind: 'map' as const, shape, enabled: true }));
+
+    options.push(accepted.includes('entity')
+        ? { kind: 'search', enabled: true }
+        : { kind: 'search', enabled: false, reason: explainShapeMismatch(verb, 'entity', subject) });
+
+    return options;
+}
 
 /**
  * Command subject - who executes
+ *
+ * `idle-filter` is a historical name: the subject names a *unit class*, and
+ * whether the directive may take a unit that is already busy is the separate
+ * `idleOnly` decision below. Both now reach the wire; before D56 neither did.
  */
 export interface CommandSubject {
     type: 'group' | 'idle-filter' | 'ai';
@@ -184,6 +297,24 @@ export type CompiledMessage =
 /**
  * GroupDirective message payload
  */
+/**
+ * The subject slot as the wire sees it — `StandingOrderConditions` minus the
+ * fields the composer has no vocabulary for.
+ *
+ * `unitClass` is a command-language class name, NOT a `squad_types` vector:
+ * the class → unit-def-id mapping needs the streamed def table, which lives in
+ * the game-processor worker, so the worker resolves it on the way out
+ * (game-processor.ts `gp:groupDirectiveUpdate`). Keeping the class name here
+ * means the compile table stays pure and testable without a def table.
+ */
+export interface DirectiveConditions {
+    /** false = an explicit order that overrides what the unit is doing.
+     *  Omitted → the wire default (true), i.e. only unemployed units. */
+    idleOnly?: boolean;
+    /** Command-language class name ("armour", "infantry", …). */
+    unitClass?: string;
+}
+
 export interface GroupDirectivePayload {
     directiveId: number;        // 0 = create new
     groupId: number;            // 0 = condition-scoped
@@ -193,6 +324,9 @@ export interface GroupDirectivePayload {
     params: number[];           // Interpreted per shape
     requestedStrength: number;  // 0 = take what idles
     phasesJson?: string;        // Optional phase gate from when-condition
+    /** Absent for a group-scoped directive — the server derives
+     *  `conditions.org_group` from `group_id` and the roster is the group. */
+    conditions?: DirectiveConditions;
 }
 
 /**
@@ -225,8 +359,16 @@ export interface AIGuidancePayload {
  * Returns null if the intent cannot be compiled (invalid combination).
  */
 export function compileIntent(intent: CommandIntent): CompiledMessage | null {
-    // Subject='ai' → AI guidance (interaction §6)
+    // Subject='ai' → AI guidance (interaction §6). Guarded by the shapes that
+    // path can actually encode, not by §5's table (D60) — and guarded here so
+    // a caller that skipped `validateIntent` cannot mint a guidance payload
+    // carrying neither `targetEntity` nor `targetPoint`.
     if (intent.subject.type === 'ai') {
+        if (!getAcceptedTargetShapes(intent.verb, intent.subject).includes(intent.target.shape)) {
+            console.warn('[compile-table] AI guidance cannot carry target shape:',
+                intent.target.shape);
+            return null;
+        }
         return compileToAIGuidance(intent);
     }
 
@@ -281,7 +423,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
 
         // Scout → screen/patrol depending on target
         case 'scout:area':
-        case 'scout:point': {
+        case 'scout:point':
+        case 'scout:entity': {
             return compileToGroupDirective(intent, DirectiveType.Screen);
         }
 
@@ -291,7 +434,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
         }
 
         // Withdraw
-        case 'withdraw:point': {
+        case 'withdraw:point':
+        case 'withdraw:entity': {
             return compileToGroupDirective(intent, DirectiveType.Withdraw);
         }
 
@@ -306,7 +450,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
         }
 
         // Build
-        case 'build:point': {
+        case 'build:point':
+        case 'build:entity': {
             return compileToGroupDirective(intent, DirectiveType.BuildBase);
         }
 
@@ -334,6 +479,17 @@ function compileToGroupDirective(
     // Phase gate from when-condition
     const phasesJson = when ? encodeWhenConditionAsPhase(when) : undefined;
 
+    // A class subject IS the roster for an ungrouped directive, so it has to
+    // travel as conditions or the directive addresses the whole team. And it
+    // travels with `idleOnly: false` — the player picked a force and gave it an
+    // order, which is the definition of overriding what that force is doing.
+    // A group-scoped directive sends none of this: the group is the roster and
+    // its members keep the suspend/auto-rejoin semantics (Q-D-d §3).
+    const conditions: DirectiveConditions | undefined =
+        groupId === 0 && subject.type === 'idle-filter' && subject.filterClass
+            ? { idleOnly: false, unitClass: subject.filterClass }
+            : undefined;
+
     const payload: GroupDirectivePayload = {
         directiveId: 0,         // 0 = create new
         groupId,
@@ -343,6 +499,7 @@ function compileToGroupDirective(
         params,
         requestedStrength: 0,   // 0 = take what idles
         phasesJson,
+        conditions,
     };
 
     return { type: 'GroupDirective', payload };
@@ -550,13 +707,13 @@ function formatWhenCondition(condition: WhenCondition): string {
  * Returns an error message if invalid, null if valid.
  */
 export function validateIntent(intent: CommandIntent): string | null {
-    // Check verb:shape compatibility (derived from TARGET_SHAPES_BY_VERB —
-    // the same table the map-arm target picker reads, so the two can never
-    // drift apart).
-    const key = `${intent.verb}:${intent.target.shape}`;
-
-    if (!VALID_VERB_SHAPE_COMBINATIONS.has(key)) {
-        return `Invalid combination: ${intent.verb} cannot target ${intent.target.shape}`;
+    // Check shape compatibility against the rule this intent's own compile
+    // path applies — §5's verb table for a directive, the guidance payload's
+    // fields for `subject = the AI` (D60). Same function the map-arm target
+    // picker reads, so the offer and the refusal can never drift apart.
+    if (!getAcceptedTargetShapes(intent.verb, intent.subject).includes(intent.target.shape)) {
+        // Names what is needed, not just what was refused (D51).
+        return explainShapeMismatch(intent.verb, intent.target.shape, intent.subject);
     }
 
     // Check that target has required data

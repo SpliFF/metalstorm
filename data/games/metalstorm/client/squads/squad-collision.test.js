@@ -20,7 +20,7 @@ import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { separate } from './steering.js';
 
 function makeCfg(overrides = {}) {
-  return { ...DEFAULT_CONFIG, countCurve: linearCount, ...overrides };
+  return { ...DEFAULT_CONFIG, countCurve: linearCount, engine: 'oo', ...overrides };
 }
 
 function makeDef(overrides = {}) {

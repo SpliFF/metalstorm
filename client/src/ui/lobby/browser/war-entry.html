@@ -1,0 +1,17 @@
+<div class="war-entry">
+    <div class="room-main">
+        <span class="room-name">{{name}}</span>
+        <span class="room-badge">{{state}}</span>
+        {{live_badge}}
+    </div>
+    <div class="room-detail"{{detail_title}}>{{detail}}</div>
+    <div class="war-control">{{control}}</div>
+    {{friends_html}}
+    {{yours_html}}
+    {{preview_html}}
+    {{digest_html}}
+    <div class="war-actions">
+        <button class="join-btn" data-id="{{id}}"{{fight_disabled}}>{{fight_label}}</button>
+        <button class="spectate-btn secondary" data-id="{{id}}">Watch</button>
+    </div>
+</div>

@@ -281,10 +281,11 @@ export interface SpringAPIContext {
     /**
      * Forward a `Spring.MarkerAddPoint` / `Spring.MarkerAddLine`
      * placement to the host so the minimap events layer can pulse a
-     * cyan ring at the drop location. The host (lua-widget-manager on
-     * the main thread) translates this into `minimap.pushMarkerPing`.
-     * Lines emit two pings — one per endpoint — so the bracket dots
-     * frame the line on the minimap. Coords are world-space elmos. */
+     * cyan ring at the drop location. The host (lua-ui-host.ts, in the
+     * worker) posts it to the main thread, which translates it into
+     * `minimap.pushMarkerPing`. Lines emit two pings — one per endpoint —
+     * so the bracket dots frame the line on the minimap. Coords are
+     * world-space elmos. */
     addMinimapMarker?(x: number, z: number): void;
     /**
      * Forward a `Spring.RequestPath` / `Spring.PathRequest` call to the
@@ -1078,11 +1079,12 @@ function canonicalKeySet(input: string): string {
     return prefix + key;
 }
 
-/** Map a Spring/SDL keycode (as produced by `springKeyCode` in
- *  lua-widget-manager) back to its canonical lowercase symbol name —
- *  the inverse of GetKeyCode. Letters fall through `String.fromCharCode`
- *  since springKeyCode emits `e.key.toLowerCase().charCodeAt(0)` for
- *  printable ASCII, so the round-trip is symmetric. */
+/** Map a Spring/SDL keycode (as produced by `codeToSpringKeysym` in
+ *  game-processor.ts, successor to the retired lua-widget-manager's
+ *  `springKeyCode`) back to its canonical lowercase symbol name — the
+ *  inverse of GetKeyCode. Letters fall through `String.fromCharCode`
+ *  since printable ASCII keycodes are the lowercase char code, so the
+ *  round-trip is symmetric. */
 function keyCodeToSymbol(code: number): string {
     const named: Record<number, string> = {
         8: 'backspace', 9: 'tab', 13: 'enter', 27: 'escape', 32: 'space',

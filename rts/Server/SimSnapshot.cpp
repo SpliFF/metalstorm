@@ -1,0 +1,5455 @@
+// SimSnapshot — see SimSnapshot.h for the design and the coverage contract.
+
+#include "Server/SimSnapshot.h"
+
+#include "Server/OrgGroups.h"
+#include "Server/StandingOrders.h"
+#include "Lua/LuaGaia.h"
+#include "Lua/LuaParser.h"
+#include "Lua/LuaRules.h"
+#include "System/FileSystem/FileHandler.h"
+#include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureDefHandler.h"
+#include "Sim/Features/FeatureHandler.h"
+#include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/Team.h"
+#include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/Unit.h"
+#include "Sim/Units/UnitDef.h"
+#include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/UnitLoader.h"
+#include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/WeaponDef.h"
+#include "Sim/Weapons/WeaponDefHandler.h"
+#include "System/GlobalRNG.h"
+#include "System/SpringLog/SpringLog.h"
+
+#define LOG_SECTION "snapshot"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <unordered_map>
+#include <cstring>
+
+namespace simsnapshot {
+
+// ─────────────────────────── The section table ───────────────────────────
+
+const std::vector<SectionSpec>& Sections()
+{
+    static const std::vector<SectionSpec> kSections = {
+        // v2: + activeSlowUpdateUnit (Q-P4).
+        {SectionId::Globals,        2, "globals",        true,  ""},
+        {SectionId::StandingOrders, 1, "standingOrders", true,  ""},
+        {SectionId::OrgGroups,      1, "orgGroups",      true,  ""},
+        {SectionId::Directives,     1, "directives",     true,  ""},
+        {SectionId::Teams,          1, "teams",          true,  ""},
+        // v2: + UnitState::activeIndex (Q-P4). v3: + UnitState::move (option A).
+        // v4: + WeaponState::weaponDefName (def-reconciliation task 2).
+        {SectionId::Units,          4, "units",          true,  ""},
+        {SectionId::Features,       1, "features",       true,  ""},
+        // v2: + luasnapshot Value type 5, Lua 5.4's integer subtype (Q-P6).
+        {SectionId::SyncedLua,      2, "syncedLua",      true,  ""},
+        {SectionId::GameRules,      1, "gameRules",      true,  ""},
+        {SectionId::EnvResources,   1, "envResources",   true,  ""},
+        {SectionId::DefNames,       1, "defNames",       true,  ""},
+        {SectionId::DefScalars,     1, "defScalars",     true,  ""},
+    };
+    return kSections;
+}
+
+std::vector<std::string> MissingSections()
+{
+    std::vector<std::string> missing;
+    for (const auto& s : Sections()) {
+        if (!s.implemented)
+            missing.emplace_back(s.name);
+    }
+    return missing;
+}
+
+std::string DescribeOffset(const uint8_t* data, size_t size, size_t offset)
+{
+    // Deliberately independent of Reader: this runs on a payload that is
+    // already known to be odd, so it must not be able to fail the way the
+    // decoder does. Every step is bounds-checked against `size` and gives up
+    // with a description rather than throwing or reading past the end.
+    if (data == nullptr || offset >= size)
+        return "byte " + std::to_string(offset) + " is past the end of a " +
+               std::to_string(size) + "-byte payload";
+
+    constexpr size_t kEnvelope = 2 + 4;   // version + section count
+    if (offset < kEnvelope)
+        return "the envelope header (byte " + std::to_string(offset) + ")";
+
+    auto u16 = [data](size_t at) -> uint16_t {
+        return static_cast<uint16_t>(data[at]) |
+               static_cast<uint16_t>(data[at + 1]) << 8;
+    };
+    auto u32 = [data](size_t at) -> uint32_t {
+        return static_cast<uint32_t>(data[at]) |
+               static_cast<uint32_t>(data[at + 1]) << 8 |
+               static_cast<uint32_t>(data[at + 2]) << 16 |
+               static_cast<uint32_t>(data[at + 3]) << 24;
+    };
+
+    size_t pos = kEnvelope;
+    while (pos + 8 <= size) {
+        const uint16_t id = u16(pos);
+        const uint16_t ver = u16(pos + 2);
+        const uint32_t len = u32(pos + 4);
+        const size_t body = pos + 8;
+        if (offset < body) {
+            return "the header of section id " + std::to_string(id) +
+                   " (byte " + std::to_string(offset - pos) + " of it)";
+        }
+        if (offset < body + len) {
+            const char* name = "?";
+            for (const auto& s : Sections())
+                if (static_cast<uint16_t>(s.id) == id) name = s.name;
+            return std::string("section '") + name + "' (id " +
+                   std::to_string(id) + " v" + std::to_string(ver) +
+                   "), byte " + std::to_string(offset - body) + " of " +
+                   std::to_string(len);
+        }
+        if (len > size) break;      // a corrupt length would loop forever
+        pos = body + len;
+    }
+    return "byte " + std::to_string(offset) + ", outside any section this "
+           "payload frames";
+}
+
+namespace {
+
+// (id, offset, length) of every section a payload frames, in written order.
+// Shared by DescribeOffset and DiffSections; tolerant of malformed input
+// because both run on payloads that are already suspect.
+std::vector<std::array<size_t, 3>> WalkSections(const uint8_t* data, size_t size)
+{
+    std::vector<std::array<size_t, 3>> out;
+    if (data == nullptr) return out;
+    constexpr size_t kEnvelope = 2 + 4;
+    size_t pos = kEnvelope;
+    while (pos + 8 <= size) {
+        const size_t id = static_cast<size_t>(data[pos]) |
+                          static_cast<size_t>(data[pos + 1]) << 8;
+        const size_t len = static_cast<size_t>(data[pos + 4]) |
+                           static_cast<size_t>(data[pos + 5]) << 8 |
+                           static_cast<size_t>(data[pos + 6]) << 16 |
+                           static_cast<size_t>(data[pos + 7]) << 24;
+        const size_t body = pos + 8;
+        if (len > size || body + len > size) break;
+        out.push_back({id, body, len});
+        pos = body + len;
+    }
+    return out;
+}
+
+const char* SectionNameById(size_t id)
+{
+    for (const auto& s : Sections())
+        if (static_cast<size_t>(s.id) == id) return s.name;
+    return "?";
+}
+
+}  // namespace
+
+std::vector<std::string> DiffSections(const std::vector<uint8_t>& a,
+                                      const std::vector<uint8_t>& b)
+{
+    std::vector<std::string> diffs;
+    const auto sa = WalkSections(a.data(), a.size());
+    const auto sb = WalkSections(b.data(), b.size());
+
+    for (const auto& x : sa) {
+        const std::array<size_t, 3>* y = nullptr;
+        for (const auto& c : sb)
+            if (c[0] == x[0]) { y = &c; break; }
+        if (y == nullptr) {
+            diffs.emplace_back(std::string(SectionNameById(x[0])) + " (absent on one side)");
+            continue;
+        }
+        if (x[2] != (*y)[2] ||
+            std::memcmp(a.data() + x[1], b.data() + (*y)[1], x[2]) != 0)
+            diffs.emplace_back(SectionNameById(x[0]));
+    }
+    for (const auto& y : sb) {
+        bool seen = false;
+        for (const auto& c : sa) if (c[0] == y[0]) { seen = true; break; }
+        if (!seen)
+            diffs.emplace_back(std::string(SectionNameById(y[0])) + " (absent on one side)");
+    }
+    return diffs;
+}
+
+UnitsDivergence CompareUnits(const std::vector<uint8_t>& a,
+                             const std::vector<uint8_t>& b)
+{
+    const auto find = [](const std::vector<uint8_t>& p,
+                         std::vector<UnitState>& out) -> bool {
+        for (const auto& s : WalkSections(p.data(), p.size())) {
+            if (s[0] != static_cast<size_t>(SectionId::Units)) continue;
+            std::string err;
+            return DecodeUnits(p.data() + s[1], s[2], out, err);
+        }
+        return false;
+    };
+
+    UnitsDivergence d;
+    std::vector<UnitState> ua, ub;
+    if (!find(a, ua) || !find(b, ub))
+        return d;   // measured stays false: "could not compare" is not "agreed"
+
+    d.measured = true;
+    d.unitsA = ua.size();
+    d.unitsB = ub.size();
+
+    std::unordered_map<int32_t, const UnitState*> byId;
+    for (const auto& u : ub) byId[u.id] = &u;
+
+    std::unordered_set<int32_t> matched;
+    for (const auto& x : ua) {
+        auto it = byId.find(x.id);
+        if (it == byId.end()) { ++d.onlyA; continue; }
+        matched.insert(x.id);
+        const UnitState& y = *it->second;
+        const bool movedT = x.posX != y.posX || x.posY != y.posY || x.posZ != y.posZ ||
+                            x.speedX != y.speedX || x.speedY != y.speedY ||
+                            x.speedZ != y.speedZ || x.heading != y.heading;
+        const bool movedV = x.health != y.health || x.experience != y.experience ||
+                            x.recentDamage != y.recentDamage;
+        if (movedT) ++d.transform;
+        if (movedV) ++d.vitals;
+
+        // The magnitudes, over units present on both sides. A count alone
+        // cannot tell "every unit is a millimetre along its path" from "a
+        // truck took the other fork" — and those size option A differently.
+        const double dx = static_cast<double>(x.posX) - y.posX;
+        const double dy = static_cast<double>(x.posY) - y.posY;
+        const double dz = static_cast<double>(x.posZ) - y.posZ;
+        const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > d.maxPosDelta) {
+            d.maxPosDelta = dist;
+            d.maxPosDeltaUnitId = x.id;
+        }
+        // Headings are 16-bit angles that wrap: 32767 vs -32768 is one step
+        // apart, not the whole circle.
+        const int32_t raw = static_cast<int32_t>(
+            static_cast<int16_t>(static_cast<int16_t>(x.heading) -
+                                 static_cast<int16_t>(y.heading)));
+        const double deg = std::abs(raw) * (360.0 / 65536.0);
+        if (deg > d.maxHeadingDelta)
+            d.maxHeadingDelta = deg;
+
+        if ((movedT || movedV) && d.first.empty()) {
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "first: unit %d '%s' pos (%.3f,%.3f,%.3f) vs (%.3f,%.3f,%.3f), "
+                "speed (%.3f,%.3f,%.3f) vs (%.3f,%.3f,%.3f), heading %d vs %d, "
+                "health %.3f vs %.3f",
+                x.id, x.unitDefName.c_str(),
+                x.posX, x.posY, x.posZ, y.posX, y.posY, y.posZ,
+                x.speedX, x.speedY, x.speedZ, y.speedX, y.speedY, y.speedZ,
+                x.heading, y.heading, x.health, y.health);
+            d.first = buf;
+        }
+    }
+    // By id, not by count: two rosters of the same size can still each hold a
+    // unit the other does not.
+    for (const auto& y : ub)
+        if (matched.find(y.id) == matched.end()) ++d.onlyB;
+
+    return d;
+}
+
+std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
+                                    const std::vector<uint8_t>& b)
+{
+    const UnitsDivergence d = CompareUnits(a, b);
+    if (!d.measured)
+        return "units sections could not be decoded for comparison";
+
+    char mag[160];
+    snprintf(mag, sizeof(mag),
+             " max pos delta %.3f elmos (unit %d), max heading delta %.1f deg.",
+             d.maxPosDelta, d.maxPosDeltaUnitId, d.maxHeadingDelta);
+
+    return std::to_string(d.unitsA) + " vs " + std::to_string(d.unitsB) +
+           " units; " + std::to_string(d.transform) + " differ in transform, " +
+           std::to_string(d.vitals) + " in vitals, " + std::to_string(d.onlyA) +
+           " present only in arm A, " + std::to_string(d.onlyB) +
+           " only in arm B." + std::string(mag) + " " +
+           (d.first.empty() ? "no per-unit difference" : d.first);
+}
+
+std::string DescribeRulesParamsDivergence(const std::vector<uint8_t>& a,
+                                          const std::vector<uint8_t>& b,
+                                          SectionId section)
+{
+    const auto find = [&](const std::vector<uint8_t>& p,
+                          std::vector<RulesParamState>& out) -> bool {
+        for (const auto& s : WalkSections(p.data(), p.size())) {
+            if (s[0] != static_cast<size_t>(section)) continue;
+            std::string err;
+            return DecodeGameRules(p.data() + s[1], s[2], out, err);
+        }
+        return false;
+    };
+
+    std::vector<RulesParamState> pa, pb;
+    if (!find(a, pa) || !find(b, pb))
+        return {};
+
+    // A rules param's whole identity is its key, so the comparison is keyed by
+    // it: an index-keyed diff of two maps that gained a key in different
+    // places reports every row after it as changed.
+    const auto value = [](const RulesParamState& p) {
+        switch (p.type) {
+            case 0:  return std::string(p.b ? "true" : "false");
+            case 1:  return std::to_string(p.f);
+            default: return "'" + p.s + "'";
+        }
+    };
+    std::unordered_map<std::string, const RulesParamState*> byKey;
+    for (const auto& p : pb) byKey[p.key] = &p;
+
+    std::vector<std::string> changed, onlyA, onlyB;
+    std::unordered_set<std::string> matched;
+    for (const auto& x : pa) {
+        auto it = byKey.find(x.key);
+        if (it == byKey.end()) { onlyA.push_back(x.key); continue; }
+        matched.insert(x.key);
+        const RulesParamState& y = *it->second;
+        if (x.type != y.type || x.los != y.los || x.b != y.b || x.f != y.f || x.s != y.s)
+            changed.push_back(x.key + " " + value(x) + " vs " + value(y));
+    }
+    for (const auto& y : pb)
+        if (matched.find(y.key) == matched.end()) onlyB.push_back(y.key);
+
+    // Bounded: a whole-map disagreement must not push the rest of the verdict
+    // out of a log line. The counts are always exact.
+    const auto list = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < 12; ++i)
+            s += (s.empty() ? "" : ", ") + v[i];
+        if (v.size() > 12) s += ", … (" + std::to_string(v.size() - 12) + " more)";
+        return s;
+    };
+
+    std::string out = std::to_string(pa.size()) + " vs " + std::to_string(pb.size()) +
+                      " params; " + std::to_string(changed.size()) + " differ in value, " +
+                      std::to_string(onlyA.size()) + " only in arm A, " +
+                      std::to_string(onlyB.size()) + " only in arm B.";
+    if (!changed.empty()) out += " changed: " + list(changed) + ".";
+    if (!onlyA.empty())   out += " only A: " + list(onlyA) + ".";
+    if (!onlyB.empty())   out += " only B: " + list(onlyB) + ".";
+    if (changed.empty() && onlyA.empty() && onlyB.empty())
+        out += " No key disagrees — the difference is in the section's encoding "
+               "order, not its content.";
+    return out;
+}
+
+const std::vector<DerivedOmission>& DerivedNotCaptured()
+{
+    static const std::vector<DerivedOmission> kDerived = {
+        {"LOS / radar / jammer coverage maps",
+         "CLosHandler recomputes per unit on the next slow-update pass"},
+        {"quad-field membership",
+         "CQuadField is repopulated as units are re-inserted"},
+        {"path-finder caches and flow fields",
+         "recomputed on demand from the command queue"},
+        {"a feature's physicalState (ONGROUND / INWATER / UNDERWATER / "
+         "UNDERGROUND / MOVING / BLOCKING)",
+         "CFeature::UpdateTransformAndPhysState recomputes the terrain bits and "
+         "MOVING, and Block() sets BLOCKING, both during ApplyFeatures. INVOID "
+         "is only ever set on units, so nothing about a feature's physical "
+         "state survives being written by the walk (task 1e)"},
+        {"a feature's solidOnTop (the object standing on a geothermal vent)",
+         "CFeature::EmitGeoSmoke re-picks the nearest solid every 5 frames"},
+        {"the statistical-combat pending-outcome ring (CStatisticalCombat's "
+         "frame-indexed volleys awaiting resolution)",
+         "not rebuilt - deliberately dropped, for the same reason and on the "
+         "same argument as an in-flight projectile below: a scheduled volley "
+         "resolves within a second of being fired, so it is one snapshot "
+         "cadence's worth of fidelity for a section that would have to track "
+         "every weapon type. Named here because PLAN-def-reconciliation E5 asks "
+         "task 2 to remap the ring's weaponDefId and there is no ring in the "
+         "payload to remap - a resumed battle loses the volleys in the air, and "
+         "loses them WITH their def references"},
+        {"in-flight projectiles",
+         "not rebuilt - deliberately dropped. A projectile's whole lifetime is "
+         "well under one snapshot cadence, so carrying them buys a fraction of "
+         "a second of fidelity for a section that has to track every weapon "
+         "type. A resumed battle loses the shots that were in the air"},
+    };
+    return kDerived;
+}
+
+// ───────────────────────── Byte primitives ─────────────────────────
+//
+// Little-endian, explicit widths, no struct punning: the payload outlives the
+// process that wrote it, and a snapshot is decoded by a binary that may have
+// been rebuilt (E1 catches the incompatible cases, but only if the bytes are
+// interpretable enough to reach the check).
+
+namespace {
+
+class Writer {
+public:
+    explicit Writer(std::vector<uint8_t>& buf) : out(buf) {}
+
+    void U8(uint8_t v)   { out.push_back(v); }
+    void U16(uint16_t v) { for (int i = 0; i < 2; ++i) out.push_back(uint8_t(v >> (8 * i))); }
+    void U32(uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); }
+    void U64(uint64_t v) { for (int i = 0; i < 8; ++i) out.push_back(uint8_t(v >> (8 * i))); }
+    void I32(int32_t v)  { U32(static_cast<uint32_t>(v)); }
+    void Bool(bool v)    { U8(v ? 1 : 0); }
+
+    void F32(float v) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        U32(bits);
+    }
+    void Vec3(const float3& v) { F32(v.x); F32(v.y); F32(v.z); }
+
+    void Str(const std::string& s) {
+        U32(static_cast<uint32_t>(s.size()));
+        out.insert(out.end(), s.begin(), s.end());
+    }
+    void Floats(const std::vector<float>& v) {
+        U32(static_cast<uint32_t>(v.size()));
+        for (const float f : v) F32(f);
+    }
+    void U32s(const std::vector<uint32_t>& v) {
+        U32(static_cast<uint32_t>(v.size()));
+        for (const uint32_t x : v) U32(x);
+    }
+    void Strs(const std::vector<std::string>& v) {
+        U32(static_cast<uint32_t>(v.size()));
+        for (const auto& s : v) Str(s);
+    }
+    /// An unordered_set has no order, and a snapshot that serialises one in
+    /// hash order is not reproducible across rehashes - which would make a
+    /// byte-comparison of two snapshots of the same state fail for no reason.
+    /// Sorted, always.
+    void U32Set(const std::unordered_set<uint32_t>& s) {
+        std::vector<uint32_t> v(s.begin(), s.end());
+        std::sort(v.begin(), v.end());
+        U32s(v);
+    }
+
+    size_t Size() const { return out.size(); }
+
+private:
+    std::vector<uint8_t>& out;
+};
+
+/// Bounds-checked reader. Every read past the end sets `bad` and returns a
+/// zero value rather than reading out of bounds; the caller checks Bad() once
+/// at the end of a section instead of after every field.
+class Reader {
+public:
+    Reader(const uint8_t* p, size_t n) : data(p), size(n) {}
+
+    uint8_t U8() {
+        if (!Want(1)) return 0;
+        return data[pos++];
+    }
+    uint16_t U16() {
+        if (!Want(2)) return 0;
+        uint16_t v = uint16_t(data[pos]) | (uint16_t(data[pos + 1]) << 8);
+        pos += 2;
+        return v;
+    }
+    uint32_t U32() {
+        if (!Want(4)) return 0;
+        uint32_t v = 0;
+        for (int i = 0; i < 4; ++i) v |= uint32_t(data[pos + i]) << (8 * i);
+        pos += 4;
+        return v;
+    }
+    uint64_t U64() {
+        if (!Want(8)) return 0;
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= uint64_t(data[pos + i]) << (8 * i);
+        pos += 8;
+        return v;
+    }
+    int32_t I32()  { return static_cast<int32_t>(U32()); }
+    bool    Bool() { return U8() != 0; }
+
+    float F32() {
+        const uint32_t bits = U32();
+        float v = 0.0f;
+        std::memcpy(&v, &bits, sizeof(v));
+        return v;
+    }
+    float3 Vec3() {
+        float3 v;
+        v.x = F32(); v.y = F32(); v.z = F32();
+        return v;
+    }
+
+    std::string Str() {
+        const uint32_t n = U32();
+        if (!Want(n)) return {};
+        std::string s(reinterpret_cast<const char*>(data + pos), n);
+        pos += n;
+        return s;
+    }
+    std::vector<float> Floats() {
+        const uint32_t n = U32();
+        // Check the whole run before reserving: a corrupt count of 4 billion
+        // must not be a 16 GB allocation before it is a decode failure.
+        if (!Want(size_t(n) * 4)) return {};
+        std::vector<float> v(n);
+        for (uint32_t i = 0; i < n; ++i) v[i] = F32();
+        return v;
+    }
+    std::vector<uint32_t> U32s() {
+        const uint32_t n = U32();
+        if (!Want(size_t(n) * 4)) return {};
+        std::vector<uint32_t> v(n);
+        for (uint32_t i = 0; i < n; ++i) v[i] = U32();
+        return v;
+    }
+    std::vector<std::string> Strs() {
+        const uint32_t n = U32();
+        // Each string costs at least its 4-byte length prefix.
+        if (!Want(size_t(n) * 4)) return {};
+        std::vector<std::string> v;
+        v.reserve(n);
+        for (uint32_t i = 0; i < n && !bad; ++i) v.push_back(Str());
+        return v;
+    }
+    std::unordered_set<uint32_t> U32Set() {
+        const std::vector<uint32_t> v = U32s();
+        return {v.begin(), v.end()};
+    }
+
+    /// Skip `n` bytes (used to step over a section this build cannot decode).
+    void Skip(size_t n) { if (Want(n)) pos += n; }
+
+    /// Mark the read failed without consuming anything. Every "this count
+    /// cannot fit in what is left" guard MUST go through here: a guard that
+    /// only returns early leaves `bad` false, so a caller that checks Bad()
+    /// and Remaining() sees a clean read of a struct that was silently left
+    /// half-decoded. Found by the truncation sweep in test_sim_snapshot.cpp -
+    /// two cut points out of ~250 decoded as SUCCESS before this existed.
+    void Fail() { bad = true; }
+
+    bool   Bad() const { return bad; }
+    size_t Pos() const { return pos; }
+    size_t Remaining() const { return bad ? 0 : size - pos; }
+
+private:
+    bool Want(size_t n) {
+        if (bad || n > size - pos) { bad = true; return false; }
+        return true;
+    }
+
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    size_t pos = 0;
+    bool bad = false;
+};
+
+// ──────────────────── The field-census tripwire ────────────────────
+//
+// Q-P1 constraint 4 asks for a completeness tripwire modelled on
+// test_synced_input_journal.cpp's classifier coverage test: the way this walk
+// quietly breaks is somebody adding a field to StandingOrder or Directive and
+// nobody noticing it never gets written.
+//
+// There is no reflection to enumerate members with, so the census uses a
+// structured binding that names every member: adding, removing or reordering a
+// field makes the binding count wrong and the BUILD FAILS on the struct whose
+// shape moved. Each function returns the field count it destructured, which
+// tests/test_sim_snapshot.cpp pins against the count the codec below writes.
+//
+// This only works because these are plain aggregates (public members, no user
+// constructors, no bases). If one ever grows a constructor, the binding stops
+// compiling and the fix is an explicit member list - not deleting the census.
+
+int CensusStandingOrderConditions(const StandingOrderConditions& c)
+{
+    const auto& [idleOnly, squadTypes, withinCenter, withinRadius, outsideCenter,
+                 outsideRadius, minStrength, hasCapabilities, orgGroup] = c;
+    (void)idleOnly; (void)squadTypes; (void)withinCenter; (void)withinRadius;
+    (void)outsideCenter; (void)outsideRadius; (void)minStrength;
+    (void)hasCapabilities; (void)orgGroup;
+    return 9;
+}
+
+int CensusStandingOrder(const StandingOrder& o)
+{
+    const auto& [id, team, authorPlayerId, type, priority, params, conditions,
+                 active, createdAtFrame, expiresAtFrame, assigned] = o;
+    (void)id; (void)team; (void)authorPlayerId; (void)type; (void)priority;
+    (void)params; (void)conditions; (void)active; (void)createdAtFrame;
+    (void)expiresAtFrame; (void)assigned;
+    return 11;
+}
+
+int CensusOrgGroup(const OrgGroup& g)
+{
+    const auto& [id, echelon, team, parentId, members, name, currentDirectiveId,
+                 postureJson, createdAtFrame] = g;
+    (void)id; (void)echelon; (void)team; (void)parentId; (void)members;
+    (void)name; (void)currentDirectiveId; (void)postureJson; (void)createdAtFrame;
+    return 9;
+}
+
+int CensusDirective(const Directive& d)
+{
+    const auto& [id, team, groupId, authorPlayerId, type, priority, shape, params,
+                 conditions, requestedStrength, phasesJson, active, createdAtFrame,
+                 expiresAtFrame, assigned, assignedStrength] = d;
+    (void)id; (void)team; (void)groupId; (void)authorPlayerId; (void)type;
+    (void)priority; (void)shape; (void)params; (void)conditions;
+    (void)requestedStrength; (void)phasesJson; (void)active; (void)createdAtFrame;
+    (void)expiresAtFrame; (void)assigned; (void)assignedStrength;
+    return 16;
+}
+
+// ─────────────────────────── Section codecs ───────────────────────────
+
+void WriteConditions(Writer& w, const StandingOrderConditions& c)
+{
+    w.Bool(c.idleOnly);
+    w.U32s([&] {
+        std::vector<uint32_t> v;
+        v.reserve(c.squadTypes.size());
+        for (const uint16_t t : c.squadTypes) v.push_back(t);
+        return v;
+    }());
+    w.Vec3(c.withinCenter);
+    w.F32(c.withinRadius);
+    w.Vec3(c.outsideCenter);
+    w.F32(c.outsideRadius);
+    w.F32(c.minStrength);
+    w.Strs(c.hasCapabilities);
+    w.U32(c.orgGroup);
+}
+
+StandingOrderConditions ReadConditions(Reader& r)
+{
+    StandingOrderConditions c;
+    c.idleOnly = r.Bool();
+    for (const uint32_t t : r.U32s()) c.squadTypes.push_back(static_cast<uint16_t>(t));
+    c.withinCenter = r.Vec3();
+    c.withinRadius = r.F32();
+    c.outsideCenter = r.Vec3();
+    c.outsideRadius = r.F32();
+    c.minStrength = r.F32();
+    c.hasCapabilities = r.Strs();
+    c.orgGroup = r.U32();
+    return c;
+}
+
+void WriteGlobals(Writer& w)
+{
+    w.I32(gs->frameNum);
+    w.U64(gsRNG.GetGenState());
+    w.U64(gsRNG.GetGenStream());
+    // `paused` is synced state the sim reads every tick. A snapshot taken
+    // while paused that resumed un-paused would start ticking a world nobody
+    // asked to run.
+    w.Bool(gs->paused);
+    // The staggered SlowUpdate cursor (Q-P4). It is only reset to 0 every
+    // UNIT_SLOWUPDATE_RATE frames, so on 14 frames out of 15 it is live
+    // cross-frame state: which slice of activeUnits gets slow-updated next.
+    // Restoring at 0 makes a resumed world slow-update units the captured one
+    // had already done, and CWeapon::SlowUpdate draws from the synced RNG.
+    w.U32(static_cast<uint32_t>(unitHandler.GetActiveSlowUpdateUnit()));
+}
+
+struct GlobalsState {
+    int32_t  frameNum = 0;
+    uint64_t rngState = 0;
+    uint64_t rngStream = 0;
+    bool     paused = false;
+    uint32_t activeSlowUpdateUnit = 0;
+};
+
+GlobalsState ReadGlobals(Reader& r)
+{
+    GlobalsState g;
+    g.frameNum  = r.I32();
+    g.rngState  = r.U64();
+    g.rngStream = r.U64();
+    g.paused    = r.Bool();
+    g.activeSlowUpdateUnit = r.U32();
+    return g;
+}
+
+void WriteStandingOrders(Writer& w)
+{
+    const auto& orders = standingOrders.GetAllOrders();
+    w.U32(standingOrders.NextId());
+    w.U32(static_cast<uint32_t>(orders.size()));
+    for (const auto& o : orders) {
+        w.U32(o.id);
+        w.I32(o.team);
+        w.I32(o.authorPlayerId);
+        w.U8(static_cast<uint8_t>(o.type));
+        w.U8(o.priority);
+        w.Floats(o.params);
+        WriteConditions(w, o.conditions);
+        w.Bool(o.active);
+        w.U32(o.createdAtFrame);
+        w.U32(o.expiresAtFrame);
+        w.U32Set(o.assigned);
+    }
+}
+
+std::vector<StandingOrder> ReadStandingOrders(Reader& r, uint32_t& nextId)
+{
+    nextId = r.U32();
+    const uint32_t count = r.U32();
+    // Cheapest possible order is ~40 bytes; refuse an absurd count before
+    // reserving anything.
+    if (r.Remaining() < size_t(count)) { r.Fail(); return {}; }
+    std::vector<StandingOrder> orders;
+    orders.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        StandingOrder o;
+        o.id = r.U32();
+        o.team = r.I32();
+        o.authorPlayerId = r.I32();
+        o.type = static_cast<StandingOrderType>(r.U8());
+        o.priority = r.U8();
+        o.params = r.Floats();
+        o.conditions = ReadConditions(r);
+        o.active = r.Bool();
+        o.createdAtFrame = r.U32();
+        o.expiresAtFrame = r.U32();
+        o.assigned = r.U32Set();
+        orders.push_back(std::move(o));
+    }
+    return orders;
+}
+
+void WriteOrgGroups(Writer& w)
+{
+    const auto& groups = orgGroups.GetAllGroups();
+    w.U32(orgGroups.NextId());
+    w.U32(static_cast<uint32_t>(groups.size()));
+    for (const auto& g : groups) {
+        w.U32(g.id);
+        w.U8(static_cast<uint8_t>(g.echelon));
+        w.I32(g.team);
+        w.U32(g.parentId);
+        w.U32s(g.members);
+        w.Str(g.name);
+        w.U32(g.currentDirectiveId);
+        w.Str(g.postureJson);
+        w.U32(g.createdAtFrame);
+    }
+}
+
+std::vector<OrgGroup> ReadOrgGroups(Reader& r, uint32_t& nextId)
+{
+    nextId = r.U32();
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) { r.Fail(); return {}; }
+    std::vector<OrgGroup> groups;
+    groups.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        OrgGroup g;
+        g.id = r.U32();
+        g.echelon = static_cast<Echelon>(r.U8());
+        g.team = r.I32();
+        g.parentId = r.U32();
+        g.members = r.U32s();
+        g.name = r.Str();
+        g.currentDirectiveId = r.U32();
+        g.postureJson = r.Str();
+        g.createdAtFrame = r.U32();
+        groups.push_back(std::move(g));
+    }
+    return groups;
+}
+
+void WriteDirectives(Writer& w)
+{
+    const auto& dirs = directiveManager.GetAllDirectives();
+    w.U32(directiveManager.NextId());
+    w.U32(static_cast<uint32_t>(dirs.size()));
+    for (const auto& d : dirs) {
+        w.U32(d.id);
+        w.I32(d.team);
+        w.U32(d.groupId);
+        w.I32(d.authorPlayerId);
+        w.U8(static_cast<uint8_t>(d.type));
+        w.U8(d.priority);
+        w.U8(static_cast<uint8_t>(d.shape));
+        w.Floats(d.params);
+        WriteConditions(w, d.conditions);
+        w.U32(d.requestedStrength);
+        w.Str(d.phasesJson);
+        w.Bool(d.active);
+        w.U32(d.createdAtFrame);
+        w.U32(d.expiresAtFrame);
+        w.U32Set(d.assigned);
+        w.F32(d.assignedStrength);
+    }
+}
+
+std::vector<Directive> ReadDirectives(Reader& r, uint32_t& nextId)
+{
+    nextId = r.U32();
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) { r.Fail(); return {}; }
+    std::vector<Directive> dirs;
+    dirs.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        Directive d;
+        d.id = r.U32();
+        d.team = r.I32();
+        d.groupId = r.U32();
+        d.authorPlayerId = r.I32();
+        d.type = static_cast<DirectiveType>(r.U8());
+        d.priority = r.U8();
+        d.shape = static_cast<OrderShape>(r.U8());
+        d.params = r.Floats();
+        d.conditions = ReadConditions(r);
+        d.requestedStrength = r.U32();
+        d.phasesJson = r.Str();
+        d.active = r.Bool();
+        d.createdAtFrame = r.U32();
+        d.expiresAtFrame = r.U32();
+        d.assigned = r.U32Set();
+        d.assignedStrength = r.F32();
+        dirs.push_back(std::move(d));
+    }
+    return dirs;
+}
+
+// ──────────── Task 1c codecs: teams + units (PLAN-persistence §7.1c) ────────────
+//
+// Everything here works on the plain state structs from the header, never on a
+// CTeam/CUnit. That is what makes the bytes testable without a sim.
+
+void WriteRes(Writer& w, const ResPair& r) { w.F32(r.metal); w.F32(r.energy); }
+ResPair ReadRes(Reader& r) { ResPair p; p.metal = r.F32(); p.energy = r.F32(); return p; }
+
+void WriteRulesParams(Writer& w, const std::vector<RulesParamState>& ps)
+{
+    w.U32(static_cast<uint32_t>(ps.size()));
+    for (const auto& p : ps) {
+        w.Str(p.key);
+        w.I32(p.los);
+        w.U8(p.type);
+        w.Bool(p.b);
+        w.F32(p.f);
+        w.Str(p.s);
+    }
+}
+
+RulesParamState ReadRulesParam(Reader& r)
+{
+    RulesParamState p;
+    p.key  = r.Str();
+    p.los  = r.I32();
+    p.type = r.U8();
+    p.b    = r.Bool();
+    p.f    = r.F32();
+    p.s    = r.Str();
+    return p;
+}
+
+std::vector<RulesParamState> ReadRulesParams(Reader& r)
+{
+    const uint32_t n = r.U32();
+    // Cheapest param is a 4-byte key length + los + type + bool + float + a
+    // 4-byte string length: refuse an absurd count before reserving.
+    if (r.Remaining() < size_t(n) * 4) { r.Fail(); return {}; }
+    std::vector<RulesParamState> ps;
+    ps.reserve(n);
+    for (uint32_t i = 0; i < n && !r.Bad(); ++i)
+        ps.push_back(ReadRulesParam(r));
+    return ps;
+}
+
+void WriteStats(Writer& w, const TeamStatsState& s)
+{
+    w.I32(s.frame);
+    w.F32(s.metalUsed);     w.F32(s.energyUsed);
+    w.F32(s.metalProduced); w.F32(s.energyProduced);
+    w.F32(s.metalExcess);   w.F32(s.energyExcess);
+    w.F32(s.metalReceived); w.F32(s.energyReceived);
+    w.F32(s.metalSent);     w.F32(s.energySent);
+    w.F32(s.damageDealt);   w.F32(s.damageReceived);
+    w.I32(s.unitsProduced);
+    w.I32(s.unitsDied);
+    w.I32(s.unitsReceived);
+    w.I32(s.unitsSent);
+    w.I32(s.unitsCaptured);
+    w.I32(s.unitsOutCaptured);
+    w.I32(s.unitsKilled);
+}
+
+TeamStatsState ReadStats(Reader& r)
+{
+    TeamStatsState s;
+    s.frame = r.I32();
+    s.metalUsed     = r.F32(); s.energyUsed     = r.F32();
+    s.metalProduced = r.F32(); s.energyProduced = r.F32();
+    s.metalExcess   = r.F32(); s.energyExcess   = r.F32();
+    s.metalReceived = r.F32(); s.energyReceived = r.F32();
+    s.metalSent     = r.F32(); s.energySent     = r.F32();
+    s.damageDealt   = r.F32(); s.damageReceived = r.F32();
+    s.unitsProduced    = r.I32();
+    s.unitsDied        = r.I32();
+    s.unitsReceived    = r.I32();
+    s.unitsSent        = r.I32();
+    s.unitsCaptured    = r.I32();
+    s.unitsOutCaptured = r.I32();
+    s.unitsKilled      = r.I32();
+    return s;
+}
+
+void WriteTeam(Writer& w, const TeamState& t)
+{
+    w.I32(t.teamNum);
+    w.Bool(t.isDead);
+    w.Bool(t.gaia);
+    w.I32(t.leader);
+    w.F32(t.incomeMultiplier);
+    w.F32(t.startPosX); w.F32(t.startPosY); w.F32(t.startPosZ);
+
+    WriteRes(w, t.res);         WriteRes(w, t.resStorage);
+    WriteRes(w, t.resPull);     WriteRes(w, t.resPrevPull);
+    WriteRes(w, t.resIncome);   WriteRes(w, t.resPrevIncome);
+    WriteRes(w, t.resExpense);  WriteRes(w, t.resPrevExpense);
+    WriteRes(w, t.resShare);    WriteRes(w, t.resDelayedShare);
+    WriteRes(w, t.resSent);     WriteRes(w, t.resPrevSent);
+    WriteRes(w, t.resReceived); WriteRes(w, t.resPrevReceived);
+    WriteRes(w, t.resPrevExcess);
+
+    w.I32(t.nextHistoryEntry);
+    w.U32(static_cast<uint32_t>(t.statHistory.size()));
+    for (const auto& s : t.statHistory) WriteStats(w, s);
+    WriteRulesParams(w, t.modParams);
+}
+
+TeamState ReadTeam(Reader& r)
+{
+    TeamState t;
+    t.teamNum = r.I32();
+    t.isDead = r.Bool();
+    t.gaia = r.Bool();
+    t.leader = r.I32();
+    t.incomeMultiplier = r.F32();
+    t.startPosX = r.F32(); t.startPosY = r.F32(); t.startPosZ = r.F32();
+
+    t.res         = ReadRes(r); t.resStorage       = ReadRes(r);
+    t.resPull     = ReadRes(r); t.resPrevPull      = ReadRes(r);
+    t.resIncome   = ReadRes(r); t.resPrevIncome    = ReadRes(r);
+    t.resExpense  = ReadRes(r); t.resPrevExpense   = ReadRes(r);
+    t.resShare    = ReadRes(r); t.resDelayedShare  = ReadRes(r);
+    t.resSent     = ReadRes(r); t.resPrevSent      = ReadRes(r);
+    t.resReceived = ReadRes(r); t.resPrevReceived  = ReadRes(r);
+    t.resPrevExcess = ReadRes(r);
+
+    t.nextHistoryEntry = r.I32();
+    const uint32_t n = r.U32();
+    // A stats row is 80 bytes; the count check keeps a corrupt length from
+    // reserving gigabytes before it fails.
+    if (r.Remaining() < size_t(n) * 4) { r.Fail(); return t; }
+    t.statHistory.reserve(n);
+    for (uint32_t i = 0; i < n && !r.Bad(); ++i) t.statHistory.push_back(ReadStats(r));
+    t.modParams = ReadRulesParams(r);
+    return t;
+}
+
+void WriteCommand(Writer& w, const CommandState& c)
+{
+    w.I32(c.cmdID);
+    w.I32(c.aiCallbackID);
+    w.I32(c.timeOut);
+    w.U32(c.tag);
+    w.U8(c.options);
+    w.Floats(c.params);
+}
+
+CommandState ReadCommand(Reader& r)
+{
+    CommandState c;
+    c.cmdID        = r.I32();
+    c.aiCallbackID = r.I32();
+    c.timeOut      = r.I32();
+    c.tag          = r.U32();
+    c.options      = r.U8();
+    c.params       = r.Floats();
+    return c;
+}
+
+void WriteWeapon(Writer& w, const WeaponState& s)
+{
+    w.I32(s.reloadStatus);
+    w.I32(s.salvoLeft);
+    w.I32(s.nextSalvo);
+    w.I32(s.numStockpiled);
+    w.I32(s.numStockpileQued);
+    w.Str(s.weaponDefName);
+}
+
+WeaponState ReadWeapon(Reader& r)
+{
+    WeaponState s;
+    s.reloadStatus     = r.I32();
+    s.salvoLeft        = r.I32();
+    s.nextSalvo        = r.I32();
+    s.numStockpiled    = r.I32();
+    s.numStockpileQued = r.I32();
+    s.weaponDefName    = r.Str();
+    return s;
+}
+
+// ──────── Option A codec: the move type (PLAN-persistence §7.1c) ────────
+//
+// Tagged: `kind` first, then the base every move type has, then ONLY the arm
+// that kind names. A CStaticMoveType therefore costs one byte more than it did
+// before option A, which matters — most units in a Metalstorm world are
+// buildings.
+
+void WriteMoveBase(Writer& w, const movetypesnapshot::BaseState& b)
+{
+    w.F32(b.goalX); w.F32(b.goalY); w.F32(b.goalZ);
+    w.F32(b.oldPosX); w.F32(b.oldPosY); w.F32(b.oldPosZ);
+    w.F32(b.oldSlowUpdatePosX); w.F32(b.oldSlowUpdatePosY); w.F32(b.oldSlowUpdatePosZ);
+    w.F32(b.oldCollisionUpdatePosX); w.F32(b.oldCollisionUpdatePosY); w.F32(b.oldCollisionUpdatePosZ);
+    w.I32(b.progressState);
+    w.F32(b.maxSpeed); w.F32(b.maxSpeedDef); w.F32(b.maxWantedSpeed);
+    w.F32(b.maneuverLeash); w.F32(b.waterline);
+    w.Bool(b.useHeading); w.Bool(b.useWantedSpeed0); w.Bool(b.useWantedSpeed1);
+}
+
+movetypesnapshot::BaseState ReadMoveBase(Reader& r)
+{
+    movetypesnapshot::BaseState b;
+    b.goalX = r.F32(); b.goalY = r.F32(); b.goalZ = r.F32();
+    b.oldPosX = r.F32(); b.oldPosY = r.F32(); b.oldPosZ = r.F32();
+    b.oldSlowUpdatePosX = r.F32(); b.oldSlowUpdatePosY = r.F32(); b.oldSlowUpdatePosZ = r.F32();
+    b.oldCollisionUpdatePosX = r.F32(); b.oldCollisionUpdatePosY = r.F32(); b.oldCollisionUpdatePosZ = r.F32();
+    b.progressState = r.I32();
+    b.maxSpeed = r.F32(); b.maxSpeedDef = r.F32(); b.maxWantedSpeed = r.F32();
+    b.maneuverLeash = r.F32(); b.waterline = r.F32();
+    b.useHeading = r.Bool(); b.useWantedSpeed0 = r.Bool(); b.useWantedSpeed1 = r.Bool();
+    return b;
+}
+
+void WriteMoveGround(Writer& w, const movetypesnapshot::GroundState& g)
+{
+    w.F32(g.currWayPointX); w.F32(g.currWayPointY); w.F32(g.currWayPointZ);
+    w.F32(g.nextWayPointX); w.F32(g.nextWayPointY); w.F32(g.nextWayPointZ);
+    w.F32(g.earlyCurrWayPointX); w.F32(g.earlyCurrWayPointY); w.F32(g.earlyCurrWayPointZ);
+    w.F32(g.earlyNextWayPointX); w.F32(g.earlyNextWayPointY); w.F32(g.earlyNextWayPointZ);
+    w.F32(g.waypointDirX); w.F32(g.waypointDirY); w.F32(g.waypointDirZ);
+    w.F32(g.flatFrontDirX); w.F32(g.flatFrontDirY); w.F32(g.flatFrontDirZ);
+    w.F32(g.lastAvoidanceDirX); w.F32(g.lastAvoidanceDirY); w.F32(g.lastAvoidanceDirZ);
+    w.F32(g.mainHeadingPosX); w.F32(g.mainHeadingPosY); w.F32(g.mainHeadingPosZ);
+    w.F32(g.skidRotVectorX); w.F32(g.skidRotVectorY); w.F32(g.skidRotVectorZ);
+    w.F32(g.turnRate); w.F32(g.turnSpeed); w.F32(g.turnAccel);
+    w.F32(g.accRate); w.F32(g.decRate); w.F32(g.myGravity);
+    w.F32(g.maxReverseDist); w.F32(g.minReverseAngle); w.F32(g.maxReverseSpeed);
+    w.F32(g.sqSkidSpeedMult);
+    w.F32(g.wantedSpeed); w.F32(g.currentSpeed); w.F32(g.deltaSpeed);
+    w.F32(g.currWayPointDist); w.F32(g.prevWayPointDist);
+    w.F32(g.goalRadius); w.F32(g.ownerRadius); w.F32(g.extraRadius);
+    w.F32(g.skidRotSpeed); w.F32(g.skidRotAccel);
+    w.F32(g.forceFromMovingCollideesX); w.F32(g.forceFromMovingCollideesY); w.F32(g.forceFromMovingCollideesZ);
+    w.F32(g.forceFromStaticCollideesX); w.F32(g.forceFromStaticCollideesY); w.F32(g.forceFromStaticCollideesZ);
+    w.F32(g.resultantForcesX); w.F32(g.resultantForcesY); w.F32(g.resultantForcesZ);
+    w.U32(g.numIdlingUpdates); w.U32(g.numIdlingSlowUpdates);
+    w.I32(g.wantedHeading); w.I32(g.minScriptChangeHeading);
+    w.I32(g.wantRepathFrame); w.I32(g.lastRepathFrame);
+    w.F32(g.bestLastWaypointDist); w.F32(g.bestReattemptedLastWaypointDist);
+    w.I32(g.setHeading); w.I32(g.setHeadingDir); w.I32(g.limitSpeedForTurning);
+    w.F32(g.oldSpeed); w.F32(g.newSpeed);
+    w.Bool(g.atGoal); w.Bool(g.atEndOfPath); w.Bool(g.wantRepath);
+    w.Bool(g.moveFailed); w.Bool(g.lastWaypoint);
+    w.Bool(g.reversing); w.Bool(g.idling);
+    w.Bool(g.pushResistant); w.Bool(g.pushResistanceBlockActive); w.Bool(g.canReverse);
+    w.Bool(g.useMainHeading); w.Bool(g.useRawMovement);
+    w.Bool(g.pathingFailed); w.Bool(g.pathingArrived); w.Bool(g.positionStuck);
+    w.Bool(g.forceStaticObjectCheck); w.Bool(g.avoidingUnits);
+}
+
+movetypesnapshot::GroundState ReadMoveGround(Reader& r)
+{
+    movetypesnapshot::GroundState g;
+    g.currWayPointX = r.F32(); g.currWayPointY = r.F32(); g.currWayPointZ = r.F32();
+    g.nextWayPointX = r.F32(); g.nextWayPointY = r.F32(); g.nextWayPointZ = r.F32();
+    g.earlyCurrWayPointX = r.F32(); g.earlyCurrWayPointY = r.F32(); g.earlyCurrWayPointZ = r.F32();
+    g.earlyNextWayPointX = r.F32(); g.earlyNextWayPointY = r.F32(); g.earlyNextWayPointZ = r.F32();
+    g.waypointDirX = r.F32(); g.waypointDirY = r.F32(); g.waypointDirZ = r.F32();
+    g.flatFrontDirX = r.F32(); g.flatFrontDirY = r.F32(); g.flatFrontDirZ = r.F32();
+    g.lastAvoidanceDirX = r.F32(); g.lastAvoidanceDirY = r.F32(); g.lastAvoidanceDirZ = r.F32();
+    g.mainHeadingPosX = r.F32(); g.mainHeadingPosY = r.F32(); g.mainHeadingPosZ = r.F32();
+    g.skidRotVectorX = r.F32(); g.skidRotVectorY = r.F32(); g.skidRotVectorZ = r.F32();
+    g.turnRate = r.F32(); g.turnSpeed = r.F32(); g.turnAccel = r.F32();
+    g.accRate = r.F32(); g.decRate = r.F32(); g.myGravity = r.F32();
+    g.maxReverseDist = r.F32(); g.minReverseAngle = r.F32(); g.maxReverseSpeed = r.F32();
+    g.sqSkidSpeedMult = r.F32();
+    g.wantedSpeed = r.F32(); g.currentSpeed = r.F32(); g.deltaSpeed = r.F32();
+    g.currWayPointDist = r.F32(); g.prevWayPointDist = r.F32();
+    g.goalRadius = r.F32(); g.ownerRadius = r.F32(); g.extraRadius = r.F32();
+    g.skidRotSpeed = r.F32(); g.skidRotAccel = r.F32();
+    g.forceFromMovingCollideesX = r.F32(); g.forceFromMovingCollideesY = r.F32(); g.forceFromMovingCollideesZ = r.F32();
+    g.forceFromStaticCollideesX = r.F32(); g.forceFromStaticCollideesY = r.F32(); g.forceFromStaticCollideesZ = r.F32();
+    g.resultantForcesX = r.F32(); g.resultantForcesY = r.F32(); g.resultantForcesZ = r.F32();
+    g.numIdlingUpdates = r.U32(); g.numIdlingSlowUpdates = r.U32();
+    g.wantedHeading = r.I32(); g.minScriptChangeHeading = r.I32();
+    g.wantRepathFrame = r.I32(); g.lastRepathFrame = r.I32();
+    g.bestLastWaypointDist = r.F32(); g.bestReattemptedLastWaypointDist = r.F32();
+    g.setHeading = r.I32(); g.setHeadingDir = r.I32(); g.limitSpeedForTurning = r.I32();
+    g.oldSpeed = r.F32(); g.newSpeed = r.F32();
+    g.atGoal = r.Bool(); g.atEndOfPath = r.Bool(); g.wantRepath = r.Bool();
+    g.moveFailed = r.Bool(); g.lastWaypoint = r.Bool();
+    g.reversing = r.Bool(); g.idling = r.Bool();
+    g.pushResistant = r.Bool(); g.pushResistanceBlockActive = r.Bool(); g.canReverse = r.Bool();
+    g.useMainHeading = r.Bool(); g.useRawMovement = r.Bool();
+    g.pathingFailed = r.Bool(); g.pathingArrived = r.Bool(); g.positionStuck = r.Bool();
+    g.forceStaticObjectCheck = r.Bool(); g.avoidingUnits = r.Bool();
+    return g;
+}
+
+void WriteMoveAir(Writer& w, const movetypesnapshot::AirState& a)
+{
+    w.I32(a.aircraftState); w.I32(a.collisionState);
+    w.F32(a.oldGoalPosX); w.F32(a.oldGoalPosY); w.F32(a.oldGoalPosZ);
+    w.F32(a.reservedLandingPosX); w.F32(a.reservedLandingPosY); w.F32(a.reservedLandingPosZ);
+    w.F32(a.landRadiusSq); w.F32(a.wantedHeight); w.F32(a.orgWantedHeight);
+    w.F32(a.accRate); w.F32(a.decRate); w.F32(a.altitudeRate);
+    w.Bool(a.collide); w.Bool(a.autoLand); w.Bool(a.dontLand);
+    w.Bool(a.useSmoothMesh); w.Bool(a.canSubmerge); w.Bool(a.floatOnWater);
+}
+
+movetypesnapshot::AirState ReadMoveAir(Reader& r)
+{
+    movetypesnapshot::AirState a;
+    a.aircraftState = r.I32(); a.collisionState = r.I32();
+    a.oldGoalPosX = r.F32(); a.oldGoalPosY = r.F32(); a.oldGoalPosZ = r.F32();
+    a.reservedLandingPosX = r.F32(); a.reservedLandingPosY = r.F32(); a.reservedLandingPosZ = r.F32();
+    a.landRadiusSq = r.F32(); a.wantedHeight = r.F32(); a.orgWantedHeight = r.F32();
+    a.accRate = r.F32(); a.decRate = r.F32(); a.altitudeRate = r.F32();
+    a.collide = r.Bool(); a.autoLand = r.Bool(); a.dontLand = r.Bool();
+    a.useSmoothMesh = r.Bool(); a.canSubmerge = r.Bool(); a.floatOnWater = r.Bool();
+    return a;
+}
+
+void WriteMoveHover(Writer& w, const movetypesnapshot::HoverState& h)
+{
+    w.I32(h.flyState);
+    w.Bool(h.bankingAllowed); w.Bool(h.airStrafe); w.Bool(h.wantToStop);
+    w.F32(h.goalDistance); w.F32(h.currentBank); w.F32(h.currentPitch);
+    w.F32(h.turnRate); w.F32(h.maxDrift); w.F32(h.maxTurnAngle);
+    w.F32(h.wantedSpeedX); w.F32(h.wantedSpeedY); w.F32(h.wantedSpeedZ);
+    w.F32(h.deltaSpeedX); w.F32(h.deltaSpeedY); w.F32(h.deltaSpeedZ);
+    w.F32(h.circlingPosX); w.F32(h.circlingPosY); w.F32(h.circlingPosZ);
+    w.F32(h.randomWindX); w.F32(h.randomWindY); w.F32(h.randomWindZ);
+    w.Bool(h.forceHeading);
+    w.I32(h.wantedHeading); w.I32(h.forcedHeading);
+    w.I32(h.waitCounter); w.I32(h.lastMoveRate);
+}
+
+movetypesnapshot::HoverState ReadMoveHover(Reader& r)
+{
+    movetypesnapshot::HoverState h;
+    h.flyState = r.I32();
+    h.bankingAllowed = r.Bool(); h.airStrafe = r.Bool(); h.wantToStop = r.Bool();
+    h.goalDistance = r.F32(); h.currentBank = r.F32(); h.currentPitch = r.F32();
+    h.turnRate = r.F32(); h.maxDrift = r.F32(); h.maxTurnAngle = r.F32();
+    h.wantedSpeedX = r.F32(); h.wantedSpeedY = r.F32(); h.wantedSpeedZ = r.F32();
+    h.deltaSpeedX = r.F32(); h.deltaSpeedY = r.F32(); h.deltaSpeedZ = r.F32();
+    h.circlingPosX = r.F32(); h.circlingPosY = r.F32(); h.circlingPosZ = r.F32();
+    h.randomWindX = r.F32(); h.randomWindY = r.F32(); h.randomWindZ = r.F32();
+    h.forceHeading = r.Bool();
+    h.wantedHeading = r.I32(); h.forcedHeading = r.I32();
+    h.waitCounter = r.I32(); h.lastMoveRate = r.I32();
+    return h;
+}
+
+void WriteMoveStrafe(Writer& w, const movetypesnapshot::StrafeState& f)
+{
+    w.I32(f.maneuverBlockTime); w.I32(f.maneuverState); w.I32(f.maneuverSubState);
+    w.Bool(f.loopbackAttack); w.Bool(f.isFighter);
+    w.F32(f.wingDrag); w.F32(f.wingAngle); w.F32(f.invDrag); w.F32(f.crashDrag);
+    w.F32(f.frontToSpeed); w.F32(f.speedToFront); w.F32(f.myGravity);
+    w.F32(f.maxBank); w.F32(f.maxPitch); w.F32(f.turnRadius);
+    w.F32(f.maxAileron); w.F32(f.maxElevator); w.F32(f.maxRudder);
+    w.F32(f.attackSafetyDistance);
+    w.F32(f.crashAileron); w.F32(f.crashElevator); w.F32(f.crashRudder);
+    w.F32(f.lastRudderPos0); w.F32(f.lastRudderPos1);
+    w.F32(f.lastElevatorPos0); w.F32(f.lastElevatorPos1);
+    w.F32(f.lastAileronPos0); w.F32(f.lastAileronPos1);
+}
+
+movetypesnapshot::StrafeState ReadMoveStrafe(Reader& r)
+{
+    movetypesnapshot::StrafeState f;
+    f.maneuverBlockTime = r.I32(); f.maneuverState = r.I32(); f.maneuverSubState = r.I32();
+    f.loopbackAttack = r.Bool(); f.isFighter = r.Bool();
+    f.wingDrag = r.F32(); f.wingAngle = r.F32(); f.invDrag = r.F32(); f.crashDrag = r.F32();
+    f.frontToSpeed = r.F32(); f.speedToFront = r.F32(); f.myGravity = r.F32();
+    f.maxBank = r.F32(); f.maxPitch = r.F32(); f.turnRadius = r.F32();
+    f.maxAileron = r.F32(); f.maxElevator = r.F32(); f.maxRudder = r.F32();
+    f.attackSafetyDistance = r.F32();
+    f.crashAileron = r.F32(); f.crashElevator = r.F32(); f.crashRudder = r.F32();
+    f.lastRudderPos0 = r.F32(); f.lastRudderPos1 = r.F32();
+    f.lastElevatorPos0 = r.F32(); f.lastElevatorPos1 = r.F32();
+    f.lastAileronPos0 = r.F32(); f.lastAileronPos1 = r.F32();
+    return f;
+}
+
+void WriteMoveScript(Writer& w, const movetypesnapshot::ScriptState& c)
+{
+    w.F32(c.velVecX); w.F32(c.velVecY); w.F32(c.velVecZ);
+    w.F32(c.relVelX); w.F32(c.relVelY); w.F32(c.relVelZ);
+    w.F32(c.rotX); w.F32(c.rotY); w.F32(c.rotZ);
+    w.F32(c.rotVelX); w.F32(c.rotVelY); w.F32(c.rotVelZ);
+    w.F32(c.minsX); w.F32(c.minsY); w.F32(c.minsZ);
+    w.F32(c.maxsX); w.F32(c.maxsY); w.F32(c.maxsZ);
+    w.I32(c.tag);
+    w.F32(c.drag); w.F32(c.groundOffset); w.F32(c.gravityFactor); w.F32(c.windFactor);
+    w.Bool(c.extrapolate); w.Bool(c.useRelVel); w.Bool(c.useRotVel);
+    w.Bool(c.trackSlope); w.Bool(c.trackGround); w.Bool(c.trackLimits);
+    w.Bool(c.noBlocking); w.Bool(c.groundStop); w.Bool(c.limitsStop);
+    w.I32(c.scriptNotify);
+}
+
+movetypesnapshot::ScriptState ReadMoveScript(Reader& r)
+{
+    movetypesnapshot::ScriptState c;
+    c.velVecX = r.F32(); c.velVecY = r.F32(); c.velVecZ = r.F32();
+    c.relVelX = r.F32(); c.relVelY = r.F32(); c.relVelZ = r.F32();
+    c.rotX = r.F32(); c.rotY = r.F32(); c.rotZ = r.F32();
+    c.rotVelX = r.F32(); c.rotVelY = r.F32(); c.rotVelZ = r.F32();
+    c.minsX = r.F32(); c.minsY = r.F32(); c.minsZ = r.F32();
+    c.maxsX = r.F32(); c.maxsY = r.F32(); c.maxsZ = r.F32();
+    c.tag = r.I32();
+    c.drag = r.F32(); c.groundOffset = r.F32(); c.gravityFactor = r.F32(); c.windFactor = r.F32();
+    c.extrapolate = r.Bool(); c.useRelVel = r.Bool(); c.useRotVel = r.Bool();
+    c.trackSlope = r.Bool(); c.trackGround = r.Bool(); c.trackLimits = r.Bool();
+    c.noBlocking = r.Bool(); c.groundStop = r.Bool(); c.limitsStop = r.Bool();
+    c.scriptNotify = r.I32();
+    return c;
+}
+
+void WriteMoveType(Writer& w, const movetypesnapshot::MoveTypeState& m)
+{
+    using movetypesnapshot::Kind;
+
+    w.U8(m.kind);
+    if (m.kind == static_cast<uint8_t>(Kind::None))
+        return;
+
+    WriteMoveBase(w, m.base);
+    switch (static_cast<Kind>(m.kind)) {
+        case Kind::Ground:    WriteMoveGround(w, m.ground); break;
+        case Kind::HoverAir:  WriteMoveAir(w, m.air); WriteMoveHover(w, m.hover); break;
+        case Kind::StrafeAir: WriteMoveAir(w, m.air); WriteMoveStrafe(w, m.strafe); break;
+        default: break;   // Static and Script add nothing beyond the base
+    }
+
+    w.Bool(m.scriptControlled);
+    if (m.scriptControlled) {
+        WriteMoveBase(w, m.scriptBase);
+        WriteMoveScript(w, m.script);
+    }
+}
+
+movetypesnapshot::MoveTypeState ReadMoveType(Reader& r)
+{
+    using movetypesnapshot::Kind;
+
+    movetypesnapshot::MoveTypeState m;
+    m.kind = r.U8();
+    if (m.kind == static_cast<uint8_t>(Kind::None))
+        return m;
+    // An unknown discriminant means the payload was written by a binary whose
+    // move-type set is not this one. There is no way to skip an arm of unknown
+    // length, so the read fails here rather than at a garbled field later.
+    if (m.kind > static_cast<uint8_t>(Kind::Script)) { r.Fail(); return m; }
+
+    m.base = ReadMoveBase(r);
+    switch (static_cast<Kind>(m.kind)) {
+        case Kind::Ground:    m.ground = ReadMoveGround(r); break;
+        case Kind::HoverAir:  m.air = ReadMoveAir(r); m.hover = ReadMoveHover(r); break;
+        case Kind::StrafeAir: m.air = ReadMoveAir(r); m.strafe = ReadMoveStrafe(r); break;
+        default: break;
+    }
+
+    m.scriptControlled = r.Bool();
+    if (m.scriptControlled) {
+        m.scriptBase = ReadMoveBase(r);
+        m.script = ReadMoveScript(r);
+    }
+    return m;
+}
+
+void WriteUnit(Writer& w, const UnitState& u)
+{
+    w.I32(u.id);
+    w.Str(u.unitDefName);
+    w.I32(u.team);
+    w.I32(u.buildFacing);
+    w.Bool(u.beingBuilt);
+
+    w.F32(u.posX); w.F32(u.posY); w.F32(u.posZ);
+    w.F32(u.speedX); w.F32(u.speedY); w.F32(u.speedZ);
+    w.I32(u.heading);
+    w.F32(u.frontX); w.F32(u.frontY); w.F32(u.frontZ);
+    w.F32(u.rightX); w.F32(u.rightY); w.F32(u.rightZ);
+    w.F32(u.upX); w.F32(u.upY); w.F32(u.upZ);
+    w.U32(u.physicalState);
+    w.U32(u.collidableState);
+
+    w.F32(u.health); w.F32(u.maxHealth);
+    w.F32(u.paralyzeDamage); w.F32(u.captureProgress); w.F32(u.buildProgress);
+    w.F32(u.experience); w.F32(u.recentDamage);
+    w.F32(u.power); w.F32(u.mass); w.F32(u.buildTime);
+    w.F32(u.terraformLeft); w.F32(u.repairAmount); w.F32(u.metalExtract);
+    WriteRes(w, u.cost); WriteRes(w, u.harvested);
+    WriteRes(w, u.harvestStorage); WriteRes(w, u.storage);
+
+    w.I32(u.fireState); w.I32(u.moveState);
+    w.Bool(u.armoredState);
+    w.F32(u.armoredMultiple); w.F32(u.curArmorMultiple);
+    w.I32(u.armorType);
+    w.U32(u.category);
+    w.F32(u.maxRange); w.F32(u.reloadSpeed);
+    w.I32(u.flankingBonusMode);
+    w.F32(u.flankingDirX); w.F32(u.flankingDirY); w.F32(u.flankingDirZ);
+    w.F32(u.flankingBonusMobility); w.F32(u.flankingBonusMobilityAdd);
+    w.F32(u.flankingBonusAvgDamage); w.F32(u.flankingBonusDifDamage);
+    w.Bool(u.onTempHoldFire); w.Bool(u.forceUseWeapons); w.Bool(u.allowUseWeapons);
+    w.Bool(u.inBuildStance); w.Bool(u.useHighTrajectory);
+    w.I32(u.selfDCountdown); w.I32(u.delayedWreckLevel); w.I32(u.featureDefID);
+    w.I32(u.lastAttackFrame); w.I32(u.lastFireWeapon); w.I32(u.lastNanoAdd);
+    w.U32(u.restTime);
+
+    w.I32(u.losRadius); w.I32(u.airLosRadius);
+    w.I32(u.realLosRadius); w.I32(u.realAirLosRadius);
+    w.I32(u.radarRadius); w.I32(u.sonarRadius); w.I32(u.jammerRadius);
+    w.I32(u.sonarJamRadius); w.I32(u.seismicRadius);
+    w.F32(u.seismicSignature); w.F32(u.decloakDistance);
+    w.Bool(u.stealth); w.Bool(u.sonarStealth);
+    w.Bool(u.isCloaked); w.Bool(u.wantCloak);
+    w.Bool(u.alwaysVisible); w.Bool(u.useAirLos);
+    w.F32(u.posErrX); w.F32(u.posErrY); w.F32(u.posErrZ);
+    w.F32(u.posErrDeltaX); w.F32(u.posErrDeltaY); w.F32(u.posErrDeltaZ);
+    w.I32(u.nextPosErrorUpdate);
+
+    w.Bool(u.activated); w.Bool(u.neutral); w.Bool(u.upright);
+    w.Bool(u.groundLevelled); w.Bool(u.stunned); w.Bool(u.invulnerable);
+    w.Bool(u.noSelect);
+
+    w.I32(u.transporterId);
+    w.I32(u.loadingTransportId);
+    w.I32(u.unloadingTransportId);
+    w.I32(u.transportCapacityUsed);
+    w.F32(u.transportMassUsed);
+    w.U32(static_cast<uint32_t>(u.transportees.size()));
+    for (const auto& p : u.transportees) { w.I32(p.first); w.I32(p.second); }
+
+    w.U32(static_cast<uint32_t>(u.commands.size()));
+    for (const auto& c : u.commands) WriteCommand(w, c);
+    w.I32(u.tagCounter);
+    w.Bool(u.repeatOrders);
+    w.I32(u.lastUserCommand); w.I32(u.lastFinishCommand);
+
+    w.U32(static_cast<uint32_t>(u.weapons.size()));
+    for (const auto& s : u.weapons) WriteWeapon(w, s);
+    WriteRulesParams(w, u.modParams);
+
+    w.U32(u.activeIndex);
+    WriteMoveType(w, u.move);
+}
+
+UnitState ReadUnit(Reader& r)
+{
+    UnitState u;
+    u.id = r.I32();
+    u.unitDefName = r.Str();
+    u.team = r.I32();
+    u.buildFacing = r.I32();
+    u.beingBuilt = r.Bool();
+
+    u.posX = r.F32(); u.posY = r.F32(); u.posZ = r.F32();
+    u.speedX = r.F32(); u.speedY = r.F32(); u.speedZ = r.F32();
+    u.heading = r.I32();
+    u.frontX = r.F32(); u.frontY = r.F32(); u.frontZ = r.F32();
+    u.rightX = r.F32(); u.rightY = r.F32(); u.rightZ = r.F32();
+    u.upX = r.F32(); u.upY = r.F32(); u.upZ = r.F32();
+    u.physicalState = r.U32();
+    u.collidableState = r.U32();
+
+    u.health = r.F32(); u.maxHealth = r.F32();
+    u.paralyzeDamage = r.F32(); u.captureProgress = r.F32(); u.buildProgress = r.F32();
+    u.experience = r.F32(); u.recentDamage = r.F32();
+    u.power = r.F32(); u.mass = r.F32(); u.buildTime = r.F32();
+    u.terraformLeft = r.F32(); u.repairAmount = r.F32(); u.metalExtract = r.F32();
+    u.cost = ReadRes(r); u.harvested = ReadRes(r);
+    u.harvestStorage = ReadRes(r); u.storage = ReadRes(r);
+
+    u.fireState = r.I32(); u.moveState = r.I32();
+    u.armoredState = r.Bool();
+    u.armoredMultiple = r.F32(); u.curArmorMultiple = r.F32();
+    u.armorType = r.I32();
+    u.category = r.U32();
+    u.maxRange = r.F32(); u.reloadSpeed = r.F32();
+    u.flankingBonusMode = r.I32();
+    u.flankingDirX = r.F32(); u.flankingDirY = r.F32(); u.flankingDirZ = r.F32();
+    u.flankingBonusMobility = r.F32(); u.flankingBonusMobilityAdd = r.F32();
+    u.flankingBonusAvgDamage = r.F32(); u.flankingBonusDifDamage = r.F32();
+    u.onTempHoldFire = r.Bool(); u.forceUseWeapons = r.Bool(); u.allowUseWeapons = r.Bool();
+    u.inBuildStance = r.Bool(); u.useHighTrajectory = r.Bool();
+    u.selfDCountdown = r.I32(); u.delayedWreckLevel = r.I32(); u.featureDefID = r.I32();
+    u.lastAttackFrame = r.I32(); u.lastFireWeapon = r.I32(); u.lastNanoAdd = r.I32();
+    u.restTime = r.U32();
+
+    u.losRadius = r.I32(); u.airLosRadius = r.I32();
+    u.realLosRadius = r.I32(); u.realAirLosRadius = r.I32();
+    u.radarRadius = r.I32(); u.sonarRadius = r.I32(); u.jammerRadius = r.I32();
+    u.sonarJamRadius = r.I32(); u.seismicRadius = r.I32();
+    u.seismicSignature = r.F32(); u.decloakDistance = r.F32();
+    u.stealth = r.Bool(); u.sonarStealth = r.Bool();
+    u.isCloaked = r.Bool(); u.wantCloak = r.Bool();
+    u.alwaysVisible = r.Bool(); u.useAirLos = r.Bool();
+    u.posErrX = r.F32(); u.posErrY = r.F32(); u.posErrZ = r.F32();
+    u.posErrDeltaX = r.F32(); u.posErrDeltaY = r.F32(); u.posErrDeltaZ = r.F32();
+    u.nextPosErrorUpdate = r.I32();
+
+    u.activated = r.Bool(); u.neutral = r.Bool(); u.upright = r.Bool();
+    u.groundLevelled = r.Bool(); u.stunned = r.Bool(); u.invulnerable = r.Bool();
+    u.noSelect = r.Bool();
+
+    u.transporterId = r.I32();
+    u.loadingTransportId = r.I32();
+    u.unloadingTransportId = r.I32();
+    u.transportCapacityUsed = r.I32();
+    u.transportMassUsed = r.F32();
+    {
+        const uint32_t n = r.U32();
+        if (r.Remaining() < size_t(n) * 8) { r.Fail(); return u; }
+        u.transportees.reserve(n);
+        for (uint32_t i = 0; i < n && !r.Bad(); ++i) {
+            const int32_t tid = r.I32();
+            const int32_t piece = r.I32();
+            u.transportees.emplace_back(tid, piece);
+        }
+    }
+    {
+        const uint32_t n = r.U32();
+        // Cheapest command is 17 bytes; 4 is the conservative floor.
+        if (r.Remaining() < size_t(n) * 4) { r.Fail(); return u; }
+        u.commands.reserve(n);
+        for (uint32_t i = 0; i < n && !r.Bad(); ++i) u.commands.push_back(ReadCommand(r));
+    }
+    u.tagCounter = r.I32();
+    u.repeatOrders = r.Bool();
+    u.lastUserCommand = r.I32(); u.lastFinishCommand = r.I32();
+    {
+        const uint32_t n = r.U32();
+        if (r.Remaining() < size_t(n) * 4) { r.Fail(); return u; }
+        u.weapons.reserve(n);
+        for (uint32_t i = 0; i < n && !r.Bad(); ++i) u.weapons.push_back(ReadWeapon(r));
+    }
+    u.modParams = ReadRulesParams(r);
+
+    u.activeIndex = r.U32();
+    u.move = ReadMoveType(r);
+    return u;
+}
+
+// ──────────── Task 1e codec: features (PLAN-persistence §7.1e) ────────────
+
+void WriteFeature(Writer& w, const FeatureState& f)
+{
+    w.I32(f.id);
+    w.Str(f.featureDefName);
+    w.Str(f.resurrectUnitDefName);
+    w.I32(f.team);
+    w.I32(f.heading);
+    w.I32(f.buildFacing);
+
+    w.F32(f.posX); w.F32(f.posY); w.F32(f.posZ);
+    w.F32(f.speedX); w.F32(f.speedY); w.F32(f.speedZ);
+    w.F32(f.frontX); w.F32(f.frontY); w.F32(f.frontZ);
+    w.F32(f.rightX); w.F32(f.rightY); w.F32(f.rightZ);
+    w.F32(f.upX); w.F32(f.upY); w.F32(f.upZ);
+    w.U32(f.collidableState);
+
+    w.F32(f.radius); w.F32(f.height);
+    w.F32(f.relMidX); w.F32(f.relMidY); w.F32(f.relMidZ);
+    w.F32(f.relAimX); w.F32(f.relAimY); w.F32(f.relAimZ);
+
+    w.F32(f.health); w.F32(f.maxHealth); w.F32(f.mass);
+    w.F32(f.reclaimTime); w.F32(f.reclaimLeft); w.F32(f.resurrectProgress);
+    w.Bool(f.isRepairingBeforeResurrect);
+    w.I32(f.lastReclaimFrame); w.I32(f.fireTime); w.I32(f.smokeTime);
+    WriteRes(w, f.defResources); WriteRes(w, f.resources);
+
+    w.Bool(f.moveCtrlEnabled);
+    w.F32(f.movementMaskX); w.F32(f.movementMaskY); w.F32(f.movementMaskZ);
+    w.F32(f.velocityMaskX); w.F32(f.velocityMaskY); w.F32(f.velocityMaskZ);
+    w.F32(f.impulseMaskX); w.F32(f.impulseMaskY); w.F32(f.impulseMaskZ);
+    w.F32(f.velVectorX); w.F32(f.velVectorY); w.F32(f.velVectorZ);
+    w.F32(f.accVectorX); w.F32(f.accVectorY); w.F32(f.accVectorZ);
+
+    w.Bool(f.crushable); w.Bool(f.blockEnemyPushing); w.Bool(f.blockHeightChanges);
+    w.Bool(f.noSelect); w.Bool(f.alwaysVisible); w.Bool(f.useAirLos);
+
+    WriteRulesParams(w, f.modParams);
+}
+
+FeatureState ReadFeature(Reader& r)
+{
+    FeatureState f;
+    f.id = r.I32();
+    f.featureDefName = r.Str();
+    f.resurrectUnitDefName = r.Str();
+    f.team = r.I32();
+    f.heading = r.I32();
+    f.buildFacing = r.I32();
+
+    f.posX = r.F32(); f.posY = r.F32(); f.posZ = r.F32();
+    f.speedX = r.F32(); f.speedY = r.F32(); f.speedZ = r.F32();
+    f.frontX = r.F32(); f.frontY = r.F32(); f.frontZ = r.F32();
+    f.rightX = r.F32(); f.rightY = r.F32(); f.rightZ = r.F32();
+    f.upX = r.F32(); f.upY = r.F32(); f.upZ = r.F32();
+    f.collidableState = r.U32();
+
+    f.radius = r.F32(); f.height = r.F32();
+    f.relMidX = r.F32(); f.relMidY = r.F32(); f.relMidZ = r.F32();
+    f.relAimX = r.F32(); f.relAimY = r.F32(); f.relAimZ = r.F32();
+
+    f.health = r.F32(); f.maxHealth = r.F32(); f.mass = r.F32();
+    f.reclaimTime = r.F32(); f.reclaimLeft = r.F32(); f.resurrectProgress = r.F32();
+    f.isRepairingBeforeResurrect = r.Bool();
+    f.lastReclaimFrame = r.I32(); f.fireTime = r.I32(); f.smokeTime = r.I32();
+    f.defResources = ReadRes(r); f.resources = ReadRes(r);
+
+    f.moveCtrlEnabled = r.Bool();
+    f.movementMaskX = r.F32(); f.movementMaskY = r.F32(); f.movementMaskZ = r.F32();
+    f.velocityMaskX = r.F32(); f.velocityMaskY = r.F32(); f.velocityMaskZ = r.F32();
+    f.impulseMaskX = r.F32(); f.impulseMaskY = r.F32(); f.impulseMaskZ = r.F32();
+    f.velVectorX = r.F32(); f.velVectorY = r.F32(); f.velVectorZ = r.F32();
+    f.accVectorX = r.F32(); f.accVectorY = r.F32(); f.accVectorZ = r.F32();
+
+    f.crushable = r.Bool(); f.blockEnemyPushing = r.Bool();
+    f.blockHeightChanges = r.Bool();
+    f.noSelect = r.Bool(); f.alwaysVisible = r.Bool(); f.useAirLos = r.Bool();
+
+    f.modParams = ReadRulesParams(r);
+    return f;
+}
+
+// ── The task 1c censuses (the structs above are aggregates, so the same
+//    structured-binding trick as 1b's applies to all six) ──
+
+int CensusResPair(const ResPair& r)
+{
+    const auto& [metal, energy] = r;
+    (void)metal; (void)energy;
+    return 2;
+}
+
+int CensusRulesParam(const RulesParamState& p)
+{
+    const auto& [key, los, type, b, f, s] = p;
+    (void)key; (void)los; (void)type; (void)b; (void)f; (void)s;
+    return 6;
+}
+
+int CensusStats(const TeamStatsState& s)
+{
+    const auto& [frame, metalUsed, energyUsed, metalProduced, energyProduced,
+                 metalExcess, energyExcess, metalReceived, energyReceived,
+                 metalSent, energySent, damageDealt, damageReceived,
+                 unitsProduced, unitsDied, unitsReceived, unitsSent,
+                 unitsCaptured, unitsOutCaptured, unitsKilled] = s;
+    (void)frame; (void)metalUsed; (void)energyUsed; (void)metalProduced;
+    (void)energyProduced; (void)metalExcess; (void)energyExcess;
+    (void)metalReceived; (void)energyReceived; (void)metalSent; (void)energySent;
+    (void)damageDealt; (void)damageReceived; (void)unitsProduced; (void)unitsDied;
+    (void)unitsReceived; (void)unitsSent; (void)unitsCaptured;
+    (void)unitsOutCaptured; (void)unitsKilled;
+    return 20;
+}
+
+int CensusTeamState(const TeamState& t)
+{
+    const auto& [teamNum, isDead, gaia, leader, incomeMultiplier,
+                 startPosX, startPosY, startPosZ,
+                 res, resStorage, resPull, resPrevPull, resIncome, resPrevIncome,
+                 resExpense, resPrevExpense, resShare, resDelayedShare,
+                 resSent, resPrevSent, resReceived, resPrevReceived, resPrevExcess,
+                 nextHistoryEntry, statHistory, modParams] = t;
+    (void)teamNum; (void)isDead; (void)gaia; (void)leader; (void)incomeMultiplier;
+    (void)startPosX; (void)startPosY; (void)startPosZ;
+    (void)res; (void)resStorage; (void)resPull; (void)resPrevPull;
+    (void)resIncome; (void)resPrevIncome; (void)resExpense; (void)resPrevExpense;
+    (void)resShare; (void)resDelayedShare; (void)resSent; (void)resPrevSent;
+    (void)resReceived; (void)resPrevReceived; (void)resPrevExcess;
+    (void)nextHistoryEntry; (void)statHistory; (void)modParams;
+    return 26;
+}
+
+int CensusCommandState(const CommandState& c)
+{
+    const auto& [cmdID, aiCallbackID, timeOut, tag, options, params] = c;
+    (void)cmdID; (void)aiCallbackID; (void)timeOut; (void)tag; (void)options;
+    (void)params;
+    return 6;
+}
+
+int CensusWeaponState(const WeaponState& s)
+{
+    const auto& [reloadStatus, salvoLeft, nextSalvo, numStockpiled,
+                 numStockpileQued, weaponDefName] = s;
+    (void)reloadStatus; (void)salvoLeft; (void)nextSalvo; (void)numStockpiled;
+    (void)numStockpileQued; (void)weaponDefName;
+    return 6;
+}
+
+int CensusUnitDefScalars(const UnitDefScalars& s)
+{
+    const auto& [maxHealth, power, mass, buildTime, cost, storage, harvestStorage,
+                 armoredMultiple, armorType, category, maxRange,
+                 losRadius, airLosRadius, radarRadius, sonarRadius, jammerRadius,
+                 sonarJamRadius, seismicRadius, seismicSignature, decloakDistance,
+                 stealth, sonarStealth, flankingBonusMode,
+                 flankingBonusMobilityAdd, flankingBonusAvgDamage,
+                 flankingBonusDifDamage] = s;
+    (void)maxHealth; (void)power; (void)mass; (void)buildTime; (void)cost;
+    (void)storage; (void)harvestStorage; (void)armoredMultiple; (void)armorType;
+    (void)category; (void)maxRange; (void)losRadius; (void)airLosRadius;
+    (void)radarRadius; (void)sonarRadius; (void)jammerRadius;
+    (void)sonarJamRadius; (void)seismicRadius; (void)seismicSignature;
+    (void)decloakDistance; (void)stealth; (void)sonarStealth;
+    (void)flankingBonusMode;
+    (void)flankingBonusMobilityAdd; (void)flankingBonusAvgDamage;
+    (void)flankingBonusDifDamage;
+    return 26;
+}
+
+int CensusFeatureDefScalars(const FeatureDefScalars& s)
+{
+    const auto& [maxHealth, mass, reclaimTime, defResources] = s;
+    (void)maxHealth; (void)mass; (void)reclaimTime; (void)defResources;
+    return 4;
+}
+
+int CensusUnitState(const UnitState& u)
+{
+    const auto& [id, unitDefName, team, buildFacing, beingBuilt,
+                 posX, posY, posZ, speedX, speedY, speedZ, heading,
+                 frontX, frontY, frontZ, rightX, rightY, rightZ, upX, upY, upZ,
+                 physicalState, collidableState,
+                 health, maxHealth, paralyzeDamage, captureProgress, buildProgress,
+                 experience, recentDamage, power, mass, buildTime,
+                 terraformLeft, repairAmount, metalExtract,
+                 cost, harvested, harvestStorage, storage,
+                 fireState, moveState, armoredState, armoredMultiple,
+                 curArmorMultiple, armorType, category, maxRange, reloadSpeed,
+                 flankingBonusMode, flankingDirX, flankingDirY, flankingDirZ,
+                 flankingBonusMobility, flankingBonusMobilityAdd,
+                 flankingBonusAvgDamage, flankingBonusDifDamage,
+                 onTempHoldFire, forceUseWeapons, allowUseWeapons,
+                 inBuildStance, useHighTrajectory,
+                 selfDCountdown, delayedWreckLevel, featureDefID,
+                 lastAttackFrame, lastFireWeapon, lastNanoAdd, restTime,
+                 losRadius, airLosRadius, realLosRadius, realAirLosRadius,
+                 radarRadius, sonarRadius, jammerRadius, sonarJamRadius,
+                 seismicRadius, seismicSignature, decloakDistance,
+                 stealth, sonarStealth, isCloaked, wantCloak,
+                 alwaysVisible, useAirLos,
+                 posErrX, posErrY, posErrZ,
+                 posErrDeltaX, posErrDeltaY, posErrDeltaZ, nextPosErrorUpdate,
+                 activated, neutral, upright, groundLevelled, stunned,
+                 invulnerable, noSelect,
+                 transporterId, loadingTransportId, unloadingTransportId,
+                 transportCapacityUsed, transportMassUsed, transportees,
+                 commands, tagCounter, repeatOrders, lastUserCommand,
+                 lastFinishCommand, weapons, modParams, activeIndex, move] = u;
+    (void)id; (void)unitDefName; (void)team; (void)buildFacing; (void)beingBuilt;
+    (void)posX; (void)posY; (void)posZ; (void)speedX; (void)speedY; (void)speedZ;
+    (void)heading; (void)frontX; (void)frontY; (void)frontZ;
+    (void)rightX; (void)rightY; (void)rightZ; (void)upX; (void)upY; (void)upZ;
+    (void)physicalState; (void)collidableState;
+    (void)health; (void)maxHealth; (void)paralyzeDamage; (void)captureProgress;
+    (void)buildProgress; (void)experience; (void)recentDamage; (void)power;
+    (void)mass; (void)buildTime; (void)terraformLeft; (void)repairAmount;
+    (void)metalExtract; (void)cost; (void)harvested; (void)harvestStorage;
+    (void)storage; (void)fireState; (void)moveState; (void)armoredState;
+    (void)armoredMultiple; (void)curArmorMultiple; (void)armorType; (void)category;
+    (void)maxRange; (void)reloadSpeed; (void)flankingBonusMode;
+    (void)flankingDirX; (void)flankingDirY; (void)flankingDirZ;
+    (void)flankingBonusMobility; (void)flankingBonusMobilityAdd;
+    (void)flankingBonusAvgDamage; (void)flankingBonusDifDamage;
+    (void)onTempHoldFire; (void)forceUseWeapons; (void)allowUseWeapons;
+    (void)inBuildStance; (void)useHighTrajectory; (void)selfDCountdown;
+    (void)delayedWreckLevel; (void)featureDefID; (void)lastAttackFrame;
+    (void)lastFireWeapon; (void)lastNanoAdd; (void)restTime;
+    (void)losRadius; (void)airLosRadius; (void)realLosRadius;
+    (void)realAirLosRadius; (void)radarRadius; (void)sonarRadius;
+    (void)jammerRadius; (void)sonarJamRadius; (void)seismicRadius;
+    (void)seismicSignature; (void)decloakDistance; (void)stealth;
+    (void)sonarStealth; (void)isCloaked; (void)wantCloak; (void)alwaysVisible;
+    (void)useAirLos; (void)posErrX; (void)posErrY; (void)posErrZ;
+    (void)posErrDeltaX; (void)posErrDeltaY; (void)posErrDeltaZ;
+    (void)nextPosErrorUpdate; (void)activated; (void)neutral; (void)upright;
+    (void)groundLevelled; (void)stunned; (void)invulnerable; (void)noSelect;
+    (void)transporterId; (void)loadingTransportId; (void)unloadingTransportId;
+    (void)transportCapacityUsed; (void)transportMassUsed; (void)transportees;
+    (void)commands; (void)tagCounter; (void)repeatOrders; (void)lastUserCommand;
+    (void)lastFinishCommand; (void)weapons; (void)modParams; (void)activeIndex;
+    (void)move;
+    return 115;
+}
+
+// ── Option A censuses (PLAN-persistence §7.1c) ──
+//
+// One per struct. These DO work as structured bindings — unlike CUnit itself,
+// the move-type state types are plain aggregates with no base class and no
+// private members, which is the whole reason the sim-side classes hand their
+// members over to a struct instead of being walked directly.
+
+int CensusMoveBase(const movetypesnapshot::BaseState& b)
+{
+    const auto& [goalX, goalY, goalZ, oldPosX, oldPosY, oldPosZ,
+                 oldSlowUpdatePosX, oldSlowUpdatePosY, oldSlowUpdatePosZ,
+                 oldCollisionUpdatePosX, oldCollisionUpdatePosY, oldCollisionUpdatePosZ,
+                 progressState, maxSpeed, maxSpeedDef, maxWantedSpeed,
+                 maneuverLeash, waterline,
+                 useHeading, useWantedSpeed0, useWantedSpeed1] = b;
+    (void)goalX; (void)goalY; (void)goalZ;
+    (void)oldPosX; (void)oldPosY; (void)oldPosZ;
+    (void)oldSlowUpdatePosX; (void)oldSlowUpdatePosY; (void)oldSlowUpdatePosZ;
+    (void)oldCollisionUpdatePosX; (void)oldCollisionUpdatePosY; (void)oldCollisionUpdatePosZ;
+    (void)progressState; (void)maxSpeed; (void)maxSpeedDef; (void)maxWantedSpeed;
+    (void)maneuverLeash; (void)waterline;
+    (void)useHeading; (void)useWantedSpeed0; (void)useWantedSpeed1;
+    return 21;
+}
+
+int CensusMoveGround(const movetypesnapshot::GroundState& g)
+{
+    const auto& [currWayPointX, currWayPointY, currWayPointZ,
+                 nextWayPointX, nextWayPointY, nextWayPointZ,
+                 earlyCurrWayPointX, earlyCurrWayPointY, earlyCurrWayPointZ,
+                 earlyNextWayPointX, earlyNextWayPointY, earlyNextWayPointZ,
+                 waypointDirX, waypointDirY, waypointDirZ,
+                 flatFrontDirX, flatFrontDirY, flatFrontDirZ,
+                 lastAvoidanceDirX, lastAvoidanceDirY, lastAvoidanceDirZ,
+                 mainHeadingPosX, mainHeadingPosY, mainHeadingPosZ,
+                 skidRotVectorX, skidRotVectorY, skidRotVectorZ,
+                 turnRate, turnSpeed, turnAccel,
+                 accRate, decRate, myGravity,
+                 maxReverseDist, minReverseAngle, maxReverseSpeed, sqSkidSpeedMult,
+                 wantedSpeed, currentSpeed, deltaSpeed,
+                 currWayPointDist, prevWayPointDist,
+                 goalRadius, ownerRadius, extraRadius,
+                 skidRotSpeed, skidRotAccel,
+                 forceFromMovingCollideesX, forceFromMovingCollideesY, forceFromMovingCollideesZ,
+                 forceFromStaticCollideesX, forceFromStaticCollideesY, forceFromStaticCollideesZ,
+                 resultantForcesX, resultantForcesY, resultantForcesZ,
+                 numIdlingUpdates, numIdlingSlowUpdates,
+                 wantedHeading, minScriptChangeHeading,
+                 wantRepathFrame, lastRepathFrame,
+                 bestLastWaypointDist, bestReattemptedLastWaypointDist,
+                 setHeading, setHeadingDir, limitSpeedForTurning,
+                 oldSpeed, newSpeed,
+                 atGoal, atEndOfPath, wantRepath, moveFailed, lastWaypoint,
+                 reversing, idling, pushResistant, pushResistanceBlockActive,
+                 canReverse, useMainHeading, useRawMovement,
+                 pathingFailed, pathingArrived, positionStuck,
+                 forceStaticObjectCheck, avoidingUnits] = g;
+    (void)currWayPointX; (void)currWayPointY; (void)currWayPointZ;
+    (void)nextWayPointX; (void)nextWayPointY; (void)nextWayPointZ;
+    (void)earlyCurrWayPointX; (void)earlyCurrWayPointY; (void)earlyCurrWayPointZ;
+    (void)earlyNextWayPointX; (void)earlyNextWayPointY; (void)earlyNextWayPointZ;
+    (void)waypointDirX; (void)waypointDirY; (void)waypointDirZ;
+    (void)flatFrontDirX; (void)flatFrontDirY; (void)flatFrontDirZ;
+    (void)lastAvoidanceDirX; (void)lastAvoidanceDirY; (void)lastAvoidanceDirZ;
+    (void)mainHeadingPosX; (void)mainHeadingPosY; (void)mainHeadingPosZ;
+    (void)skidRotVectorX; (void)skidRotVectorY; (void)skidRotVectorZ;
+    (void)turnRate; (void)turnSpeed; (void)turnAccel;
+    (void)accRate; (void)decRate; (void)myGravity;
+    (void)maxReverseDist; (void)minReverseAngle; (void)maxReverseSpeed;
+    (void)sqSkidSpeedMult; (void)wantedSpeed; (void)currentSpeed; (void)deltaSpeed;
+    (void)currWayPointDist; (void)prevWayPointDist;
+    (void)goalRadius; (void)ownerRadius; (void)extraRadius;
+    (void)skidRotSpeed; (void)skidRotAccel;
+    (void)forceFromMovingCollideesX; (void)forceFromMovingCollideesY; (void)forceFromMovingCollideesZ;
+    (void)forceFromStaticCollideesX; (void)forceFromStaticCollideesY; (void)forceFromStaticCollideesZ;
+    (void)resultantForcesX; (void)resultantForcesY; (void)resultantForcesZ;
+    (void)numIdlingUpdates; (void)numIdlingSlowUpdates;
+    (void)wantedHeading; (void)minScriptChangeHeading;
+    (void)wantRepathFrame; (void)lastRepathFrame;
+    (void)bestLastWaypointDist; (void)bestReattemptedLastWaypointDist;
+    (void)setHeading; (void)setHeadingDir; (void)limitSpeedForTurning;
+    (void)oldSpeed; (void)newSpeed;
+    (void)atGoal; (void)atEndOfPath; (void)wantRepath; (void)moveFailed;
+    (void)lastWaypoint; (void)reversing; (void)idling; (void)pushResistant;
+    (void)pushResistanceBlockActive; (void)canReverse; (void)useMainHeading;
+    (void)useRawMovement; (void)pathingFailed; (void)pathingArrived;
+    (void)positionStuck; (void)forceStaticObjectCheck; (void)avoidingUnits;
+    return 86;
+}
+
+int CensusMoveAir(const movetypesnapshot::AirState& a)
+{
+    const auto& [aircraftState, collisionState,
+                 oldGoalPosX, oldGoalPosY, oldGoalPosZ,
+                 reservedLandingPosX, reservedLandingPosY, reservedLandingPosZ,
+                 landRadiusSq, wantedHeight, orgWantedHeight,
+                 accRate, decRate, altitudeRate,
+                 collide, autoLand, dontLand,
+                 useSmoothMesh, canSubmerge, floatOnWater] = a;
+    (void)aircraftState; (void)collisionState;
+    (void)oldGoalPosX; (void)oldGoalPosY; (void)oldGoalPosZ;
+    (void)reservedLandingPosX; (void)reservedLandingPosY; (void)reservedLandingPosZ;
+    (void)landRadiusSq; (void)wantedHeight; (void)orgWantedHeight;
+    (void)accRate; (void)decRate; (void)altitudeRate;
+    (void)collide; (void)autoLand; (void)dontLand;
+    (void)useSmoothMesh; (void)canSubmerge; (void)floatOnWater;
+    return 20;
+}
+
+int CensusMoveHover(const movetypesnapshot::HoverState& h)
+{
+    const auto& [flyState, bankingAllowed, airStrafe, wantToStop,
+                 goalDistance, currentBank, currentPitch,
+                 turnRate, maxDrift, maxTurnAngle,
+                 wantedSpeedX, wantedSpeedY, wantedSpeedZ,
+                 deltaSpeedX, deltaSpeedY, deltaSpeedZ,
+                 circlingPosX, circlingPosY, circlingPosZ,
+                 randomWindX, randomWindY, randomWindZ,
+                 forceHeading, wantedHeading, forcedHeading,
+                 waitCounter, lastMoveRate] = h;
+    (void)flyState; (void)bankingAllowed; (void)airStrafe; (void)wantToStop;
+    (void)goalDistance; (void)currentBank; (void)currentPitch;
+    (void)turnRate; (void)maxDrift; (void)maxTurnAngle;
+    (void)wantedSpeedX; (void)wantedSpeedY; (void)wantedSpeedZ;
+    (void)deltaSpeedX; (void)deltaSpeedY; (void)deltaSpeedZ;
+    (void)circlingPosX; (void)circlingPosY; (void)circlingPosZ;
+    (void)randomWindX; (void)randomWindY; (void)randomWindZ;
+    (void)forceHeading; (void)wantedHeading; (void)forcedHeading;
+    (void)waitCounter; (void)lastMoveRate;
+    return 27;
+}
+
+int CensusMoveStrafe(const movetypesnapshot::StrafeState& f)
+{
+    const auto& [maneuverBlockTime, maneuverState, maneuverSubState,
+                 loopbackAttack, isFighter,
+                 wingDrag, wingAngle, invDrag, crashDrag,
+                 frontToSpeed, speedToFront, myGravity,
+                 maxBank, maxPitch, turnRadius,
+                 maxAileron, maxElevator, maxRudder, attackSafetyDistance,
+                 crashAileron, crashElevator, crashRudder,
+                 lastRudderPos0, lastRudderPos1,
+                 lastElevatorPos0, lastElevatorPos1,
+                 lastAileronPos0, lastAileronPos1] = f;
+    (void)maneuverBlockTime; (void)maneuverState; (void)maneuverSubState;
+    (void)loopbackAttack; (void)isFighter;
+    (void)wingDrag; (void)wingAngle; (void)invDrag; (void)crashDrag;
+    (void)frontToSpeed; (void)speedToFront; (void)myGravity;
+    (void)maxBank; (void)maxPitch; (void)turnRadius;
+    (void)maxAileron; (void)maxElevator; (void)maxRudder;
+    (void)attackSafetyDistance;
+    (void)crashAileron; (void)crashElevator; (void)crashRudder;
+    (void)lastRudderPos0; (void)lastRudderPos1;
+    (void)lastElevatorPos0; (void)lastElevatorPos1;
+    (void)lastAileronPos0; (void)lastAileronPos1;
+    return 28;
+}
+
+int CensusMoveScript(const movetypesnapshot::ScriptState& c)
+{
+    const auto& [velVecX, velVecY, velVecZ, relVelX, relVelY, relVelZ,
+                 rotX, rotY, rotZ, rotVelX, rotVelY, rotVelZ,
+                 minsX, minsY, minsZ, maxsX, maxsY, maxsZ,
+                 tag, drag, groundOffset, gravityFactor, windFactor,
+                 extrapolate, useRelVel, useRotVel,
+                 trackSlope, trackGround, trackLimits,
+                 noBlocking, groundStop, limitsStop, scriptNotify] = c;
+    (void)velVecX; (void)velVecY; (void)velVecZ;
+    (void)relVelX; (void)relVelY; (void)relVelZ;
+    (void)rotX; (void)rotY; (void)rotZ;
+    (void)rotVelX; (void)rotVelY; (void)rotVelZ;
+    (void)minsX; (void)minsY; (void)minsZ;
+    (void)maxsX; (void)maxsY; (void)maxsZ;
+    (void)tag; (void)drag; (void)groundOffset; (void)gravityFactor; (void)windFactor;
+    (void)extrapolate; (void)useRelVel; (void)useRotVel;
+    (void)trackSlope; (void)trackGround; (void)trackLimits;
+    (void)noBlocking; (void)groundStop; (void)limitsStop; (void)scriptNotify;
+    return 33;
+}
+
+int CensusMoveTypeState(const movetypesnapshot::MoveTypeState& m)
+{
+    const auto& [kind, base, ground, air, hover, strafe, script,
+                 scriptControlled, scriptBase] = m;
+    (void)kind; (void)base; (void)ground; (void)air; (void)hover; (void)strafe;
+    (void)script; (void)scriptControlled; (void)scriptBase;
+    return 9;
+}
+
+int CensusEnvResourceState(const envressnapshot::EnvResourceState& e)
+{
+    const auto& [curTidalStrength, curWindStrength,
+                 minWindStrength, maxWindStrength,
+                 curWindDirX, curWindDirY, curWindDirZ,
+                 curWindVecX, curWindVecY, curWindVecZ,
+                 newWindVecX, newWindVecY, newWindVecZ,
+                 oldWindVecX, oldWindVecY, oldWindVecZ,
+                 windDirTimer, allGeneratorIDs, newGeneratorIDs] = e;
+    (void)curTidalStrength; (void)curWindStrength;
+    (void)minWindStrength; (void)maxWindStrength;
+    (void)curWindDirX; (void)curWindDirY; (void)curWindDirZ;
+    (void)curWindVecX; (void)curWindVecY; (void)curWindVecZ;
+    (void)newWindVecX; (void)newWindVecY; (void)newWindVecZ;
+    (void)oldWindVecX; (void)oldWindVecY; (void)oldWindVecZ;
+    (void)windDirTimer; (void)allGeneratorIDs; (void)newGeneratorIDs;
+    return 19;
+}
+
+int CensusFeatureState(const FeatureState& f)
+{
+    const auto& [id, featureDefName, resurrectUnitDefName, team, heading,
+                 buildFacing,
+                 posX, posY, posZ, speedX, speedY, speedZ,
+                 frontX, frontY, frontZ, rightX, rightY, rightZ, upX, upY, upZ,
+                 collidableState,
+                 radius, height, relMidX, relMidY, relMidZ,
+                 relAimX, relAimY, relAimZ,
+                 health, maxHealth, mass, reclaimTime, reclaimLeft,
+                 resurrectProgress, isRepairingBeforeResurrect,
+                 lastReclaimFrame, fireTime, smokeTime, defResources, resources,
+                 moveCtrlEnabled,
+                 movementMaskX, movementMaskY, movementMaskZ,
+                 velocityMaskX, velocityMaskY, velocityMaskZ,
+                 impulseMaskX, impulseMaskY, impulseMaskZ,
+                 velVectorX, velVectorY, velVectorZ,
+                 accVectorX, accVectorY, accVectorZ,
+                 crushable, blockEnemyPushing, blockHeightChanges,
+                 noSelect, alwaysVisible, useAirLos, modParams] = f;
+    (void)id; (void)featureDefName; (void)resurrectUnitDefName; (void)team;
+    (void)heading; (void)buildFacing;
+    (void)posX; (void)posY; (void)posZ; (void)speedX; (void)speedY; (void)speedZ;
+    (void)frontX; (void)frontY; (void)frontZ; (void)rightX; (void)rightY;
+    (void)rightZ; (void)upX; (void)upY; (void)upZ; (void)collidableState;
+    (void)radius; (void)height; (void)relMidX; (void)relMidY; (void)relMidZ;
+    (void)relAimX; (void)relAimY; (void)relAimZ;
+    (void)health; (void)maxHealth; (void)mass; (void)reclaimTime;
+    (void)reclaimLeft; (void)resurrectProgress; (void)isRepairingBeforeResurrect;
+    (void)lastReclaimFrame; (void)fireTime; (void)smokeTime; (void)defResources;
+    (void)resources; (void)moveCtrlEnabled;
+    (void)movementMaskX; (void)movementMaskY; (void)movementMaskZ;
+    (void)velocityMaskX; (void)velocityMaskY; (void)velocityMaskZ;
+    (void)impulseMaskX; (void)impulseMaskY; (void)impulseMaskZ;
+    (void)velVectorX; (void)velVectorY; (void)velVectorZ;
+    (void)accVectorX; (void)accVectorY; (void)accVectorZ;
+    (void)crushable; (void)blockEnemyPushing; (void)blockHeightChanges;
+    (void)noSelect; (void)alwaysVisible; (void)useAirLos; (void)modParams;
+    return 65;
+}
+
+/// Flatten a LuaRulesParams::Params map into the wire form, SORTED BY KEY: the
+/// map is unordered, and a snapshot whose byte layout depends on hash order is
+/// not comparable against a second snapshot of the same state.
+std::vector<RulesParamState> CaptureRulesParams(const LuaRulesParams::Params& in)
+{
+    std::vector<RulesParamState> out;
+    out.reserve(in.size());
+    for (const auto& [key, param] : in) {
+        RulesParamState p;
+        p.key = key;
+        p.los = param.los;
+        if (std::holds_alternative<bool>(param.value)) {
+            p.type = 0;
+            p.b = std::get<bool>(param.value);
+        } else if (std::holds_alternative<float>(param.value)) {
+            p.type = 1;
+            p.f = std::get<float>(param.value);
+        } else {
+            p.type = 2;
+            p.s = std::get<std::string>(param.value);
+        }
+        out.push_back(std::move(p));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const RulesParamState& a, const RulesParamState& b) { return a.key < b.key; });
+    return out;
+}
+
+void ApplyRulesParams(const std::vector<RulesParamState>& in, LuaRulesParams::Params& out)
+{
+    out.clear();
+    for (const auto& p : in) {
+        LuaRulesParams::Param param;
+        param.los = p.los;
+        switch (p.type) {
+            case 0:  param.value = p.b; break;
+            case 1:  param.value = p.f; break;
+            default: param.value = p.s; break;
+        }
+        out[p.key] = std::move(param);
+    }
+}
+
+/// The task 1d census. luasnapshot::Value is an aggregate, so the same
+/// structured-binding tripwire applies: a sixth member (a metatable name, a
+/// light-userdata tag, ...) fails the build until the codec writes it.
+int CensusLuaValue(const luasnapshot::Value& v)
+{
+    const auto& [type, b, num, i, str, table] = v;
+    (void)type; (void)b; (void)num; (void)i; (void)str; (void)table;
+    return 6;
+}
+
+const SectionSpec* SpecFor(uint16_t id)
+{
+    for (const auto& s : Sections()) {
+        if (static_cast<uint16_t>(s.id) == id) return &s;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+// ───────────── Task 1c: section codecs (public, for the tests) ─────────────
+
+void EncodeTeams(const std::vector<TeamState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.U32(static_cast<uint32_t>(in.size()));
+    for (const auto& t : in) WriteTeam(w, t);
+}
+
+bool DecodeTeams(const uint8_t* data, size_t size,
+                 std::vector<TeamState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) {
+        err = "teams section claims " + std::to_string(count) + " teams in " +
+              std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadTeam(r));
+    if (r.Bad()) {
+        err = "teams section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "teams section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+void EncodeUnits(const std::vector<UnitState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.U32(static_cast<uint32_t>(in.size()));
+    for (const auto& u : in) WriteUnit(w, u);
+}
+
+bool DecodeUnits(const uint8_t* data, size_t size,
+                 std::vector<UnitState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) {
+        err = "units section claims " + std::to_string(count) + " units in " +
+              std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadUnit(r));
+    if (r.Bad()) {
+        err = "units section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "units section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+// ───────────── Task 1e: the features codec (public, for the tests) ─────────────
+
+void EncodeFeatures(const std::vector<FeatureState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.U32(static_cast<uint32_t>(in.size()));
+    for (const auto& f : in) WriteFeature(w, f);
+}
+
+bool DecodeFeatures(const uint8_t* data, size_t size,
+                    std::vector<FeatureState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    // A feature costs far more than a byte, but the point of this guard is only
+    // that a corrupt count is a decode failure before it is an allocation.
+    if (r.Remaining() < size_t(count)) {
+        err = "features section claims " + std::to_string(count) +
+              " features in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadFeature(r));
+    if (r.Bad()) {
+        err = "features section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "features section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+void EncodeGameRules(const std::vector<RulesParamState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    WriteRulesParams(w, in);
+}
+
+bool DecodeGameRules(const uint8_t* data, size_t size,
+                     std::vector<RulesParamState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) {
+        err = "gameRules section claims " + std::to_string(count) +
+              " params in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadRulesParam(r));
+    if (r.Bad()) {
+        err = "gameRules section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "gameRules section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+// ───────────── The wind codec (EnvResourceHandler) ─────────────
+//
+// One record, not a count-prefixed list: there is exactly one handler. The two
+// generator id lists are the only variable-length part.
+
+void EncodeEnvResources(const envressnapshot::EnvResourceState& in,
+                        std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.F32(in.curTidalStrength);
+    w.F32(in.curWindStrength);
+    w.F32(in.minWindStrength);
+    w.F32(in.maxWindStrength);
+
+    w.F32(in.curWindDirX); w.F32(in.curWindDirY); w.F32(in.curWindDirZ);
+    w.F32(in.curWindVecX); w.F32(in.curWindVecY); w.F32(in.curWindVecZ);
+    w.F32(in.newWindVecX); w.F32(in.newWindVecY); w.F32(in.newWindVecZ);
+    w.F32(in.oldWindVecX); w.F32(in.oldWindVecY); w.F32(in.oldWindVecZ);
+
+    w.I32(in.windDirTimer);
+
+    // Written in list order, NOT sorted: the order allGeneratorIDs is walked in
+    // is the order UpdateWind() is called in, and two snapshots of the same
+    // world always hold the same order because only push_back and erase touch
+    // these vectors.
+    w.U32(static_cast<uint32_t>(in.allGeneratorIDs.size()));
+    for (const int32_t id : in.allGeneratorIDs) w.I32(id);
+    w.U32(static_cast<uint32_t>(in.newGeneratorIDs.size()));
+    for (const int32_t id : in.newGeneratorIDs) w.I32(id);
+}
+
+bool DecodeEnvResources(const uint8_t* data, size_t size,
+                        envressnapshot::EnvResourceState& out, std::string& err)
+{
+    Reader r(data, size);
+    envressnapshot::EnvResourceState e;
+    e.curTidalStrength = r.F32();
+    e.curWindStrength = r.F32();
+    e.minWindStrength = r.F32();
+    e.maxWindStrength = r.F32();
+
+    e.curWindDirX = r.F32(); e.curWindDirY = r.F32(); e.curWindDirZ = r.F32();
+    e.curWindVecX = r.F32(); e.curWindVecY = r.F32(); e.curWindVecZ = r.F32();
+    e.newWindVecX = r.F32(); e.newWindVecY = r.F32(); e.newWindVecZ = r.F32();
+    e.oldWindVecX = r.F32(); e.oldWindVecY = r.F32(); e.oldWindVecZ = r.F32();
+
+    e.windDirTimer = r.I32();
+
+    for (int list = 0; list < 2 && !r.Bad(); ++list) {
+        const uint32_t count = r.U32();
+        // The whole run before the reserve, same discipline as Reader::Floats:
+        // a corrupt count must be a decode failure before it is an allocation.
+        if (r.Remaining() < size_t(count) * 4) {
+            err = "envResources section claims " + std::to_string(count) +
+                  " generator ids in " + std::to_string(size) + " bytes";
+            return false;
+        }
+        auto& dst = (list == 0) ? e.allGeneratorIDs : e.newGeneratorIDs;
+        dst.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) dst.push_back(r.I32());
+    }
+    if (r.Bad()) {
+        err = "envResources section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "envResources section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(e);
+    return true;
+}
+
+void CaptureEnvResources(envressnapshot::EnvResourceState& out)
+{
+    out = envressnapshot::EnvResourceState{};
+    envResHandler.SnapshotCapture(out);
+}
+
+void ApplyEnvResources(const envressnapshot::EnvResourceState& in)
+{
+    envResHandler.SnapshotApply(in);
+}
+
+// ───────── The def name tables (PLAN-def-reconciliation task 1) ─────────
+
+namespace {
+
+void EncodeDefTable(Writer& w, const std::vector<DefNameEntry>& t)
+{
+    w.U32(static_cast<uint32_t>(t.size()));
+    for (const auto& e : t) {
+        w.I32(e.id);
+        w.Str(e.name);
+    }
+}
+
+/// `what` names the family in the refusal, so a corrupt count says which of
+/// the three tables it was corrupt in rather than "a def table".
+bool DecodeDefTable(Reader& r, std::vector<DefNameEntry>& t, const char* what,
+                    size_t size, std::string& err)
+{
+    const uint32_t count = r.U32();
+    // The whole run before the reserve, same discipline as Reader::Floats: a
+    // corrupt count must be a decode failure before it is an allocation. Each
+    // entry costs at least 4 (id) + 4 (name length) bytes.
+    if (r.Remaining() < size_t(count) * 8) {
+        err = std::string("defNames section claims ") + std::to_string(count) + " " +
+              what + " in " + std::to_string(size) + " bytes";
+        r.Fail();
+        return false;
+    }
+    t.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        DefNameEntry e;
+        e.id   = r.I32();
+        e.name = r.Str();
+        t.push_back(std::move(e));
+    }
+    return !r.Bad();
+}
+
+}  // namespace
+
+void EncodeDefNames(const DefNameTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    EncodeDefTable(w, in.units);
+    EncodeDefTable(w, in.weapons);
+    EncodeDefTable(w, in.features);
+}
+
+bool DecodeDefNames(const uint8_t* data, size_t size, DefNameTables& out, std::string& err)
+{
+    Reader r(data, size);
+    DefNameTables t;
+    if (!DecodeDefTable(r, t.units, "unit defs", size, err) ||
+        !DecodeDefTable(r, t.weapons, "weapon defs", size, err) ||
+        !DecodeDefTable(r, t.features, "feature defs", size, err)) {
+        if (err.empty()) err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Bad()) {
+        err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defNames section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+void CaptureDefNames(DefNameTables& out)
+{
+    out = DefNameTables{};
+
+    // The three loops do NOT share a start index, and that is the whole reason
+    // this is written out rather than templated: id 0 is a real weapon def
+    // (`nodefweapon`, which every weaponless slot points at) and is not a real
+    // unit or feature def. Dropping it would shift every weapon index by one
+    // on reconcile — the exact corruption class the section exists to detect.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.units.push_back({int32_t(id), v[id].name});
+    }
+    if (weaponDefHandler != nullptr) {
+        const auto& v = weaponDefHandler->GetWeaponDefsVec();
+        for (size_t id = 0; id < v.size(); ++id)
+            out.weapons.push_back({int32_t(id), v[id].name});
+    }
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.features.push_back({int32_t(id), v[id].name});
+    }
+}
+
+// ───────── The game's own renames (task 2, §2 step 2 / persistence §5) ─────────
+//
+// `gamedata/migrations.lua` is the game's file, not the engine's, and its
+// absence is the normal state: most games never rename a def. It is read
+// through the same mod VFS the def files come from, so a game shipped as a zip
+// needs no special handling.
+//
+//   return {
+//     units    = { old_tank = "new_tank" },
+//     weapons  = { old_gun  = "new_gun"  },
+//     features = { ... },
+//   }
+//
+// A file that exists and does not parse is an error: applying half a rename
+// table would remove exactly the units the author was trying to keep.
+bool LoadDefAliases(DefAliases& out, std::string& err)
+{
+    out = DefAliases{};
+
+    static const char* kPath = "gamedata/migrations.lua";
+    if (!CFileHandler::FileExists(kPath, SPRING_VFS_MOD_BASE))
+        return true;
+
+    LuaParser p(kPath, SPRING_VFS_MOD_BASE, SPRING_VFS_ZIP);
+    if (!p.Execute()) {
+        err = std::string(kPath) + " failed to parse: " + p.GetErrorLog();
+        return false;
+    }
+    const LuaTable root = p.GetRoot();
+    if (!root.IsValid()) {
+        err = std::string(kPath) + " did not return a table";
+        return false;
+    }
+
+    const auto read = [&root](const char* family,
+                              std::unordered_map<std::string, std::string>& into) {
+        const LuaTable t = root.SubTable(family);
+        if (!t.IsValid()) return;
+        std::vector<std::string> keys;
+        t.GetKeys(keys);
+        for (const std::string& k : keys) {
+            const std::string v = t.GetString(k, "");
+            // A rename to nothing is not a removal request - a def that is gone
+            // is gone from the def tables, which is what the removal path reads.
+            // Ignoring it keeps one way to say each thing.
+            if (!v.empty() && v != k) into.emplace(k, v);
+        }
+    };
+    read("units", out.units);
+    read("weapons", out.weapons);
+    read("features", out.features);
+    return true;
+}
+
+std::string DefDelta::Describe() const
+{
+    if (!Changed()) return "unchanged";
+
+    const auto join = [](const std::vector<std::string>& names, size_t total) {
+        std::string s;
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i != 0) s += ", ";
+            s += names[i];
+        }
+        if (total > names.size()) s += "…";
+        return s;
+    };
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    if (renumbered != 0)
+        add(std::to_string(renumbered) + " renumbered (" +
+            join(renumberedNames, renumbered) + ")");
+    if (removed != 0)
+        add(std::to_string(removed) + " removed (" + join(removedNames, removed) + ")");
+    // Additions carry no names: §3 says a new def needs nothing on reconcile,
+    // so the count is the whole finding.
+    if (added != 0)
+        add(std::to_string(added) + " added");
+    return s;
+}
+
+DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
+                         const std::vector<DefNameEntry>& live)
+{
+    DefDelta d;
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // Walked in captured order, so the examples in the log line are stable
+    // between two runs over the same pair of def loads.
+    for (const auto& e : captured) {
+        const auto it = liveByName.find(e.name);
+        if (it == liveByName.end()) {
+            ++d.removed;
+            if (d.removedNames.size() < kDefDeltaExamples) d.removedNames.push_back(e.name);
+        } else if (it->second == e.id) {
+            ++d.unchanged;
+        } else {
+            ++d.renumbered;
+            if (d.renumberedNames.size() < kDefDeltaExamples)
+                d.renumberedNames.push_back(e.name);
+        }
+    }
+
+    std::unordered_set<std::string> capturedNames;
+    capturedNames.reserve(captured.size());
+    for (const auto& e : captured) capturedNames.insert(e.name);
+    for (const auto& e : live)
+        if (capturedNames.count(e.name) == 0) ++d.added;
+
+    return d;
+}
+
+// ───────── The remap pass (PLAN-def-reconciliation task 2, §2 steps 1-2) ─────────
+
+int32_t DefIdMap::Map(int32_t oldId) const
+{
+    if (gone.count(oldId) != 0) return -1;
+    const auto it = to.find(oldId);
+    return (it != to.end()) ? it->second : oldId;
+}
+
+namespace {
+
+/// One family. `renames` collects the aliases that actually fired, so the log
+/// can say which rename moved which object rather than that renames exist.
+bool BuildOneMap(const char* family,
+                 const std::vector<DefNameEntry>& captured,
+                 const std::vector<DefNameEntry>& live,
+                 const std::unordered_map<std::string, std::string>& aliases,
+                 DefIdMap& out,
+                 std::unordered_map<std::string, std::string>* renames,
+                 std::string& err)
+{
+    out = DefIdMap{};
+
+    // An unrecorded vocabulary on EITHER side is "I cannot tell", and the only
+    // safe answer to that is to change nothing. The live side is empty in a
+    // headless run with no def load; the captured side is empty in any snapshot
+    // taken before task 1 shipped the section. Reading either as "every def was
+    // removed" would delete the entire world, so this branch is load-bearing
+    // and is the negative test in the doctests.
+    if (captured.empty() || live.empty()) {
+        out.unknown = true;
+        return true;
+    }
+
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // E1, half one: an alias whose target is ambiguous. `a = "b"` while this
+    // game still defines BOTH means the author renamed something that did not
+    // go away, and there is no way to know which def the old objects are. §4
+    // E1 says refuse, loudly, as an authoring bug.
+    for (const auto& [from, to_] : aliases) {
+        if (liveByName.count(from) != 0 && liveByName.count(to_) != 0) {
+            err = std::string("gamedata/migrations.lua aliases ") + family +
+                  " def '" + from + "' to '" + to_ + "', but this game defines " +
+                  "both - a rename whose source still exists is ambiguous";
+            return false;
+        }
+    }
+
+    // E1, half two: two captured names aliased onto one live name. The objects
+    // of both would land on one def and their counts would silently merge.
+    std::unordered_map<std::string, std::string> claimedBy;
+    for (const auto& e : captured) {
+        const auto a = aliases.find(e.name);
+        if (a == aliases.end()) continue;
+        const auto prev = claimedBy.find(a->second);
+        if (prev != claimedBy.end()) {
+            err = std::string("gamedata/migrations.lua aliases two ") + family +
+                  " defs ('" + prev->second + "' and '" + e.name + "') onto '" +
+                  a->second + "'";
+            return false;
+        }
+        claimedBy.emplace(a->second, e.name);
+    }
+
+    for (const auto& e : captured) {
+        // Aliasing happens BEFORE the lookup (§2 step 2: migrations may alias
+        // renames "before removal applies"), so a renamed def is a renumber and
+        // not a removal followed by an addition.
+        std::string name = e.name;
+        const auto a = aliases.find(name);
+        const bool renamed = (a != aliases.end() && liveByName.count(a->second) != 0);
+        if (renamed) name = a->second;
+
+        const auto it = liveByName.find(name);
+        if (it == liveByName.end()) {
+            out.gone.insert(e.id);
+            out.goneByName.insert(e.name);
+            if (out.goneNames.size() < kDefDeltaExamples)
+                out.goneNames.push_back(e.name);
+            continue;
+        }
+        if (renamed && renames != nullptr) (*renames)[e.name] = name;
+        if (it->second != e.id) out.to.emplace(e.id, it->second);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool BuildDefRemap(const DefNameTables& captured, const DefNameTables& live,
+                   const DefAliases& aliases, DefRemap& out, std::string& err)
+{
+    out = DefRemap{};
+    return BuildOneMap("unit", captured.units, live.units, aliases.units,
+                       out.units, &out.unitRenames, err) &&
+           BuildOneMap("weapon", captured.weapons, live.weapons, aliases.weapons,
+                       out.weapons, nullptr, err) &&
+           BuildOneMap("feature", captured.features, live.features,
+                       aliases.features, out.features, &out.featureRenames, err);
+}
+
+bool RemapReport::Changed() const
+{
+    return unitsRenamed || unitsDropped || featuresRenamed || featuresDropped ||
+           resurrectCleared || wreckRemapped || wreckCleared ||
+           buildCmdsRemapped || buildCmdsDropped || orderDefsRemapped ||
+           orderDefsDropped || ordersDeactivated;
+}
+
+std::string RemapReport::Describe() const
+{
+    if (!Changed()) return "nothing to remap";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitsDropped != 0) {
+        std::string names;
+        for (size_t i = 0; i < droppedUnitNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += droppedUnitNames[i];
+        }
+        if (droppedUnitNames.size() < unitsDropped) names += "…";
+        add(std::to_string(unitsDropped) + " units removed with their def (" +
+            names + ")");
+    }
+    count(unitsRenamed, "units renamed");
+    count(featuresDropped, "features removed with their def");
+    count(featuresRenamed, "features renamed");
+    count(resurrectCleared, "resurrect targets cleared");
+    count(wreckRemapped, "delayed wrecks remapped");
+    count(wreckCleared, "delayed wrecks cleared");
+    count(buildCmdsRemapped, "build orders remapped");
+    count(buildCmdsDropped, "build orders dropped");
+    count(orderDefsRemapped, "order def refs remapped");
+    count(orderDefsDropped, "order def refs dropped");
+    count(ordersDeactivated, "orders deactivated (def filter emptied)");
+    return s;
+}
+
+namespace {
+
+/// The build-order encoding: a command whose id is the NEGATED unit def id.
+/// Shared by CBuilderCAI and CFactoryCAI, and it is the one place a def id
+/// hides inside a field that does not look like one.
+constexpr bool IsBuildCmd(int32_t cmdID) { return cmdID < 0; }
+
+/// Remap a def-id filter list in place (`squadTypes`). Returns false when the
+/// list HAD entries and lost every one of them — the caller must not leave that
+/// as an empty list, because empty means wildcard.
+bool RemapDefFilter(std::vector<uint16_t>& types, const DefIdMap& map,
+                    RemapReport& rep)
+{
+    if (types.empty()) return true;
+    std::vector<uint16_t> kept;
+    kept.reserve(types.size());
+    for (const uint16_t t : types) {
+        const int32_t mapped = map.Map(int32_t(t));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(t)) ++rep.orderDefsRemapped;
+        kept.push_back(uint16_t(mapped));
+    }
+    const bool survived = !kept.empty();
+    types.swap(kept);
+    return survived;
+}
+
+/// BuildBase's params are [x, y, z, defId, defId, ...] (StandingOrders.cpp).
+/// The geometry is never a def, so the walk starts at 3.
+void RemapBuildParams(std::vector<float>& params, const DefIdMap& map,
+                      RemapReport& rep)
+{
+    if (params.size() <= 3) return;
+    std::vector<float> kept(params.begin(), params.begin() + 3);
+    for (size_t i = 3; i < params.size(); ++i) {
+        const int32_t mapped = map.Map(int32_t(params[i]));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(params[i])) ++rep.orderDefsRemapped;
+        kept.push_back(float(mapped));
+    }
+    params.swap(kept);
+}
+
+}  // namespace
+
+std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
+                                      const std::vector<std::string>& liveDefNames)
+{
+    std::vector<int32_t> from(liveDefNames.size(), -1);
+
+    // Positional fallback: a payload with no names is a pre-task-2 units
+    // section (or a fixture that never set them), and matching those by name
+    // would pair every unnamed slot with every other one. Detected on the
+    // captured side because that is the side that can be old.
+    bool anyNames = false;
+    for (const auto& w : captured)
+        if (!w.weaponDefName.empty()) { anyNames = true; break; }
+    if (!anyNames) {
+        for (size_t i = 0; i < std::min(from.size(), captured.size()); ++i)
+            from[i] = int32_t(i);
+        return from;
+    }
+
+    // Occurrence order per name: a def with two identical launchers keeps
+    // "first launcher's stockpile stays in the first launcher".
+    std::vector<bool> used(captured.size(), false);
+    for (size_t i = 0; i < liveDefNames.size(); ++i) {
+        if (liveDefNames[i].empty()) continue;
+        for (size_t j = 0; j < captured.size(); ++j) {
+            if (used[j] || captured[j].weaponDefName != liveDefNames[i]) continue;
+            used[j] = true;
+            from[i] = int32_t(j);
+            break;
+        }
+    }
+    return from;
+}
+
+void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
+                  std::vector<FeatureState>& features,
+                  std::vector<StandingOrder>& orders,
+                  std::vector<Directive>& dirs, RemapReport& out)
+{
+    out = RemapReport{};
+
+    // ── units ──
+    //
+    // A unit whose def is gone does not come back (§2 step 2, "with wreck
+    // substitution off - clean removal"). It is dropped from the payload here,
+    // which is also what keeps ResolveUnitDefs' refusal correct: past this
+    // point a name that does not resolve really is a corrupt payload rather
+    // than a balance patch.
+    {
+        std::vector<UnitState> kept;
+        kept.reserve(units.size());
+        for (auto& u : units) {
+            // The unit's own def travels by NAME, so removal is a name test,
+            // and it has to run before the rename: the captured name is the key
+            // both tables are built on.
+            if (map.units.Gone(u.unitDefName)) {
+                ++out.unitsDropped;
+                if (out.droppedUnitNames.size() < kDefDeltaExamples)
+                    out.droppedUnitNames.push_back(u.unitDefName);
+                // Complete, not capped: this is the list the game's own gadgets
+                // clean up against (task 4's DefsReconciled), and it is the only
+                // notice they get — no UnitDestroyed fires for a unit that never
+                // reached the restored world.
+                out.droppedUnitIds.push_back(u.id);
+                continue;
+            }
+            const auto rn = map.unitRenames.find(u.unitDefName);
+            if (rn != map.unitRenames.end()) {
+                u.unitDefName = rn->second;
+                ++out.unitsRenamed;
+            }
+            kept.push_back(std::move(u));
+        }
+        units.swap(kept);
+    }
+
+    // A dropped unit takes its place in every transport graph with it: a
+    // transportee id that names nothing is skipped by ApplyUnits, but a
+    // transport that was itself dropped would leave its cargo listed as
+    // attached to a unit that never gets created.
+    if (out.unitsDropped != 0) {
+        std::unordered_set<int32_t> live;
+        live.reserve(units.size());
+        for (const auto& u : units) live.insert(u.id);
+        for (auto& u : units) {
+            if (u.transporterId >= 0 && live.count(u.transporterId) == 0)
+                u.transporterId = -1;
+            if (u.loadingTransportId >= 0 && live.count(u.loadingTransportId) == 0)
+                u.loadingTransportId = -1;
+            if (u.unloadingTransportId >= 0 && live.count(u.unloadingTransportId) == 0)
+                u.unloadingTransportId = -1;
+            if (u.transportees.empty()) continue;
+            std::vector<std::pair<int32_t, int32_t>> tees;
+            tees.reserve(u.transportees.size());
+            for (const auto& t : u.transportees)
+                if (live.count(t.first) != 0) tees.push_back(t);
+            u.transportees.swap(tees);
+        }
+    }
+
+    for (auto& u : units) {
+        // The delayed wreck: a raw feature def id (CUnit::delayedWreckLevel's
+        // companion), so it remaps through the feature map and clears when the
+        // wreck's def is gone rather than pointing at whatever took its id.
+        if (u.featureDefID >= 0) {
+            const int32_t mapped = map.features.Map(u.featureDefID);
+            if (mapped < 0) {
+                u.featureDefID = -1;
+                ++out.wreckCleared;
+            } else if (mapped != u.featureDefID) {
+                u.featureDefID = mapped;
+                ++out.wreckRemapped;
+            }
+        }
+
+        // Build orders. The queue is rewritten rather than patched in place
+        // because a build order for a def that no longer exists has to LEAVE:
+        // -id is a valid command id for whichever def now holds that id, so
+        // "leave it" builds the wrong thing forever.
+        if (!u.commands.empty()) {
+            std::vector<CommandState> kept;
+            kept.reserve(u.commands.size());
+            for (auto& c : u.commands) {
+                if (!IsBuildCmd(c.cmdID)) {
+                    kept.push_back(std::move(c));
+                    continue;
+                }
+                const int32_t mapped = map.units.Map(-c.cmdID);
+                if (mapped < 0) {
+                    ++out.buildCmdsDropped;
+                    continue;
+                }
+                if (mapped != -c.cmdID) {
+                    c.cmdID = -mapped;
+                    ++out.buildCmdsRemapped;
+                }
+                kept.push_back(std::move(c));
+            }
+            u.commands.swap(kept);
+        }
+
+        // Weapon slots are NOT remapped here: their pairing needs the live
+        // def's weapon list, which only exists at apply time. MatchWeaponSlots
+        // is that half, and the captured names it matches on travel in the
+        // payload for exactly this reason.
+    }
+
+    // ── features ──
+    {
+        std::vector<FeatureState> kept;
+        kept.reserve(features.size());
+        for (auto& f : features) {
+            if (map.features.Gone(f.featureDefName)) {
+                ++out.featuresDropped;
+                out.droppedFeatureIds.push_back(f.id);
+                continue;
+            }
+            const auto rn = map.featureRenames.find(f.featureDefName);
+            if (rn != map.featureRenames.end()) {
+                f.featureDefName = rn->second;
+                ++out.featuresRenamed;
+            }
+            // A resurrect target that is gone becomes "not resurrectable",
+            // which is a real state (see FeatureState::resurrectUnitDefName)
+            // rather than an invented one.
+            if (!f.resurrectUnitDefName.empty()) {
+                if (map.units.Gone(f.resurrectUnitDefName)) {
+                    f.resurrectUnitDefName.clear();
+                    ++out.resurrectCleared;
+                } else {
+                    const auto ru = map.unitRenames.find(f.resurrectUnitDefName);
+                    if (ru != map.unitRenames.end())
+                        f.resurrectUnitDefName = ru->second;
+                }
+            }
+            kept.push_back(std::move(f));
+        }
+        features.swap(kept);
+    }
+
+    // ── standing orders and directives ──
+    //
+    // Both carry the same two def-id shapes: BuildBase's trailing param list,
+    // and `conditions.squadTypes`, whose empty state is a WILDCARD. Emptying
+    // that filter would widen the order instead of narrowing it, so an order
+    // that loses its whole filter is deactivated and counted.
+    for (auto& o : orders) {
+        if (o.type == StandingOrderType::BuildBase)
+            RemapBuildParams(o.params, map.units, out);
+        if (!RemapDefFilter(o.conditions.squadTypes, map.units, out)) {
+            o.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
+    for (auto& d : dirs) {
+        if (d.type == DirectiveType::BuildBase)
+            RemapBuildParams(d.params, map.units, out);
+        if (!RemapDefFilter(d.conditions.squadTypes, map.units, out)) {
+            d.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
+
+    // Sorted because these two lists reach SYNCED Lua (task 4's call-in), where
+    // the order of a table a gadget iterates is part of the sim's behaviour.
+    // The payload's own order is capture order and not a promise.
+    std::sort(out.droppedUnitIds.begin(), out.droppedUnitIds.end());
+    std::sort(out.droppedFeatureIds.begin(), out.droppedFeatureIds.end());
+}
+
+// ───── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ─────
+
+void CaptureDefScalars(DefScalarTables& out)
+{
+    out = DefScalarTables{};
+
+    // The experience curve. Not a def — modInfo — which is exactly why it has
+    // to be recorded: a modinfo edit moves maxHealth, power and reloadSpeed on
+    // every veteran in the world without moving the defsHash by one bit.
+    out.expPowerScale  = CUnit::GetExpPowerScale();
+    out.expHealthScale = CUnit::GetExpHealthScale();
+    out.expReloadScale = CUnit::GetExpReloadScale();
+
+    // This mirrors CUnit::PreInit + CUnit::FinishedBuilding, statement for
+    // statement, and that duplication is the point: the comparison in
+    // ReconcileScalars is plain equality, so PreInit's clamps and derived
+    // combinations have to be applied HERE rather than reimplemented at every
+    // field. A change to PreInit that this loop does not follow shows up as
+    // every unit in every payload reading as "authored" — visible in the
+    // report's authored count, which is why that count is reported.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const UnitDef& d = v[id];
+            UnitDefScalars s;
+            s.maxHealth = d.health;
+            s.power = d.power;
+            s.mass = d.mass;
+            s.buildTime = d.buildTime;
+            s.cost = {d.cost.metal, d.cost.energy};
+            s.storage = {d.storage.metal, d.storage.energy};
+            s.harvestStorage = {d.harvestStorage.metal, d.harvestStorage.energy};
+            s.armoredMultiple = d.armoredMultiple;
+            s.armorType = d.armorType;
+            s.category = d.category;
+            // A unit's maxRange is built by WeaponLoader as the max over its
+            // loaded weapons' ranges; UnitDef::maxWeaponRange is the same max
+            // taken over the same weapon defs at def-parse time.
+            s.maxRange = d.maxWeaponRange;
+            s.losRadius = std::clamp(int(d.losRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.airLosRadius = std::clamp(int(d.airLosRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.radarRadius = std::clamp(d.radarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarRadius = std::clamp(d.sonarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.jammerRadius = std::clamp(d.jammerRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarJamRadius = std::clamp(d.sonarJamRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicRadius = std::clamp(d.seismicRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicSignature = d.seismicSignature;
+            s.decloakDistance = d.decloakDistance;
+            s.stealth = d.stealth;
+            s.sonarStealth = d.sonarStealth;
+            s.flankingBonusMode = d.flankingBonusMode;
+            s.flankingBonusMobilityAdd = d.flankingBonusMobilityAdd;
+            s.flankingBonusAvgDamage = (d.flankingBonusMax + d.flankingBonusMin) * 0.5f;
+            s.flankingBonusDifDamage = (d.flankingBonusMax - d.flankingBonusMin) * 0.5f;
+            out.units.emplace(d.name, s);
+        }
+    }
+
+    // CFeature::Initialize's four (Feature.cpp: mass, health/maxHealth,
+    // reclaimTime, defResources = def->cost).
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const FeatureDef& d = v[id];
+            FeatureDefScalars s;
+            s.maxHealth = d.health;
+            s.mass = d.mass;
+            s.reclaimTime = d.reclaimTime;
+            s.defResources = {d.cost.metal, d.cost.energy};
+            out.features.emplace(d.name, s);
+        }
+    }
+}
+
+namespace {
+
+void WriteUnitDefScalars(Writer& w, const UnitDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.power); w.F32(s.mass); w.F32(s.buildTime);
+    w.F32(s.cost.metal); w.F32(s.cost.energy);
+    w.F32(s.storage.metal); w.F32(s.storage.energy);
+    w.F32(s.harvestStorage.metal); w.F32(s.harvestStorage.energy);
+    w.F32(s.armoredMultiple);
+    w.I32(s.armorType);
+    w.U32(s.category);
+    w.F32(s.maxRange);
+    w.I32(s.losRadius); w.I32(s.airLosRadius);
+    w.I32(s.radarRadius); w.I32(s.sonarRadius); w.I32(s.jammerRadius);
+    w.I32(s.sonarJamRadius); w.I32(s.seismicRadius);
+    w.F32(s.seismicSignature); w.F32(s.decloakDistance);
+    w.Bool(s.stealth); w.Bool(s.sonarStealth);
+    w.I32(s.flankingBonusMode);
+    w.F32(s.flankingBonusMobilityAdd);
+    w.F32(s.flankingBonusAvgDamage); w.F32(s.flankingBonusDifDamage);
+}
+
+UnitDefScalars ReadUnitDefScalars(Reader& r)
+{
+    UnitDefScalars s;
+    s.maxHealth = r.F32(); s.power = r.F32(); s.mass = r.F32(); s.buildTime = r.F32();
+    s.cost.metal = r.F32(); s.cost.energy = r.F32();
+    s.storage.metal = r.F32(); s.storage.energy = r.F32();
+    s.harvestStorage.metal = r.F32(); s.harvestStorage.energy = r.F32();
+    s.armoredMultiple = r.F32();
+    s.armorType = r.I32();
+    s.category = r.U32();
+    s.maxRange = r.F32();
+    s.losRadius = r.I32(); s.airLosRadius = r.I32();
+    s.radarRadius = r.I32(); s.sonarRadius = r.I32(); s.jammerRadius = r.I32();
+    s.sonarJamRadius = r.I32(); s.seismicRadius = r.I32();
+    s.seismicSignature = r.F32(); s.decloakDistance = r.F32();
+    s.stealth = r.Bool(); s.sonarStealth = r.Bool();
+    s.flankingBonusMode = r.I32();
+    s.flankingBonusMobilityAdd = r.F32();
+    s.flankingBonusAvgDamage = r.F32(); s.flankingBonusDifDamage = r.F32();
+    return s;
+}
+
+void WriteFeatureDefScalars(Writer& w, const FeatureDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.mass); w.F32(s.reclaimTime);
+    w.F32(s.defResources.metal); w.F32(s.defResources.energy);
+}
+
+FeatureDefScalars ReadFeatureDefScalars(Reader& r)
+{
+    FeatureDefScalars s;
+    s.maxHealth = r.F32(); s.mass = r.F32(); s.reclaimTime = r.F32();
+    s.defResources.metal = r.F32(); s.defResources.energy = r.F32();
+    return s;
+}
+
+}  // namespace
+
+void EncodeDefScalars(const DefScalarTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.F32(in.expPowerScale); w.F32(in.expHealthScale); w.F32(in.expReloadScale);
+
+    // Sorted by name, not in hash order: two captures of the same def load must
+    // produce the same bytes or the §8 re-capture bar compares a payload against
+    // a permutation of itself.
+    std::vector<const std::string*> names;
+    names.reserve(in.units.size());
+    for (const auto& [name, s] : in.units) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteUnitDefScalars(w, in.units.at(*n));
+    }
+
+    names.clear();
+    names.reserve(in.features.size());
+    for (const auto& [name, s] : in.features) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteFeatureDefScalars(w, in.features.at(*n));
+    }
+}
+
+bool DecodeDefScalars(const uint8_t* data, size_t size, DefScalarTables& out,
+                      std::string& err)
+{
+    Reader r(data, size);
+    DefScalarTables t;
+    t.expPowerScale = r.F32();
+    t.expHealthScale = r.F32();
+    t.expReloadScale = r.F32();
+
+    const uint32_t units = r.U32();
+    // A corrupt count must be a decode failure before it is an allocation
+    // (Reader::Floats' discipline). The smallest unit entry is a 4-byte name
+    // length plus the fixed field block.
+    if (r.Remaining() < size_t(units) * 4) {
+        err = "defScalars section claims " + std::to_string(units) +
+              " unit defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.units.reserve(units);
+    for (uint32_t i = 0; i < units && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.units.emplace(name, ReadUnitDefScalars(r));
+    }
+    const uint32_t features = r.U32();
+    if (r.Remaining() < size_t(features) * 4) {
+        err = "defScalars section claims " + std::to_string(features) +
+              " feature defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.features.reserve(features);
+    for (uint32_t i = 0; i < features && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.features.emplace(name, ReadFeatureDefScalars(r));
+    }
+
+    if (r.Bad()) {
+        err = "defScalars section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defScalars section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+bool ScalarReport::Changed() const
+{
+    return unitDefsRetuned || featureDefsRetuned || unitFieldsReDerived ||
+           unitsHealthScaled || featureFieldsReDerived || featuresHealthScaled ||
+           featuresResourcesScaled || unitsUnknownDef || featuresUnknownDef;
+}
+
+std::string ScalarReport::Describe() const
+{
+    if (!ran) return "no def scalars recorded in this snapshot";
+    if (!Changed()) return "no def scalar moved";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitDefsRetuned != 0 || featureDefsRetuned != 0) {
+        std::string names;
+        for (size_t i = 0; i < retunedNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += retunedNames[i];
+        }
+        if (retunedNames.size() < unitDefsRetuned + featureDefsRetuned) names += "…";
+        add(std::to_string(unitDefsRetuned) + " unit + " +
+            std::to_string(featureDefsRetuned) + " feature defs retuned (" + names + ")");
+    }
+    count(unitsTouched, "units adjusted");
+    count(unitFieldsReDerived, "unit fields re-derived");
+    count(unitsHealthScaled, "unit health fractions preserved");
+    count(unitFieldsAuthored, "unit fields kept (authored, not the def's)");
+    count(featuresTouched, "features adjusted");
+    count(featureFieldsReDerived, "feature fields re-derived");
+    count(featuresHealthScaled, "feature health fractions preserved");
+    count(featuresResourcesScaled, "feature reclaim pools rescaled");
+    count(featureFieldsAuthored, "feature fields kept (authored)");
+    count(unitsUnknownDef, "units whose def has no recorded scalars");
+    count(featuresUnknownDef, "features whose def has no recorded scalars");
+    return s;
+}
+
+namespace {
+
+/// "Was this field ever authored?" over floats. Relative, because the audited
+/// values span a build time of 3 and a health pool of 200 000 and a fixed
+/// epsilon cannot serve both; and needed at all because the captured value has
+/// been through a float round-trip, so it is not bit-equal to the def's own
+/// float even when nothing ever touched it.
+bool SameScalar(float a, float b)
+{
+    return std::fabs(a - b) <=
+           1e-5f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
+}
+bool SameScalar(const ResPair& a, const ResPair& b)
+{
+    return SameScalar(a.metal, b.metal) && SameScalar(a.energy, b.energy);
+}
+template <typename T> bool SameScalar(const T& a, const T& b) { return a == b; }
+
+/// Did this def's newborn values move between the two loads? Only the report's
+/// "N defs retuned" count is built on this — every disposition that touches an
+/// object runs field by field below, so a field missing from this list costs a
+/// log line's accuracy and nothing else. The census tripwire is what says the
+/// field list is complete.
+bool SameDefScalars(const UnitDefScalars& a, const UnitDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.power, b.power) &&
+           SameScalar(a.mass, b.mass) && SameScalar(a.buildTime, b.buildTime) &&
+           SameScalar(a.cost, b.cost) && SameScalar(a.storage, b.storage) &&
+           SameScalar(a.harvestStorage, b.harvestStorage) &&
+           SameScalar(a.armoredMultiple, b.armoredMultiple) &&
+           a.armorType == b.armorType && a.category == b.category &&
+           SameScalar(a.maxRange, b.maxRange) &&
+           a.losRadius == b.losRadius && a.airLosRadius == b.airLosRadius &&
+           a.radarRadius == b.radarRadius && a.sonarRadius == b.sonarRadius &&
+           a.jammerRadius == b.jammerRadius &&
+           a.sonarJamRadius == b.sonarJamRadius &&
+           a.seismicRadius == b.seismicRadius &&
+           SameScalar(a.seismicSignature, b.seismicSignature) &&
+           SameScalar(a.decloakDistance, b.decloakDistance) &&
+           a.stealth == b.stealth && a.sonarStealth == b.sonarStealth &&
+           a.flankingBonusMode == b.flankingBonusMode &&
+           SameScalar(a.flankingBonusMobilityAdd, b.flankingBonusMobilityAdd) &&
+           SameScalar(a.flankingBonusAvgDamage, b.flankingBonusAvgDamage) &&
+           SameScalar(a.flankingBonusDifDamage, b.flankingBonusDifDamage);
+}
+
+bool SameDefScalars(const FeatureDefScalars& a, const FeatureDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.mass, b.mass) &&
+           SameScalar(a.reclaimTime, b.reclaimTime) &&
+           SameScalar(a.defResources, b.defResources);
+}
+
+/// THE RULE, once: a captured value that still equals what the OLD def gave a
+/// newborn was never authored, so it becomes what the NEW def gives. Anything
+/// else is a deliberate write by the game's Lua (or by gameplay) and survives
+/// the resume untouched — reconciling it would silently revert a gadget.
+template <typename T>
+void ReDerive(T& cur, const T& born, const T& live,
+              size_t& reDerived, size_t& authored, bool& touched)
+{
+    if (!SameScalar(cur, born)) { ++authored; return; }
+    if (SameScalar(born, live)) return;   // nothing moved
+    cur = live;
+    ++reDerived;
+    touched = true;
+}
+
+/// maxHealth / power under the experience curve: CUnit::AddExperience recomputes
+/// both off unitDef whenever experience moves, so a veteran's value is the def's
+/// times a factor and comparing against the raw def value would read every
+/// veteran as authored.
+float ExpScaled(float base, float limExp, float scale, bool clampMin)
+{
+    if (scale <= 0.0f) return base;
+    const float v = base * (1.0f + limExp * scale);
+    return clampMin ? std::max(0.1f, v) : v;
+}
+
+}  // namespace
+
+void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
+                      const DefRemap& map, std::vector<UnitState>& units,
+                      std::vector<FeatureState>& features, ScalarReport& out)
+{
+    out = ScalarReport{};
+
+    // An empty captured table is a snapshot taken before this section existed.
+    // Treating it as "every def was retuned to the live values" would overwrite
+    // every authored scalar in the world, so it does nothing at all — the same
+    // one-directional guard as task 2's `unknown` vocabulary. The live table
+    // being empty (this process has parsed no def) is likewise nothing to do.
+    if (captured.Empty() || live.Empty()) return;
+    out.ran = true;
+
+    // The captured tables are keyed by the names the SNAPSHOT used; the payload
+    // has already been through RemapPayload, so its objects carry LIVE names.
+    // The rename tables bridge the two, inverted.
+    std::unordered_map<std::string, std::string> liveToCaptured;
+    for (const auto& [from, to] : map.unitRenames) liveToCaptured.emplace(to, from);
+    std::unordered_map<std::string, std::string> liveToCapturedFeature;
+    for (const auto& [from, to] : map.featureRenames)
+        liveToCapturedFeature.emplace(to, from);
+
+    const auto capturedName =
+        [](const std::unordered_map<std::string, std::string>& inv,
+           const std::string& liveName) -> const std::string& {
+            const auto it = inv.find(liveName);
+            return (it != inv.end()) ? it->second : liveName;
+        };
+
+    // Which defs were retuned at all, independent of what the world holds:
+    // reported because "3 defs retuned, 400 units adjusted" and "400 defs
+    // retuned, 400 units adjusted" are a balance tweak and a whole rebalance.
+    const auto renamed = [](const std::unordered_map<std::string, std::string>& fwd,
+                            const std::string& from) -> const std::string& {
+        const auto it = fwd.find(from);
+        return (it != fwd.end()) ? it->second : from;
+    };
+    for (const auto& [name, born] : captured.units) {
+        const std::string& liveName = renamed(map.unitRenames, name);
+        const auto lit = live.units.find(liveName);
+        if (lit == live.units.end()) continue;   // removed: task 2's problem
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.unitDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+        out.retunedUnitDefs.push_back(liveName);
+    }
+    for (const auto& [name, born] : captured.features) {
+        const std::string& liveName = renamed(map.featureRenames, name);
+        const auto lit = live.features.find(liveName);
+        if (lit == live.features.end()) continue;
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.featureDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+        out.retunedFeatureDefs.push_back(liveName);
+    }
+
+    // The two retune loops walk unordered_maps, so their order is a hash
+    // artefact — and unlike `retunedNames` (a log line) these lists reach synced
+    // Lua. `retunedNames` is left in map order deliberately: it is five examples
+    // in a WARNING, and sorting it would only make the examples always be the
+    // alphabetically-first five rather than a spread.
+    std::sort(out.retunedUnitDefs.begin(), out.retunedUnitDefs.end());
+    std::sort(out.retunedFeatureDefs.begin(), out.retunedFeatureDefs.end());
+
+    for (auto& u : units) {
+        const auto cit = captured.units.find(capturedName(liveToCaptured, u.unitDefName));
+        const auto lit = live.units.find(u.unitDefName);
+        if (cit == captured.units.end() || lit == live.units.end()) {
+            // A def with no recorded scalars on either side. Not a refusal: the
+            // payload is internally consistent and the object's values are the
+            // ones it was captured with, which is strictly today's behaviour.
+            ++out.unitsUnknownDef;
+            continue;
+        }
+        UnitDefScalars born = cit->second;
+        UnitDefScalars now  = lit->second;
+
+        // ── the newborn value is not always the def value ──
+        //
+        // Three fields are set at FinishedBuilding rather than PreInit, so a
+        // unit still under construction has never held the def's value and
+        // comparing it against one would read as authored. And `mass` is not a
+        // def cache at all on two paths: it stays at its constructor value while
+        // beingBuilt (Unit.cpp:268) and a transport ACCUMULATES its cargo's mass
+        // into it (Unit.cpp:2686), so a loaded transport's mass is a sum, not a
+        // number any def knows. Both are skipped rather than guessed at.
+        const bool massIsDefs = !u.beingBuilt && u.transportees.empty() &&
+                                u.transporterId < 0;
+        if (u.beingBuilt) {
+            born.storage = ResPair{};
+            now.storage = ResPair{};
+            born.losRadius = born.airLosRadius = 0;
+            now.losRadius = now.airLosRadius = 0;
+        }
+
+        const float limExp = u.experience / (u.experience + 1.0f);
+        born.maxHealth = ExpScaled(born.maxHealth, limExp, captured.expHealthScale, true);
+        now.maxHealth  = ExpScaled(now.maxHealth,  limExp, live.expHealthScale, true);
+        born.power = ExpScaled(born.power, limExp, captured.expPowerScale, false);
+        now.power  = ExpScaled(now.power,  limExp, live.expPowerScale, false);
+
+        bool touched = false;
+        size_t& rd = out.unitFieldsReDerived;
+        size_t& au = out.unitFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        // ── vitals, and §2 step 3's fraction preservation ──
+        //
+        // The order is load-bearing: the fraction is taken against the maxHealth
+        // the snapshot was captured under, so it has to be read before the
+        // re-derive rewrites it. A nerfed def leaves a damaged unit damaged by
+        // the same proportion; a buffed one raises its absolute health, which
+        // §3 accepted explicitly (it is not a heal — the unit is exactly as
+        // wounded as it was).
+        const float capturedMax = u.maxHealth;
+        field(u.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(u.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            u.health = std::max(0.0f, u.health / capturedMax) * u.maxHealth;
+            ++out.unitsHealthScaled;
+        }
+        field(u.power, born.power, now.power);
+        if (massIsDefs) field(u.mass, born.mass, now.mass);
+        field(u.buildTime, born.buildTime, now.buildTime);
+        field(u.cost, born.cost, now.cost);
+        field(u.storage, born.storage, now.storage);
+        field(u.harvestStorage, born.harvestStorage, now.harvestStorage);
+
+        // reloadSpeed has no def input at all — it is 1 plus the experience
+        // term, so the curve is the only thing that can move it.
+        const float bornReload = (captured.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * captured.expReloadScale : 1.0f;
+        const float liveReload = (live.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * live.expReloadScale : 1.0f;
+        field(u.reloadSpeed, bornReload, liveReload);
+
+        // ── combat ──
+        field(u.armoredMultiple, born.armoredMultiple, now.armoredMultiple);
+        // curArmorMultiple is armoredMultiple-or-1 by armoredState, which is
+        // exactly what Spring.SetUnitArmored maintains.
+        field(u.curArmorMultiple,
+              u.armoredState ? born.armoredMultiple : 1.0f,
+              u.armoredState ? now.armoredMultiple : 1.0f);
+        // armorType and category have NO Lua setter and nothing mutates them
+        // after PreInit, so they are unconditional re-derives — and armorType is
+        // the gap task 2 filed: an index into the armor-type list, which no
+        // section carries and no name-keyed remap could reach. The fix is not a
+        // fourth name table; it is not restoring a stale index at all.
+        field(u.armorType, born.armorType, now.armorType);
+        field(u.category, born.category, now.category);
+        field(u.maxRange, born.maxRange, now.maxRange);
+        field(u.flankingBonusMode, born.flankingBonusMode, now.flankingBonusMode);
+        field(u.flankingBonusMobilityAdd, born.flankingBonusMobilityAdd,
+              now.flankingBonusMobilityAdd);
+        // flankingBonusMobility is NOT here: it is an accumulator, not a cache
+        // (Unit.cpp:699 adds mobilityAdd to it on every SlowUpdate). Found live
+        // by the authored-count line below — every unit in the fixture reported
+        // exactly one authored field, and it was this one.
+        field(u.flankingBonusAvgDamage, born.flankingBonusAvgDamage,
+              now.flankingBonusAvgDamage);
+        field(u.flankingBonusDifDamage, born.flankingBonusDifDamage,
+              now.flankingBonusDifDamage);
+
+        // ── sensors ──
+        field(u.realLosRadius, born.losRadius, now.losRadius);
+        field(u.realAirLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.losRadius, born.losRadius, now.losRadius);
+        field(u.airLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.radarRadius, born.radarRadius, now.radarRadius);
+        field(u.sonarRadius, born.sonarRadius, now.sonarRadius);
+        field(u.jammerRadius, born.jammerRadius, now.jammerRadius);
+        field(u.sonarJamRadius, born.sonarJamRadius, now.sonarJamRadius);
+        field(u.seismicRadius, born.seismicRadius, now.seismicRadius);
+        field(u.seismicSignature, born.seismicSignature, now.seismicSignature);
+        field(u.decloakDistance, born.decloakDistance, now.decloakDistance);
+        field(u.stealth, born.stealth, now.stealth);
+        field(u.sonarStealth, born.sonarStealth, now.sonarStealth);
+
+        if (touched) ++out.unitsTouched;
+    }
+
+    for (auto& f : features) {
+        const auto cit =
+            captured.features.find(capturedName(liveToCapturedFeature, f.featureDefName));
+        const auto lit = live.features.find(f.featureDefName);
+        if (cit == captured.features.end() || lit == live.features.end()) {
+            ++out.featuresUnknownDef;
+            continue;
+        }
+        const FeatureDefScalars& born = cit->second;
+        const FeatureDefScalars& now  = lit->second;
+
+        bool touched = false;
+        size_t& rd = out.featureFieldsReDerived;
+        size_t& au = out.featureFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        const float capturedMax = f.maxHealth;
+        field(f.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(f.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            f.health = std::max(0.0f, f.health / capturedMax) * f.maxHealth;
+            ++out.featuresHealthScaled;
+        }
+        field(f.mass, born.mass, now.mass);
+        field(f.reclaimTime, born.reclaimTime, now.reclaimTime);
+
+        // `resources` is what is LEFT to reclaim and CFeature keeps it capped at
+        // defResources, using the ratio between them as the reclaim fraction
+        // (Feature.cpp:284, :421). So a re-costed wreck gets the same treatment
+        // health does: preserve the fraction, not the absolute amount, or a
+        // cheapened def leaves half-reclaimed wrecks holding more than they
+        // could ever have held.
+        const ResPair capturedRes = f.defResources;
+        field(f.defResources, born.defResources, now.defResources);
+        if (!SameScalar(f.defResources, capturedRes)) {
+            const auto scale = [](float cur, float from, float to) {
+                return (from > 0.0f) ? std::max(0.0f, cur / from) * to : to;
+            };
+            f.resources.metal = scale(f.resources.metal, capturedRes.metal,
+                                      f.defResources.metal);
+            f.resources.energy = scale(f.resources.energy, capturedRes.energy,
+                                       f.defResources.energy);
+            ++out.featuresResourcesScaled;
+        }
+
+        if (touched) ++out.featuresTouched;
+    }
+}
+
+// ───── The game's turn: DefsReconciled (task 4, §2 step 5) ─────
+
+namespace {
+
+using LuaValue = luasnapshot::Value;
+
+/// A Lua 1..n array of strings. Sorted by the caller (or already complete and
+/// sorted on the report) — a gadget iterating this with ipairs is running SYNCED
+/// code, so the order is sim behaviour and not presentation.
+LuaValue StringArray(std::vector<std::string> names)
+{
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (auto& n : names)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Str(std::move(n)));
+    return out;
+}
+
+LuaValue IntArray(const std::vector<int32_t>& ids)
+{
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (const int32_t id : ids)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Int(id));
+    return out;
+}
+
+/// old name → new name, as a Lua map. Keyed by the CAPTURED name because that is
+/// the name a gadget's own saved state was written with — the whole point of
+/// handing it over is that the gadget cannot look the old name up any more.
+LuaValue RenameMap(const std::unordered_map<std::string, std::string>& renames)
+{
+    std::vector<std::pair<std::string, std::string>> sorted(renames.begin(), renames.end());
+    std::sort(sorted.begin(), sorted.end());
+    LuaValue out = LuaValue::Table();
+    for (auto& [from, to] : sorted)
+        out.table.emplace_back(LuaValue::Str(from), LuaValue::Str(to));
+    return out;
+}
+
+/// Every captured def of one family that this game no longer defines. From
+/// `goneByName`, which the map builds complete precisely because the two
+/// families that travel by name have to be tested against it.
+LuaValue RemovedNames(const DefIdMap& fam)
+{
+    return StringArray(std::vector<std::string>(fam.goneByName.begin(),
+                                                fam.goneByName.end()));
+}
+
+void AddCount(LuaValue& into, const char* key, size_t n)
+{
+    into.table.emplace_back(LuaValue::Str(key), LuaValue::Int(static_cast<int64_t>(n)));
+}
+
+} // namespace
+
+luasnapshot::Value BuildDefsReconciledDelta(const DefDelta& unitDelta,
+                                            const DefDelta& weaponDelta,
+                                            const DefDelta& featureDelta,
+                                            const DefRemap& remap,
+                                            const RemapReport& remapRep,
+                                            const ScalarReport& scalarRep)
+{
+    // Nil rather than an empty table: "nothing moved" is the ordinary resume and
+    // the call-in must not fire on it. A gadget handed an empty delta would have
+    // to re-derive that answer from eleven counters, and one of them would
+    // eventually be forgotten.
+    //
+    // A pure def ADDITION fires this too, even though §3 says additions need
+    // nothing from the engine. They can need something from the GAME: a gadget
+    // that caches "what can this factory build" has to hear about a def that
+    // appeared, and the engine cannot know which gadgets those are.
+    if (!unitDelta.Changed() && !weaponDelta.Changed() && !featureDelta.Changed() &&
+        !remapRep.Changed() && !scalarRep.Changed())
+        return LuaValue::Nil();
+
+    LuaValue units = LuaValue::Table();
+    units.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.units));
+    units.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.unitRenames));
+    units.table.emplace_back(LuaValue::Str("retuned"), StringArray(scalarRep.retunedUnitDefs));
+
+    LuaValue features = LuaValue::Table();
+    features.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.features));
+    features.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.featureRenames));
+    features.table.emplace_back(LuaValue::Str("retuned"),
+                                StringArray(scalarRep.retunedFeatureDefs));
+
+    // Weapons carry no `renamed` half and the absence is structural, not an
+    // oversight: DefRemap aliases weapon names inside the ID map (a weapon is
+    // never referenced by name from anything a gadget saves), so there is no
+    // captured→live weapon name pairing to hand over. Removals are still
+    // reported — a gadget keying anything on a weapon def name wants those.
+    LuaValue weapons = LuaValue::Table();
+    weapons.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.weapons));
+
+    LuaValue counts = LuaValue::Table();
+    AddCount(counts, "buildOrdersDropped",     remapRep.buildCmdsDropped);
+    AddCount(counts, "featureDefsAdded",       featureDelta.added);
+    AddCount(counts, "featureDefsRenumbered",  featureDelta.renumbered);
+    AddCount(counts, "featureDefsRetuned",     scalarRep.featureDefsRetuned);
+    AddCount(counts, "featuresAdjusted",       scalarRep.featuresTouched);
+    AddCount(counts, "featuresDropped",        remapRep.featuresDropped);
+    AddCount(counts, "featuresHealthScaled",   scalarRep.featuresHealthScaled);
+    AddCount(counts, "ordersDeactivated",      remapRep.ordersDeactivated);
+    AddCount(counts, "unitDefsAdded",          unitDelta.added);
+    AddCount(counts, "unitDefsRenumbered",     unitDelta.renumbered);
+    AddCount(counts, "unitDefsRetuned",        scalarRep.unitDefsRetuned);
+    AddCount(counts, "unitFieldsAuthored",     scalarRep.unitFieldsAuthored);
+    AddCount(counts, "unitFieldsReDerived",    scalarRep.unitFieldsReDerived);
+    AddCount(counts, "unitsAdjusted",          scalarRep.unitsTouched);
+    AddCount(counts, "unitsDropped",           remapRep.unitsDropped);
+    AddCount(counts, "unitsHealthScaled",      scalarRep.unitsHealthScaled);
+    AddCount(counts, "weaponDefsAdded",        weaponDelta.added);
+    AddCount(counts, "weaponDefsRenumbered",   weaponDelta.renumbered);
+
+    LuaValue out = LuaValue::Table();
+    out.table.emplace_back(LuaValue::Str("counts"), std::move(counts));
+    // The digest string §2 step 6 asks for, composed HERE rather than in Lua:
+    // it is the two reports' own Describe() output, and a second wording of the
+    // same counts in Lua is a second wording to keep in step.
+    out.table.emplace_back(LuaValue::Str("digest"),
+                           LuaValue::Str(remapRep.Describe() + " | " +
+                                         scalarRep.Describe()));
+    out.table.emplace_back(LuaValue::Str("droppedFeatures"),
+                           IntArray(remapRep.droppedFeatureIds));
+    out.table.emplace_back(LuaValue::Str("droppedUnits"),
+                           IntArray(remapRep.droppedUnitIds));
+    out.table.emplace_back(LuaValue::Str("features"), std::move(features));
+    // False on a pre-task-3 snapshot: the retune lists are then EMPTY BECAUSE
+    // NOTHING WAS RECORDED, not because nothing moved, and a gadget deciding
+    // whether to re-derive its own def caches needs to tell those apart — the
+    // same one-directional guard the two passes apply to their own vocabularies.
+    out.table.emplace_back(LuaValue::Str("retunesKnown"),
+                           LuaValue::Boolean(scalarRep.ran));
+    out.table.emplace_back(LuaValue::Str("units"), std::move(units));
+    out.table.emplace_back(LuaValue::Str("weapons"), std::move(weapons));
+    return out;
+}
+
+// ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
+//
+// One recursive value format: type byte, then the payload for that type, and a
+// table is a pair count followed by (key, value) pairs in the order the Value
+// already holds them (canonical — luasnapshot::Capture sorted them, and the
+// decoder does NOT re-sort, so a payload written out of order decodes out of
+// order and the round-trip test sees it).
+
+namespace {
+
+void WriteLuaValue(Writer& w, const luasnapshot::Value& v)
+{
+    w.U8(static_cast<uint8_t>(v.type));
+    switch (v.type) {
+        case luasnapshot::Value::Type::Nil:
+            break;
+        case luasnapshot::Value::Type::Bool:
+            w.Bool(v.b);
+            break;
+        case luasnapshot::Value::Type::Number: {
+            // Doubles, bit-exact: a Lua number is a double, and a frame stamp
+            // or an accumulated resource total past 2^24 would round if this
+            // were the F32 the rest of the walk uses.
+            uint64_t bits = 0;
+            std::memcpy(&bits, &v.num, sizeof(bits));
+            w.U64(bits);
+        } break;
+        case luasnapshot::Value::Type::Integer:
+            // Two's complement through U64 rather than the double path: an
+            // integer past 2^53 is exactly what the subtype exists to keep.
+            w.U64(static_cast<uint64_t>(v.i));
+            break;
+        case luasnapshot::Value::Type::String:
+            w.Str(v.str);
+            break;
+        case luasnapshot::Value::Type::Table: {
+            w.U32(static_cast<uint32_t>(v.table.size()));
+            for (const auto& kv : v.table) {
+                WriteLuaValue(w, kv.first);
+                WriteLuaValue(w, kv.second);
+            }
+        } break;
+    }
+}
+
+/// Depth-limited on the way IN as well as out: a corrupt payload claiming a
+/// million nested tables must be a decode failure, not a C-stack overflow.
+luasnapshot::Value ReadLuaValue(Reader& r, int depth)
+{
+    luasnapshot::Value v;
+    if (depth >= luasnapshot::kMaxDepth) {
+        r.Fail();
+        return v;
+    }
+
+    const uint8_t type = r.U8();
+    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Integer)) {
+        r.Fail();
+        return v;
+    }
+    v.type = static_cast<luasnapshot::Value::Type>(type);
+
+    switch (v.type) {
+        case luasnapshot::Value::Type::Nil:
+            break;
+        case luasnapshot::Value::Type::Bool:
+            v.b = r.Bool();
+            break;
+        case luasnapshot::Value::Type::Number: {
+            const uint64_t bits = r.U64();
+            std::memcpy(&v.num, &bits, sizeof(v.num));
+        } break;
+        case luasnapshot::Value::Type::Integer:
+            v.i = static_cast<int64_t>(r.U64());
+            break;
+        case luasnapshot::Value::Type::String:
+            v.str = r.Str();
+            break;
+        case luasnapshot::Value::Type::Table: {
+            const uint32_t pairs = r.U32();
+            // Cheapest possible pair is two type bytes, so a count that cannot
+            // fit in what remains is a refusal before it is an allocation.
+            if (size_t(pairs) * 2 > r.Remaining()) {
+                r.Fail();
+                return v;
+            }
+            v.table.reserve(pairs);
+            for (uint32_t i = 0; i < pairs && !r.Bad(); ++i) {
+                luasnapshot::Value key = ReadLuaValue(r, depth + 1);
+                luasnapshot::Value val = ReadLuaValue(r, depth + 1);
+                v.table.emplace_back(std::move(key), std::move(val));
+            }
+        } break;
+    }
+    return v;
+}
+
+} // namespace
+
+void EncodeSyncedLua(const luasnapshot::Value& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    WriteLuaValue(w, in);
+}
+
+bool DecodeSyncedLua(const uint8_t* data, size_t size,
+                     luasnapshot::Value& out, std::string& err)
+{
+    Reader r(data, size);
+    out = ReadLuaValue(r, 0);
+    if (r.Bad()) {
+        err = "syncedLua section is truncated or malformed";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "syncedLua section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+// ───────────── Task 1c: capture / apply (the sim-touching halves) ─────────────
+//
+// THE TRIPWIRE FOR THESE TWO CLASSES. CTeam and CUnit are not aggregates
+// (private members, base classes), so the structured-binding census cannot
+// destructure them the way it does StandingOrder. The tripwire is instead a
+// size assert: adding a member to either class almost always moves sizeof, and
+// the failure message points at PLAN-persistence §7.1c so whoever added the
+// field decides its disposition (captured / re-derived / rebuilt / dropped)
+// instead of discovering years later that it was never snapshotted.
+//
+// Stated limitation, because it is real: a member that fits inside existing
+// padding does NOT move sizeof. This assert is a prompt, not a proof — what
+// proves the payload covers what it claims is the round-trip tests over the
+// state structs above.
+static_assert(sizeof(CTeam) == 624,
+              "CTeam changed shape - revisit the snapshot fidelity contract "
+              "(PLAN-persistence.md §7.1c) and TeamState, then update this size");
+static_assert(sizeof(CUnit) == 4040,
+              "CUnit changed shape - revisit the snapshot fidelity contract "
+              "(PLAN-persistence.md §7.1c) and UnitState, then update this size");
+
+void CaptureTeams(std::vector<TeamState>& out)
+{
+    out.clear();
+    for (int i = 0; i < teamHandler.ActiveTeams(); ++i) {
+        const CTeam* team = teamHandler.Team(i);
+        TeamState s;
+        s.teamNum = team->teamNum;
+        s.isDead  = team->isDead;
+        s.gaia    = team->gaia;
+        s.leader  = team->GetLeader();
+        s.incomeMultiplier = team->GetIncomeMultiplier();
+        const float3& sp = team->GetStartPos();
+        s.startPosX = sp.x; s.startPosY = sp.y; s.startPosZ = sp.z;
+
+        const auto pack = [](const SResourcePack& p) {
+            ResPair r; r.metal = p.metal; r.energy = p.energy; return r;
+        };
+        s.res             = pack(team->res);
+        s.resStorage      = pack(team->resStorage);
+        s.resPull         = pack(team->resPull);
+        s.resPrevPull     = pack(team->resPrevPull);
+        s.resIncome       = pack(team->resIncome);
+        s.resPrevIncome   = pack(team->resPrevIncome);
+        s.resExpense      = pack(team->resExpense);
+        s.resPrevExpense  = pack(team->resPrevExpense);
+        s.resShare        = pack(team->resShare);
+        s.resDelayedShare = pack(team->resDelayedShare);
+        s.resSent         = pack(team->resSent);
+        s.resPrevSent     = pack(team->resPrevSent);
+        s.resReceived     = pack(team->resReceived);
+        s.resPrevReceived = pack(team->resPrevReceived);
+        s.resPrevExcess   = pack(team->resPrevExcess);
+
+        s.nextHistoryEntry = team->nextHistoryEntry;
+        s.statHistory.reserve(team->statHistory.size());
+        for (const TeamStatistics& st : team->statHistory) {
+            TeamStatsState o;
+            o.frame = st.frame;
+            o.metalUsed = st.metalUsed;         o.energyUsed = st.energyUsed;
+            o.metalProduced = st.metalProduced; o.energyProduced = st.energyProduced;
+            o.metalExcess = st.metalExcess;     o.energyExcess = st.energyExcess;
+            o.metalReceived = st.metalReceived; o.energyReceived = st.energyReceived;
+            o.metalSent = st.metalSent;         o.energySent = st.energySent;
+            o.damageDealt = st.damageDealt;     o.damageReceived = st.damageReceived;
+            o.unitsProduced = st.unitsProduced;
+            o.unitsDied = st.unitsDied;
+            o.unitsReceived = st.unitsReceived;
+            o.unitsSent = st.unitsSent;
+            o.unitsCaptured = st.unitsCaptured;
+            o.unitsOutCaptured = st.unitsOutCaptured;
+            o.unitsKilled = st.unitsKilled;
+            s.statHistory.push_back(o);
+        }
+        s.modParams = CaptureRulesParams(team->modParams);
+        out.push_back(std::move(s));
+    }
+}
+
+bool ResolveTeams(const std::vector<TeamState>& in, std::string& err)
+{
+    for (const auto& s : in) {
+        if (!teamHandler.IsValidTeam(s.teamNum)) {
+            err = "snapshot has team " + std::to_string(s.teamNum) +
+                  " but this game has " + std::to_string(teamHandler.ActiveTeams()) +
+                  " teams";
+            return false;
+        }
+    }
+    return true;
+}
+
+void ApplyTeams(const std::vector<TeamState>& in)
+{
+    for (const auto& s : in) {
+        CTeam* team = teamHandler.Team(s.teamNum);
+        team->isDead = s.isDead;
+        team->gaia   = s.gaia;
+        team->SetLeader(s.leader);
+        team->SetIncomeMultiplier(s.incomeMultiplier);
+        team->SetStartPos(float3(s.startPosX, s.startPosY, s.startPosZ));
+
+        const auto unpack = [](const ResPair& r) { return SResourcePack(r.metal, r.energy); };
+        team->res             = unpack(s.res);
+        team->resStorage      = unpack(s.resStorage);
+        team->resPull         = unpack(s.resPull);
+        team->resPrevPull     = unpack(s.resPrevPull);
+        team->resIncome       = unpack(s.resIncome);
+        team->resPrevIncome   = unpack(s.resPrevIncome);
+        team->resExpense      = unpack(s.resExpense);
+        team->resPrevExpense  = unpack(s.resPrevExpense);
+        team->resShare        = unpack(s.resShare);
+        team->resDelayedShare = unpack(s.resDelayedShare);
+        team->resSent         = unpack(s.resSent);
+        team->resPrevSent     = unpack(s.resPrevSent);
+        team->resReceived     = unpack(s.resReceived);
+        team->resPrevReceived = unpack(s.resPrevReceived);
+        team->resPrevExcess   = unpack(s.resPrevExcess);
+
+        team->nextHistoryEntry = s.nextHistoryEntry;
+        // statHistory must never be empty: GetCurrentStats() is back() and is
+        // called from the sim every SlowUpdate.
+        team->statHistory.clear();
+        for (const auto& o : s.statHistory) {
+            TeamStatistics st;
+            st.frame = o.frame;
+            st.metalUsed = o.metalUsed;         st.energyUsed = o.energyUsed;
+            st.metalProduced = o.metalProduced; st.energyProduced = o.energyProduced;
+            st.metalExcess = o.metalExcess;     st.energyExcess = o.energyExcess;
+            st.metalReceived = o.metalReceived; st.energyReceived = o.energyReceived;
+            st.metalSent = o.metalSent;         st.energySent = o.energySent;
+            st.damageDealt = o.damageDealt;     st.damageReceived = o.damageReceived;
+            st.unitsProduced = o.unitsProduced;
+            st.unitsDied = o.unitsDied;
+            st.unitsReceived = o.unitsReceived;
+            st.unitsSent = o.unitsSent;
+            st.unitsCaptured = o.unitsCaptured;
+            st.unitsOutCaptured = o.unitsOutCaptured;
+            st.unitsKilled = o.unitsKilled;
+            team->statHistory.push_back(st);
+        }
+        if (team->statHistory.empty())
+            team->statHistory.emplace_back();
+
+        ApplyRulesParams(s.modParams, team->modParams);
+    }
+}
+
+void CaptureUnits(std::vector<UnitState>& out)
+{
+    out.clear();
+    std::vector<CUnit*> live(unitHandler.GetActiveUnits().begin(),
+                             unitHandler.GetActiveUnits().end());
+    // The insertion order is state (UnitState::activeIndex, Q-P4), so record
+    // each unit's slot BEFORE the sort discards it.
+    std::unordered_map<int, uint32_t> activeIndex;
+    activeIndex.reserve(live.size());
+    for (size_t i = 0; i < live.size(); ++i)
+        activeIndex[live[i]->id] = static_cast<uint32_t>(i);
+
+    // Ascending id, so two snapshots of the same world are byte-comparable
+    // (activeUnits is in insertion order, which a kill+rebuild reshuffles).
+    std::sort(live.begin(), live.end(),
+              [](const CUnit* a, const CUnit* b) { return a->id < b->id; });
+
+    out.reserve(live.size());
+    for (const CUnit* u : live) {
+        // A dead unit is mid-teardown (its Killed script may still be running):
+        // it is not state, and recreating it on restore would resurrect a
+        // corpse that the sim is in the middle of deleting.
+        if (u->isDead || u->unitDef == nullptr)
+            continue;
+
+        UnitState s;
+        s.id = u->id;
+        s.unitDefName = u->unitDef->name;
+        s.team = u->team;
+        s.buildFacing = u->buildFacing;
+        s.beingBuilt = u->beingBuilt;
+
+        s.posX = u->pos.x; s.posY = u->pos.y; s.posZ = u->pos.z;
+        s.speedX = u->speed.x; s.speedY = u->speed.y; s.speedZ = u->speed.z;
+        s.heading = u->heading;
+        s.frontX = u->frontdir.x; s.frontY = u->frontdir.y; s.frontZ = u->frontdir.z;
+        s.rightX = u->rightdir.x; s.rightY = u->rightdir.y; s.rightZ = u->rightdir.z;
+        s.upX = u->updir.x; s.upY = u->updir.y; s.upZ = u->updir.z;
+        s.physicalState = static_cast<uint32_t>(u->physicalState);
+        s.collidableState = static_cast<uint32_t>(u->collidableState);
+
+        s.health = u->health; s.maxHealth = u->maxHealth;
+        s.paralyzeDamage = u->paralyzeDamage;
+        s.captureProgress = u->captureProgress;
+        s.buildProgress = u->buildProgress;
+        s.experience = u->experience;
+        s.recentDamage = u->recentDamage;
+        s.power = u->power; s.mass = u->mass; s.buildTime = u->buildTime;
+        s.terraformLeft = u->terraformLeft;
+        s.repairAmount = u->repairAmount;
+        s.metalExtract = u->metalExtract;
+        const auto pack = [](const SResourcePack& p) {
+            ResPair r; r.metal = p.metal; r.energy = p.energy; return r;
+        };
+        s.cost = pack(u->cost);
+        s.harvested = pack(u->harvested);
+        s.harvestStorage = pack(u->harvestStorage);
+        s.storage = pack(u->storage);
+
+        s.fireState = u->fireState; s.moveState = u->moveState;
+        s.armoredState = u->armoredState;
+        s.armoredMultiple = u->armoredMultiple;
+        s.curArmorMultiple = u->curArmorMultiple;
+        s.armorType = u->armorType;
+        s.category = u->category;
+        s.maxRange = u->maxRange; s.reloadSpeed = u->reloadSpeed;
+        s.flankingBonusMode = u->flankingBonusMode;
+        s.flankingDirX = u->flankingBonusDir.x;
+        s.flankingDirY = u->flankingBonusDir.y;
+        s.flankingDirZ = u->flankingBonusDir.z;
+        s.flankingBonusMobility = u->flankingBonusMobility;
+        s.flankingBonusMobilityAdd = u->flankingBonusMobilityAdd;
+        s.flankingBonusAvgDamage = u->flankingBonusAvgDamage;
+        s.flankingBonusDifDamage = u->flankingBonusDifDamage;
+        s.onTempHoldFire = u->onTempHoldFire;
+        s.forceUseWeapons = u->forceUseWeapons;
+        s.allowUseWeapons = u->allowUseWeapons;
+        s.inBuildStance = u->inBuildStance;
+        s.useHighTrajectory = u->useHighTrajectory;
+        s.selfDCountdown = u->selfDCountdown;
+        s.delayedWreckLevel = u->delayedWreckLevel;
+        s.featureDefID = u->featureDefID;
+        s.lastAttackFrame = u->lastAttackFrame;
+        s.lastFireWeapon = u->lastFireWeapon;
+        s.lastNanoAdd = u->lastNanoAdd;
+        s.restTime = u->restTime;
+
+        s.losRadius = u->losRadius; s.airLosRadius = u->airLosRadius;
+        s.realLosRadius = u->realLosRadius; s.realAirLosRadius = u->realAirLosRadius;
+        s.radarRadius = u->radarRadius; s.sonarRadius = u->sonarRadius;
+        s.jammerRadius = u->jammerRadius; s.sonarJamRadius = u->sonarJamRadius;
+        s.seismicRadius = u->seismicRadius;
+        s.seismicSignature = u->seismicSignature;
+        s.decloakDistance = u->decloakDistance;
+        s.stealth = u->stealth; s.sonarStealth = u->sonarStealth;
+        s.isCloaked = u->isCloaked; s.wantCloak = u->wantCloak;
+        s.alwaysVisible = u->alwaysVisible; s.useAirLos = u->useAirLos;
+        s.posErrX = u->posErrorVector.x;
+        s.posErrY = u->posErrorVector.y;
+        s.posErrZ = u->posErrorVector.z;
+        s.posErrDeltaX = u->posErrorDelta.x;
+        s.posErrDeltaY = u->posErrorDelta.y;
+        s.posErrDeltaZ = u->posErrorDelta.z;
+        s.nextPosErrorUpdate = u->nextPosErrorUpdate;
+
+        s.activated = u->activated;
+        s.neutral = u->neutral;
+        s.upright = u->upright;
+        s.groundLevelled = u->groundLevelled;
+        s.stunned = u->IsStunned();
+        s.invulnerable = u->invulnerable;
+        s.noSelect = u->noSelect;
+
+        s.transporterId = (u->GetTransporter() != nullptr) ? u->GetTransporter()->id : -1;
+        s.loadingTransportId = u->loadingTransportId;
+        s.unloadingTransportId = u->unloadingTransportId;
+        s.transportCapacityUsed = u->transportCapacityUsed;
+        s.transportMassUsed = u->transportMassUsed;
+        for (const CUnit::TransportedUnit& tu : u->transportedUnits) {
+            if (tu.unit == nullptr) continue;
+            s.transportees.emplace_back(tu.unit->id, tu.piece);
+        }
+
+        if (u->commandAI != nullptr) {
+            const CCommandAI* cai = u->commandAI;
+            s.commands.reserve(cai->commandQue.size());
+            for (const Command& c : cai->commandQue) {
+                CommandState cs;
+                cs.cmdID = c.GetID(false);
+                cs.aiCallbackID = c.GetID(true);
+                cs.timeOut = c.GetTimeOut();
+                cs.tag = c.GetTag();
+                cs.options = c.GetOpts();
+                cs.params.assign(c.GetParams(), c.GetParams() + c.GetNumParams());
+                s.commands.push_back(std::move(cs));
+            }
+            s.tagCounter = cai->commandQue.GetTagCounter();
+            s.repeatOrders = cai->repeatOrders;
+            s.lastUserCommand = cai->lastUserCommand;
+            s.lastFinishCommand = cai->lastFinishCommand;
+        }
+
+        s.weapons.reserve(u->weapons.size());
+        for (const CWeapon* w : u->weapons) {
+            WeaponState ws;
+            if (w != nullptr) {
+                ws.reloadStatus = w->reloadStatus;
+                ws.salvoLeft = w->salvoLeft;
+                ws.nextSalvo = w->nextSalvo;
+                ws.numStockpiled = w->numStockpiled;
+                ws.numStockpileQued = w->numStockpileQued;
+                // What this slot IS, so the restore can find it again after a
+                // def gains or reorders a weapon (task 2). A weapon with no
+                // def cannot happen (CWeapon's constructor takes one), but the
+                // null check costs nothing and the empty name degrades to the
+                // old positional match.
+                if (w->weaponDef != nullptr)
+                    ws.weaponDefName = w->weaponDef->name;
+            }
+            s.weapons.push_back(ws);
+        }
+        s.modParams = CaptureRulesParams(u->modParams);
+        s.activeIndex = activeIndex[u->id];
+
+        // ── the move type (option A) ──
+        //
+        // Under Lua move control the live moveType is a CScriptMoveType and
+        // the real one is parked in prevMoveType; `kind` names the PARKED one,
+        // because that is what the unit goes back to being when the gadget
+        // gives control up, and losing it would strand the unit as a
+        // script-driven object forever.
+        if (u->UsingScriptMoveType()) {
+            s.move.kind = static_cast<uint8_t>(u->prevMoveType->SnapshotKind());
+            u->prevMoveType->SnapshotCapture(s.move);
+            s.move.scriptControlled = true;
+            u->moveType->SnapshotCapture(s.move);   // fills script + scriptBase
+        } else if (u->moveType != nullptr) {
+            s.move.kind = static_cast<uint8_t>(u->moveType->SnapshotKind());
+            u->moveType->SnapshotCapture(s.move);
+        }
+
+        out.push_back(std::move(s));
+    }
+}
+
+bool ResolveUnitDefs(const std::vector<UnitState>& in,
+                     std::vector<int32_t>& defIds, std::string& err)
+{
+    defIds.clear();
+    defIds.reserve(in.size());
+
+    std::vector<int32_t> seen;
+    seen.reserve(in.size());
+
+    for (const auto& s : in) {
+        const UnitDef* ud = unitDefHandler->GetUnitDefByName(s.unitDefName);
+        if (ud == nullptr) {
+            // §7.1c: a def carried by name so that a missing one is loud. This
+            // is the check that has to happen BEFORE the live roster is torn
+            // down - there is no way back from a half-rebuilt world.
+            err = "snapshot unit " + std::to_string(s.id) + " has unitDef '" +
+                  s.unitDefName + "', which this game does not define";
+            return false;
+        }
+        if (!teamHandler.IsValidTeam(s.team)) {
+            err = "snapshot unit " + std::to_string(s.id) + " belongs to team " +
+                  std::to_string(s.team) + ", which this game does not have";
+            return false;
+        }
+        if (s.id < 0 || unsigned(s.id) >= unitHandler.MaxUnits()) {
+            err = "snapshot unit id " + std::to_string(s.id) +
+                  " is outside this game's unit-id space (max " +
+                  std::to_string(unitHandler.MaxUnits()) + ")";
+            return false;
+        }
+        if (std::find(seen.begin(), seen.end(), s.id) != seen.end()) {
+            err = "snapshot has two units with id " + std::to_string(s.id);
+            return false;
+        }
+        seen.push_back(s.id);
+        defIds.push_back(ud->id);
+    }
+    return true;
+}
+
+namespace {
+
+/// Everything about a restored unit that is not needed to create it.
+// The move type half of a unit's restore (option A). Split out because it is
+// the one part that can DISAGREE with the live object: the payload names a
+// class, and the class a fresh unit gets comes from the def, so a def edit
+// between capture and restore can put a CGroundMoveType where the snapshot
+// recorded a CHoverAirMoveType. Applying an arm to the wrong class would write
+// a plausible-looking wrong world; saying so and leaving the constructor
+// values is the honest failure.
+void ApplyMoveTypeState(CUnit* u, const movetypesnapshot::MoveTypeState& m)
+{
+    using movetypesnapshot::Kind;
+
+    if (m.kind == static_cast<uint8_t>(Kind::None) || u->moveType == nullptr)
+        return;
+
+    // Under Lua move control the payload's `kind` describes the PARKED type,
+    // so the class to compare against is the one the unit has before the
+    // controller is installed.
+    if (u->moveType->SnapshotKind() != static_cast<Kind>(m.kind)) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: unit %d ('%s') has move type %d, the snapshot "
+                 "recorded %d - move state not applied for it or any later "
+                 "mismatch (the def's movement class moved under the snapshot)",
+                 u->id, u->unitDef->name.c_str(),
+                 int(u->moveType->SnapshotKind()), int(m.kind));
+        }
+        return;
+    }
+
+    u->moveType->SnapshotApply(m);
+
+    if (m.scriptControlled) {
+        // EnableScriptMoveType parks what was just restored and installs a
+        // fresh CScriptMoveType; the controller's own state goes on top.
+        u->EnableScriptMoveType();
+        u->moveType->SnapshotApply(m);
+    }
+}
+
+void ApplyUnitState(CUnit* u, const UnitState& s)
+{
+    // ForcedMove rather than a raw pos write: it re-registers the unit with the
+    // quad field and the ground-blocking map, which a bare assignment leaves
+    // pointing at the spawn position.
+    //
+    // CUnit:: qualified on purpose — CBuilding overrides ForcedMove to snap the
+    // position through Pos2BuildPos and re-run FlattenGround, and a restore must
+    // reproduce the world it captured rather than re-derive where the building
+    // "should" have been built. A building staged off the 16-elmo build grid (a
+    // scenario's authored position, a transport drop) was silently moved up to
+    // half a square on every restore, and the terrain cut was made a second
+    // time — which is also what `params.flattenGround = false` in ApplyUnits
+    // exists to avoid. Everything else the override did is applied explicitly
+    // by the statements below (heading, the three direction vectors, velocity).
+    u->CUnit::ForcedMove(float3(s.posX, s.posY, s.posZ));
+    u->SetVelocityAndSpeed(float3(s.speedX, s.speedY, s.speedZ));
+    u->heading = static_cast<short>(s.heading);
+    u->buildFacing = static_cast<short>(s.buildFacing);
+    u->frontdir = float3(s.frontX, s.frontY, s.frontZ);
+    u->rightdir = float3(s.rightX, s.rightY, s.rightZ);
+    u->updir    = float3(s.upX, s.upY, s.upZ);
+    u->physicalState = static_cast<CSolidObject::PhysicalState>(s.physicalState);
+    u->collidableState = static_cast<CSolidObject::CollidableState>(s.collidableState);
+
+    u->maxHealth = s.maxHealth;
+    u->health = s.health;
+    u->paralyzeDamage = s.paralyzeDamage;
+    u->captureProgress = s.captureProgress;
+    u->buildProgress = s.buildProgress;
+    u->experience = s.experience;
+    // limExperience is a pure function of experience (rebuilt, not captured) —
+    // but AddExperience(0) does NOT rebuild it: the engine's first statement is
+    // `if (exp == 0.0f) return`, so the call this line used to make was a no-op
+    // and every restored veteran came back with limExperience 0 until its next
+    // kill. That is not cosmetic: limExperience is CWeapon's accuracy scale
+    // (Weapon.cpp) and a missile's wobble factor, so a restored veteran shot
+    // like a rookie. Recomputed the way AddExperience does it (Unit.cpp:1494).
+    u->limExperience = s.experience / (s.experience + 1.0f);
+    u->recentDamage = s.recentDamage;
+    u->power = s.power;
+    u->SetMass(s.mass);
+    u->buildTime = s.buildTime;
+    u->terraformLeft = s.terraformLeft;
+    u->repairAmount = s.repairAmount;
+    u->metalExtract = s.metalExtract;
+    u->cost = SResourcePack(s.cost.metal, s.cost.energy);
+    u->harvested = SResourcePack(s.harvested.metal, s.harvested.energy);
+    u->harvestStorage = SResourcePack(s.harvestStorage.metal, s.harvestStorage.energy);
+    u->SetStorage(SResourcePack(s.storage.metal, s.storage.energy));
+
+    u->fireState = s.fireState;
+    u->moveState = s.moveState;
+    u->armoredState = s.armoredState;
+    u->armoredMultiple = s.armoredMultiple;
+    u->curArmorMultiple = s.curArmorMultiple;
+    u->armorType = s.armorType;
+    u->category = s.category;
+    u->maxRange = s.maxRange;
+    u->reloadSpeed = s.reloadSpeed;
+    u->flankingBonusMode = s.flankingBonusMode;
+    u->flankingBonusDir = float3(s.flankingDirX, s.flankingDirY, s.flankingDirZ);
+    u->flankingBonusMobility = s.flankingBonusMobility;
+    u->flankingBonusMobilityAdd = s.flankingBonusMobilityAdd;
+    u->flankingBonusAvgDamage = s.flankingBonusAvgDamage;
+    u->flankingBonusDifDamage = s.flankingBonusDifDamage;
+    u->onTempHoldFire = s.onTempHoldFire;
+    u->forceUseWeapons = s.forceUseWeapons;
+    u->allowUseWeapons = s.allowUseWeapons;
+    u->inBuildStance = s.inBuildStance;
+    u->useHighTrajectory = s.useHighTrajectory;
+    u->selfDCountdown = s.selfDCountdown;
+    u->delayedWreckLevel = s.delayedWreckLevel;
+    u->featureDefID = s.featureDefID;
+    u->lastAttackFrame = s.lastAttackFrame;
+    u->lastFireWeapon = s.lastFireWeapon;
+    u->lastNanoAdd = s.lastNanoAdd;
+    u->restTime = s.restTime;
+
+    u->realLosRadius = s.realLosRadius;
+    u->realAirLosRadius = s.realAirLosRadius;
+    // ChangeLos rather than two assignments: it tells the LOS handler the
+    // radius moved, which is what makes the rebuilt LOS map match the payload.
+    u->ChangeLos(s.losRadius, s.airLosRadius);
+    u->radarRadius = s.radarRadius;
+    u->sonarRadius = s.sonarRadius;
+    u->jammerRadius = s.jammerRadius;
+    u->sonarJamRadius = s.sonarJamRadius;
+    u->seismicRadius = s.seismicRadius;
+    u->seismicSignature = s.seismicSignature;
+    u->decloakDistance = s.decloakDistance;
+    u->stealth = s.stealth;
+    u->sonarStealth = s.sonarStealth;
+    u->isCloaked = s.isCloaked;
+    u->wantCloak = s.wantCloak;
+    u->alwaysVisible = s.alwaysVisible;
+    u->useAirLos = s.useAirLos;
+    u->posErrorVector = float3(s.posErrX, s.posErrY, s.posErrZ);
+    u->posErrorDelta = float3(s.posErrDeltaX, s.posErrDeltaY, s.posErrDeltaZ);
+    u->nextPosErrorUpdate = s.nextPosErrorUpdate;
+
+    u->activated = s.activated;
+    u->SetNeutral(s.neutral);
+    u->upright = s.upright;
+    u->groundLevelled = s.groundLevelled;
+    u->SetStunned(s.stunned);
+    u->invulnerable = s.invulnerable;
+    u->noSelect = s.noSelect;
+
+    u->loadingTransportId = s.loadingTransportId;
+    u->unloadingTransportId = s.unloadingTransportId;
+    u->transportCapacityUsed = s.transportCapacityUsed;
+    u->transportMassUsed = s.transportMassUsed;
+
+    if (u->commandAI != nullptr) {
+        CCommandAI* cai = u->commandAI;
+        cai->RestoreCommandQueue([&]() {
+            std::vector<Command> cmds;
+            cmds.reserve(s.commands.size());
+            for (const auto& cs : s.commands) {
+                Command c(cs.cmdID);
+                c.SetAICmdID(cs.aiCallbackID);
+                for (const float p : cs.params) c.PushParam(p);
+                c.SetTimeOut(cs.timeOut);
+                c.SetTag(cs.tag);
+                c.SetOpts(cs.options);
+                cmds.push_back(c);
+            }
+            return cmds;
+        }(), s.tagCounter);
+        cai->repeatOrders = s.repeatOrders;
+        cai->lastUserCommand = s.lastUserCommand;
+        cai->lastFinishCommand = s.lastFinishCommand;
+        cai->selfDCountdown = s.selfDCountdown;
+    }
+
+    // The def decides how many weapons a unit has and in what order, so the
+    // pairing between captured slots and live ones is BY NAME, not by position
+    // (task 2 — MatchWeaponSlots, and the WeaponState::weaponDefName comment
+    // for why the positional version was a wrong-but-plausible restore). A
+    // live slot with no captured counterpart is E4's up-gunned fleet and keeps
+    // its constructor state: loaded, no stockpile.
+    {
+        std::vector<std::string> liveNames;
+        liveNames.reserve(u->weapons.size());
+        for (const CWeapon* w : u->weapons)
+            liveNames.emplace_back((w != nullptr && w->weaponDef != nullptr)
+                                       ? w->weaponDef->name : std::string());
+
+        const std::vector<int32_t> from = MatchWeaponSlots(s.weapons, liveNames);
+        size_t paired = 0;
+        size_t reloadClamped = 0;
+        for (size_t i = 0; i < u->weapons.size(); ++i) {
+            CWeapon* w = u->weapons[i];
+            if (w == nullptr || from[i] < 0) continue;
+            const WeaponState& ws = s.weapons[size_t(from[i])];
+            w->reloadStatus = ws.reloadStatus;
+            // §2 step 3's other half: cycle state clamps to the NEW cycle
+            // length. reloadStatus is the frame the weapon may fire again
+            // (Weapon.cpp: frameNum + reloadTime/reloadSpeed) and reloadTime
+            // comes off the live def, so a weapon whose reload was shortened
+            // restores stuck mid-cycle for longer than the new def allows —
+            // and one whose owner is mid-reload of a cycle that no longer
+            // exists never becomes ready at a frame the new cycle would.
+            // Clamped rather than reset: a nerfed (longer) reload keeps its
+            // remaining wait, which is the fraction-preserving disposition.
+            const int cycle = std::max(1, int(w->reloadTime /
+                                              std::max(0.01f, u->reloadSpeed)));
+            if (w->reloadStatus > gs->frameNum + cycle) {
+                w->reloadStatus = gs->frameNum + cycle;
+                ++reloadClamped;
+            }
+            w->salvoLeft = ws.salvoLeft;
+            w->nextSalvo = ws.nextSalvo;
+            w->numStockpiled = ws.numStockpiled;
+            w->numStockpileQued = ws.numStockpileQued;
+            ++paired;
+        }
+        // Both directions are worth a line, and only once: a fleet-wide def
+        // change would otherwise write one per unit.
+        if (paired != s.weapons.size() || paired != u->weapons.size()) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: unit %d ('%s') has %zu weapons, the "
+                     "snapshot recorded %zu - %zu slot(s) paired by weapon def "
+                     "name, %zu captured slot(s) had no live weapon, %zu live "
+                     "slot(s) start fresh (E4)",
+                     u->id, s.unitDefName.c_str(), u->weapons.size(),
+                     s.weapons.size(), paired, s.weapons.size() - paired,
+                     u->weapons.size() - paired);
+            }
+        }
+        if (reloadClamped != 0) {
+            static bool clampWarned = false;
+            if (!clampWarned) {
+                clampWarned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: %zu weapon(s) on unit %d ('%s') were "
+                     "mid-reload past the live def's cycle length and were "
+                     "clamped to it (def-reconciliation task 3, §2 step 3)",
+                     reloadClamped, u->id, s.unitDefName.c_str());
+            }
+        }
+    }
+
+    ApplyRulesParams(s.modParams, u->modParams);
+
+    ApplyMoveTypeState(u, s.move);
+}
+
+} // namespace
+
+std::vector<int32_t> RestoredActiveOrder(const std::vector<UnitState>& in)
+{
+    std::vector<const UnitState*> p;
+    p.reserve(in.size());
+    for (const auto& s : in) p.push_back(&s);
+
+    // (activeIndex, id). The id is the tie-break, not decoration: a payload
+    // whose indices are not a clean permutation — an older capture that carried
+    // none, a hand-built fixture, a partial roster — must still produce ONE
+    // order, or two restores of the same bytes disagree and the whole point of
+    // capturing the order is lost to std::sort being unstable.
+    std::sort(p.begin(), p.end(),
+              [](const UnitState* a, const UnitState* b) {
+                  if (a->activeIndex != b->activeIndex)
+                      return a->activeIndex < b->activeIndex;
+                  return a->id < b->id;
+              });
+
+    std::vector<int32_t> out;
+    out.reserve(p.size());
+    for (const UnitState* s : p) out.push_back(s->id);
+    return out;
+}
+
+void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& defIds)
+{
+    // ── 1. tear the live roster down ──
+    //
+    // reclaimed = true (what CUnitHandler::QueueDeleteUnit itself passes), so
+    // no wreck, no explosion and no death CEG: a restore is not a massacre.
+    // GarbageCollectUnit is synchronous and recycles the id immediately, which
+    // is required - the payload's units claim those same ids.
+    std::vector<int> liveIds;
+    liveIds.reserve(unitHandler.GetActiveUnits().size());
+    for (const CUnit* u : unitHandler.GetActiveUnits())
+        liveIds.push_back(u->id);
+
+    for (const int id : liveIds) {
+        CUnit* u = unitHandler.GetUnit(id);
+        if (u == nullptr) continue;
+        // QueueDeleteUnit refuses a unit whose death script has not finished;
+        // there is no script to wait for when the world is being replaced.
+        u->deathScriptFinished = true;
+        unitHandler.GarbageCollectUnit(id);
+    }
+
+    // ── 2. rebuild ──
+    for (size_t i = 0; i < in.size(); ++i) {
+        const UnitState& s = in[i];
+        UnitLoadParams params;
+        params.unitDef = unitDefHandler->GetUnitDefByID(defIds[i]);
+        params.builder = nullptr;
+        params.pos = float3(s.posX, s.posY, s.posZ);
+        params.speed = float3(s.speedX, s.speedY, s.speedZ);
+        params.unitID = s.id;
+        params.teamID = s.team;
+        params.facing = s.buildFacing;
+        params.beingBuilt = s.beingBuilt;
+        // The ground under this unit was terraformed when it was first placed;
+        // re-flattening on restore would re-cut a hole that the heightmap
+        // already carries.
+        params.flattenGround = false;
+
+        CUnit* u = unitLoader->LoadUnit(params);
+        if (u == nullptr) {
+            // Every fallible condition was checked in ResolveUnitDefs, so this
+            // is a bug rather than a data problem - but it must not be silent.
+            SLOG(SPRING_LOG_ERROR,
+                 "snapshot restore: could not create unit %d ('%s') for team %d",
+                 s.id, s.unitDefName.c_str(), s.team);
+            continue;
+        }
+        ApplyUnitState(u, s);
+    }
+
+    // ── 3. the transport graph, once every unit exists ──
+    for (const auto& s : in) {
+        if (s.transportees.empty()) continue;
+        CUnit* transport = unitHandler.GetUnit(s.id);
+        if (transport == nullptr) continue;
+        for (const auto& [teeId, piece] : s.transportees) {
+            CUnit* tee = unitHandler.GetUnit(teeId);
+            if (tee == nullptr) continue;
+            // force: the capacity/mass checks already passed when this unit was
+            // loaded during the match, and a restored transport must not shed
+            // its cargo because a check rounds differently.
+            transport->AttachUnit(tee, piece, true);
+        }
+    }
+
+    // ── 4. put activeUnits back in its captured order (Q-P4) ──
+    //
+    // Step 2 creates in payload order, which is ascending id; the world was in
+    // insertion order. That difference is not cosmetic: SlowUpdateUnits walks
+    // this vector in a staggered slice, so a reshuffle moves every unit into a
+    // different slow-update frame, and CWeapon::SlowUpdate draws from the synced
+    // RNG. A restored world therefore drew a different number of times on its
+    // very first tick, with every unit byte-identical — the divergence Q-P4
+    // filed.
+    const std::vector<int32_t> order = RestoredActiveOrder(in);
+    std::unordered_map<int32_t, size_t> rank;
+    rank.reserve(order.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        rank[order[i]] = i;
+
+    std::vector<CUnit*>& active = unitHandler.GetActiveUnits();
+    std::sort(active.begin(), active.end(),
+              [&rank](const CUnit* a, const CUnit* b) {
+                  const auto ia = rank.find(a->id), ib = rank.find(b->id);
+                  // A live unit the payload does not name cannot exist after a
+                  // full rebuild, but if one ever did it goes to the end in id
+                  // order rather than wherever std::sort left it.
+                  const size_t ka = (ia != rank.end()) ? ia->second : SIZE_MAX;
+                  const size_t kb = (ib != rank.end()) ? ib->second : SIZE_MAX;
+                  if (ka != kb) return ka < kb;
+                  return a->id < b->id;
+              });
+}
+
+// ───────── Task 1e: features capture / apply (§7.1e) ─────────
+//
+// Same size-assert tripwire as CTeam/CUnit, and the same stated limitation: a
+// member that fits in existing padding does not move sizeof.
+static_assert(sizeof(CFeature) == 1152,
+              "CFeature changed shape - revisit the snapshot fidelity contract "
+              "(PLAN-persistence.md §7.1e) and FeatureState, then update this size");
+
+void CaptureFeatures(std::vector<FeatureState>& out)
+{
+    out.clear();
+
+    // Ascending id: activeFeatureIDs is an unordered_set, so two snapshots of
+    // the same world would otherwise differ by hash order alone.
+    std::vector<int> ids(featureHandler.GetActiveFeatureIDs().begin(),
+                         featureHandler.GetActiveFeatureIDs().end());
+    std::sort(ids.begin(), ids.end());
+
+    out.reserve(ids.size());
+    for (const int id : ids) {
+        const CFeature* f = featureHandler.GetFeature(id);
+        // deleteMe is the feature-side equivalent of CUnit::isDead: it is
+        // already scheduled for removal in this frame's FeatureHandler::Update,
+        // so recreating it on restore would resurrect something the sim is in
+        // the middle of deleting.
+        if (f == nullptr || f->deleteMe || f->def == nullptr)
+            continue;
+
+        FeatureState s;
+        s.id = f->id;
+        s.featureDefName = f->def->name;
+        s.resurrectUnitDefName = (f->udef != nullptr) ? f->udef->name : "";
+        s.team = f->team;
+        s.heading = f->heading;
+        s.buildFacing = f->buildFacing;
+
+        s.posX = f->pos.x; s.posY = f->pos.y; s.posZ = f->pos.z;
+        s.speedX = f->speed.x; s.speedY = f->speed.y; s.speedZ = f->speed.z;
+        s.frontX = f->frontdir.x; s.frontY = f->frontdir.y; s.frontZ = f->frontdir.z;
+        s.rightX = f->rightdir.x; s.rightY = f->rightdir.y; s.rightZ = f->rightdir.z;
+        s.upX = f->updir.x; s.upY = f->updir.y; s.upZ = f->updir.z;
+        s.collidableState = static_cast<uint32_t>(f->collidableState);
+
+        s.radius = f->radius; s.height = f->height;
+        s.relMidX = f->relMidPos.x; s.relMidY = f->relMidPos.y; s.relMidZ = f->relMidPos.z;
+        s.relAimX = f->relAimPos.x; s.relAimY = f->relAimPos.y; s.relAimZ = f->relAimPos.z;
+
+        s.health = f->health;
+        s.maxHealth = f->maxHealth;
+        s.mass = f->mass;
+        s.reclaimTime = f->reclaimTime;
+        s.reclaimLeft = f->reclaimLeft;
+        s.resurrectProgress = f->resurrectProgress;
+        s.isRepairingBeforeResurrect = f->isRepairingBeforeResurrect;
+        s.lastReclaimFrame = f->lastReclaimFrame;
+        s.fireTime = f->fireTime;
+        s.smokeTime = f->smokeTime;
+        const auto pack = [](const SResourcePack& p) {
+            ResPair r; r.metal = p.metal; r.energy = p.energy; return r;
+        };
+        s.defResources = pack(f->defResources);
+        s.resources = pack(f->resources);
+
+        s.moveCtrlEnabled = f->moveCtrl.enabled;
+        s.movementMaskX = f->moveCtrl.movementMask.x;
+        s.movementMaskY = f->moveCtrl.movementMask.y;
+        s.movementMaskZ = f->moveCtrl.movementMask.z;
+        s.velocityMaskX = f->moveCtrl.velocityMask.x;
+        s.velocityMaskY = f->moveCtrl.velocityMask.y;
+        s.velocityMaskZ = f->moveCtrl.velocityMask.z;
+        s.impulseMaskX = f->moveCtrl.impulseMask.x;
+        s.impulseMaskY = f->moveCtrl.impulseMask.y;
+        s.impulseMaskZ = f->moveCtrl.impulseMask.z;
+        s.velVectorX = f->moveCtrl.velVector.x;
+        s.velVectorY = f->moveCtrl.velVector.y;
+        s.velVectorZ = f->moveCtrl.velVector.z;
+        s.accVectorX = f->moveCtrl.accVector.x;
+        s.accVectorY = f->moveCtrl.accVector.y;
+        s.accVectorZ = f->moveCtrl.accVector.z;
+
+        s.crushable = f->crushable;
+        s.blockEnemyPushing = f->blockEnemyPushing;
+        s.blockHeightChanges = f->blockHeightChanges;
+        s.noSelect = f->noSelect;
+        s.alwaysVisible = f->alwaysVisible;
+        s.useAirLos = f->useAirLos;
+
+        s.modParams = CaptureRulesParams(f->modParams);
+        out.push_back(std::move(s));
+    }
+}
+
+bool ResolveFeatureDefs(const std::vector<FeatureState>& in,
+                        std::vector<int32_t>& defIds,
+                        std::vector<int32_t>& udefIds, std::string& err)
+{
+    defIds.clear();
+    udefIds.clear();
+    defIds.reserve(in.size());
+    udefIds.reserve(in.size());
+
+    std::vector<int32_t> seen;
+    seen.reserve(in.size());
+
+    for (const auto& s : in) {
+        // showError=false: a missing def is reported by THIS function, with the
+        // feature id, rather than as an engine-level log line with no context.
+        const FeatureDef* fd = featureDefHandler->GetFeatureDef(s.featureDefName, false);
+        if (fd == nullptr) {
+            err = "snapshot feature " + std::to_string(s.id) + " has featureDef '" +
+                  s.featureDefName + "', which this game does not define";
+            return false;
+        }
+        // The resurrect target is state too: a wreck that resurrects into a def
+        // this build no longer has would silently become unresurrectable, so it
+        // is a staging refusal like the featureDef itself.
+        int32_t udefId = -1;
+        if (!s.resurrectUnitDefName.empty()) {
+            const UnitDef* ud = unitDefHandler->GetUnitDefByName(s.resurrectUnitDefName);
+            if (ud == nullptr) {
+                err = "snapshot feature " + std::to_string(s.id) +
+                      " resurrects into unitDef '" + s.resurrectUnitDefName +
+                      "', which this game does not define";
+                return false;
+            }
+            udefId = ud->id;
+        }
+        if (!teamHandler.IsValidTeam(s.team)) {
+            err = "snapshot feature " + std::to_string(s.id) + " belongs to team " +
+                  std::to_string(s.team) + ", which this game does not have";
+            return false;
+        }
+        if (s.id < 0 || s.id >= MAX_FEATURES) {
+            err = "snapshot feature id " + std::to_string(s.id) +
+                  " is outside this game's feature-id space (max " +
+                  std::to_string(MAX_FEATURES) + ")";
+            return false;
+        }
+        if (std::find(seen.begin(), seen.end(), s.id) != seen.end()) {
+            err = "snapshot has two features with id " + std::to_string(s.id);
+            return false;
+        }
+        seen.push_back(s.id);
+        defIds.push_back(fd->id);
+        udefIds.push_back(udefId);
+    }
+    return true;
+}
+
+namespace {
+
+/// Everything about a restored feature that creating it does not already set.
+void ApplyFeatureState(CFeature* f, const FeatureState& s)
+{
+    // Geometry first: Block() and UpdatePhysicalState below read radius, height
+    // and midPos, so a restore that set them afterwards would block the map
+    // with the def's footprint and then quietly disagree with itself.
+    f->SetRadiusAndHeight(s.radius, s.height);
+    f->SetMidAndAimPos(float3(s.relMidX, s.relMidY, s.relMidZ),
+                       float3(s.relAimX, s.relAimY, s.relAimZ), true);
+
+    f->collidableState = static_cast<CSolidObject::CollidableState>(s.collidableState);
+    f->crushable = s.crushable;
+    f->blockEnemyPushing = s.blockEnemyPushing;
+    f->blockHeightChanges = s.blockHeightChanges;
+    f->noSelect = s.noSelect;
+    f->alwaysVisible = s.alwaysVisible;
+    f->useAirLos = s.useAirLos;
+
+    // Before the velocity, because SetVelocity masks through velocityMask.
+    f->moveCtrl.enabled = s.moveCtrlEnabled;
+    f->moveCtrl.SetMovementMask(float3(s.movementMaskX, s.movementMaskY, s.movementMaskZ));
+    f->moveCtrl.SetVelocityMask(float3(s.velocityMaskX, s.velocityMaskY, s.velocityMaskZ));
+    f->moveCtrl.impulseMask = float3(s.impulseMaskX, s.impulseMaskY, s.impulseMaskZ);
+    f->moveCtrl.velVector = float3(s.velVectorX, s.velVectorY, s.velVectorZ);
+    f->moveCtrl.accVector = float3(s.accVectorX, s.accVectorY, s.accVectorZ);
+
+    f->maxHealth = s.maxHealth;
+    f->health = s.health;
+    f->SetMass(s.mass);
+    f->reclaimTime = s.reclaimTime;
+    f->reclaimLeft = s.reclaimLeft;
+    f->resurrectProgress = s.resurrectProgress;
+    f->isRepairingBeforeResurrect = s.isRepairingBeforeResurrect;
+    f->lastReclaimFrame = s.lastReclaimFrame;
+    f->fireTime = s.fireTime;
+    f->defResources = SResourcePack(s.defResources.metal, s.defResources.energy);
+    f->resources = SResourcePack(s.resources.metal, s.resources.energy);
+
+    // ForcedMove rather than a raw pos write: it re-registers the feature with
+    // the quad field and the ground-blocking map and recomputes the physical
+    // state, which is why physicalState is not in the payload at all.
+    f->ForcedMove(float3(s.posX, s.posY, s.posZ));
+
+    // AFTER ForcedMove, deliberately: it calls UpdateTransformAndPhysState,
+    // which re-derives the three direction vectors from `heading` and the ground
+    // normal. A feature spun by Spring.SetFeatureDirection / SetFeatureRotation
+    // has a basis that derivation cannot reproduce, so the captured one is put
+    // back last and the cached transform matrix refreshed from it.
+    f->frontdir = float3(s.frontX, s.frontY, s.frontZ);
+    f->rightdir = float3(s.rightX, s.rightY, s.rightZ);
+    f->updir    = float3(s.upX, s.upY, s.upZ);
+    f->UpdateMidAndAimPos();
+    f->UpdateTransform(f->pos, true);
+
+    // Last: SetVelocity re-queues the feature for updates when it is moving,
+    // and reads the masks restored above.
+    f->SetVelocity(float3(s.speedX, s.speedY, s.speedZ));
+
+    ApplyRulesParams(s.modParams, f->modParams);
+}
+
+} // namespace
+
+void ApplyFeatures(const std::vector<FeatureState>& in,
+                   const std::vector<int32_t>& defIds,
+                   const std::vector<int32_t>& udefIds)
+{
+    // ── 1. tear the live feature set down ──
+    //
+    // ClearAllFeatures is synchronous and frees every id immediately, which is
+    // required: the payload's features claim those same ids, and
+    // CFeatureHandler::CanAddFeature refuses an id the pool has not recycled.
+    // The deferred path (DeleteFeature + the next Update) would only free them
+    // 32 frames later, i.e. after the rebuild had already failed. It also drains
+    // the ids of features deleted the ordinary way within the last 32 frames,
+    // which are exactly the ids a rollback is most likely to re-claim.
+    featureHandler.ClearAllFeatures();
+
+    // ── 2. rebuild ──
+    for (size_t i = 0; i < in.size(); ++i) {
+        const FeatureState& s = in[i];
+
+        FeatureLoadParams params;
+        params.parentObj = nullptr;
+        params.unitDef = (udefIds[i] >= 0)
+            ? unitDefHandler->GetUnitDefByID(udefIds[i]) : nullptr;
+        params.featureDef = featureDefHandler->GetFeatureDefByID(defIds[i]);
+        params.pos = float3(s.posX, s.posY, s.posZ);
+        params.speed = float3(s.speedX, s.speedY, s.speedZ);
+        params.featureID = s.id;
+        params.teamID = s.team;
+        params.allyTeamID = teamHandler.AllyTeam(s.team);
+        params.heading = static_cast<short>(s.heading);
+        params.facing = static_cast<short>(s.buildFacing);
+        // LoadFeature, not CreateWreckage: the def is the one this feature
+        // already IS, so there is no wreck-chain left to walk (a wreckLevels of
+        // anything but 0 would step it further down the chain and restore the
+        // WRONG def). smokeTime travels as the captured absolute value for the
+        // same reason - CreateWreckage treats it as a multiplier, LoadFeature
+        // does not.
+        params.wreckLevels = 0;
+        params.smokeTime = s.smokeTime;
+
+        CFeature* f = featureHandler.LoadFeature(params);
+        if (f == nullptr) {
+            // Every fallible condition was checked in ResolveFeatureDefs, so
+            // this is a bug rather than a data problem - but it must not be
+            // silent.
+            SLOG(SPRING_LOG_ERROR,
+                 "snapshot restore: could not create feature %d ('%s') for team %d",
+                 s.id, s.featureDefName.c_str(), s.team);
+            continue;
+        }
+        ApplyFeatureState(f, s);
+    }
+}
+
+// ───────── Task 1d: synced-Lua capture / apply (the Lua-touching half) ─────────
+//
+// TWO handles, not one. luaRules is where the game's gadgets live, but
+// Simulation.cpp also loads luaGaia when the map ships LuaGaia — and a Gaia
+// gadget's state is synced state like any other. Keying the root table by
+// handle keeps them apart and makes the absence of one visible: a payload
+// written with Gaia loaded, restored into a run without it, is a refusal rather
+// than a silently thinner world.
+
+namespace {
+
+/// Every live synced handle, paired with the root key its state travels under.
+std::vector<std::pair<const char*, CSplitLuaHandle*>> SyncedHandles()
+{
+    std::vector<std::pair<const char*, CSplitLuaHandle*>> handles;
+    if (luaRules != nullptr) handles.emplace_back("rules", luaRules);
+    if (luaGaia  != nullptr) handles.emplace_back("gaia",  luaGaia);
+    return handles;
+}
+
+} // namespace
+
+std::vector<std::string> SyncedLuaCoverageGaps(std::string& err)
+{
+    err.clear();
+    std::vector<std::string> gaps;
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        std::vector<std::string> covered, stateless, handleGaps;
+        std::string one;
+        if (!handle->SnapshotCoverage(covered, stateless, handleGaps, one)) {
+            // Could not ask. NOT reported as "no gaps": the caller decides, and
+            // Serialize() treats an unanswerable question as a refusal.
+            if (!err.empty()) err += "; ";
+            err += std::string(key) + ": " + one;
+            continue;
+        }
+        for (const auto& g : handleGaps)
+            gaps.push_back(std::string(key) + "/" + g);
+    }
+
+    std::sort(gaps.begin(), gaps.end());
+    return gaps;
+}
+
+bool CaptureSyncedLua(luasnapshot::Value& out, std::string& err)
+{
+    out = luasnapshot::Value::Table();
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        luasnapshot::Value state;
+        if (!handle->SnapshotSave(state, err)) {
+            err = std::string("synced Lua capture failed for ") + key + ": " + err;
+            return false;
+        }
+        out.table.emplace_back(luasnapshot::Value::Str(key), std::move(state));
+    }
+    return true;
+}
+
+bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err)
+{
+    bool ok = true;
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        const luasnapshot::Value* state = in.Field(key);
+        // An absent handle key still calls Load with an empty table: the
+        // gadgets' live bookkeeping is what a rollback is undoing, so skipping
+        // them would leave the very state the restore was meant to replace.
+        const luasnapshot::Value empty = luasnapshot::Value::Table();
+        std::string one;
+        if (!handle->SnapshotLoad((state != nullptr) ? *state : empty, one)) {
+            // Commit phase: there is nothing left to roll back to, so this is
+            // reported loudly and the restore continues rather than abandoning
+            // a half-rebuilt world.
+            SLOG(SPRING_LOG_ERROR, "snapshot restore: synced Lua (%s): %s",
+                 key, one.c_str());
+            if (!err.empty()) err += "; ";
+            err += std::string(key) + ": " + one;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+/// Task 4, §2 step 5. Best-effort by design — see CSyncedLuaHandle::
+/// DefsReconciled for why a raising handler does not fail the restore.
+void NotifyDefsReconciled(const luasnapshot::Value& delta)
+{
+    if (delta.IsNil()) return;   // an ordinary resume: nothing moved
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        std::string one;
+        if (!handle->DefsReconciled(delta, one))
+            SLOG(SPRING_LOG_ERROR, "snapshot restore: DefsReconciled (%s): %s",
+                 key, one.c_str());
+    }
+}
+
+// ───────────────────────── The gameRules section ─────────────────────────
+//
+// Task 1d-b's finding. Every OTHER rulesParam family hangs off an object the
+// walk already visits — `team->modParams` rides the `teams` section,
+// `u->modParams` rides `units`, `f->modParams` rides `features`. Game rules
+// params hang off nothing: `Spring.SetGameRulesParam` writes one process-wide
+// static on CSplitLuaHandle, so they were the one family no section reached,
+// and MissingSections() could not say so (1c's Finding 2 shape again — the
+// table cannot report a section nobody thought of).
+//
+// They are NOT re-derivable from the gadgets that wrote them. A gadget's Load
+// could republish its own keys, but only the keys it still owns: an objective
+// created after the captured frame leaves `objective_<id>_*` behind, and a
+// rollback that leaves the client reading a resolved objective's params is
+// exactly the half-restored world §2 refuses. So the map is captured whole and
+// applied whole.
+
+void CaptureGameRules(std::vector<RulesParamState>& out)
+{
+    out = CaptureRulesParams(CSplitLuaHandle::GetGameParams());
+}
+
+void ApplyGameRules(const std::vector<RulesParamState>& in)
+{
+    LuaRulesParams::Params params;
+    ApplyRulesParams(in, params);
+    CSplitLuaHandle::SetGameParams(std::move(params));
+}
+
+bool ResolveSyncedLua(const luasnapshot::Value& in, std::string& err)
+{
+    if (!in.IsTable()) {
+        err = "syncedLua section is not a table";
+        return false;
+    }
+
+    const auto handles = SyncedHandles();
+    for (const auto& kv : in.table) {
+        if (kv.first.type != luasnapshot::Value::Type::String) {
+            err = "syncedLua section has a non-string handle key";
+            return false;
+        }
+        const bool live = std::any_of(handles.begin(), handles.end(),
+            [&](const auto& h) { return kv.first.str == h.first; });
+        if (!live) {
+            err = "snapshot carries synced Lua state for '" + kv.first.str +
+                  "', which this run has not loaded";
+            return false;
+        }
+    }
+    for (const auto& [key, handle] : handles) {
+        if (in.Field(key) == nullptr) {
+            err = std::string("this run has synced Lua handle '") + key +
+                  "' but the snapshot carries no state for it";
+            return false;
+        }
+    }
+    return true;
+}
+
+// ───────────────────────── The serializer ─────────────────────────
+
+uint64_t SimSnapshotSerializer::LayoutHash() const
+{
+    // FNV-1a over the envelope version plus (id, version) of every IMPLEMENTED
+    // section. Unimplemented sections are excluded deliberately: they emit no
+    // bytes, so including them would move the hash - and refuse every existing
+    // snapshot - on the day a gap is filled in a way that changes nothing
+    // about the sections that were already there.
+    uint64_t h = 1469598103934665603ull;
+    const auto fold = [&h](uint64_t v) {
+        for (int i = 0; i < 8; ++i) {
+            h ^= uint64_t(uint8_t(v >> (8 * i)));
+            h *= 1099511628211ull;
+        }
+    };
+    fold(kPayloadVersion);
+    for (const auto& s : Sections()) {
+        if (!s.implemented) continue;
+        fold(static_cast<uint64_t>(s.id));
+        fold(s.version);
+    }
+    return h;
+}
+
+int32_t SimSnapshotSerializer::Frame() const
+{
+    return (gs != nullptr) ? gs->frameNum : -1;
+}
+
+bool SimSnapshotSerializer::Serialize(std::vector<uint8_t>& out, std::string& err)
+{
+    const std::vector<std::string> missing = MissingSections();
+    if (!missing.empty()) {
+        // Refuse by name. A payload that silently omits declared state is the
+        // exact failure mode option B was warned about; the store's honest
+        // refusal is better than a snapshot that restores a partial world.
+        err = "snapshot serializer incomplete - unimplemented sections: ";
+        for (size_t i = 0; i < missing.size(); ++i)
+            err += (i ? ", " : "") + missing[i];
+        return false;
+    }
+
+    // The second completeness gate, one level below the section table (§7.1d
+    // decision 3): the syncedLua section can be fully implemented and still
+    // capture nothing for a gadget that implements neither call-in. A table of
+    // gadget names in C++ could not tell - the list has to come from the live
+    // handler, and a gadget it names is state this payload would drop.
+    std::string coverageErr;
+    const std::vector<std::string> gaps = SyncedLuaCoverageGaps(coverageErr);
+    if (!coverageErr.empty()) {
+        err = "cannot establish synced Lua coverage: " + coverageErr;
+        return false;
+    }
+    if (!gaps.empty()) {
+        err = "synced Lua coverage incomplete - gadgets with neither Save/Load "
+              "nor a stateless declaration: ";
+        for (size_t i = 0; i < gaps.size(); ++i)
+            err += (i ? ", " : "") + gaps[i];
+        return false;
+    }
+
+    return SerializeImplemented(out, err);
+}
+
+bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std::string& err)
+{
+    if (gs == nullptr) {
+        err = "no sim: gs is null";
+        return false;
+    }
+
+    Writer w(out);
+    uint32_t written = 0;
+    std::vector<uint8_t> section;
+
+    for (const auto& s : Sections()) {
+        if (!s.implemented) continue;
+
+        section.clear();
+        Writer sw(section);
+        switch (s.id) {
+            case SectionId::Globals:        WriteGlobals(sw);        break;
+            case SectionId::StandingOrders: WriteStandingOrders(sw); break;
+            case SectionId::OrgGroups:      WriteOrgGroups(sw);      break;
+            case SectionId::Directives:     WriteDirectives(sw);     break;
+            case SectionId::Teams: {
+                std::vector<TeamState> teams;
+                CaptureTeams(teams);
+                EncodeTeams(teams, section);
+            } break;
+            case SectionId::Units: {
+                std::vector<UnitState> units;
+                CaptureUnits(units);
+                EncodeUnits(units, section);
+            } break;
+            case SectionId::Features: {
+                std::vector<FeatureState> features;
+                CaptureFeatures(features);
+                EncodeFeatures(features, section);
+            } break;
+            case SectionId::SyncedLua: {
+                luasnapshot::Value state;
+                if (!CaptureSyncedLua(state, err))
+                    return false;
+                EncodeSyncedLua(state, section);
+            } break;
+            case SectionId::GameRules: {
+                std::vector<RulesParamState> params;
+                CaptureGameRules(params);
+                EncodeGameRules(params, section);
+            } break;
+            case SectionId::EnvResources: {
+                envressnapshot::EnvResourceState env;
+                CaptureEnvResources(env);
+                EncodeEnvResources(env, section);
+            } break;
+            case SectionId::DefNames: {
+                DefNameTables defs;
+                CaptureDefNames(defs);
+                EncodeDefNames(defs, section);
+            } break;
+            case SectionId::DefScalars: {
+                DefScalarTables scalars;
+                CaptureDefScalars(scalars);
+                EncodeDefScalars(scalars, section);
+            } break;
+            default:
+                // An implemented section with no writer is a programming
+                // error, not a runtime condition - fail the checkpoint rather
+                // than emit a hole.
+                err = std::string("no writer for implemented section '") + s.name + "'";
+                return false;
+        }
+
+        w.U16(static_cast<uint16_t>(s.id));
+        w.U16(s.version);
+        w.U32(static_cast<uint32_t>(section.size()));
+        out.insert(out.end(), section.begin(), section.end());
+        ++written;
+    }
+
+    // Envelope header goes at the FRONT, so it is built last and prepended:
+    // the section count is not known until the walk finishes.
+    std::vector<uint8_t> head;
+    Writer hw(head);
+    hw.U16(kPayloadVersion);
+    hw.U32(written);
+    out.insert(out.begin(), head.begin(), head.end());
+    return true;
+}
+
+bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::string& err)
+{
+    if (gs == nullptr) {
+        err = "no sim: gs is null";
+        return false;
+    }
+
+    Reader r(data, size);
+    const uint16_t version = r.U16();
+    if (version != kPayloadVersion) {
+        err = "payload version " + std::to_string(version) + ", expected " +
+              std::to_string(kPayloadVersion);
+        return false;
+    }
+    const uint32_t sectionCount = r.U32();
+
+    // STAGING. §2's "mismatches refuse loudly, never half-load" is a hard
+    // requirement of ISimSerializer::Deserialize, so nothing below touches
+    // live state: every section decodes into a local, and the swap only
+    // happens once the whole payload has been read without a single failure.
+    bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
+    bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
+    bool haveFeatures = false, haveGameRules = false, haveEnvRes = false;
+    bool haveDefNames = false, haveDefScalars = false;
+    envressnapshot::EnvResourceState envRes;
+    DefNameTables defNames;
+    DefScalarTables defScalars;
+    luasnapshot::Value syncedLua = luasnapshot::Value::Table();
+    std::vector<RulesParamState> gameRules;
+    std::vector<TeamState> teams;
+    std::vector<UnitState> units;
+    std::vector<int32_t>   unitDefIds;
+    std::vector<FeatureState> features;
+    std::vector<int32_t>   featureDefIds;
+    std::vector<int32_t>   featureUdefIds;
+    GlobalsState globals;
+    std::vector<StandingOrder> orders;
+    uint32_t ordersNextId = 1;
+    std::vector<OrgGroup> groups;
+    uint32_t groupsNextId = 1;
+    std::vector<Directive> dirs;
+    uint32_t dirsNextId = 1;
+
+    for (uint32_t i = 0; i < sectionCount; ++i) {
+        const uint16_t id = r.U16();
+        const uint16_t sver = r.U16();
+        const uint32_t len = r.U32();
+        if (r.Bad()) {
+            err = "truncated section header at index " + std::to_string(i);
+            return false;
+        }
+        if (len > r.Remaining()) {
+            err = "section " + std::to_string(id) + " claims " + std::to_string(len) +
+                  " bytes, only " + std::to_string(r.Remaining()) + " remain";
+            return false;
+        }
+
+        const SectionSpec* spec = SpecFor(id);
+        if (spec == nullptr) {
+            // Not "skip the ones we don't know": a snapshot is same-binary by
+            // construction (E1 refuses foreign engineHash before we get here),
+            // so an unknown section means the payload is not what it claims.
+            err = "unknown section id " + std::to_string(id);
+            return false;
+        }
+        if (sver != spec->version) {
+            err = std::string("section '") + spec->name + "' version " +
+                  std::to_string(sver) + ", expected " + std::to_string(spec->version);
+            return false;
+        }
+
+        Reader sr(data + r.Pos(), len);
+        switch (spec->id) {
+            case SectionId::Globals:
+                globals = ReadGlobals(sr);
+                haveGlobals = true;
+                break;
+            case SectionId::StandingOrders:
+                orders = ReadStandingOrders(sr, ordersNextId);
+                haveOrders = true;
+                break;
+            case SectionId::OrgGroups:
+                groups = ReadOrgGroups(sr, groupsNextId);
+                haveGroups = true;
+                break;
+            case SectionId::Directives:
+                dirs = ReadDirectives(sr, dirsNextId);
+                haveDirs = true;
+                break;
+            case SectionId::Teams:
+                // These two decode through the public codec (the same entry
+                // point the round-trip tests use) rather than a private reader,
+                // so what the tests cover and what a restore runs are the same
+                // code path. They report their own truncation, so the section
+                // reader is consumed whole and the generic checks below see an
+                // empty remainder.
+                if (!DecodeTeams(data + r.Pos(), len, teams, err))
+                    return false;
+                sr.Skip(len);
+                haveTeams = true;
+                break;
+            case SectionId::Units:
+                if (!DecodeUnits(data + r.Pos(), len, units, err))
+                    return false;
+                sr.Skip(len);
+                haveUnits = true;
+                break;
+            case SectionId::Features:
+                if (!DecodeFeatures(data + r.Pos(), len, features, err))
+                    return false;
+                sr.Skip(len);
+                haveFeatures = true;
+                break;
+            case SectionId::SyncedLua:
+                if (!DecodeSyncedLua(data + r.Pos(), len, syncedLua, err))
+                    return false;
+                sr.Skip(len);
+                haveSyncedLua = true;
+                break;
+            case SectionId::GameRules:
+                if (!DecodeGameRules(data + r.Pos(), len, gameRules, err))
+                    return false;
+                sr.Skip(len);
+                haveGameRules = true;
+                break;
+            case SectionId::EnvResources:
+                if (!DecodeEnvResources(data + r.Pos(), len, envRes, err))
+                    return false;
+                sr.Skip(len);
+                haveEnvRes = true;
+                break;
+            case SectionId::DefNames:
+                if (!DecodeDefNames(data + r.Pos(), len, defNames, err))
+                    return false;
+                sr.Skip(len);
+                haveDefNames = true;
+                break;
+            case SectionId::DefScalars:
+                if (!DecodeDefScalars(data + r.Pos(), len, defScalars, err))
+                    return false;
+                sr.Skip(len);
+                haveDefScalars = true;
+                break;
+            default:
+                err = std::string("no reader for section '") + spec->name + "'";
+                return false;
+        }
+        if (sr.Bad()) {
+            err = std::string("section '") + spec->name + "' is truncated";
+            return false;
+        }
+        // Trailing bytes inside a section mean the writer and reader disagree
+        // about the shape while the version says they agree - the one failure
+        // this framing exists to catch.
+        if (sr.Remaining() != 0) {
+            err = std::string("section '") + spec->name + "' has " +
+                  std::to_string(sr.Remaining()) + " unread trailing bytes";
+            return false;
+        }
+        r.Skip(len);
+    }
+
+    if (r.Bad() || r.Remaining() != 0) {
+        err = "payload has " + std::to_string(r.Remaining()) + " trailing bytes";
+        return false;
+    }
+    if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
+        !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
+        !haveGameRules || !haveEnvRes || !haveDefNames || !haveDefScalars) {
+        err = "payload is missing a required section";
+        return false;
+    }
+
+    // ── The def vocabulary: report, then RECONCILE (task 1 + task 2) ──
+    //
+    // A defs change is not an error (§3: "reconcile is not optional" — the
+    // snapshot taken before a balance patch is exactly the one that has to
+    // reach the restore path). It is reported, and then every def reference in
+    // the payload is rewritten through name-keyed maps before anything is
+    // resolved against a live def. Still in the staging phase, deliberately:
+    // the pass edits the decoded payload, and the one thing it CAN refuse (E1,
+    // an ambiguous rename) has to refuse while there is still a live world to
+    // fall back on.
+    //
+    // Nil unless something moved. Built here, in the staging phase where the
+    // reports exist, and delivered at the very END of the commit phase (task 4,
+    // §2 step 5): a gadget can only repair state it has already restored.
+    luasnapshot::Value reconcileDelta = luasnapshot::Value::Nil();
+    {
+        DefNameTables liveDefs;
+        CaptureDefNames(liveDefs);
+        const DefDelta units_ = CompareDefNames(defNames.units, liveDefs.units);
+        const DefDelta weapons_ = CompareDefNames(defNames.weapons, liveDefs.weapons);
+        const DefDelta features_ = CompareDefNames(defNames.features, liveDefs.features);
+        const bool moved = units_.Changed() || weapons_.Changed() || features_.Changed();
+        if (moved) {
+            SLOG(SPRING_LOG_INFO,
+                 "snapshot restore: defs moved under this snapshot - units: %s | "
+                 "weapons: %s | features: %s",
+                 units_.Describe().c_str(), weapons_.Describe().c_str(),
+                 features_.Describe().c_str());
+        }
+
+        DefAliases aliases;
+        if (!LoadDefAliases(aliases, err))
+            return false;
+
+        DefRemap remap;
+        if (!BuildDefRemap(defNames, liveDefs, aliases, remap, err))
+            return false;
+
+        RemapReport rep;
+        // §3's fast path: a tuning-only patch renames and renumbers nothing, so
+        // steps 1-2 have no work and the payload is not touched at all.
+        if (!remap.Identity()) {
+            RemapPayload(remap, units, features, orders, dirs, rep);
+            // WARNING rather than INFO: this is the line a returning player's
+            // "where did my army go" question is answered from, and §2 step 6's
+            // digest is built on the same counts.
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def references - %s",
+                 rep.Describe().c_str());
+        } else if (moved) {
+            SLOG(SPRING_LOG_INFO,
+                 "snapshot restore: no def reference needed rewriting (additions "
+                 "and tuning only)");
+        }
+
+        // §2 steps 3-4, and it runs whether or not step 1-2 had work: a
+        // tuning-only patch is precisely the case where no name and no id moved
+        // and every NUMBER did. The fast path is inside the pass (a def whose
+        // newborn values did not move re-derives nothing).
+        ScalarReport srep;
+        DefScalarTables liveScalars;
+        CaptureDefScalars(liveScalars);
+        ReconcileScalars(defScalars, liveScalars, remap, units, features, srep);
+        if (srep.Changed()) {
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def scalars - %s",
+                 srep.Describe().c_str());
+        } else {
+            // Reported even when nothing moved, and the authored counts are why:
+            // CaptureDefScalars mirrors CUnit::PreInit by hand, and if that
+            // mirror ever drifts, every field of every unit reads as "authored"
+            // and this whole pass silently stops re-deriving anything. A restore
+            // into an UNCHANGED def load should show a small authored count (the
+            // handful of values the game's gadgets really do write) — a number
+            // near units × fields is the mirror being wrong, not the game being
+            // opinionated. It is the only in-production check on the half no
+            // doctest can reach.
+            // NOTICE, not INFO: INFO is below the server's default level, and a
+            // tripwire nobody can see is not a tripwire. One line per restore.
+            SLOG(SPRING_LOG_NOTICE,
+                 "snapshot restore: %s [%zu unit + %zu feature def-derived "
+                 "field(s) authored by the game and kept as captured]",
+                 srep.Describe().c_str(), srep.unitFieldsAuthored,
+                 srep.featureFieldsAuthored);
+        }
+
+        reconcileDelta = BuildDefsReconciledDelta(units_, weapons_, features_,
+                                                  remap, rep, srep);
+    }
+
+    // The last fallible work, and it MUST be here rather than in the commit
+    // phase (§7.1c decision 2): resolving a unitDef name or validating a team
+    // after the live roster has been torn down leaves a half-built world with
+    // nothing to roll back to.
+    if (!ResolveTeams(teams, err))
+        return false;
+    if (!ResolveUnitDefs(units, unitDefIds, err))
+        return false;
+    if (!ResolveFeatureDefs(features, featureDefIds, featureUdefIds, err))
+        return false;
+    if (!ResolveSyncedLua(syncedLua, err))
+        return false;
+
+    // ── Commit. Past this point nothing can fail. ──
+    gs->frameNum = globals.frameNum;
+    gs->paused   = globals.paused;
+    // NOTE: the synced RNG is NOT restored here — see the end of the commit.
+    standingOrders.RestoreState(std::move(orders), ordersNextId);
+    orgGroups.RestoreState(std::move(groups), groupsNextId);
+    directiveManager.RestoreState(std::move(dirs), dirsNextId);
+    // Teams before units: unit creation calls CTeam::AddUnit, which bumps the
+    // team's (derived, uncaptured) unit count.
+    ApplyTeams(teams);
+    ApplyUnits(units, unitDefIds);
+    // Features AFTER units, and the order is load-bearing: the roster teardown
+    // runs a death path for every live unit, and anything that path leaves
+    // behind in the feature set (a wreck, a corpse) has to be discarded rather
+    // than added to the restored world. Rebuilding the features last is what
+    // discards it. ApplyUnits currently deletes with reclaimed = true, so no
+    // wreck is created today - this ordering is what keeps that from being a
+    // load-bearing detail of the unit path.
+    ApplyFeatures(features, featureDefIds, featureUdefIds);
+    // Game rules params after the roster rebuild and BEFORE the gadgets' own
+    // Load, for the same reason the roster comes before them: the teardown and
+    // rebuild fire UnitDestroyed/UnitCreated across every unit, and a gadget
+    // that publishes on those events writes game params during ApplyUnits.
+    // Applying the captured map here discards those writes; running the
+    // gadgets' Load after it lets a gadget that keeps a live Lua mirror
+    // (game_gameover's GG.WarState) republish on top, which is the one case
+    // where the gadget, not the map, is the authority.
+    ApplyGameRules(gameRules);
+    // Teams, a SECOND time, and this is not belt-and-braces — the roster
+    // teardown and rebuild between the two calls rewrites team state the first
+    // call had already restored. Every unit deleted bumps `unitsDied` and every
+    // unit created bumps `unitsProduced` in the CURRENT statistics entry, and
+    // creation/destruction move the team's resource storage; all of that is
+    // captured state, so the restored world came back with a match's kill
+    // ledger inflated by the size of its own roster. ApplyTeams is a pure
+    // setter over captured fields, so running it twice is free and the second
+    // run is the one that wins.
+    //
+    // The FIRST call still has to happen where it does: units are created into
+    // their team, and a team that is still marked dead (or holds another
+    // world's resources) at creation time is not a state unit creation is
+    // written to survive.
+    //
+    // Found by the §8 round-trip: the re-capture differed from the checkpoint
+    // it had just applied, at byte 290 of the `teams` section — inside team 0's
+    // statistics history.
+    ApplyTeams(teams);
+    // Synced Lua LAST, and the order is load-bearing: tearing down and
+    // rebuilding the roster fires UnitDestroyed for every live unit and
+    // UnitCreated/UnitFinished for every restored one, so a gadget's own unit
+    // bookkeeping is rewritten by those events during ApplyUnits. Restoring
+    // gadget state before them would hand the events a table to corrupt; after
+    // them, the snapshot's version wins - which is what a rollback means.
+    std::string luaErr;
+    const bool luaOk = ApplySyncedLua(syncedLua, luaErr);
+
+    // ── The synced RNG is restored LAST, and this ordering is the whole
+    // correctness of the resumed sim's random sequence. ──
+    //
+    // Everything above CONSUMES draws: unit creation, the UnitDestroyed /
+    // UnitCreated / UnitFinished storm the roster rebuild fires across every
+    // gadget, and a gadget's own Load. Restoring the generator before that
+    // work — which is where this call used to sit — left it advanced by
+    // however many draws the rebuild happened to make, so a resumed world's
+    // first random decision differed from the one the snapshot was taken on
+    // even though every unit, team and gadget table was byte-identical.
+    //
+    // Found by the §8 round-trip on Meridian Basin: the re-capture taken
+    // immediately after a restore differed from the checkpoint it had just
+    // applied, at byte 4 of the `globals` section — the first byte of the RNG
+    // state — and the hash track diverged on the very first tick after.
+    gsRNG.SetGenState(globals.rngState, globals.rngStream);
+
+    // After ApplyUnits, because the setter clamps against the rebuilt roster
+    // (Q-P4). Ordering only: this consumes no draws.
+    unitHandler.SetActiveSlowUpdateUnit(globals.activeSlowUpdateUnit);
+
+    // Also after ApplyUnits, for the same reason and one more: the wind's
+    // generator lists are unit ids, and the clamp that drops an id the restored
+    // world does not carry has to have the roster to ask. It must also come
+    // after the rebuild rather than before it because CUnit::PostInit registers
+    // every restored wind generator as NEW - the state this replaces is state
+    // ApplyUnits wrote. Consumes no draws: the two floats the wind takes are
+    // drawn by Update(), on the frame the restored timer says.
+    ApplyEnvResources(envRes);
+
+    if (!luaOk) {
+        // Past the point of no return. The world IS restored; what failed is a
+        // gadget's own Load, which no earlier check could have run.
+        err = "world restored but synced Lua Load failed: " + luaErr;
+        return false;
+    }
+
+    // §2 step 5, and it is LAST for three reasons that all point the same way.
+    // After ApplySyncedLua, because a gadget repairs the state it just restored,
+    // not the state this process happened to be holding. After the failure
+    // check above, because a gadget whose Load failed must not then be asked to
+    // reconcile what it did not restore. And after gsRNG.SetGenState, because a
+    // handler that draws (expiring an objective, re-rolling a target) has to
+    // draw from the resumed world's stream — the draws are part of the resumed
+    // war, not of the checkpoint. No-op unless the defs actually moved, which is
+    // what keeps the §8 round-trip's byte-for-byte re-capture intact.
+    NotifyDefsReconciled(reconcileDelta);
+    return true;
+}
+
+// The censuses are referenced here so they are odr-used and the structured
+// bindings are actually instantiated - an uninstantiated one would compile
+// forever regardless of how the structs change, i.e. a tripwire that is not
+// armed. tests/test_sim_snapshot.cpp pins the returned counts.
+namespace census {
+int Conditions(const StandingOrderConditions& c) { return CensusStandingOrderConditions(c); }
+int Order(const StandingOrder& o)                { return CensusStandingOrder(o); }
+int Group(const OrgGroup& g)                     { return CensusOrgGroup(g); }
+int Directive_(const Directive& d)               { return CensusDirective(d); }
+int Team(const TeamState& t)                     { return CensusTeamState(t); }
+int Unit(const UnitState& u)                     { return CensusUnitState(u); }
+int Feature(const FeatureState& f)               { return CensusFeatureState(f); }
+int Weapon(const WeaponState& w)                 { return CensusWeaponState(w); }
+int Cmd(const CommandState& c)                   { return CensusCommandState(c); }
+int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }
+int Stats(const TeamStatsState& s)               { return CensusStats(s); }
+int Res(const ResPair& r)                        { return CensusResPair(r); }
+int LuaValue(const luasnapshot::Value& v)        { return CensusLuaValue(v); }
+int UnitDefScalars_(const UnitDefScalars& s)     { return CensusUnitDefScalars(s); }
+int FeatureDefScalars_(const FeatureDefScalars& s) { return CensusFeatureDefScalars(s); }
+
+int MoveBase(const movetypesnapshot::BaseState& b)   { return CensusMoveBase(b); }
+int MoveGround(const movetypesnapshot::GroundState& g) { return CensusMoveGround(g); }
+int MoveAir(const movetypesnapshot::AirState& a)     { return CensusMoveAir(a); }
+int MoveHover(const movetypesnapshot::HoverState& h) { return CensusMoveHover(h); }
+int MoveStrafe(const movetypesnapshot::StrafeState& f) { return CensusMoveStrafe(f); }
+int MoveScript(const movetypesnapshot::ScriptState& c) { return CensusMoveScript(c); }
+int MoveType_(const movetypesnapshot::MoveTypeState& m) { return CensusMoveTypeState(m); }
+
+int EnvResource(const envressnapshot::EnvResourceState& e) { return CensusEnvResourceState(e); }
+
+} // namespace census
+
+} // namespace simsnapshot

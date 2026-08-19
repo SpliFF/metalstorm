@@ -23,6 +23,7 @@ import {
     Quaternion,
 } from '@babylonjs/core';
 import { Texture } from '@babylonjs/core';
+import type { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import type { LosBitmap } from './los-bitmap.js';
@@ -38,6 +39,93 @@ const TEAM_COLORS: [number, number, number][] = [
     [0.27, 0.80, 0.27], // green
     [1.0, 0.80, 0.13],  // yellow
 ];
+
+/**
+ * Configure the fog-of-war overlay material.
+ *
+ * The overlay is a flat BLACK tint whose only per-texel variable is alpha, so
+ * every colour input must be zero and the LOS bitmap enters solely through
+ * `opacityTexture`.
+ *
+ * ⚠ `emissiveColor` used to be (1,1,1) here, and it painted the whole minimap
+ * white (PLAN-endtoend D48, minimap half). It reads like a neutral
+ * multiplicand, but StandardMaterial's emissive texture is **additive**, not
+ * multiplicative — the compiled fragment stage is:
+ *
+ *     vec3 emissiveColor = vEmissiveColor;
+ *     emissiveColor += texture(emissiveSampler, vEmissiveUV + uvOffset).rgb * vEmissiveInfos.y;
+ *
+ * so (1,1,1) is not neutral, it saturates the output white whatever the
+ * texture holds — measured live, an all-0 RGB, an all-255 RGB and a pure-red
+ * bitmap every one rendered 255. Binding the bitmap as `emissiveTexture` at
+ * all was pointless for the same reason: its RGB is a constant 0, which adds
+ * nothing. It is left unbound so the overlay's colour cannot depend on that
+ * contract at all, under either an additive or a multiplicative reading.
+ */
+export function configureFogMaterial(mat: StandardMaterial,
+                                     fogTexture: BaseTexture): void {
+    mat.diffuseColor = new Color3(0, 0, 0);
+    mat.emissiveColor = new Color3(0, 0, 0);
+    mat.emissiveTexture = null;
+    mat.disableLighting = true;
+    mat.useAlphaFromDiffuseTexture = false;
+    // Also what keeps `needAlphaBlending()` true — with no opacity texture the
+    // quad would draw opaque and hide the map instead of tinting it.
+    mat.opacityTexture = fogTexture;
+    mat.backFaceCulling = false;
+}
+
+/**
+ * Configure the minimap backdrop material — an unlit quad that must render the
+ * baked map thumbnail **exactly** as the asset holds it.
+ *
+ * ⚠ The texture is bound ONCE, as `diffuseTexture`, and the unlit term comes
+ * from a white `emissiveColor`. Binding it as *both* `diffuseTexture` and
+ * `emissiveTexture` (which is what it used to do) squares it, because the
+ * compiled fragment stage multiplies the emissive term by the diffuse base:
+ *
+ *     vec3 emissiveColor = vEmissiveColor;
+ *     emissiveColor += texture(emissiveSampler, vEmissiveUV + uvOffset).rgb * vEmissiveInfos.y;
+ *     vec3 finalDiffuse = clamp(diffuseBase*diffuseColor + emissiveColor + vAmbientColor, 0.0, 1.0)
+ *                       * baseColor.rgb;
+ *
+ * With `disableLighting` there is no `diffuseBase`, so that reduces to
+ * `texel * texel`. Measured live on `scorched_crossing_v2.4` (200² capture,
+ * fog hidden): **26.76 mean luminance against the asset's 69.94**, bracketed
+ * twice — and x² is close enough in shape to an sRGB decode (x^2.2) that it
+ * was first written up as a missing gamma encode. It is not a colour-space
+ * bug; nothing in this scene converts spaces, and a solid `emissiveColor` of
+ * 0.5 renders as exactly 128. With the texture bound once: **69.74**.
+ *
+ * The same reduction is why every other material in this scene (blips, pings,
+ * metal spots, the selection ring) renders its authored `emissiveColor`
+ * literally: with no `diffuseTexture`, `baseColor.rgb` is (1,1,1).
+ */
+export function configureBackdropMaterial(mat: StandardMaterial,
+                                          backdrop: BaseTexture): void {
+    mat.diffuseTexture = backdrop;
+    mat.emissiveTexture = null;
+    mat.emissiveColor = new Color3(1, 1, 1);
+    mat.disableLighting = true;
+}
+
+/** Summary of one captured minimap frame — see `captureFrameStats`. */
+export interface MinimapFrameStats {
+    width: number;
+    height: number;
+    /** Rec.709 luminance, 0–255, averaged over every pixel. */
+    meanLuminance: number;
+    meanAlpha: number;
+    /** Fraction of fully transparent pixels. 1.0 ⇒ the capture missed its
+     *  window and nothing else in this record means anything. */
+    transparentFraction: number;
+    whiteFraction: number;
+    darkFraction: number;
+    /** Whether the backdrop quad exists AND its texture finished loading —
+     *  distinguishes "drew the wrong colour" from "drew no backdrop". */
+    backdropLoaded: boolean;
+    backdropUrl: string | null;
+}
 
 export interface MinimapConfig {
     /** Map width in elmos. */
@@ -116,6 +204,17 @@ export class Minimap {
     private geometry: { x: number; y: number; w: number; h: number; visible: boolean } = {
         x: 0, y: 0, w: 0, h: 0, visible: true,
     };
+    /** PLAN-metalstorm-command-language.md §6.3 — "show me the minimap, full
+     *  screen". Null when the overlay is off; otherwise the state needed to put
+     *  the canvas back exactly as it was. */
+    private fullscreenState: {
+        canvasWidth: number;
+        canvasHeight: number;
+        cssWidth: string;
+        cssHeight: string;
+        onKeyDown: (e: KeyboardEvent) => void;
+        scrim: HTMLElement;
+    } | null = null;
     /** Suppresses redundant engine.resize() during a chili drag — Babylon
      *  recreates the default framebuffer on every resize, which adds up
      *  fast when the widget is fed window-mousemove events. */
@@ -145,6 +244,8 @@ export class Minimap {
     // samples it with bilinear filtering across the minimap quad, so
     // the edge of the fog looks smooth rather than chunky despite the
     // low-resolution source. Allocated lazily on the first bitmap.
+    /** URL the backdrop texture was last requested from (capture diagnostics). */
+    private backdropUrl: string | null = null;
     private fogQuad: Mesh | null = null;
     private fogTexture: DynamicTexture | null = null;
     private fogBitmapSize: { w: number; h: number } = { w: 0, h: 0 };
@@ -282,11 +383,10 @@ export class Minimap {
             quad.position.x = this.mapWidth / 2;
             quad.position.z = this.mapHeight / 2;
 
-            const tex = new Texture(`${mapBaseUrl}/minimap.ktx2`, this.scene);
+            this.backdropUrl = `${mapBaseUrl}/minimap.ktx2`;
+            const tex = new Texture(this.backdropUrl, this.scene);
             const mat = new StandardMaterial('minimapMat', this.scene);
-            mat.diffuseTexture = tex;
-            mat.emissiveTexture = tex;
-            mat.disableLighting = true;
+            configureBackdropMaterial(mat, tex);
             quad.material = mat;
 
             this.terrainQuad = quad;
@@ -301,6 +401,162 @@ export class Minimap {
         this.selectedIds = new Set(ids);
         // Broadcast to other windows
         this.channel?.postMessage({ type: 'selection', unitIds: ids });
+    }
+
+    // ── Full-screen overlay (PLAN-metalstorm-command-language.md §6.3) ──────
+    //
+    // "Show me the minimap, full screen" is one of the plan's own example
+    // utterances and had no implementation anywhere: the minimap was a 256px
+    // corner panel or nothing. This is that mode.
+    //
+    // What it changes: the SIZE of the canvas, and only that. Same scene, same
+    // ortho frustum (fitted to the map, not the canvas), same team-fog overlay
+    // built from the same per-allyteam LOS bitmap. Nothing about what is drawn
+    // depends on the canvas dimensions, so a fullscreen minimap shows the same
+    // fog, the same blips and the same unexplored black as the corner one — at
+    // more pixels. LOS honesty applies to pixels too, and the way to guarantee
+    // it is to not touch the render path at all.
+    //
+    // What it must NOT do is let game input through. The overlay ships with a
+    // full-viewport scrim BENEATH the canvas: `#game-canvas` owns the pointer
+    // listeners that drive selection, orders and the camera, so a click that
+    // lands on the scrim instead of the canvas is a click the game never sees.
+    // Keyboard is separate — `CameraInput` listens on `window`, which DOM
+    // stacking cannot block — so a capture-phase `document` handler swallows the
+    // camera keys (and Escape) while the overlay is up. Capture on `document`
+    // runs before a bubble-phase listener on `window`, which is what makes the
+    // swallow effective rather than a race on registration order.
+
+    /** True while the full-screen overlay is up. */
+    isFullscreen(): boolean {
+        return this.fullscreenState !== null;
+    }
+
+    /**
+     * Turn the overlay on/off (no argument ⇒ toggle). Returns the state it
+     * settled in, so a caller echoing the result to the player can't disagree
+     * with the DOM.
+     *
+     * Refuses (returns false) under 'widget' ownership: a LuaUI widget owns the
+     * canvas position then, and fighting it would leave the minimap somewhere
+     * neither party expects. Metalstorm ships no LuaUI, so this is the
+     * future-proofing case, not today's.
+     */
+    setFullscreen(on?: boolean): boolean {
+        const wanted = on ?? !this.isFullscreen();
+        if (wanted === this.isFullscreen()) return this.isFullscreen();
+
+        if (wanted && this.ownership !== 'default') {
+            console.warn('[minimap] full screen is unavailable while a widget owns the canvas');
+            return false;
+        }
+        if (wanted) this.enterFullscreen();
+        else this.exitFullscreen();
+        return this.isFullscreen();
+    }
+
+    private enterFullscreen(): void {
+        const shell = this.shellElement();
+        if (!shell) {
+            console.warn('[minimap] no #hud-minimap shell to expand');
+            return;
+        }
+
+        // The scrim is a sibling INSERTED BEFORE the shell in the HUD layer, so
+        // it paints under the expanded panel and over the game canvas.
+        const scrim = document.createElement('div');
+        scrim.className = 'minimap-fullscreen-scrim';
+        // Clicking outside the map is the other natural "I'm done" gesture, and
+        // costs nothing to honour.
+        scrim.addEventListener('pointerdown', (e) => { e.stopPropagation(); this.setFullscreen(false); });
+        scrim.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+        shell.parentElement?.insertBefore(scrim, shell);
+
+        const onKeyDown = (e: KeyboardEvent): void => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                e.preventDefault();
+                this.setFullscreen(false);
+                return;
+            }
+            // Arrow keys pan the worker camera behind the overlay. Swallow them:
+            // the player is reading the map, not driving.
+            if (e.key.startsWith('Arrow')) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown, true);
+
+        this.fullscreenState = {
+            canvasWidth: this.canvas.width,
+            canvasHeight: this.canvas.height,
+            cssWidth: this.canvas.style.width,
+            cssHeight: this.canvas.style.height,
+            onKeyDown,
+            scrim,
+        };
+
+        shell.classList.add('is-fullscreen');
+        // The minimap lives inside #game-hud (z-index 10) and the native-UI
+        // rails live in #ui-root (z-index 100), so the shell's own z-index —
+        // confined to #game-hud's stacking context — can never lift it above
+        // them. Verified live: the first build put the command console and the
+        // objectives rail squarely across the expanded map. The overlay is modal,
+        // so the whole HUD layer is promoted for its duration.
+        document.getElementById('game-hud')?.classList.add('has-fullscreen-overlay');
+        // A focused text field under an opaque overlay eats keystrokes the player
+        // can't see. Drop focus so typing does nothing rather than something
+        // invisible; Escape closes and the console comes straight back.
+        const focused = document.activeElement as HTMLElement | null;
+        if (focused && focused !== document.body) focused.blur();
+
+        this.canvas.classList.add('minimap-canvas--fullscreen');
+        this.resizeCanvasToShell();
+        this.broadcastState();
+    }
+
+    private exitFullscreen(): void {
+        const state = this.fullscreenState;
+        if (!state) return;
+        this.fullscreenState = null;
+
+        document.removeEventListener('keydown', state.onKeyDown, true);
+        state.scrim.remove();
+
+        this.shellElement()?.classList.remove('is-fullscreen');
+        document.getElementById('game-hud')?.classList.remove('has-fullscreen-overlay');
+        this.canvas.classList.remove('minimap-canvas--fullscreen');
+        this.canvas.style.width = state.cssWidth;
+        this.canvas.style.height = state.cssHeight;
+        this.canvas.width = state.canvasWidth;
+        this.canvas.height = state.canvasHeight;
+        this.engine.resize();
+        this.broadcastState();
+    }
+
+    /**
+     * Match the canvas backing store to the square the CSS gave it.
+     *
+     * Square, not the panel's aspect: `updateOrthoBounds` fits the LONGER map
+     * axis into the frustum, so a non-square canvas would letterbox the map
+     * inside a stretched viewport. A square canvas centred by CSS keeps the
+     * fullscreen view geometrically identical to the corner one.
+     */
+    private resizeCanvasToShell(): void {
+        const side = Math.max(
+            64,
+            Math.floor(Math.min(window.innerWidth, window.innerHeight) * 0.86),
+        );
+        this.canvas.style.width = `${side}px`;
+        this.canvas.style.height = `${side}px`;
+        this.canvas.width = side;
+        this.canvas.height = side;
+        this.engine.resize();
+    }
+
+    private shellElement(): HTMLElement | null {
+        return this.defaultParent.closest('#hud-minimap') as HTMLElement | null;
     }
 
     /**
@@ -360,7 +616,11 @@ export class Minimap {
      * gets exactly the old behaviour, one setGeometry call later.
      */
     private setDefaultShellVisible(visible: boolean): void {
-        const shell = this.defaultParent.closest('#hud-minimap') as HTMLElement | null;
+        // A hidden shell can't be full screen — a widget claiming the canvas
+        // mid-overlay would otherwise leave the scrim up over a minimap that has
+        // moved out from under it.
+        if (!visible) this.setFullscreen(false);
+        const shell = this.shellElement();
         if (shell) shell.style.display = visible ? 'block' : 'none';
     }
 
@@ -386,8 +646,9 @@ export class Minimap {
 
     /**
      * Set the on-screen rect for the minimap canvas in DOM-space pixels
-     * (top-left origin). Called by lua-widget-manager after translating
-     * the widget's Spring-space ConfigMiniMap call into DOM-space.
+     * (top-left origin). Called from main.ts's `minimapGeometry` handler
+     * after the worker (lua-ui-host.ts) translates the widget's
+     * Spring-space ConfigMiniMap call into DOM-space and posts it over.
      * Triggers a Babylon engine resize (debounced via rAF) only when the
      * pixel dimensions actually change — repositioning alone is free.
      */
@@ -454,10 +715,11 @@ export class Minimap {
             && clientY >= g.y && clientY < g.y + g.h;
     }
 
-    /** Called by lua-widget-manager whenever a widget invokes
-     *  `gl.DrawMiniMapEvents`. The events layer is suppressed in
-     *  widget-owned mode unless this was set within `eventsRequestTtlMs`
-     *  — letting a widget mute pings without owning the data itself. */
+    /** Called by main.ts whenever a widget invokes `gl.DrawMiniMapEvents`
+     *  (lua-gl-bridge.ts in the worker forwards the call over). The events
+     *  layer is suppressed in widget-owned mode unless this was set within
+     *  `eventsRequestTtlMs` — letting a widget mute pings without owning
+     *  the data itself. */
     markEventsRequested(): void {
         this.eventsRequestedAt = performance.now();
     }
@@ -470,10 +732,10 @@ export class Minimap {
     }
 
     /** Push a player-marker ping into the events layer. Fired when the
-     *  widget worker invokes `Spring.MarkerAddPoint`/`MarkerAddLine`;
-     *  the worker posts a message back to the main thread (via
-     *  `lua-widget-manager`) which calls this. Line markers push one
-     *  ping per endpoint so the cyan dots bracket the line. */
+     *  game-processor worker invokes `Spring.MarkerAddPoint`/`MarkerAddLine`
+     *  (lua-ui-host.ts); the worker posts a `minimapMarker` message back
+     *  to the main thread, whose handler calls this. Line markers push
+     *  one ping per endpoint so the cyan dots bracket the line. */
     pushMarkerPing(p: { x: number; z: number }): void {
         this.pushPing(p.x, p.z, 'marker');
     }
@@ -538,19 +800,12 @@ export class Minimap {
                 quad.position.y = 2;
                 quad.isPickable = false;
                 const mat = new StandardMaterial('minimapFogMat', this.scene);
-                mat.emissiveTexture = this.fogTexture;
-                mat.diffuseColor = new Color3(0, 0, 0);
-                mat.emissiveColor = new Color3(1, 1, 1);
-                mat.disableLighting = true;
-                mat.useAlphaFromDiffuseTexture = false;
-                mat.opacityTexture = this.fogTexture;
-                mat.backFaceCulling = false;
+                configureFogMaterial(mat, this.fogTexture);
                 quad.material = mat;
                 this.fogQuad = quad;
             } else {
-                const mat = this.fogQuad.material as StandardMaterial;
-                mat.emissiveTexture = this.fogTexture;
-                mat.opacityTexture = this.fogTexture;
+                configureFogMaterial(this.fogQuad.material as StandardMaterial,
+                                     this.fogTexture);
             }
         }
 
@@ -652,6 +907,70 @@ export class Minimap {
         this.updateEntityInstances();
         this.updateEventsLayer();
         this.scene.render();
+    }
+
+    // ─── Capture (verification harness) ──────────────────────────────
+    //
+    // The minimap is a main-thread canvas, so neither of the project's two
+    // existing capture routes reaches it: CDP `take_screenshot` cannot read
+    // a WebGL2 canvas at all, and the `__gp` / `window.test.screenshot()`
+    // trick reads the *worker's* OffscreenCanvas. Reading this one needs a
+    // third route, and the reason it defeated the first attempt is the
+    // engine's `preserveDrawingBuffer: false` (line ~208): the drawing
+    // buffer is only defined until the end of the task that drew it, and a
+    // `toDataURL` from any later turn of the event loop hands back a fully
+    // transparent image — every sample alpha 0, which reads exactly like a
+    // canvas that was never drawn to.
+    //
+    // Both capture entry points therefore render and read back-to-back in
+    // ONE synchronous block, which is the documented-safe window. Do not
+    // split them across an `await`.
+
+    /** Render one frame and read it back as a PNG data-URL. */
+    captureFrame(): string {
+        this.render();
+        return this.canvas.toDataURL('image/png');
+    }
+
+    /**
+     * Render one frame and reduce it to summary statistics, without
+     * shipping a megabyte of base64 over the debug channel.
+     *
+     * `transparentFraction` is the tell for a capture that missed its
+     * window (it reads 1.0); on a real frame the minimap is opaque, so
+     * anything above ~0 means the numbers below it are meaningless.
+     */
+    captureFrameStats(): MinimapFrameStats {
+        this.render();
+        const w = this.canvas.width, h = this.canvas.height;
+        const scratch = document.createElement('canvas');
+        scratch.width = w; scratch.height = h;
+        const ctx = scratch.getContext('2d', { willReadFrequently: true })!;
+        ctx.drawImage(this.canvas, 0, 0);
+        const px = ctx.getImageData(0, 0, w, h).data;
+
+        let lumSum = 0, alphaSum = 0, clear = 0, white = 0, dark = 0;
+        const n = w * h;
+        for (let i = 0; i < px.length; i += 4) {
+            const a = px[i + 3];
+            const lum = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+            lumSum += lum; alphaSum += a;
+            if (a === 0) clear++;
+            if (lum >= 240) white++;
+            if (lum <= 8) dark++;
+        }
+        return {
+            width: w, height: h,
+            meanLuminance: lumSum / n,
+            meanAlpha: alphaSum / n,
+            transparentFraction: clear / n,
+            whiteFraction: white / n,
+            darkFraction: dark / n,
+            backdropLoaded: this.terrainQuad !== null
+                && (this.terrainQuad.material as StandardMaterial | null)
+                    ?.diffuseTexture?.isReady() === true,
+            backdropUrl: this.backdropUrl,
+        };
     }
 
     private ensurePingMesh(kind: MinimapPingKind): Mesh {
@@ -985,6 +1304,7 @@ export class Minimap {
         // Put the shell back the way hud.html ships it, so a disposed minimap
         // doesn't leave an empty bordered box with a Detach button on the HUD
         // between games (main.ts disposes and rebuilds one per session).
+        this.setFullscreen(false);      // drops the scrim + the key handler
         this.setDefaultShellVisible(false);
         this.channel?.postMessage({ type: 'gameEnded' });
         if (this.detachedWindow && !this.detachedWindow.closed) {

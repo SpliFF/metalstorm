@@ -227,13 +227,19 @@ def _read_scaled_class(path: str) -> dict[str, UnitFacts]:
     return out
 
 
-def _read_flat_class(path: str) -> dict[str, UnitFacts]:
-    """units/civilians.lua and units/civvehicles.lua — plain literal defs."""
+def _read_flat_class(path: str, prefix: str = "ms_") -> dict[str, UnitFacts]:
+    """units/civilians.lua and units/civvehicles.lua — plain literal defs.
+
+    `prefix` is how a top-level entry is told from a stray local. It defaults
+    to the roster's own `ms_` namespace; `fable_airship.lua` is read with its
+    own name because the one carrier a generated war stages is a `fable_*`
+    showcase def rather than a scale-class member (see _CARRIER_FILES).
+    """
     with open(path, encoding="utf-8") as fh:
         text = _strip_comments(fh.read())
     out = {}
     for name, body in _split_top_level_entries(text).items():
-        if not name.startswith("ms_"):
+        if not name.startswith(prefix):
             continue
         fx = _num(body, "footprintx", 2)
         fz = _num(body, "footprintz", 2)
@@ -283,14 +289,29 @@ _SCALED_FILES = ("staticdefense.lua", "soldiers.lua", "tanks.lua",
 # template name a def that can never be sited.
 _FLAT_FILES = ("civilians.lua", "civvehicles.lua", "irregulars.lua",
                "logistics.lua", "recon_vehicles.lua", "command_vehicles.lua")
+# The carrier. Read despite being a `fable_*` showcase def and despite being
+# air, because since PLAN-metalstorm-transports.md §3.2 a generated war STAGES
+# one per side: a side's transports are part of its declared staged force, so
+# being transport-less at GameStart is a choice a scenario makes rather than an
+# accident. It is the only lift a land map can hold — ms_landing_ship is
+# movementclass SHIP and the generator has no water placement — which is why
+# transports.lua is still absent from this list.
+#
+# Being in the catalog is the point, not a side effect: it puts the carrier
+# under the same gates as every other staged def (nothing spawns inside a
+# yardmap, no two units share a spot, --coverage really does stage one of
+# everything) instead of smuggling it past them.
+_CARRIER_FILES = (("fable_airship.lua", "fable_airship"),)
 
 
 def load(game_dir: str) -> dict[str, UnitFacts]:
     """Every def the scenario generator may emit, keyed by def name.
 
     `game_dir` is data/games/metalstorm. Only the def families the generator
-    places are read — the fable_*/wz_* baseline models and the naval/air
-    classes are not scenario-generator content.
+    places are read — the wz_* baseline models and the naval classes are not
+    scenario-generator content. The one exception is `fable_airship`, which a
+    generated war now stages per side as that side's carrier
+    (PLAN-metalstorm-transports.md §3.2); see _CARRIER_FILES.
     """
     units = os.path.join(game_dir, "units")
     facts: dict[str, UnitFacts] = {}
@@ -300,6 +321,8 @@ def load(game_dir: str) -> dict[str, UnitFacts]:
         facts.update(_read_scaled_class(os.path.join(units, f)))
     for f in _FLAT_FILES:
         facts.update(_read_flat_class(os.path.join(units, f)))
+    for f, prefix in _CARRIER_FILES:
+        facts.update(_read_flat_class(os.path.join(units, f), prefix=prefix))
     return facts
 
 
@@ -312,6 +335,66 @@ def site_kinds(game_dir: str) -> dict[str, str]:
     """
     return _read_customparam(
         os.path.join(game_dir, "units", "buildings_sites.lua"), "site_kind")
+
+
+def feature_chain_pitch(game_dir: str, kind: str = "bridge") -> float:
+    """Segment spacing for a chained feature family, in elmos.
+
+    `features/bridges.lua` publishes the measured tile length as
+    `customparams.chain_pitch` so nothing downstream restates it —
+    game_scenario.lua's `featureChainPitch` reads it at stage time, and the map
+    generator needs the same number at PLAN time to size a chain of spans
+    (terragen/bridges.py).
+
+    Read off the file rather than per-def, because that is where the value is:
+    both spans get it from the shared `span()` posture helper, which is not
+    inside either def's own table. So this asserts the file speaks with one
+    voice instead of pretending to read one entry — two different pitches in one
+    family would mean a chain sized for the wrong span, which is the failure
+    §M3 spent a live boot on.
+
+    Raises rather than defaulting: a silent 24.0 here would be exactly the
+    hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    with open(path, encoding="utf-8") as fh:
+        text = _strip_comments(fh.read())
+    found = {m.group(1) for m in
+             re.finditer(r"chain_pitch\s*=\s*'([^']*)'", text)}
+    if not found:
+        raise ValueError(f"{path} declares no customparams.chain_pitch")
+    if len(found) > 1:
+        raise ValueError(f"{path} declares {len(found)} different chain "
+                         f"pitches ({sorted(found)}) — a chain sized against "
+                         f"one would be wrong for the other")
+    return float(found.pop())
+
+
+def feature_deck_top(game_dir: str, defname: str, kind: str = "bridge") -> float:
+    """How far a chained span's trafficable surface sits above its own y = 0.
+
+    The number that decides roads R3c (PLAN-maps.md §2j), read from the def
+    rather than from the forge layout script that authored the mesh: a feature's
+    y is clamped UP to the ground every tick (`CFeature::UpdatePosition`,
+    Feature.cpp:570) and can never be pushed down, so a unit driving on the
+    terrain under a span is exactly this far below the deck — and an earthwork
+    raises the span with the ground, leaving the gap unchanged.
+
+    Read PER DEF, unlike `feature_chain_pitch`: the pitch is a family fact set
+    in the shared `span()` posture (and one family cannot hold two), while the
+    deck heights genuinely differ — road 1.5, rail 3.8. A file-wide read here
+    would either raise on a correct file or attribute one span's deck to the
+    other.
+
+    Raises rather than defaulting, for the same reason the pitch does: a silent
+    constant here is the hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    tops = _read_customparam(path, "deck_top")
+    if defname not in tops:
+        raise ValueError(f"{path} declares no customparams.deck_top for "
+                         f"{defname} (declared for: {sorted(tops) or 'nothing'})")
+    return float(tops[defname])
 
 
 def verify(facts: dict[str, UnitFacts], required: list[str]) -> list[str]:

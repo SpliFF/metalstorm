@@ -50,6 +50,16 @@ function kill.participants(o, ctx)
     return ctx.unitsInArea(x, z, PARTICIPATION_RADIUS)
 end
 
+--- Which units this objective is DEFINED in terms of
+--- (PLAN-def-reconciliation task 4). Answered by the type module rather than by
+--- a table of param spellings in game_objectives.lua: the four types with unit
+--- references spell theirs four different ways (targetUnitID, targetUnitIDs,
+--- payloadUnitIDs, buildingUnitIDs), and a key list somewhere else is a list
+--- that a sixth type silently falls off.
+function kill.unitRefs(o)
+    return { o.params.targetUnitID }
+end
+
 function kill.describe(o)
     return 'Kill target ' .. tostring(o.params.targetUnitID)
 end

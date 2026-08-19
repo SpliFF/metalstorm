@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- TEMPORARY D49 verification harness — deleted at the end of the session.
+     Mounts the three changed widgets in a real browser with the real CSS and
+     the float32 values measured live on the player path, because a DOM
+     assertion on textContent is blind to what CSS does to the string. -->
+<html><head><meta charset="utf-8">
+<!-- BOTH stylesheets: the design system (which sets --nui-font 12px and the
+     panel/list rules) and the game's overrides. Loading only the second one
+     renders every string at the browser's default 16px and manufactures
+     ellipses that the shipped rail does not have. -->
+<link rel="stylesheet" href="http://localhost:8892/client/src/ui/native-ui/native-ui.css">
+<link rel="stylesheet" href="metalstorm.ui.css">
+<style>
+  body { background:#12161c; margin:0; padding:16px; font-family:system-ui,sans-serif; }
+  .rig { display:flex; gap:16px; align-items:flex-start; }
+  /* The loader gives panels a fixed 236px column (see metalstorm.ui.json) —
+     reproduce it, since that width is what truncates. */
+  .col { width:236px; }
+  h2 { color:#8ea; font:12px/1.6 monospace; margin:12px 0 4px; }
+</style></head>
+<body>
+<div class="rig">
+  <div class="col"><h2>authority-bar</h2><div id="bar"></div></div>
+  <div class="col"><h2>objectives-panel</h2><div id="obj"></div></div>
+  <div class="col"><h2>scoreboard-panel</h2><div id="score"></div></div>
+</div>
+<script type="module">
+import bar from './widgets/authority-bar.js';
+import obj from './widgets/objectives-panel.js';
+import score from './widgets/scoreboard-panel.js';
+
+const identity = { playerId: 1, teamId: 0, accountId: 135 };
+const team = new Map([
+  ['authority_pool', 614.5499877929688],
+  ['authority_player_1', 202.5500030517578],
+]);
+const game = new Map([
+  ['objective_count', 8],
+  ['objective_8_type', 'escort'], ['objective_8_scope', 'tactical'],
+  ['objective_8_state', 'active'], ['objective_8_team', 0],
+  ['objective_8_reward', 114.55000305175781], ['objective_8_progress', 0.47],
+  ['objective_3_type', 'control'], ['objective_3_scope', 'strategic'],
+  ['objective_3_state', 'active'], ['objective_3_team', 0],
+  ['objective_3_reward', 75.30000305175781], ['objective_3_progress', 0.6],
+  ['score_1_earned', 1204.5500030517578], ['score_1_spent', 837.4499877929688],
+  ['score_1_objectives', 3],
+  ['score_2_earned', 96.55000305175781], ['score_2_spent', 12.449996948242188],
+  ['score_2_objectives', 0],
+]);
+const subs = [];
+const mk = (mount) => ({
+  mount, identity,
+  setBadge() {},
+  store: {
+    teamRulesParam: (t, k) => (t === 0 ? team.get(k) : undefined),
+    gameRulesParam: (k) => game.get(k),
+    playerRoster: () => ([
+      { playerId: 1, teamId: 0, name: 'e2e3_north', isSpectator: false },
+      { playerId: 2, teamId: 1, name: 'RavenAI', isAI: true, isSpectator: false },
+    ]),
+    subscribe: (keys, cb) => { subs.push(cb); return () => {}; },
+  },
+});
+bar.init(mk(document.getElementById('bar')));
+obj.init(mk(document.getElementById('obj')));
+score.init(mk(document.getElementById('score')));
+for (const cb of subs) cb();
+
+// An award toast, the third string D49 named.
+bar._pushToast('award', 114.55000305175781, 'objective_control');
+
+// Resolve the escort so an outcome row + the log render alongside the live row.
+game.set('objective_8_state', 'failed');
+for (const cb of subs) cb();
+
+window.__d49 = () => document.body.innerText;
+</script>
+</body></html>

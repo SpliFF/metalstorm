@@ -8,6 +8,20 @@ local mapinfo = {
     mapfile = "maps/meridian_basin.smf",
     legacycoordsystem = false,
 
+    -- Metalstorm extension block. `CMapInfo` never reads this; it is
+    -- the map's own statement about itself, for tools.
+    -- reachability: does armour reach every start from every other?
+    --   "connected" — yes, and `regions_from_map.py --verify` fails
+    --                  this map if it ever stops being true.
+    --   "split"     — no, ON PURPOSE (PLAN-maps.md §2k): the starts
+    --                  sit in several armour realms and the crossing
+    --                  is a transport problem, not a defect. `--verify`
+    --                  then fails this map if it comes out CONNECTED,
+    --                  because the declaration would be stale.
+    metalstorm = {
+        reachability = "split",
+    },
+
     maxmetal = 0.5,
     extractorradius = 90,
 
@@ -19,7 +33,7 @@ local mapinfo = {
     water = {
         damage = 0,
         voidwater = false,
-        surfacecolor = { 0.35, 0.42, 0.50 },
+        surfacecolor = { 0.35, 0.42, 0.5 },
         surfacealpha = 0.45,
         basecolor = { 0.28, 0.36, 0.43 },
         mincolor = { 0.05, 0.08, 0.11 },
@@ -39,6 +53,7 @@ local mapinfo = {
     },
 
     resources = {
+        groundtex = "ground.png",   -- DEVIATION: map-space ground albedo (PLAN-maps §2n)
         splatdistrtex = "splat_distr.png",
         splatdetailtex = "splat_detail.png",
     },
@@ -48,18 +63,38 @@ local mapinfo = {
         texmults = { 0.25, 0.35, 0.22, 0.22 },
     },
 
-    -- typemap value 1 = road surface
+    -- typemap values are terragen.roads.SURF_*: 1 bitumen, 2 dirt, 3 mud.
+    -- movespeeds is a NESTED subtable because that is where
+    -- CMapInfo::ReadTerrainTypes looks, and it has no flat fallback.
+    -- receivetracks turns the engine's dynamic tyre-track decals on per
+    -- surface: soft ground records a passing unit, sealed bitumen does not.
     terraintypes = {
         [0] = {
             name = "default",
             hardness = 1.0,
-            tankspeed = 1.0, kbotspeed = 1.0, hoverspeed = 1.0, shipspeed = 1.0,
+            receiveTracks = true,
+            moveSpeeds = { tank = 1.0, kbot = 1.0, hover = 1.0, ship = 1.0 },
         },
         [1] = {
-            name = "road",
+            name = "bitumen",
+            hardness = 1.4,
+            receiveTracks = false,
+            moveSpeeds = { tank = 1.6, kbot = 1.6,
+                            hover = 1.6, ship = 1.0 },
+        },
+        [2] = {
+            name = "dirt",
             hardness = 1.2,
-            tankspeed = 1.35, kbotspeed = 1.35,
-            hoverspeed = 1.35, shipspeed = 1.0,
+            receiveTracks = true,
+            moveSpeeds = { tank = 1.25, kbot = 1.25,
+                            hover = 1.25, ship = 1.0 },
+        },
+        [3] = {
+            name = "mud",
+            hardness = 0.8,
+            receiveTracks = true,
+            moveSpeeds = { tank = 1.0, kbot = 1.0,
+                            hover = 1.0, ship = 1.0 },
         },
     },
 

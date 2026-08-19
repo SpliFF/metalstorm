@@ -122,8 +122,13 @@ splatMultsArray():Float32Array|null {
   return offset ? new Float32Array(this.bb!.bytes().buffer, this.bb!.bytes().byteOffset + this.bb!.__vector(this.bb_pos + offset), this.bb!.__vector_len(this.bb_pos + offset)) : null;
 }
 
+splatDetailNormalDiffuseAlpha():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
 static startMapDecals(builder:flatbuffers.Builder) {
-  builder.startObject(11);
+  builder.startObject(12);
 }
 
 static addDetailTex(builder:flatbuffers.Builder, detailTexOffset:flatbuffers.Offset) {
@@ -204,12 +209,16 @@ static startSplatMultsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addSplatDetailNormalDiffuseAlpha(builder:flatbuffers.Builder, splatDetailNormalDiffuseAlpha:boolean) {
+  builder.addFieldInt8(11, +splatDetailNormalDiffuseAlpha, +false);
+}
+
 static endMapDecals(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createMapDecals(builder:flatbuffers.Builder, detailTexOffset:flatbuffers.Offset, specularTexOffset:flatbuffers.Offset, splatDetailTexOffset:flatbuffers.Offset, splatDistrTexOffset:flatbuffers.Offset, splatNormal0Offset:flatbuffers.Offset, splatNormal1Offset:flatbuffers.Offset, splatNormal2Offset:flatbuffers.Offset, splatNormal3Offset:flatbuffers.Offset, detailNormalTexOffset:flatbuffers.Offset, splatScalesOffset:flatbuffers.Offset, splatMultsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createMapDecals(builder:flatbuffers.Builder, detailTexOffset:flatbuffers.Offset, specularTexOffset:flatbuffers.Offset, splatDetailTexOffset:flatbuffers.Offset, splatDistrTexOffset:flatbuffers.Offset, splatNormal0Offset:flatbuffers.Offset, splatNormal1Offset:flatbuffers.Offset, splatNormal2Offset:flatbuffers.Offset, splatNormal3Offset:flatbuffers.Offset, detailNormalTexOffset:flatbuffers.Offset, splatScalesOffset:flatbuffers.Offset, splatMultsOffset:flatbuffers.Offset, splatDetailNormalDiffuseAlpha:boolean):flatbuffers.Offset {
   MapDecals.startMapDecals(builder);
   MapDecals.addDetailTex(builder, detailTexOffset);
   MapDecals.addSpecularTex(builder, specularTexOffset);
@@ -222,6 +231,7 @@ static createMapDecals(builder:flatbuffers.Builder, detailTexOffset:flatbuffers.
   MapDecals.addDetailNormalTex(builder, detailNormalTexOffset);
   MapDecals.addSplatScales(builder, splatScalesOffset);
   MapDecals.addSplatMults(builder, splatMultsOffset);
+  MapDecals.addSplatDetailNormalDiffuseAlpha(builder, splatDetailNormalDiffuseAlpha);
   return MapDecals.endMapDecals(builder);
 }
 
@@ -237,7 +247,8 @@ unpack(): MapDecalsT {
     this.splatNormal3(),
     this.detailNormalTex(),
     this.bb!.createScalarList<number>(this.splatScales.bind(this), this.splatScalesLength()),
-    this.bb!.createScalarList<number>(this.splatMults.bind(this), this.splatMultsLength())
+    this.bb!.createScalarList<number>(this.splatMults.bind(this), this.splatMultsLength()),
+    this.splatDetailNormalDiffuseAlpha()
   );
 }
 
@@ -254,6 +265,7 @@ unpackTo(_o: MapDecalsT): void {
   _o.detailNormalTex = this.detailNormalTex();
   _o.splatScales = this.bb!.createScalarList<number>(this.splatScales.bind(this), this.splatScalesLength());
   _o.splatMults = this.bb!.createScalarList<number>(this.splatMults.bind(this), this.splatMultsLength());
+  _o.splatDetailNormalDiffuseAlpha = this.splatDetailNormalDiffuseAlpha();
 }
 }
 
@@ -269,7 +281,8 @@ constructor(
   public splatNormal3: string|Uint8Array|null = null,
   public detailNormalTex: string|Uint8Array|null = null,
   public splatScales: (number)[] = [],
-  public splatMults: (number)[] = []
+  public splatMults: (number)[] = [],
+  public splatDetailNormalDiffuseAlpha: boolean = false
 ){}
 
 
@@ -297,7 +310,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     splatNormal3,
     detailNormalTex,
     splatScales,
-    splatMults
+    splatMults,
+    this.splatDetailNormalDiffuseAlpha
   );
 }
 }

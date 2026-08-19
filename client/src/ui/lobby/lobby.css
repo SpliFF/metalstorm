@@ -59,7 +59,8 @@
 }
 
 .lobby-form input,
-.create-form input {
+.create-form input,
+.totp-panel input {
     padding: 10px 14px;
     border: 1px solid #334;
     border-radius: 6px;
@@ -69,7 +70,8 @@
 }
 
 .lobby-form input:focus,
-.create-form input:focus {
+.create-form input:focus,
+.totp-panel input:focus {
     outline: none;
     border-color: #4cc9f0;
 }
@@ -113,13 +115,149 @@ button.danger:hover { background: #cc3333; }
     color: #789;
 }
 
+/* Two-factor (PLAN-metalstorm-lobby.md §7.2, task 8d). The login challenge
+   reuses the form's own input styling — it is one more field in the same
+   column — while the enrolment panel is a settings surface and gets its own
+   card treatment. */
+.login-totp-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.totp-panel {
+    background: #12161c;
+    border: 1px solid #253040;
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.totp-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.totp-status { font-size: 13px; color: #9aa4b5; margin: 0 0 10px; }
+.totp-enrol {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+/* The secret is read off the screen and typed into a phone, so it wants a
+   monospace face, room to breathe, and to be selectable as one run of text. */
+.totp-secret {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 15px;
+    letter-spacing: 1px;
+    color: #cfe6f5;
+    background: #0b0e13;
+    border: 1px solid #253040;
+    border-radius: 4px;
+    padding: 8px 10px;
+    user-select: all;
+    word-break: break-all;
+}
+.totp-uri { font-size: 12px; color: #4cc9f0; }
+.totp-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.totp-row input {
+    flex: 1 1 140px;
+    min-width: 120px;
+}
+.totp-recovery { margin-bottom: 10px; }
+.totp-recovery-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 4px 12px;
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: #cfe6f5;
+}
+
+/* Guest sign-in + the upgrade panel (PLAN-metalstorm-lobby.md §7.1, task 8c).
+   The sign-in is a LINK, not a button: it sits directly under a real submit
+   button, and two filled buttons in a column read as two equal choices when
+   one of them is the default and the other is the escape hatch. */
+.login-guest {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid #253040;
+}
+button.link-button {
+    background: none;
+    padding: 0;
+    color: #4cc9f0;
+    font-size: 13px;
+    text-decoration: underline;
+}
+button.link-button:hover { background: none; color: #7fdcff; }
+
+/* The upgrade panel is a settings surface, so it takes the same card
+   treatment as the 2FA one rather than the login form's column. */
+.guest-panel {
+    background: #12161c;
+    border: 1px solid #253040;
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.guest-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.guest-panel input,
+.guest-panel select {
+    padding: 10px 14px;
+    border: 1px solid #334;
+    border-radius: 6px;
+    background: #0f1626;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+.guest-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+/* The cost line is the one piece of text in this panel that changes what the
+   player decides, so it does not read as a hint. */
+.guest-cost {
+    font-size: 13px;
+    line-height: 1.4;
+    color: #e8c07d;
+    margin: 2px 0 0;
+    min-height: 34px;
+}
+
 .lobby-header {
     display: flex;
     align-items: center;
     gap: 12px;
     margin-bottom: 16px;
+    /* The header grew a fifth control with the 2FA button (task 8d) and a
+       flex item's `min-width: auto` is its min-content — so at 600px the row
+       did not overflow, it squeezed, and "Log out" wrapped to two lines
+       inside its own button. Wrapping the ROW instead, and forbidding a wrap
+       inside a label, is the same fix D61 needed for the AI row. */
+    flex-wrap: wrap;
 }
+.lobby-header button { white-space: nowrap; }
 .lobby-header h2 { margin: 0; flex: 1; }
+
+/* Signed-in account label beside the logout button (D45). Collapses to
+   nothing when the name is empty, so a header rendered before the username
+   is known does not reserve a gap. */
+.lobby-account {
+    font-size: 12px;
+    color: #9aa4b2;
+    white-space: nowrap;
+}
+.lobby-account:empty { display: none; }
 
 .room-badge {
     background: #334;
@@ -152,7 +290,213 @@ button.danger:hover { background: #cc3333; }
 .room-main { display: flex; align-items: center; gap: 8px; }
 .room-name { font-weight: 600; }
 .room-detail { grid-column: 1; color: #888; font-size: 12px; }
-.join-btn { grid-row: 1 / 3; grid-column: 2; }
+/* Pre-join legibility for a persistent war (PLAN-metalstorm-lobby.md §2.4):
+   which side your faction puts you on and the authority you arrive with.
+   Brighter than .room-detail on purpose — it is about YOU, not about the
+   room, and it is the line that decides whether the click is worth making. */
+.room-preview { grid-column: 1; color: #7fd4a8; font-size: 12px; }
+/* The same sentence when it says you will be WATCHING rather than fighting.
+   Muted rather than red: spectating is a normal outcome, not an error. */
+.room-preview-watch { color: #9aa4b5; }
+/* `1 / -1`, not `1 / 3`: the card grew a third row and a button pinned to an
+   explicit two-row range would have stopped covering it, sitting high against
+   a taller card. Spanning to the last line survives the next row too. */
+.join-btn { grid-row: 1 / -1; grid-column: 2; }
+
+/* ---- War browser (PLAN-metalstorm-lobby.md §4, task 6) ---- */
+
+.war-section { margin-bottom: 16px; }
+.war-section-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    /* The filter row is a flex sibling of the heading, and a chip's
+       min-content width is its label — without wrap a fourth chip pushes the
+       row past the panel, which is exactly the overflow D61 found in the AI
+       row (a flex item's `min-width: auto` is min-content). */
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.war-section-head h3 { margin: 0; font-size: 15px; }
+.war-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.war-filter-chip {
+    background: #1a2338;
+    color: #9aa4b5;
+    border: 1px solid #2a3550;
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.war-filter-chip:hover { border-color: #4cc9f0; color: #cfe6f5; }
+.war-filter-chip.active {
+    background: #16304a;
+    color: #4cc9f0;
+    border-color: #4cc9f0;
+}
+
+/* Deploy sits at the far end of the head row, away from the filter chips: it
+   is not a filter, and a primary action styled like a chip beside three chips
+   reads as a fourth view. `margin-left: auto` rather than a spacer element so
+   it still wraps sanely when the chips take the whole row. */
+.deploy-btn {
+    margin-left: auto;
+    background: #16304a;
+    color: #4cc9f0;
+    border: 1px solid #4cc9f0;
+    border-radius: 4px;
+    padding: 5px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.deploy-btn:hover { background: #1d3f60; }
+.deploy-btn:disabled { opacity: 0.5; cursor: default; }
+.deploy-result {
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: #16304a;
+    border-left: 3px solid #4cc9f0;
+    border-radius: 4px;
+    color: #cfe6f5;
+    font-size: 13px;
+}
+
+.war-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* Same grid as .room-entry — a war IS a room, and two card geometries that
+   drift apart is how the join button ends up half a row tall (D61's
+   `grid-row: 1 / 3` against a three-row grid). The buttons live in their own
+   flex cell here because a war offers two of them. */
+.war-entry {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    background: #0f1626;
+    border-radius: 8px;
+    align-items: center;
+    border-left: 3px solid #2a3550;
+}
+.war-entry .room-detail,
+.war-entry .room-preview,
+.war-entry .war-digest,
+.war-entry .war-yours,
+.war-entry .war-friends,
+.war-entry .war-control { grid-column: 1; }
+/* "Your games" (PLAN-persistence task 4c) — the one line on the card that is
+   about the PLAYER rather than about the war: their side, their absence, and
+   how much of their world is frozen waiting for them. Given the accent colour
+   and the card's own left border rather than the muted grey of `.war-control`
+   above it, because on a "My wars" list every row is one of these and the
+   player is scanning for which of their worlds needs them. */
+.war-yours {
+    color: #7fd4a8;
+    font-size: 12px;
+}
+.war-yours:empty { display: none; }
+/* The one reading of that line that is bad news: the seat the player remembers
+   is gone (`seat: superseded`). It keeps the row — the history and the frozen
+   world are still theirs — so it must not be painted in the same green as
+   "your side: Union". */
+.war-yours-lost { color: #d9a06a; }
+/* "Bob is fighting here" (task 9a). A different accent from `.war-yours`
+   because it is a fact about somebody ELSE, and on a "Friends here" list every
+   row carries one — two greens would read as one thing said twice. */
+.war-friends {
+    color: #c9a0ff;
+    font-size: 12px;
+}
+.war-friends:empty { display: none; }
+.war-control { color: #7a8496; font-size: 12px; }
+.war-control:empty { display: none; }
+/* The while-you-were-away digest (PLAN-persistence task 4b). Sits in the
+   card's left column under the join preview, indented behind its own rule so
+   the war's HISTORY reads as a different kind of statement from the war's
+   current state above it.
+
+   Deliberately NOT height-bounded with a scroll, which is what it was first:
+   a month away is a legitimate amount of news, but capping the box put the
+   "N earlier, not shown" line — the one line whose job is to say the list is
+   incomplete — under a fold with no scrollbar to hint at it. The cap belongs
+   on the LINE COUNT (war-digest.ts), where the leftover can be counted and
+   said out loud. */
+.war-digest {
+    margin-top: 2px;
+    padding-left: 8px;
+    border-left: 2px solid #2a3550;
+    font-size: 12px;
+    color: #9aa4b5;
+}
+.war-digest-head {
+    display: block;
+    color: #7a8496;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 10px;
+}
+.war-digest ul { margin: 2px 0 0; padding-left: 14px; }
+.war-digest li { line-height: 1.4; }
+.war-digest-more { color: #7a8496; font-style: italic; }
+.war-actions {
+    grid-row: 1 / -1;
+    grid-column: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+/* Reset the room-browser rule: inside a war card the button is a flex child
+   of .war-actions, not a grid item, and inheriting `grid-row: 1 / -1` would
+   stretch it over the whole card. */
+.war-entry .join-btn { grid-row: auto; grid-column: auto; }
+.war-badge-live {
+    background: #16304a;
+    color: #7fd4a8;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+/* A war whose server is not running is a normal, recoverable state (task 3 —
+   the next join resumes it), so this is muted rather than an alarm colour. */
+.war-badge-idle {
+    background: #232a38;
+    color: #8b93a3;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+/* The room-state badge is empty on a war whose own state is published (see
+   renderWarList) — an empty pill would be a floating grey lozenge. */
+.war-entry .room-badge:empty { display: none; }
+/* A resume in flight (PLAN-persistence task 4). Warm rather than green: the
+   war is coming back but is not serving yet, and a joiner waits. */
+.war-badge-resuming {
+    background: #3a3320;
+    color: #e0c67a;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+/* Crashed and unresumable: the two states where the world a player remembers
+   is not all coming back. Not an error colour (nothing is broken, and both are
+   joinable) but not the muted "nothing here" one either. */
+.war-badge-crashed {
+    background: #3a2426;
+    color: #e39b9b;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
 
 .empty-state { text-align: center; color: #555; padding: 32px; }
 
@@ -205,6 +549,283 @@ button.danger:hover { background: #cc3333; }
 .replay-detail { grid-column: 1; color: #888; font-size: 12px; }
 .watch-btn { grid-row: 1 / 4; grid-column: 2; }
 .replay-error { color: #ff6b6b; font-size: 12px; padding: 8px 0; }
+
+/* ---- Friends (PLAN-metalstorm-lobby.md §8, task 9a) ---- */
+
+.friends-panel {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+}
+.friends-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.friends-head h3 { margin: 0; font-size: 15px; }
+/* The add box sits at the far end of the head row for the reason `.deploy-btn`
+   does: it is the panel's only creating action and must not read as one more
+   thing in the list. */
+.friend-add { display: flex; gap: 8px; margin-left: auto; }
+.friend-add-name {
+    background: #0f1626;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    color: #dfe6f0;
+    padding: 5px 10px;
+    font-size: 12px;
+    min-width: 160px;
+}
+.friend-add-name:focus { outline: none; border-color: #4cc9f0; }
+/* One line for what just happened, in three readings: neutral, a refusal, and
+   the successful join that has to read as a warning (`opposing_side`). */
+.friend-msg { font-size: 12px; color: #9aa4b5; margin: 0 0 10px; }
+.friend-msg-error { color: #ff6b6b; }
+.friend-msg-warn { color: #f0a04c; }
+.friends-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+.friend-entry {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    background: #0f1626;
+    border-radius: 8px;
+    border-left: 3px solid #2a3550;
+}
+/* An unanswered request is the only row here that is asking a question, so it
+   is the only one that gets a coloured edge — the same device the war cards
+   use to mark the row that needs the player. */
+.friend-incoming { border-left-color: #f0a04c; }
+.friend-outgoing { opacity: 0.75; }
+/* The two quiet edges, stated rather than left to the base rule: the panel
+   renders `friend-<edge>` straight off the wire's own word, so every value
+   FriendEdgeToString can produce needs a rule here or a new server state
+   ships unstyled. */
+.friend-mutual { border-left-color: #2a3550; }
+.friend-none { border-left-color: #2a3550; }
+.friend-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.friend-name { font-weight: 600; }
+.friend-faction {
+    background: #16304a;
+    color: #4cc9f0;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+}
+.friend-presence { color: #7a8496; font-size: 12px; }
+/* Presence is the panel's whole point, so the two states worth acting on are
+   the two that are not grey. `unknown` stays grey deliberately: it is what a
+   non-mutual row publishes, and colouring it would dress an absence as news. */
+.friend-presence-fighting { color: #7fd4a8; }
+.friend-presence-staging { color: #4cc9f0; }
+.friend-presence-online { color: #9aa4b5; }
+.friend-presence-offline { color: #7a8496; }
+.friend-presence-unknown { color: #7a8496; }
+/* The second click on a cross-faction join. Amber like the sentence above it,
+   because it is the same warning continued and not a new offer. */
+.friend-confirm-btn {
+    margin-top: 6px;
+    background: #f0a04c;
+    color: #241a0c;
+    font-size: 12px;
+    padding: 4px 12px;
+}
+.friend-confirm-btn:hover { background: #f7b978; }
+.friend-actions { display: flex; gap: 6px; margin-left: auto; }
+.friend-action-btn { font-size: 12px; padding: 4px 12px; }
+/* The closed panel's button, when somebody is waiting on an answer. The whole
+   button changes colour rather than just its text: the header's other buttons
+   are filled cyan, and amber text on that fill was both unreadable and easy to
+   miss — checked in the browser, which is the only place it could be. */
+.friends-btn-pending { background: #f0a04c; color: #241a0c; }
+.friends-btn-pending:hover { background: #f7b978; }
+
+/* ---- Chat (PLAN-lobby.md §3, task 9b) ---- */
+
+.chat-dock {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+}
+.chat-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.chat-head h3 { margin: 0; font-size: 15px; }
+.chat-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+/* A tab is a quiet control until it is the one being read: the panel can
+   easily hold six of them, and six filled cyan buttons read as six calls to
+   action rather than one conversation and five places it is not. */
+.chat-tab {
+    background: #182236;
+    color: #9aa4b5;
+    font-size: 12px;
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.chat-tab:hover { background: #22304a; color: #dfe6f0; }
+.chat-tab-active { background: #16304a; color: #4cc9f0; }
+.chat-tab-active:hover { background: #16304a; color: #4cc9f0; }
+/* Unread rides on the tab, amber like every other "this wants you" mark in
+   the lobby (`.friends-btn-pending`, the incoming-request edge). */
+.chat-unread {
+    background: #f0a04c;
+    color: #241a0c;
+    border-radius: 8px;
+    padding: 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.chat-tab-close { color: #7a8496; font-size: 13px; line-height: 1; }
+.chat-tab-close:hover { color: #ff6b6b; }
+/* The stream's own line — never a message. Amber because every state it
+   reports is one the player may have to act on (reconnecting, disconnected,
+   muted, a refused command). */
+.chat-notice {
+    font-size: 12px;
+    color: #f0a04c;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.chat-log {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    height: 220px;
+    overflow-y: auto;
+    background: #0f1626;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+.chat-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: #dfe6f0;
+}
+.chat-time { color: #55607a; font-size: 11px; font-variant-numeric: tabular-nums; }
+.chat-from { color: #4cc9f0; font-weight: 600; }
+.chat-from::after { content: ':'; color: #55607a; font-weight: 400; }
+/* `word-break` rather than nothing: a 500-character word is a legal message
+   and an unbreakable one stretches the panel past the page. */
+.chat-text { flex: 1; word-break: break-word; }
+/* Your own line is dimmer, and its name is the one green thing in the log:
+   you already know what you said, and the lines worth reading are other
+   people's. The three modifiers each paint the whole line rather than
+   qualifying `.chat-text` — `.chat-text` declares no colour, so it inherits,
+   and a rule that only exists as a descendant selector is a rule the panel's
+   own coverage test cannot see. */
+.chat-line-mine { color: #b9c2d0; }
+.chat-line-mine .chat-from { color: #7fd4a8; }
+/* A server line is the room talking: dimmer, italic, and marked down its left
+   edge so a moderation line ("bob was kicked by admin") cannot be mistaken for
+   somebody in the channel saying it. */
+.chat-line-system {
+    color: #9aa4b5;
+    font-style: italic;
+    border-left: 2px solid #55607a;
+    padding-left: 6px;
+    margin-left: -8px;
+}
+.chat-line-action { color: #c9a0f0; font-style: italic; }
+/* §3.5's mention highlight. Amber like the unread badge and the notice line —
+   the lobby's one "this wants you" colour — and a tinted row rather than a
+   coloured name, because the thing being marked is the whole line. */
+.chat-line-mention {
+    background: #2a2416;
+    border-left: 2px solid #f0a04c;
+    padding-left: 6px;
+    margin-left: -8px;
+    border-radius: 3px;
+}
+.chat-line-mention .chat-text { color: #f3e2c8; }
+/* Links are anchors and nothing else (§3.5: no embeds). */
+.chat-link { color: #4cc9f0; text-decoration: underline; }
+.chat-link:hover { color: #7fdcff; }
+/* A standing mute is not the stream's amber: it is a refusal that will not
+   clear itself on a reconnect, and it sits above every other notice. */
+.chat-notice-mod {
+    color: #ff8f8f;
+    background: #2a1618;
+    border: 1px solid #5a2a2e;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+.chat-sound-btn {
+    background: none;
+    color: #7a8496;
+    font-size: 14px;
+    padding: 2px 6px;
+    margin-left: auto;
+}
+.chat-sound-btn:hover { color: #dfe6f0; }
+/* The operator's mute list: a record, so it reads as a table rather than as
+   chat, and it is dismissible because it is a snapshot. */
+.chat-mutes {
+    background: #131b2e;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+.chat-mutes-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: #9aa4b5;
+    margin-bottom: 4px;
+}
+.chat-mutes-row { color: #dfe6f0; font-variant-numeric: tabular-nums; }
+/* Its own rule rather than `.chat-tab-close`, which is a bare colour on a
+   `<span>`: worn by a `<button>` it inherits the lobby's filled-cyan default
+   and a dismiss cross reads as the panel's primary action. Only the
+   screenshot showed it. */
+.chat-mutes-close {
+    background: none;
+    color: #7a8496;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+}
+.chat-mutes-close:hover { color: #ff6b6b; }
+.chat-compose { display: flex; gap: 8px; margin-top: 8px; }
+.chat-input {
+    flex: 1;
+    background: #0f1626;
+    border: 1px solid #2a3550;
+    border-radius: 4px;
+    color: #dfe6f0;
+    padding: 6px 10px;
+    font-size: 13px;
+}
+.chat-input:focus { outline: none; border-color: #4cc9f0; }
+.chat-send-btn { font-size: 12px; padding: 4px 14px; }
+/* The composer's hint line names the slash commands, so they have to be
+   legible against the panel rather than the browser's default serif. */
+.chat-log code {
+    background: #182236;
+    color: #9aa4b5;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12px;
+}
 
 .create-form {
     margin-top: 16px;
@@ -311,8 +932,17 @@ button.danger:hover { background: #cc3333; }
     margin-bottom: 16px;
 }
 
+/* Wraps rather than overflows. A `<select>`'s min-content width is its
+ * widest option, so a row with three dropdowns in it could not shrink to
+ * fit the card: the AI row pushed its own status text and remove button
+ * out past the card's right edge, onto the page background (found while
+ * fixing PLAN-endtoend.md D61 — the two defects are on the same row, and
+ * the profile dropdown, whose widest option is "NPC Raider (needs
+ * scenario slate)", is what tips it over). Wrapping keeps every control
+ * inside the card at any width and keeps the full option labels. */
 .player-row {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 8px 12px;
     background: #0f1626;
@@ -329,14 +959,29 @@ button.danger:hover { background: #cc3333; }
 
 .player-name { flex: 1; font-weight: 500; }
 
-.team-select {
+/* Every dropdown that sits inside a player or AI row, styled as one
+ * control strip. Listed together rather than as four near-identical
+ * rules: `.ai-team-select` and `.ai-profile-select` were each added with
+ * the markup that renders them and neither ever picked up a rule, so an
+ * AI row painted two native white selects between the dark ones
+ * (PLAN-endtoend.md D61). A new dropdown class belongs on this list —
+ * `lobby-css-coverage.test.ts` fails if one is added without it. */
+.team-select,
+.startpos-select,
+.ai-team-select,
+.ai-profile-select {
     padding: 4px 8px;
+    min-width: 0;
     background: #0f1626;
     color: #e0e0e0;
     border: 1px solid #334;
     border-radius: 4px;
     font-size: 12px;
 }
+.team-select:disabled,
+.startpos-select:disabled,
+.ai-team-select:disabled,
+.ai-profile-select:disabled { color: #667; border-color: #223; }
 
 .player-status {
     font-size: 12px;
@@ -367,18 +1012,8 @@ button.danger:hover { background: #cc3333; }
     min-width: 60px;
 }
 
-/* Start-position dropdown appears next to the team select in each
- * player and AI row. Uses the same visual treatment as .team-select
- * so the row reads as one coherent control strip. */
-.startpos-select {
-    padding: 4px 8px;
-    background: #0f1626;
-    color: #e0e0e0;
-    border: 1px solid #334;
-    border-radius: 4px;
-    font-size: 12px;
-}
-.startpos-select:disabled { color: #667; border-color: #223; }
+/* (The start-position, side and profile dropdowns that appear in these
+ * rows are styled with .team-select above — one shared control strip.) */
 
 .ai-remove-btn {
     background: transparent;
@@ -406,3 +1041,56 @@ button.danger:hover { background: #cc3333; }
     padding: 4px 12px;
     font-size: 12px;
 }
+
+/* ── The war notice (PLAN-persistence task 4d) ─────────────────────────────
+   A war that comes back, goes to sleep or loses its tail says so out loud,
+   rather than flipping a badge on a list tick nobody is watching. Bottom-left
+   so it cannot land on the parked-session banner (bottom-centre) or on the
+   war list's own buttons, and it is dismissible because a player who is mid-
+   click on something else did not ask for it.
+
+   Three colourings, and they are the card's own split: the accent green is for
+   news you can act on, the warm amber for a wait, and the red-brown for the
+   one reading where frames are gone. A "your war is back" toast and a "your
+   war lost its last stretch" toast wearing the same colour would be the same
+   defect task 4a's badge split existed to fix. */
+.war-notice {
+    position: fixed;
+    left: 1.5rem;
+    bottom: 1.5rem;
+    z-index: 140;
+    max-width: 22rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: #161a22;
+    border: 1px solid #2a3140;
+    border-left-width: 3px;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    color: #e6e8ec;
+    /* Stated, not inherited. The notice is appended to `body`, OUTSIDE the
+       `#lobby` root that carries the lobby's font (and its text colour), so it
+       inherits the page default — which rendered the whole toast in the
+       browser's serif until the harness screenshot showed it. Same reason the
+       parked-session banner sets its own. */
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+}
+.war-notice-good { border-left-color: #7fd4a8; }
+.war-notice-wait { border-left-color: #e0c67a; }
+.war-notice-bad  { border-left-color: #d9a06a; }
+.war-notice-title { font-weight: 600; }
+.war-notice-detail { color: #b4bccb; font-size: 12px; line-height: 1.35; }
+.war-notice-actions { display: flex; gap: 8px; align-items: center; }
+.war-notice-actions .join-btn { grid-row: auto; grid-column: auto; }
+.war-notice-dismiss {
+    background: none;
+    border: 0;
+    color: #7a8496;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+.war-notice-dismiss:hover { color: #e6e8ec; }

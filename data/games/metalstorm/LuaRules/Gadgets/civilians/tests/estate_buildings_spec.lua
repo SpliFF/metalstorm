@@ -64,6 +64,9 @@ local function freshWorld()
         Include = function(path)
             local mod = path:match('civilians/([%w_]+)%.lua$')
             if mod then return require(mod) end
+            -- Shared gadget modules live one level up (tick.lua, D15).
+            local shared = path:match('^LuaRules/Gadgets/([%w_]+)%.lua$')
+            if shared then return dofile('../' .. shared .. '.lua') end
             -- mapdata/civilians.lua — no map placement data in this fixture.
             error('no such file: ' .. tostring(path))
         end,

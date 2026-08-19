@@ -17,12 +17,17 @@
 //   - live rulesParams data / the command-send API (`ctx.sendCommand`
 //     stand-in, warn-once-if-absent) — see parley-panel.js's header for the
 //     shared rationale.
-//   - the intent report (§6.3 "what my AI is doing"): the AI-side writer is
-//     EXPLICITLY gated on engine ask I1 (ai/strategos/actuators.lua's
-//     `_publishIntent` stays a documented no-op until then) — this panel
-//     reads the same guidance_<team>_intent_* convention the writer WOULD
-//     populate, so wiring is a pure no-op-removal once I1 lands, but shows
-//     an honest "no intent data yet" state today rather than fabricating one.
+//
+// The intent report (§6.3 "what my AI is doing") IS wired: engine ask I1
+// landed 2026-08-14 (PLAN-ai-synced-write.md), so `game_ai_guidance.lua`
+// publishes `guidance_<team>_intent_<i>_{goal,group,spend,goal_id}` from the
+// authority charge path and the strategos actuator tags each directive with
+// its planner goal id. `goal_id` is the loop-closing field: it is what the
+// Veto button sends back, so a line WITHOUT one (a scripted-slate directive
+// carries no planner goal) still renders — it just carries no Veto button,
+// because there would be nothing for the planner to blacklist.
+
+import { formatAuthority } from '../lib/authority-format.js';
 
 const STANCES = ['defensive', 'balanced', 'aggressive'];
 const PAINTS = ['normal', 'priority', 'forbidden'];
@@ -37,6 +42,15 @@ function warnNoSendCommand(action) {
     `[ai-command-panel] ctx.sendCommand is not wired yet — ${action} is a no-op ` +
     '(FIDELITY-STANDIN: no validated command-send API for native-ui widgets yet, see file header).'
   );
+}
+
+/** Quote-safe interpolation for an HTML attribute value. The goal id is the one
+ * value here that has to survive a round trip *out of* the DOM (`dataset.goal`
+ * is read back and sent on the wire), and it originates in AI-authored planner
+ * data rather than in this file — a bare `"` in it would otherwise end the
+ * attribute and lose the id. */
+function attrValue(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
 function splitList(v) {
@@ -140,7 +154,14 @@ export default {
     });
     this.el.addEventListener('click', (ev) => {
       const veto = ev.target.closest('.ms-ai-intent-veto');
-      if (veto) this._send('guidance.veto', { goalId: Number(veto.dataset.goal) });
+      // The goal id is sent as the RAW STRING the gadget published. Planner goal
+      // ids are strings ('def:basin_a', 'obj:12' — ai/strategos/slate.lua), so
+      // the old `Number(...)` produced NaN for every real one and the wire
+      // dropped the field — the same coercion that made `guidance.veto` refuse
+      // every real goal on the gadget side (PLAN-ai-synced-write §6, task 2).
+      // A numeric id survives this unchanged: the gadget's handler still does
+      // `Wire.num(fields.goalId) or fields.goalId`.
+      if (veto) this._send('guidance.veto', { goalId: veto.dataset.goal });
     });
   },
 
@@ -171,22 +192,38 @@ export default {
       lockKeys.map((k) => `<li><span class="ms-ai-key">group ${k}</span></li>`).join('') ||
       '<li class="nui-empty">No locked groups</li>';
 
-    // §6.3: the intent-report WRITER is gated on engine ask I1 (see file
-    // header) — this list is honestly empty until that lands, never faked.
+    // §6.3: one line per directive the AI actually paid for (the gadget drives
+    // the report off the charge path, so there are no phantom lines). The LABEL
+    // stays `goal → group` — a human-readable verb like 'Assault', which is what
+    // the panel has always shown; the VETO carries `goal_id`, the planner's own
+    // id, which is the only value the planner can blacklist.
     const intentCount = Number(get('intent_count')) || 0;
     const intentItems = [];
     for (let i = 0; i < intentCount; i++) {
       const goal = get(`intent_${i}_goal`);
       const group = get(`intent_${i}_group`);
       const spend = get(`intent_${i}_spend`);
+      // Published as '' rather than omitted when the entry has no tag (see the
+      // gadget's publishIntent comment), so absent and empty both mean "no
+      // planner goal": render the line, render no Veto button.
+      const goalId = get(`intent_${i}_goal_id`);
+      const vetoable = goalId !== undefined && goalId !== null && String(goalId) !== '';
       intentItems.push(
         `<li><span class="ms-ai-key">${goal} → ${group}</span>` +
-        `<span class="nui-badge nui-badge--gold">⬡ ${spend}</span>` +
-        `<button type="button" class="nui-btn nui-btn--sm nui-btn--danger ms-ai-intent-veto" data-goal="${goal}">Veto</button></li>`
+        // An intent's spend is an authority amount like any other, so it wears
+        // the shared format (D49). (The change feed below is deliberately NOT
+        // formatted: its `value` is whatever field changed — a stance string as
+        // often as a number.)
+        `<span class="nui-badge nui-badge--gold">⬡ ${formatAuthority(spend)}</span>` +
+        (vetoable
+          ? '<button type="button" class="nui-btn nui-btn--sm nui-btn--danger ms-ai-intent-veto"' +
+            ` data-goal="${attrValue(goalId)}">Veto</button>`
+          : '') +
+        '</li>'
       );
     }
     this.el.querySelector('.ms-ai-intent-list').innerHTML =
-      intentItems.join('') || '<li class="nui-empty">No intent data yet (requires engine ask I1)</li>';
+      intentItems.join('') || '<li class="nui-empty">No intent data yet</li>';
     // Stance is the one thing worth reading off a collapsed header.
     this.ctx.setBadge?.(stance || null);
 

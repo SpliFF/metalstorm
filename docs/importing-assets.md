@@ -143,7 +143,7 @@ The textureconverter takes one source texture and emits up to four channel-split
 | `<stem>_emissive.ktx2` | tex2.R replicated to RGB | `material.emissiveTexture` |
 | `<stem>_orm.ktx2` | tex2: `R=255` (no AO), `G=255-tex2.G` (specular → roughness), `B=tex2.B` (metallic) | `material.pbrMetallicRoughness.metallicRoughnessTexture` *and* `material.occlusionTexture` (one texture, two refs — spec-supported) |
 
-Inputs decode via stb_image (TGA, PNG, JPEG, BMP) or a small DDS decoder (DXT1/3/5/BC4/BC5/uncompressed RGBA). Outputs encode as UASTC + Zstd KTX2 — Babylon's KTX2 transcoder picks a GPU-native format (BC7, ASTC, ETC2 depending on platform) at upload time. Every output carries an explicit `KTXorientation=S=r,T=d` key in the KTX2 key/value data so loaders can't fall back to a different orientation default; rows are always top-down (V increases downwards), matching glTF 2.0.
+Inputs decode via stb_image (TGA, PNG, JPEG, BMP) or a small DDS decoder (DXT1/3/5/BC4/BC5/uncompressed RGBA). Outputs encode as UASTC + Zstd KTX2 — Babylon's KTX2 transcoder picks a GPU-native format (BC7, ASTC, ETC2 depending on platform) at upload time. Every output carries an explicit `KTXorientation=rd` key in the KTX2 key/value data so loaders can't fall back to a different orientation default; rows are always top-down (V increases downwards), matching glTF 2.0. (`rd` is the KTX2 §3.11.4 spelling — the KTX**1** form `S=r,T=d`, written until PLAN-maps M8f, makes the file invalid to the Khronos `ktx` CLI.) Outputs also carry `KTXwriter=springrts-web textureconverter / libktx v4.0`, because the tree mixes our output with forge's `Basis Universal` and `toktx` files and provenance is the first question any texture investigation asks.
 
 Sibling KTX2s share encoding across models — when two S3Os reference the same `3do2s3o_atlas_1.tga`, the four output KTX2s are emitted once and both `.gltf` files point at them.
 
@@ -191,7 +191,7 @@ content/games/<gameId>/unittextures/<stem>1_invert.<ext>  (optional marker)
         ├─ Decode (DDS / TGA / PNG / ...) — output is always top-down RGBA8
         ├─ ApplyChannelOp (diffuse / team / emissive / orm)
         ├─ Encode UASTC + Zstd KTX2
-        └─ Stamp KTXorientation=S=r,T=d so loaders can't misread the orientation
+        └─ Stamp KTXorientation=rd (orientation) + KTXwriter (provenance)
         |
         v
 data/games/<gameId>/models/<stem>.gltf + .bin + KTX2 siblings

@@ -67,6 +67,10 @@ private:
 	bool HandleCollisions(bool checkCollisions);
 
 public:
+	movetypesnapshot::Kind SnapshotKind() const override { return movetypesnapshot::Kind::HoverAir; }
+	void SnapshotCapture(movetypesnapshot::MoveTypeState& s) const override;
+	void SnapshotApply(const movetypesnapshot::MoveTypeState& s) override;
+
 	enum FlyState {
 		FLY_CRUISING,
 		FLY_CIRCLING,

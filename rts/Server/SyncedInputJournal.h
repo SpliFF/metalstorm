@@ -195,7 +195,15 @@ struct Record {
     int32_t   frame    = 0;     ///< sim frame the input was applied at
     TickPhase phase    = TickPhase::Inbound;
     InputKind kind     = InputKind::ClientMessage;
-    uint8_t   subKind  = 0;     ///< ClientPayload tag when kind == ClientMessage
+    /// Which verb, within the kind. ClientPayload tag when kind ==
+    /// ClientMessage; the PlayerLeft reason when kind == PlayerDisconnect;
+    /// the AICommandKind when kind == AICommand (SG1 task 5(b): without it
+    /// every AI record on `/api/journal` reads as one anonymous
+    /// `ai-command` row, so the push order of an `ai.intent` LuaMsg against
+    /// the directive it annotates — the ONE ordering the correlation depends
+    /// on — was not observable on a live run at all). 0 for the kinds that
+    /// have no second axis.
+    uint8_t   subKind  = 0;
     int32_t   playerId = -1;    ///< -1 = unattributed (server/operator/test AI)
     /// Transport-level source id for kind == ClientMessage; 0 otherwise.
     ///
@@ -298,7 +306,14 @@ public:
                        const std::string& code);
     /// `blob` is the AICommand POD as drained — opaque here on purpose; the
     /// journal stores bytes and the replay driver re-pushes them.
-    bool RecordAICommand(int32_t playerId, const uint8_t* data, size_t size);
+    ///
+    /// `kind` is the AICommandKind, passed in rather than read off `data[0]`:
+    /// the caller has it typed, and a decoder here would tie the journal to
+    /// the codec's byte layout for a value used only for observability. It is
+    /// the same number the payload's first byte carries — the doctest asserts
+    /// the two agree, which is what stops the two from drifting.
+    bool RecordAICommand(int32_t playerId, uint8_t kind,
+                         const uint8_t* data, size_t size);
     bool RecordGameStart(const std::string& setupSummary);
     bool RecordSnapshotRestore(int32_t fromFrame, int32_t toFrame);
     /// Record what a successful AuthRequest on `clientId` resolved to. Emitted

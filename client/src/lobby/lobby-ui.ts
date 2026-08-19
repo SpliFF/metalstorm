@@ -12,6 +12,36 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
+import { formatJoinPreview, type WarJoinPreview } from './join-preview';
+import { formatDigest } from './war-digest';
+import { noticeFor, parseWarStateEvent } from './war-notice';
+import {
+    filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
+    warStateBadge, formatYourWar,
+    formatDeploy, WAR_FILTER_LABELS,
+    type DeployResult, type WarFilter, type WarInfo, type WarRow,
+} from './war-browser';
+import {
+    friendActions, friendFactionLabel, friendJoinNeedsConfirm, friendStatusLine,
+    friendWarRooms,
+    formatFriendJoin, formatFriendsHere, pendingRequestCount, sortFriends,
+    type FriendJoinResult, type FriendRow,
+} from './friends';
+import {
+    ChatModel, CHAT_STREAM_MAX_ATTEMPTS, CHAT_TICKET_TTL_SEC,
+    actionBody, chatTime, hasMention, isActionLine, linkSegments, moderationActive,
+    moderationNoticeText, muteRowLine, parseChatInput, pmOther, shouldNotify,
+    streamRecovery, tabKey,
+    type ChatModerationEvent, type ChatMuteRow,
+} from './chat';
+import {
+    classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
+    type TotpStatus,
+} from './totp';
+import {
+    classifyUpgradeResponse, clearDeviceToken, decideBoot, describeUpgradeCost,
+    displayGuestName, DEVICE_TOKEN_KEY, storeDeviceToken,
+} from './guest';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -35,14 +65,23 @@ import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
 import { RoomStateUpdate } from '../protocol/spring-web/room-state-update.js';
 import { renderTemplate } from '../ui/ui.js';
 import {
-    defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
+    defaultTeamForNewSlot, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
-import { decideRoomTransition } from './room-transition.js';
+import { decideRoomTransition, type SessionKind } from './room-transition.js';
+import { resolveRoomSeat, roomSeatStatus, type RoomSeat } from './room-seat.js';
+import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
+import {
+    ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, browserTokenStore,
+    fetchWarReconnectToken, refreshAccessToken, storeTokens,
+} from './auth-tokens.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
 import {
-    defaultScenarioFor, parseScenarioList, resolveScenarioLabel, scenarioNote,
-    scenarioOptionLabel, scenariosForMap,
+    defaultScenarioFor, noWarNote, noWarReason, parseScenarioList,
+    resolveScenarioLabel, scenarioNote, scenarioOptionLabel, scenariosForMap,
 } from './scenario-picker.js';
+import {
+    defaultAIId, defaultGameId, gameOptionLabel, gameOptionState,
+} from './game-picker.js';
 import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
@@ -64,6 +103,14 @@ interface RoomInfo {
     /// than a game. Joining one goes through /api/replays/watch, not
     /// /api/rooms/join — the watch route is what knows about the recording.
     replayFile?: string;
+    /// 'skirmish' | 'persistent' (task 1). The browser has to tell a war from
+    /// a skirmish for every row — a war is the only kind that gets a pre-join
+    /// preview, because it is the only kind whose seat is not chosen.
+    sessionKind?: string;
+    /// The `war` block a persistent-war room carries (§4, task 6): sides,
+    /// seat counts, and — when a server is publishing — live populations,
+    /// spectators and region control. Absent on every skirmish.
+    war?: WarInfo;
 }
 
 interface RoomPlayerInfo {
@@ -125,6 +172,12 @@ interface AvailableGameInfo {
     /// to what a third-party glTF viewer renders. Unknown values fall
     /// back to gameplay on the renderer side.
     lighting: string;
+    /// True when the game is kept on disk but does not run (PLAN-endtoend.md
+    /// D26). Drives the disabled option in the create-room picker; the server
+    /// enforces the same rule on POST /api/rooms.
+    archived: boolean;
+    /// One sentence on why, for the disabled option's tooltip.
+    archivedReason: string;
 }
 
 /// Mirrors ai/strategos/config.lua's Config.PROFILES allow-list. A
@@ -154,6 +207,12 @@ interface CurrentRoom {
     /// this room will stage; the room screen shows it so the coupling
     /// between map and war is visible rather than implicit.
     modOptions: Record<string, string>;
+    /// 'persistent' for a war, 'skirmish' otherwise (task 1's SessionKind, as
+    /// the room JSON reports it). Task 8a reads it to decide whether to mint a
+    /// per-war reconnect token on entry — a skirmish has nothing to come back
+    /// to. Optional because the flatbuffer RoomUpdate does not carry it; that
+    /// path carries the last JSON value forward, exactly like `modOptions`.
+    sessionKind?: string;
 }
 
 export class LobbyUI {
@@ -171,7 +230,7 @@ export class LobbyUI {
     /// would otherwise double-fire. Reset on the state>=5 (Ended) branch
     /// below so a later restart of the *same* persistent room re-arms it.
     private gameStartedForRoomId: number | null = null;
-    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
+    private onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void;
     /// PLAN-quickstart.md Part B: true while a detached game session is
     /// parked (worker alive, `currentRoom` still points at that game). Guards
     /// `updateCurrentRoomFromJson`'s gameRunning branch — while detached, a
@@ -189,10 +248,63 @@ export class LobbyUI {
     private inGame = false;
     private onParkedRoomEnded?: () => void;
     private parkedBanner: HTMLElement | null = null;
+    /// The war notice on screen (PLAN-persistence task 4d), if any. One at a
+    /// time and the newest wins: two wars moving in the same tick is real (a
+    /// deploy hibernates every war at once), and a stack of toasts would cover
+    /// the war list the player is being told to look at.
+    private warNotice: HTMLElement | null = null;
+    private warNoticeTimer: ReturnType<typeof setTimeout> | null = null;
     private myPlayerId = 0;
+    /// This account's permanent faction, from the `faction` field every auth
+    /// response now carries (login / register / validate — PLAN-endtoend.md
+    /// D40). Empty for an account that has none: a dev or `/api/rooms/direct`
+    /// manifest account, or a pre-faction legacy one.
+    ///
+    /// The server owns the consequence — it seats by faction and refuses a
+    /// cross-faction `POST /api/rooms/team`. The client holds it only so the
+    /// room screen can stop offering the side that would be refused.
+    private myFaction = '';
     private pendingRejoinRoomId = 0;
-    private authToken = '';
+
+    /// Q-P3: the room the player has just explicitly asked to (re)join, live
+    /// only for the length of that `joinRoom` call. It is what tells
+    /// `decideRoomTransition` that a live war it has already been in should be
+    /// re-entered — a passive poll mentioning the same war must not, or
+    /// quitting a war to the lobby would be undone by the next broadcast.
+    private rejoinRequestedRoomId: number | null = null;
+
+    /// 8a-follow-on: no longer a cached string. LobbyUI was a holder of the
+    /// access token that task 8a's "six call sites" note did not even count —
+    /// one `private authToken` read by ~20 methods for the life of the page.
+    /// Every assignment to it already wrote localStorage in the next line or
+    /// two, so the field was a *copy* whose only possible divergence was going
+    /// stale; at a 1 h TTL it goes stale inside one session. Accessors over
+    /// the store, so a renewal in this tab or a peer's is picked up by every
+    /// reader with no plumbing.
+    ///
+    /// Deliberately the RAW stored value, not `getAccessToken` — the lobby's
+    /// HTTP surface observes expiry as a 401 and reacts to it (tryAutoLogin),
+    /// and that path is better than pre-emptively sending no credential at all.
+    private get authToken(): string {
+        return browserTokenStore.get(ACCESS_TOKEN_KEY) ?? '';
+    }
+    private set authToken(v: string) {
+        if (v) browserTokenStore.set(ACCESS_TOKEN_KEY, v);
+        else browserTokenStore.remove(ACCESS_TOKEN_KEY);
+    }
     private roomEventSource: EventSource | null = null;
+    /// Per-war pre-join preview for THIS account, keyed by room id (§2.4).
+    private warPreviews = new Map<number, WarJoinPreview>();
+    /// Which wars the browser is listing (§4). Defaults to the question §4
+    /// says a player is actually asking — "wars where my faction is
+    /// fighting" — and is remembered for the session, not persisted: it is a
+    /// view, and a player who comes back tomorrow is asking it fresh.
+    private warFilter: WarFilter = 'my-faction';
+    /// The friends list (§8, task 9a), or null on a lobby whose friends routes
+    /// do not answer. Null and empty are different states and the panel reads
+    /// them differently: null hides the whole feature, `[]` says "no friends
+    /// yet" and offers the add box.
+    private friends: FriendRow[] | null = null;
     /// Tracks the room state at last full render so patchRoom() can
     /// detect when the action buttons need to change (state bracket
     /// shift) and fall back to a full re-render.
@@ -282,7 +394,7 @@ export class LobbyUI {
     private suppressed = false;
 
     constructor(
-        onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void,
+        onGameStart?: (gameServerPort: number, mapId: string, gameId: string, modOptions: Record<string, string>) => void,
         templates?: LobbyTemplates,
         suppressed = false,
     ) {
@@ -311,10 +423,17 @@ export class LobbyUI {
         console.log(`[lobby] init: savedUser=${savedUser ?? 'null'} savedToken=${savedToken ? savedToken.substring(0,8) + '...' : 'null'} suppressed=${suppressed}`);
         if (this.suppressed) {
             this.hide();
-        } else if (savedUser && savedToken) {
-            this.tryAutoLogin(savedUser, savedToken);
         } else {
-            this.showLogin();
+            // Task 8c: a third boot state — no session, but a guest device
+            // token. The ordering is `decideBoot`'s, and it runs one way only
+            // (session beats device); see guest.ts for why the reverse breaks
+            // every reload after an upgrade.
+            const boot = decideBoot(
+                savedUser && savedToken ? savedToken : null,
+                browserTokenStore.get(DEVICE_TOKEN_KEY));
+            if (boot.kind === 'session') this.tryAutoLogin(savedUser!, savedToken!);
+            else if (boot.kind === 'resume-guest') void this.resumeGuest(boot.deviceToken);
+            else this.showLogin();
         }
     }
 
@@ -358,20 +477,38 @@ export class LobbyUI {
             if (resp.ok) {
                 const data = await resp.json();
                 if (data.valid) {
-                    this.authToken = token;
-                    this.myPlayerId = data.user_id ?? 0;
-                    console.log(`[lobby] auto-login OK: user=${data.username}`);
-                    localStorage.setItem('springrts-token', token);
-
-                    const savedRoomId = localStorage.getItem('springrts-game-room');
-                    if (savedRoomId) {
-                        this.pendingRejoinRoomId = parseInt(savedRoomId);
-                        this.joinRoom(this.pendingRejoinRoomId);
-                    }
-                    this.startPolling();
-                    this.showBrowser();
+                    this.adoptSession(token, data);
                     return;
                 }
+            }
+            // Task 8a / §7.2: the access session aged out. Before task 8a this
+            // was the end of the account — the player retyped their password,
+            // which is exactly what "reconnect over days" is not. A rotating
+            // refresh token turns it into a round trip nobody sees.
+            //
+            // Placed on the 401 path rather than on a timer on purpose: an
+            // expiry the client never observes needs no refresh, and a timer
+            // would rotate the credential (and burn a family generation) on
+            // every idle tab.
+            if (resp.status === 401) {
+                const outcome = await refreshAccessToken(
+                    CONFIG.httpUrl, browserTokenStore);
+                if (outcome.kind === 'refreshed') {
+                    console.log('[lobby] access session refreshed silently');
+                    this.autoLoginAttempts = 0;
+                    this.adoptSession(outcome.token, outcome.data);
+                    return;
+                }
+                if (outcome.kind === 'rejected' || outcome.kind === 'none') {
+                    // Nothing left to try. Retrying the same dead access token
+                    // four more times just delays the login form by 4 s.
+                    this.autoLoginAttempts = 0;
+                    localStorage.removeItem('springrts-token');
+                    this.showLogin();
+                    return;
+                }
+                // 'unreachable' — fall through to the retry ladder below, which
+                // is what it is for.
             }
         } catch { /* network error */ }
 
@@ -384,6 +521,37 @@ export class LobbyUI {
             localStorage.removeItem('springrts-token');
             this.showLogin();
         }
+    }
+
+    /// Enter the logged-in state with `token`. Shared by the validate path and
+    /// the refresh path so the two cannot drift — the refresh arm is the one
+    /// nobody exercises by hand, and it is the one that would quietly skip
+    /// e.g. the saved-room rejoin.
+    private adoptSession(token: string, data: {
+        user_id?: number; username?: string; faction?: string;
+        refresh_token?: string; expires_in?: number;
+    }): void {
+        this.authToken = token;
+        this.myPlayerId = data.user_id ?? 0;
+        this.myFaction = data.faction ?? '';
+        console.log(`[lobby] auto-login OK: user=${data.username}`
+            + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
+        // 8a-follow-on: `expires_in` is forwarded, and on THIS path it is the
+        // session's remaining life rather than the full TTL (/api/auth/validate
+        // reports on a session it did not mint). Without it the renewal timer
+        // has nothing to arm against on every visit after the first — which is
+        // every visit.
+        storeTokens({ token, refresh_token: data.refresh_token,
+                      expires_in: data.expires_in },
+                    browserTokenStore);
+
+        const savedRoomId = localStorage.getItem('springrts-game-room');
+        if (savedRoomId) {
+            this.pendingRejoinRoomId = parseInt(savedRoomId);
+            this.joinRoom(this.pendingRejoinRoomId);
+        }
+        this.startPolling();
+        this.showBrowser();
     }
 
     getConnection(): Connection | null { return this.connection; }
@@ -478,6 +646,19 @@ export class LobbyUI {
                 if (Array.isArray(rooms)) this.applyRoomList(rooms);
             } catch { /* ignore parse errors */ }
         });
+        // A war MOVED (PLAN-persistence task 4d). The list above carries the
+        // state as a datum, which is enough for a badge and not enough for a
+        // player who left a war days ago and is waiting for it to come back:
+        // the badge flips on a tick nobody is watching. This event is the
+        // interruption, and it arrives after the `rooms` event that describes
+        // the same war — the lobby orders them that way so the lookup below
+        // finds the NEW row.
+        es.addEventListener('war-state', (e: MessageEvent) => {
+            const ev = parseWarStateEvent(e.data);
+            if (!ev) return;
+            const notice = noticeFor(ev, this.warRows());
+            if (notice) this.renderWarNotice(notice);
+        });
         es.onerror = () => {
             // EventSource auto-reconnects; no manual retry needed
         };
@@ -488,6 +669,10 @@ export class LobbyUI {
             this.roomEventSource.close();
             this.roomEventSource = null;
         }
+        // Chat rides the same session: a logged-out browser must not keep a
+        // stream open against a ticket the server has just revoked, retrying
+        // it every few seconds for the life of the page.
+        this.stopChat();
     }
 
     private applyRoomList(rooms: any[]): void {
@@ -497,7 +682,17 @@ export class LobbyUI {
             state: r.state ?? 0, hasPassword: false,
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
             replayFile: r.replay_file,
+            sessionKind: r.session_kind,
+            war: r.war,
         }));
+
+        // Pre-join legibility (§2.4, task 5). Refreshed with the list rather
+        // than per card: the answer is per-account and changes when anyone
+        // else takes a seat, so it cannot ride the (shared) room broadcast,
+        // but one call per list tick is cheap where N calls per tick is not.
+        // Fire-and-forget — a war row renders without the line if it fails.
+        if (this.rooms.some(r => r.sessionKind === 'persistent'))
+            void this.refreshWarPreviews();
 
         // Check if our current room still exists
         if (this.currentRoom) {
@@ -516,6 +711,22 @@ export class LobbyUI {
         }
 
         if (this.currentScreen === 'browser') this.renderRoomList();
+    }
+
+    /// Ask the lobby what joining each war would do to THIS account, and
+    /// re-render if we are looking at the browser. Never throws outward: a
+    /// preview is an enrichment, and a lobby that cannot answer must still
+    /// list its wars.
+    private async refreshWarPreviews(): Promise<void> {
+        try {
+            const rows = await this.lobbyPost('/api/wars/join-preview');
+            if (!Array.isArray(rows)) return;
+            this.warPreviews.clear();
+            for (const p of rows as WarJoinPreview[]) this.warPreviews.set(p.room_id, p);
+            if (this.currentScreen === 'browser') this.renderRoomList();
+        } catch (e) {
+            console.warn('[lobby] war join-preview failed', e);
+        }
     }
 
     private updateCurrentRoomFromJson(r: any): void {
@@ -538,6 +749,7 @@ export class LobbyUI {
             gameServerPort: r.game_server_port ?? 0,
             modOptions: (r.modoptions && typeof r.modoptions === 'object')
                 ? r.modoptions as Record<string, string> : {},
+            sessionKind: r.session_kind,
         };
 
         // Refresh AI list when entering a room with a different game
@@ -553,7 +765,12 @@ export class LobbyUI {
 
         const transition = decideRoomTransition(
             this.currentRoom.id, this.currentRoom.state, this.currentRoom.gameServerPort,
-            { gameStartedForRoomId: this.gameStartedForRoomId, inGame: this.inGame, detached: this.detached },
+            {
+                gameStartedForRoomId: this.gameStartedForRoomId, inGame: this.inGame,
+                detached: this.detached,
+                rejoinRequestedRoomId: this.rejoinRequestedRoomId,
+            },
+            this.currentRoom.sessionKind as SessionKind | undefined,
         );
         if (transition !== 'refresh-room-game-gone') {
             // A live game to reconnect to — persist the creds a page refresh
@@ -571,7 +788,19 @@ export class LobbyUI {
                 this.inGame = true;
                 this.stopPolling();
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                // Task 8a / §7.3: mint this account's long-TTL key back into
+                // the war it is about to enter, while the access session that
+                // authorises the mint is still live. Fire-and-forget and
+                // deliberately not awaited — entering the game must not wait
+                // on a credential whose whole purpose is the visit AFTER this
+                // one. Wars only: a skirmish dies with its lobby, so the route
+                // refuses one and there is nothing to cache.
+                if (this.currentRoom.sessionKind === 'persistent') {
+                    void fetchWarReconnectToken(
+                        CONFIG.httpUrl, this.authToken, this.currentRoom.id,
+                        browserTokenStore);
+                }
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
                 return;
             case 'refresh-room-game-gone':
                 // E4: the game ended while a session was parked — dispose the
@@ -628,6 +857,10 @@ export class LobbyUI {
                 descEl.textContent = f ? f.description : '';
             };
         }
+        // Task 8c. Optional in the same way every other control here is: a
+        // game's template override may ship a login screen without it.
+        const guestBtn = document.getElementById('login-guest-btn') as HTMLButtonElement | null;
+        if (guestBtn) guestBtn.onclick = () => { void this.signInAsGuest(); };
         this.fetchFactionsForSignup();
     }
 
@@ -665,6 +898,8 @@ export class LobbyUI {
         const pass = (document.getElementById('login-pass') as HTMLInputElement).value;
         const pass2 = (document.getElementById('login-pass2') as HTMLInputElement).value;
         const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
+        const totpEl = document.getElementById('login-totp') as HTMLInputElement | null;
+        const totpGroup = document.getElementById('login-totp-group');
         const msgEl = document.getElementById('login-msg')!;
 
         if (!user) { msgEl.textContent = 'Enter a username'; return; }
@@ -676,39 +911,539 @@ export class LobbyUI {
         msgEl.className = 'msg';
 
         try {
-            // Try login first, then register if login fails
+            // Task 8d: the code rides on the FIRST login attempt when the
+            // player has already been challenged, rather than on a second
+            // round-trip. The password is re-sent with it because the server
+            // authenticates both factors in one call — there is no
+            // half-authenticated state on the server, deliberately, since one
+            // would be a credential in its own right.
+            const code = totpEl ? normaliseCode(totpEl.value) : '';
             let resp = await fetch(`${CONFIG.httpUrl}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: user, password: pass }),
+                body: JSON.stringify(code
+                    ? { username: user, password: pass, totp_code: code }
+                    : { username: user, password: pass }),
             });
 
-            if (!resp.ok && pass2) {
-                // Registration attempt (confirm password was provided)
+            let data = await resp.json().catch(() => ({}));
+            // A two-factor challenge is a failed login that must NOT fall
+            // through to registration — see classifyLoginResponse.
+            let outcome = classifyLoginResponse(resp, data, pass2 !== '');
+            if (outcome.kind === 'totp-required') {
+                totpGroup?.classList.remove('hidden');
+                totpEl?.focus();
+                // The code field is cleared on a rejection so the player is
+                // not editing a stale six digits — a code that was refused for
+                // being replayed looks identical to one refused for being
+                // wrong, and both want a fresh one.
+                if (code && totpEl) totpEl.value = '';
+                msgEl.textContent = code ? outcome.message
+                    : 'Enter the code from your authenticator app';
+                msgEl.className = code ? 'msg error' : 'msg';
+                return;
+            }
+            if (outcome.kind === 'register') {
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username: user, password: pass, faction }),
                 });
+                data = await resp.json().catch(() => ({}));
+                outcome = classifyLoginResponse(resp, data, false);
             }
-
-            const data = await resp.json();
-            if (!resp.ok || !data.token) {
-                msgEl.textContent = data.error || 'Login failed';
+            if (outcome.kind !== 'ok') {
+                msgEl.textContent = outcome.kind === 'failed' ? outcome.message : 'Login failed';
                 msgEl.className = 'msg error';
                 return;
             }
 
             this.authToken = data.token;
             this.myPlayerId = data.user_id ?? 0;
+            // Both /login and /register echo the account's faction (D40); the
+            // register-time value used to be dropped on the floor here.
+            this.myFaction = data.faction ?? '';
             localStorage.setItem('springrts-username', user);
-            localStorage.setItem('springrts-token', data.token);
-            console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`);
+            // Task 8a: the access token AND the 30-day rotating refresh token
+            // the response now carries. Written through storeTokens so the
+            // "never clear what the response omitted" rule lives in one place.
+            storeTokens(data, browserTokenStore);
+            console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`
+                + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
             this.startPolling();
             this.showBrowser();
         } catch (err) {
             msgEl.textContent = `Connection failed: ${err}`;
             msgEl.className = 'msg error';
+        }
+    }
+
+    /**
+     * Leave the account entirely (PLAN-endtoend.md D45). The ordering and the
+     * best-effort semantics are `runLogout`'s; this supplies the effects.
+     */
+    async logout(): Promise<void> {
+        const token = this.authToken;
+        await runLogout({
+            hasToken: token !== '',
+            inRoom: this.currentRoom !== null,
+            leaveRoom: () => this.lobbyPost('/api/rooms/leave'),
+            // Task 8a: the refresh token rides along in the body so the server
+            // revokes the whole rotation family, not just the session row.
+            // Read here rather than inside the closure's `token` because the
+            // two are different credentials under different keys.
+            revokeToken: () => fetch(`${CONFIG.httpUrl}/api/auth/logout`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    refresh_token: localStorage.getItem(REFRESH_TOKEN_KEY) ?? '',
+                }),
+            }),
+            clearLocalState: () => {
+                this.stopPolling();
+                this.clearParked();
+                for (const key of LOGOUT_CLEARED_KEYS) localStorage.removeItem(key);
+                this.authToken = '';
+                this.myPlayerId = 0;
+                this.myFaction = '';
+                this.currentRoom = null;
+                this.rooms = [];
+                this.replays = null;
+                this.pendingRejoinRoomId = 0;
+                this.autoLoginAttempts = 0;
+            },
+        });
+        console.log('[lobby] logged out');
+        this.showLogin();
+    }
+
+    /**
+     * §7.2's "log out everywhere" verb — the compromise response.
+     *
+     * Deliberately NOT what the header's Logout button does: one browser
+     * signing out must not evict the player's phone from a war they are
+     * standing in. This ends every session and every refresh family the
+     * account holds, then finishes as an ordinary local logout, because the
+     * token this browser is holding is one of the ones it just killed.
+     */
+    async logoutEverywhere(): Promise<void> {
+        const token = this.authToken;
+        if (token) {
+            try {
+                const resp = await fetch(`${CONFIG.httpUrl}/api/auth/logout-all`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`,
+                    },
+                    body: '{}',
+                });
+                const data = await resp.json().catch(() => ({}));
+                console.log('[lobby] logout-all:'
+                    + ` sessions=${data.sessions_revoked ?? '?'}`
+                    + ` refresh=${data.refresh_revoked ?? '?'}`);
+            } catch { /* best effort — the local half still runs */ }
+        }
+        await this.logout();
+    }
+
+    /// Wire the header's logout button. Shared by the browser and room
+    /// screens; both ship one, and a game's template override may ship
+    /// neither — hence the null check rather than a `!` assertion.
+    ///
+    /// `logout-all-btn` is optional in exactly the same way and is a separate
+    /// control rather than a modifier on the first: the two acts differ in
+    /// blast radius, and a shift-click that silently signed the player out of
+    /// their other devices is the kind of thing nobody discovers until it has
+    /// already happened to them.
+    private wireLogoutButton(): void {
+        const btn = document.getElementById('logout-btn') as HTMLButtonElement | null;
+        if (btn) btn.onclick = () => { void this.logout(); };
+        const allBtn = document.getElementById('logout-all-btn') as HTMLButtonElement | null;
+        if (allBtn) allBtn.onclick = () => { void this.logoutEverywhere(); };
+        this.wireTotpPanel();
+        this.wireGuestPanel();
+    }
+
+    // ===================== GUEST ACCOUNTS (task 8c) =====================
+
+    /// True while this session belongs to a provisional account. Held so the
+    /// browser screen can offer the upgrade — and so it can NOT offer it to
+    /// everyone else, for whom it is an invitation to become what they are.
+    private isProvisional = false;
+
+    /**
+     * Sign in with no account at all. The response is a real session on a real
+     * account, so everything downstream — polling, rooms, wars — is the
+     * ordinary path from here; the only difference is the device token, which
+     * is what makes this account survive closing the tab.
+     */
+    private async signInAsGuest(): Promise<void> {
+        const msgEl = document.getElementById('login-msg');
+        if (msgEl) { msgEl.textContent = 'Signing in…'; msgEl.className = 'msg'; }
+        try {
+            // The faction picker on the login form is the sign-up one, and it
+            // is only visible when a confirm-password has been typed. Sent if
+            // the player happened to choose — a guest may hold a provisional
+            // faction, and one that does can fight rather than only watch.
+            const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/guest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(faction ? { faction } : {}),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data?.token) {
+                if (msgEl) {
+                    msgEl.textContent = data?.error ?? 'Guest sign-in failed';
+                    msgEl.className = 'msg error';
+                }
+                return;
+            }
+            storeDeviceToken(data, browserTokenStore);
+            this.adoptGuestSession(data);
+        } catch (err) {
+            if (msgEl) {
+                msgEl.textContent = `Connection failed: ${err}`;
+                msgEl.className = 'msg error';
+            }
+        }
+    }
+
+    /// Come back as the guest this browser already is. Falls back to the login
+    /// screen rather than retrying: unlike an access token, a device token
+    /// that is refused is not going to start working — it has expired, been
+    /// revoked by an upgrade, or the account was swept.
+    private async resumeGuest(deviceToken: string): Promise<void> {
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/guest/resume`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_token: deviceToken }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok && data?.token) {
+                console.log('[lobby] resumed guest session');
+                this.adoptGuestSession(data);
+                return;
+            }
+            clearDeviceToken(browserTokenStore);
+        } catch { /* network error — the login screen is still the answer */ }
+        this.showLogin();
+    }
+
+    /// Shared tail of both guest entry points. Deliberately does NOT go
+    /// through `adoptSession`: that one writes `springrts-token` via
+    /// storeTokens and looks for a saved room to rejoin, both of which are
+    /// right here — but it also assumes a full account, and the provisional
+    /// flag has to be set before showBrowser() renders the header.
+    private adoptGuestSession(data: {
+        token?: string; user_id?: number; username?: string; faction?: string;
+        expires_in?: number;
+    }): void {
+        this.authToken = data.token ?? '';
+        this.myPlayerId = data.user_id ?? 0;
+        this.myFaction = data.faction ?? '';
+        this.isProvisional = true;
+        if (data.username) localStorage.setItem('springrts-username', data.username);
+        // 8a-follow-on: `data`, not a rebuilt `{token}` — the rebuild dropped
+        // `expires_in`, so a guest was the one account kind whose session could
+        // never schedule a renewal.
+        storeTokens(data, browserTokenStore);
+        this.startPolling();
+        this.showBrowser();
+    }
+
+    /**
+     * Wire the "Claim account" panel.
+     *
+     * The cost line is re-rendered on every faction change rather than only on
+     * submit, because the decision it describes is not reversible: switching
+     * faction gives up every war seat held on the old side (§1b, inherited by
+     * the upgrade), and a player who learns that from the result has already
+     * paid it.
+     */
+    private wireGuestPanel(): void {
+        const openBtn = document.getElementById('guest-upgrade-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('guest-panel');
+        if (!openBtn || !panel) return;
+
+        // Everyone who is not a guest sees nothing at all.
+        openBtn.style.display = this.isProvisional ? 'inline-block' : 'none';
+        if (!this.isProvisional) { panel.style.display = 'none'; return; }
+
+        // Logging out of a guest account ends it: the device token is the only
+        // credential it has, and a logout has to clear it (see logout.ts). The
+        // warning goes on the control rather than into a confirm() dialog, so
+        // it is readable before the click rather than after it.
+        const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement | null;
+        if (logoutBtn) {
+            logoutBtn.title = 'Logging out ends this guest account — claim it '
+                + 'first to keep your war seats and everything you have earned.';
+        }
+
+        // A guest must not be offered 2FA, and the reason is a one-way door
+        // rather than tidiness: `totp/disable` costs the PASSWORD as well as a
+        // code (task 8d, deliberately — a stolen session must not strip the
+        // factor), and a guest has no password. So a guest who enrolled would
+        // hold a factor they can never remove — one that meanwhile gates
+        // nothing, because their sign-in is `guest/resume`, which presents a
+        // device token and never visits /api/auth/login. Offered again the
+        // moment the account is claimed, which is when it starts working.
+        const totpBtn = document.getElementById('totp-btn') as HTMLButtonElement | null;
+        if (totpBtn) totpBtn.style.display = 'none';
+
+        const select = document.getElementById('guest-faction') as HTMLSelectElement | null;
+        const costEl = document.getElementById('guest-cost');
+        const renderCost = () => {
+            if (costEl) costEl.textContent =
+                describeUpgradeCost(this.myFaction, select?.value || this.myFaction);
+        };
+
+        openBtn.onclick = () => {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            if (panel.style.display !== 'block') return;
+            // The picker is filled from the game's declared factions, the same
+            // source the sign-up form uses — a guest confirming a faction is
+            // making the sign-up choice, just later.
+            if (select && select.options.length <= 1) {
+                for (const f of this.availableFactions) {
+                    const opt = document.createElement('option');
+                    opt.value = f.key;
+                    opt.textContent = f.fullName || f.name;
+                    select.appendChild(opt);
+                }
+                if (this.availableFactions.length === 0) void this.fetchFactionsForSignup();
+            }
+            renderCost();
+        };
+        if (select) select.onchange = renderCost;
+        (document.getElementById('guest-close-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => { panel.style.display = 'none'; });
+        (document.getElementById('guest-confirm-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => { void this.upgradeGuest(); });
+    }
+
+    private async upgradeGuest(): Promise<void> {
+        const msgEl = document.getElementById('guest-msg');
+        const username = (document.getElementById('guest-username') as HTMLInputElement | null)?.value.trim() ?? '';
+        const password = (document.getElementById('guest-password') as HTMLInputElement | null)?.value ?? '';
+        const faction = (document.getElementById('guest-faction') as HTMLSelectElement | null)?.value ?? '';
+        const say = (text: string, error = false) => {
+            if (msgEl) { msgEl.textContent = text; msgEl.className = error ? 'msg error' : 'msg'; }
+        };
+        if (!password) { say('Choose a password', true); return; }
+
+        try {
+            const body: Record<string, string> = { password };
+            if (username) body.username = username;
+            // Sent only when the player actually moved the picker. An echo of
+            // the current faction is harmless server-side (it compares before
+            // deciding) but omitting it keeps "kept" and "re-chosen" the same
+            // request, which is what the promise above says they are.
+            if (faction && faction !== this.myFaction) body.faction = faction;
+
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/upgrade`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.authToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            const outcome = classifyUpgradeResponse(resp, data);
+            if (outcome.kind === 'name-in-use') {
+                // Not a dead end: the upgrade itself is fine, it is the rename
+                // that the live roster blocks — so say what to do instead of
+                // what went wrong.
+                say(`${outcome.message}. You can claim the account now and `
+                    + `choose a name afterwards by clearing the name field.`, true);
+                return;
+            }
+            if (outcome.kind !== 'ok') { say(outcome.message, true); return; }
+
+            this.authToken = outcome.data.token ?? this.authToken;
+            this.myFaction = outcome.data.faction ?? this.myFaction;
+            this.isProvisional = false;
+            if (outcome.data.username)
+                localStorage.setItem('springrts-username', outcome.data.username);
+            storeTokens(outcome.data, browserTokenStore);
+            // The server has already revoked it; this drops the copy that
+            // would otherwise sit in a shared browser's localStorage.
+            clearDeviceToken(browserTokenStore);
+            const lost = outcome.data.cleared_bindings ?? 0;
+            console.log(`[lobby] account claimed: user=${outcome.data.username}`
+                + ` faction=${this.myFaction} cleared_bindings=${lost}`);
+            this.showBrowser();
+        } catch (err) {
+            say(`Connection failed: ${err}`, true);
+        }
+    }
+
+    // ===================== TWO-FACTOR (task 8d) =====================
+
+    /**
+     * Wire the 2FA panel. Every element is optional in the same way the
+     * logout controls are: the browser screen ships the panel, the room
+     * screen does not, and a game's template override may ship neither.
+     *
+     * The panel is re-rendered from `/api/auth/totp/status` after every verb
+     * rather than from what the verb returned. A local guess at the new state
+     * is how a UI ends up claiming 2FA is on because the request that turned
+     * it on came back 200 for some other reason.
+     */
+    private wireTotpPanel(): void {
+        const panel = document.getElementById('totp-panel');
+        const openBtn = document.getElementById('totp-btn') as HTMLButtonElement | null;
+        if (!panel || !openBtn) return;
+
+        const el = (id: string) => document.getElementById(id);
+        const close = document.getElementById('totp-close-btn') as HTMLButtonElement | null;
+
+        openBtn.onclick = () => {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            if (panel.style.display === 'block') void this.refreshTotpStatus();
+        };
+        if (close) close.onclick = () => { panel.style.display = 'none'; };
+
+        (el('totp-start-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.startTotpEnrolment();
+        });
+        (el('totp-confirm-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.confirmTotpEnrolment();
+        });
+        (el('totp-disable-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            const form = el('totp-disable-form');
+            if (form) form.style.display = 'flex';
+        });
+        (el('totp-disable-confirm-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.disableTotp();
+        });
+
+        // The label carries the state, so an account with 2FA on says so
+        // without the panel having to be opened.
+        void this.refreshTotpStatus(/*quiet=*/true);
+    }
+
+    /// Read the account's 2FA state and render every control from it.
+    private async refreshTotpStatus(quiet = false): Promise<void> {
+        let status: TotpStatus;
+        try {
+            status = await this.lobbyPost('/api/auth/totp/status') as TotpStatus;
+        } catch { return; }
+        if (typeof status?.enabled !== 'boolean') return;
+
+        const btn = document.getElementById('totp-btn');
+        if (btn) btn.textContent = status.enabled ? '2FA ✓' : '2FA';
+        if (quiet) return;
+
+        const statusEl = document.getElementById('totp-status');
+        if (statusEl) statusEl.textContent = describeStatus(status);
+        const show = (id: string, on: boolean, mode = 'block') => {
+            const e = document.getElementById(id);
+            if (e) e.style.display = on ? mode : 'none';
+        };
+        // "Set up" and "Turn off" are mutually exclusive, and the enrolment
+        // block only exists between the two — a panel that offered both at
+        // once would let a player start an enrolment they cannot finish (the
+        // server refuses one over a live factor, by design).
+        show('totp-start-btn', !status.enabled, 'inline-block');
+        show('totp-disable-btn', status.enabled, 'inline-block');
+        show('totp-enrol', false, 'flex');
+        show('totp-disable-form', false, 'flex');
+        show('totp-recovery', false);
+    }
+
+    private async startTotpEnrolment(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/enroll');
+            if (!data?.secret) {
+                if (msg) { msg.textContent = data?.error ?? 'Could not start set-up'; msg.className = 'msg error'; }
+                return;
+            }
+            const secretEl = document.getElementById('totp-secret');
+            if (secretEl) secretEl.textContent = formatSecret(data.secret);
+            const uriEl = document.getElementById('totp-uri') as HTMLAnchorElement | null;
+            // The href is the otpauth:// URI itself: on a phone that hands the
+            // enrolment straight to the authenticator app, and on a desktop it
+            // is inert, which is why the secret is shown as text as well.
+            if (uriEl) uriEl.href = data.uri ?? '#';
+            const enrol = document.getElementById('totp-enrol');
+            if (enrol) enrol.style.display = 'flex';
+            if (msg) { msg.textContent = ''; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not start set-up'; msg.className = 'msg error'; }
+        }
+    }
+
+    private async confirmTotpEnrolment(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        const codeEl = document.getElementById('totp-code') as HTMLInputElement | null;
+        const code = normaliseCode(codeEl?.value ?? '');
+        if (!code) {
+            if (msg) { msg.textContent = 'Enter the code from your app'; msg.className = 'msg error'; }
+            return;
+        }
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/confirm', { code });
+            if (!data?.ok) {
+                if (msg) { msg.textContent = data?.error ?? 'That code did not match'; msg.className = 'msg error'; }
+                if (codeEl) codeEl.value = '';
+                return;
+            }
+            await this.refreshTotpStatus();
+            // Recovery codes are rendered AFTER the status refresh, because
+            // that refresh hides the block — and this is the one and only time
+            // they exist. Nothing re-fetches them; there is no route that
+            // could.
+            const list = document.getElementById('totp-recovery-list');
+            const wrap = document.getElementById('totp-recovery');
+            if (list && wrap && Array.isArray(data.recovery_codes)) {
+                list.innerHTML = '';
+                for (const c of data.recovery_codes as string[]) {
+                    const li = document.createElement('li');
+                    li.textContent = c;
+                    list.appendChild(li);
+                }
+                wrap.style.display = 'block';
+            }
+            if (codeEl) codeEl.value = '';
+            if (msg) { msg.textContent = 'Two-factor authentication is on.'; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not turn on two-factor'; msg.className = 'msg error'; }
+        }
+    }
+
+    private async disableTotp(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        const passEl = document.getElementById('totp-disable-pass') as HTMLInputElement | null;
+        const codeEl = document.getElementById('totp-disable-code') as HTMLInputElement | null;
+        const password = passEl?.value ?? '';
+        const code = normaliseCode(codeEl?.value ?? '');
+        if (!password || !code) {
+            if (msg) { msg.textContent = 'Password and a current code are both required'; msg.className = 'msg error'; }
+            return;
+        }
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/disable', { password, code });
+            // Both fields are cleared whatever happened: a password left
+            // sitting in a form on a shared machine is the thing this panel is
+            // supposed to be defending.
+            if (passEl) passEl.value = '';
+            if (codeEl) codeEl.value = '';
+            if (!data?.ok) {
+                if (msg) { msg.textContent = data?.error ?? 'Could not turn off two-factor'; msg.className = 'msg error'; }
+                return;
+            }
+            await this.refreshTotpStatus();
+            if (msg) { msg.textContent = 'Two-factor authentication is off.'; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not turn off two-factor'; msg.className = 'msg error'; }
         }
     }
 
@@ -780,6 +1515,70 @@ export class LobbyUI {
         this.parkedBanner = el;
     }
 
+    /// The war notice (PLAN-persistence task 4d) — the toast a `war-state`
+    /// event becomes when `noticeFor` says it is this player's business.
+    ///
+    /// Built in the DOM rather than as a template because it is not part of any
+    /// screen: it must survive a re-render of the browser (which is what an
+    /// arriving `rooms` event does, and one always arrives just before this) and
+    /// it must be able to appear over the room screen too. Same reasoning, and
+    /// the same shape, as `renderParkedBanner` above.
+    private renderWarNotice(n: {
+        roomId: number; title: string; detail: string; cls: string; canJoin: boolean;
+    }): void {
+        this.dismissWarNotice();
+        const el = document.createElement('div');
+        el.className = `war-notice ${n.cls}`;
+        el.id = 'war-notice';
+        el.setAttribute('data-room', String(n.roomId));
+        const title = document.createElement('div');
+        title.className = 'war-notice-title';
+        title.textContent = n.title;
+        const detail = document.createElement('div');
+        detail.className = 'war-notice-detail';
+        detail.textContent = n.detail;
+        const actions = document.createElement('div');
+        actions.className = 'war-notice-actions';
+        if (n.canJoin) {
+            const join = document.createElement('button');
+            join.className = 'join-btn';
+            // "Rejoin", not "Join": every notice this button appears on is for
+            // a war the account already holds a seat in — `noticeFor` returns
+            // nothing for any other war — which is the same reading
+            // `fightLabel` gives a returning player's card.
+            join.textContent = 'Rejoin';
+            join.onclick = () => {
+                this.dismissWarNotice();
+                this.joinRoom(n.roomId, /*asSpectator=*/false);
+            };
+            actions.appendChild(join);
+        }
+        const close = document.createElement('button');
+        close.className = 'war-notice-dismiss';
+        close.textContent = 'Dismiss';
+        close.onclick = () => this.dismissWarNotice();
+        actions.appendChild(close);
+        el.append(title, detail, actions);
+        document.body.appendChild(el);
+        this.warNotice = el;
+        // Auto-dismissed, but not quickly: this is news about a world the
+        // player has been away from for days, and it carries an action. 30 s is
+        // long enough to read and act on and short enough that a stale notice
+        // is not still on screen when the war moves again.
+        this.warNoticeTimer = setTimeout(() => this.dismissWarNotice(), 30000);
+    }
+
+    /// Remove the notice, if one is up. Idempotent — called by the dismiss
+    /// button, the timer, the join, and by the next notice replacing it.
+    private dismissWarNotice(): void {
+        if (this.warNoticeTimer !== null) {
+            clearTimeout(this.warNoticeTimer);
+            this.warNoticeTimer = null;
+        }
+        this.warNotice?.remove();
+        this.warNotice = null;
+    }
+
     showBrowser(): void {
         // Suppressed (scenario/direct boot): stay off screen and, crucially,
         // do not null currentRoom — the runner's setCurrentRoomFromJson wiring
@@ -822,7 +1621,19 @@ export class LobbyUI {
             this.refreshGameList();
         }
 
-        this.container.innerHTML = this.templates.browser;
+        // D45: the header carries the signed-in account name so the player
+        // can see *which* account they are about to log out of — the whole
+        // point of the control on a shared machine. Escaped here because
+        // renderTemplate substitutes raw.
+        // Task 8c: a generated guest name is 14 characters of hex nobody can
+        // read back, and the header's job is telling the player WHICH account
+        // this is. `displayGuestName` shortens it and leaves a claimed name
+        // exactly as typed.
+        this.container.innerHTML = renderTemplate(this.templates.browser, {
+            account_name: this.esc(
+                displayGuestName(localStorage.getItem('springrts-username') ?? '')),
+        });
+        this.wireLogoutButton();
         document.getElementById('create-room-btn')!.onclick = () => {
             document.getElementById('create-form')!.style.display = 'block';
         };
@@ -843,6 +1654,778 @@ export class LobbyUI {
         this.renderGameOptions();
         this.renderRoomList();
         this.wireReplayPanel();
+        this.wireFriendsPanel();
+        this.wireDeployButton();
+        this.wireChatDock();
+    }
+
+    /// Deploy — §6/task 7's one-click "which war should I fight in".
+    ///
+    /// The server decides; this only carries the answer out. Three of the four
+    /// outcomes end somewhere: a war to join, a war to return to, or the Create
+    /// Game form — because "every side for your faction is taken" is answered
+    /// by seeding a new war, not by a queue (WarDeploy.h). The fourth
+    /// (`no_faction`) has nowhere to send anyone and says so.
+    private wireDeployButton(): void {
+        const btn = document.getElementById('deploy-btn') as HTMLButtonElement | null;
+        if (!btn) return;
+        btn.onclick = async () => {
+            btn.disabled = true;
+            const out = document.getElementById('deploy-result');
+            try {
+                const d = await this.lobbyPost('/api/wars/deploy') as DeployResult;
+                if (out) {
+                    out.textContent = formatDeploy(d);
+                    out.style.display = '';
+                }
+                if ((d.outcome === 'join' || d.outcome === 'return') && d.room_id) {
+                    this.joinRoom(d.room_id, /*asSpectator=*/false);
+                } else if (d.outcome === 'seed') {
+                    // Opened, not created: a war needs a map and a scenario,
+                    // and picking those for somebody is a bigger decision than
+                    // picking which existing war they walk into.
+                    const form = document.getElementById('create-form');
+                    if (form) form.style.display = 'block';
+                }
+            } catch (e) {
+                console.warn('[lobby] deploy failed', e);
+                if (out) {
+                    out.textContent = 'Deploy failed — pick a war from the list.';
+                    out.style.display = '';
+                }
+            } finally {
+                btn.disabled = false;
+            }
+        };
+    }
+
+    // ============== FRIENDS (PLAN-metalstorm-lobby §8, task 9a) ==============
+    //
+    // The server half answers four routes and this is everything that reads
+    // them: the panel, the add box, and the "Friends here" war filter, whose
+    // only input is `friendWarRooms(this.friends)`.
+    //
+    // Polled with the room list rather than streamed. Presence here is derived
+    // from three sources with 120–150 s freshness windows (FriendPresence.h),
+    // so a per-event push would carry no fact the next poll does not, and the
+    // lobby deliberately has no presence heartbeat to hang one on.
+
+    private wireFriendsPanel(): void {
+        const btn = document.getElementById('show-friends-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('friends-panel');
+        if (!btn || !panel) return;
+        btn.onclick = () => {
+            const showing = panel.style.display !== 'none';
+            panel.style.display = showing ? 'none' : 'block';
+            if (!showing) void this.refreshFriends();
+        };
+
+        const form = document.getElementById('friend-add-form') as HTMLFormElement | null;
+        const input = document.getElementById('friend-add-name') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const name = input.value.trim();
+                if (!name) return;
+                input.value = '';
+                void this.friendRequest('/api/friends/add', name);
+            };
+        }
+
+        // Probed once per browser render, exactly like the replay panel: the
+        // button only appears on a lobby that actually has the routes.
+        void this.refreshFriends().then(() => {
+            if (this.friends === null) return;
+            btn.style.display = '';
+        });
+    }
+
+    /// Fetch the friends list. Leaves `this.friends` null — and the whole
+    /// feature invisible — when the route does not answer.
+    private async refreshFriends(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/friends/list');
+            this.friends = Array.isArray(resp) ? resp as FriendRow[] : null;
+        } catch {
+            this.friends = null;
+        }
+        this.renderFriendsList();
+        // The war browser reads the same list: a friend who just went into a
+        // war changes which rows "Friends here" keeps.
+        if (this.friends !== null) this.renderWarList();
+    }
+
+    /// add / remove, and the two words that are the same two routes: accept is
+    /// `add` from the other end, decline and cancel are both `remove`
+    /// (Friends.h). One helper, because the panel must not grow a route the
+    /// server does not have.
+    private async friendRequest(path: string, username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        try {
+            const r = await this.lobbyPost(path, { username });
+            if (msg) {
+                // `edge` is what actually happened, which is not always what
+                // was asked for: adding somebody who already added you
+                // completes the friendship rather than sending a request, and
+                // saying "request sent" there would be wrong on the one click
+                // the player most wants confirmed.
+                const text = r?.error
+                    ? String(r.error)
+                    : r?.edge === 'mutual'
+                        ? `You and ${username} are now friends.`
+                        : r?.edge === 'outgoing'
+                            ? `Friend request sent to ${username}.`
+                            : r?.removed !== undefined
+                                ? `${username} removed.`
+                                : 'Done.';
+                msg.textContent = text;
+                msg.className = r?.error ? 'friend-msg friend-msg-error' : 'friend-msg';
+                msg.style.display = '';
+            }
+        } catch {
+            if (msg) {
+                msg.textContent = 'The lobby did not answer.';
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+        }
+        await this.refreshFriends();
+    }
+
+    /// "Take me to where my friend is fighting" (§8).
+    ///
+    /// Two steps on purpose: `/api/friends/join` ANSWERS — it names the war
+    /// and the side — and the ordinary `/api/rooms/join` does the seating, so
+    /// this path cannot skip the fork brakes, the resume decision or the audit
+    /// row that path owns. The sentence is shown before the join either way,
+    /// because on a cross-faction friend the successful click seats the player
+    /// OPPOSITE them and that is not something to discover on the map.
+    private async joinFriend(username: string): Promise<void> {
+        const msg = document.getElementById('friend-msg');
+        const r = await this.lobbyPost('/api/friends/join', { username }) as FriendJoinResult;
+        if (!r || !r.outcome) {
+            if (msg) {
+                msg.textContent = `Could not join ${username}.`;
+                msg.className = 'friend-msg friend-msg-error';
+                msg.style.display = '';
+            }
+            return;
+        }
+        const { text, seats } = formatFriendJoin(r);
+        const confirm = seats && friendJoinNeedsConfirm(r.outcome);
+        if (msg) {
+            msg.textContent = text;
+            msg.className = confirm
+                ? 'friend-msg friend-msg-warn'
+                : seats ? 'friend-msg' : 'friend-msg friend-msg-error';
+            msg.style.display = '';
+        }
+        if (!seats || !r.room_id) return;
+        if (!confirm) { this.joinRoom(r.room_id, /*asSpectator=*/false); return; }
+        // The warning needs somewhere to stand. Seating immediately writes the
+        // sentence and replaces it with the room screen in the same tick —
+        // verified in the browser, where it was on screen for a frame — so the
+        // surprising outcome, and only that one, costs a second click.
+        const roomId = r.room_id;
+        const go = document.createElement('button');
+        go.className = 'friend-confirm-btn';
+        go.textContent = `Join anyway — fight against ${r.friend}`;
+        go.onclick = () => this.joinRoom(roomId, /*asSpectator=*/false);
+        msg?.appendChild(document.createElement('br'));
+        msg?.appendChild(go);
+    }
+
+    private renderFriendsList(): void {
+        const panel = document.getElementById('friends-panel');
+        const el = document.getElementById('friends-list');
+        const btn = document.getElementById('show-friends-btn');
+        if (!panel || !el) return;
+        if (this.friends === null) { panel.style.display = 'none'; return; }
+
+        // The pending count rides on the closed button: an incoming request is
+        // the only thing here that asks the player a question.
+        if (btn) {
+            const pending = pendingRequestCount(this.friends);
+            btn.textContent = pending > 0 ? `Friends (${pending})` : 'Friends';
+            btn.className = pending > 0 ? 'friends-btn-pending' : '';
+        }
+
+        if (this.friends.length === 0) {
+            el.innerHTML = '<div class="empty-state">No friends yet — add one ' +
+                           'by username above.</div>';
+            return;
+        }
+
+        el.innerHTML = sortFriends(this.friends).map(f => {
+            const faction = friendFactionLabel(f);
+            const factionHtml = faction
+                ? `<span class="friend-faction">${this.esc(faction)}</span>` : '';
+            const actions = friendActions(f).map(a =>
+                `<button class="friend-action-btn${a.primary ? '' : ' secondary'}" ` +
+                `data-action="${a.kind}" data-name="${this.escAttr(f.username)}">` +
+                `${this.esc(a.label)}</button>`).join('');
+            return `<div class="friend-entry friend-${f.edge}">` +
+                   `<div class="friend-main"><span class="friend-name">` +
+                   `${this.esc(f.username)}</span>${factionHtml}` +
+                   `<span class="friend-presence friend-presence-${f.presence}">` +
+                   `${this.esc(friendStatusLine(f))}</span></div>` +
+                   `<div class="friend-actions">${actions}</div></div>`;
+        }).join('');
+
+        el.querySelectorAll('.friend-action-btn').forEach(b => {
+            (b as HTMLElement).onclick = () => {
+                const name = b.getAttribute('data-name')!;
+                switch (b.getAttribute('data-action')) {
+                    case 'accept': void this.friendRequest('/api/friends/add', name); break;
+                    // Decline and cancel are the same verb from the two ends:
+                    // "there is no edge between us any more".
+                    case 'decline':
+                    case 'cancel':
+                    case 'remove': void this.friendRequest('/api/friends/remove', name); break;
+                    case 'join': void this.joinFriend(name); break;
+                }
+            };
+        });
+    }
+
+    // ================= CHAT (PLAN-lobby.md §3, task 9b client) ================
+    //
+    // The service is `rts/Server/Chat.{h,cpp}` plus six `/api/chat/*` routes;
+    // every decision that is not a fetch lives in `chat.ts`. Two things about
+    // the transport shape the code here:
+    //
+    //   * The stream is IDENTIFIED, so it needs a credential, and an
+    //     `EventSource` cannot send a header — hence the ticket, minted with
+    //     the real token and spent in the url (SSETickets.h).
+    //   * `onerror` says nothing about WHY, so the recovery policy has to be a
+    //     rule rather than a reaction; `streamRecovery` is that rule, and this
+    //     file only carries out what it decides.
+    //
+    // The dock is rendered from `chat.ts`'s model into whichever screen is up
+    // — the browser and the room are two views of the same conversation list,
+    // which is §3's "one chat service" seen from the client end.
+
+    private chat = new ChatModel();
+    private chatStream: EventSource | null = null;
+    private chatTicketMintedAt = 0;
+    private chatTicketTtlSec = CHAT_TICKET_TTL_SEC;
+    private chatErrors = 0;
+    private chatRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /// Null until the first mint answers: null hides the dock (a lobby without
+    /// the routes must look exactly as it did), false means the routes refused
+    /// this account, true means chat is live.
+    private chatAvailable: boolean | null = null;
+    /// Two notice lines, deliberately not one. The stream's state
+    /// (reconnecting, disconnected) is a standing condition and clears itself
+    /// when the connection comes back; a refused command ("Unknown command
+    /// /whisper", a mute, a 404 on a typo'd name) is a reply to one action and
+    /// has to go away on the next one. Sharing a field left a refusal from
+    /// four actions ago sitting over a working panel — seen in the browser,
+    /// which is the only place it looked wrong.
+    private chatStreamNotice = '';
+    private chatCmdNotice = '';
+    /// The standing account-level mute, from the `moderation` SSE event
+    /// (task 9d). A THIRD notice and not a fourth use of the other two: it
+    /// outranks both — it is why sending fails — and unlike the stream's it
+    /// is about this account rather than this connection, so a reconnect must
+    /// not clear it and a command reply must not overwrite it.
+    private chatMod: ChatModerationEvent | null = null;
+    /// The operator's mute list, shown until dismissed. Null = not asked for.
+    private chatMuteList: ChatMuteRow[] | null = null;
+    /// §3.5's "optional notification sound" — optional, so it is a toggle, and
+    /// remembered, because a player who turns a sound off means it.
+    private chatSoundOn = localStorage.getItem('springrts-chat-sound') !== 'off';
+    private chatAudio: AudioContext | null = null;
+
+    /// Bring the chat panel up. Idempotent: both screens call it on render and
+    /// the stream survives the screen change.
+    private wireChatDock(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable === null && !this.chatStream) void this.startChat();
+        this.chat.myId = this.myPlayerId;
+        this.syncChatRoomTabs();
+        this.renderChat();
+    }
+
+    /// Mint a ticket and open the stream.
+    ///
+    /// Order matters and is the opposite of the obvious one: the STREAM opens
+    /// before any history is fetched, so a line said while the backfill is in
+    /// flight is delivered rather than lost. It arrives twice instead, which
+    /// `mergeMessages` is for.
+    private async startChat(): Promise<void> {
+        let ticket = '';
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            ticket = typeof r?.ticket === 'string' ? r.ticket : '';
+            if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+        } catch { /* no route, or no lobby */ }
+        if (!ticket) {
+            this.chatAvailable = false;
+            this.renderChat();
+            return;
+        }
+        this.chatAvailable = true;
+        this.chatTicketMintedAt = Date.now();
+        this.openChatStream(ticket);
+        void this.backfillActiveTab();
+    }
+
+    private openChatStream(ticket: string): void {
+        this.closeChatStream();
+        const es = new EventSource(
+            `${CONFIG.httpUrl}/api/chat/stream?ticket=${encodeURIComponent(ticket)}`);
+        this.chatStream = es;
+        es.addEventListener('open', () => {
+            // A connection that stands up clears the backoff: the next failure
+            // is a new failure, not the sixth of the old one.
+            this.chatErrors = 0;
+            if (this.chatStreamNotice) { this.chatStreamNotice = ''; this.renderChat(); }
+        });
+        es.addEventListener('chat', (e: MessageEvent) => {
+            let f: any;
+            try { f = JSON.parse(e.data); } catch { return; }
+            if (!f || typeof f.id !== 'number') return;
+            const frame = {
+                id: f.id, scope: f.scope, target: String(f.target ?? ''),
+                from: String(f.from ?? ''), fromId: Number(f.fromId ?? 0),
+                text: String(f.text ?? ''), ts: Number(f.ts ?? 0),
+                ...(f.system ? { system: true } : {}),
+            };
+            // The unread decision is `applyFrame`'s and reads the tab the
+            // frame lands in; the ping is decided on the FRAME, before it is
+            // filed, because a mention pings in the tab you are reading and
+            // that tab never counts an unread.
+            const landed = this.chat.applyFrame(frame);
+            if (landed) {
+                if (shouldNotify(frame, this.myPlayerId, this.myChatName(),
+                                 this.chat.activeKey)) this.chatPing();
+                this.renderChat();
+            }
+        });
+        // The moderation channel (task 9d). It carries exactly one thing —
+        // this account's own account-level mute — because a scoped mute is
+        // told to its channel as a system line instead. Both directions
+        // arrive: the mute, and the lift, without which an
+        // until-lifted banner would stand for the rest of the session.
+        es.addEventListener('moderation', (e: MessageEvent) => {
+            let ev: any;
+            try { ev = JSON.parse(e.data); } catch { return; }
+            if (!ev || typeof ev.muted !== 'boolean') return;
+            this.chatMod = {
+                muted: ev.muted, until: Number(ev.until ?? 0),
+                reason: String(ev.reason ?? ''), by: String(ev.by ?? ''),
+            };
+            this.renderChat();
+        });
+        es.onerror = () => this.onChatStreamError();
+    }
+
+    /// The one place that decides what a dead stream means.
+    private onChatStreamError(): void {
+        this.chatErrors++;
+        const ageSec = (Date.now() - this.chatTicketMintedAt) / 1000;
+        const r = streamRecovery(this.chatErrors, ageSec, this.chatTicketTtlSec);
+        if (r.notice !== this.chatStreamNotice) { this.chatStreamNotice = r.notice; this.renderChat(); }
+        if (r.action === 'wait') return;          // the browser retries on its own
+        this.closeChatStream();                    // stop the retry on a dead url
+        if (r.action === 'stop') return;           // the player asks for the next one
+        if (this.chatRetryTimer) clearTimeout(this.chatRetryTimer);
+        this.chatRetryTimer = setTimeout(() => {
+            this.chatRetryTimer = null;
+            void this.remintAndReopen();
+        }, r.delayMs);
+    }
+
+    /// Trade the (real, header-borne) token for a fresh ticket and reconnect.
+    private async remintAndReopen(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/ticket');
+            if (typeof r?.ticket === 'string' && r.ticket) {
+                this.chatTicketMintedAt = Date.now();
+                if (typeof r?.ttl === 'number' && r.ttl > 0) this.chatTicketTtlSec = r.ttl;
+                this.openChatStream(r.ticket);
+                return;
+            }
+        } catch { /* fall through to the same backoff as a stream failure */ }
+        this.onChatStreamError();
+    }
+
+    private closeChatStream(): void {
+        if (!this.chatStream) return;
+        this.chatStream.close();
+        this.chatStream = null;
+    }
+
+    /// Shut chat down with the rest of the session (logout, or leaving the
+    /// lobby for the game surface). The ticket dies server-side with the
+    /// account's tokens; this stops the browser retrying against it.
+    private stopChat(): void {
+        this.closeChatStream();
+        if (this.chatRetryTimer) { clearTimeout(this.chatRetryTimer); this.chatRetryTimer = null; }
+        this.chatErrors = 0;
+        this.chatAvailable = null;
+        this.chatStreamNotice = '';
+        this.chatCmdNotice = '';
+        this.chatMod = null;
+        this.chatMuteList = null;
+    }
+
+    /// The name a mention has to match. Off the stored session rather than the
+    /// roster: chat runs on the browser screen too, where there is no room and
+    /// therefore no roster row to read a name out of.
+    private myChatName(): string {
+        return localStorage.getItem('springrts-username') ?? '';
+    }
+
+    /// §3.5's notification sound. Synthesised rather than fetched: the lobby
+    /// ships no audio assets and a two-tone blip needs none, so this cannot
+    /// 404 or wait on the network. Built lazily because a browser refuses an
+    /// `AudioContext` created before the first gesture.
+    private chatPing(): void {
+        if (!this.chatSoundOn) return;
+        try {
+            const Ctor = window.AudioContext ?? (window as any).webkitAudioContext;
+            if (!Ctor) return;
+            this.chatAudio ??= new Ctor();
+            const ctx = this.chatAudio!;
+            if (ctx.state === 'suspended') void ctx.resume();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.setValueAtTime(1174, ctx.currentTime + 0.07);
+            // Ramped, not switched: a square-edged gain on a sine is a click.
+            gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.2);
+        } catch { /* audio is a courtesy; a chat panel that throws over it is not */ }
+    }
+
+    /// Room tabs follow the seat, and the seat comes off the roster the room
+    /// screen already holds — never off anything the client chooses.
+    private syncChatRoomTabs(): void {
+        const r = this.currentRoom;
+        const me = r?.players.find(p => p.playerId === this.myPlayerId) ?? null;
+        const seat = r && me
+            ? { roomId: r.id, team: me.team, isSpectator: !!me.isSpectator }
+            : null;
+        if (this.chat.syncRoomTabs(seat, r?.name ?? '')) void this.backfillActiveTab();
+    }
+
+    /// §3.3's "backfills the UI on join". Once per tab: the store is
+    /// authoritative and a re-open must not re-page it.
+    private async backfillActiveTab(): Promise<void> {
+        const tab = this.chat.active();
+        if (!tab || tab.loaded || this.chatAvailable !== true) return;
+        try {
+            const r = await this.lobbyPost('/api/chat/history',
+                { scope: tab.scope, target: tab.sendTarget, limit: 50 });
+            if (Array.isArray(r?.messages)) {
+                this.chat.applyHistory(tab.key, r.messages);
+                this.renderChat();
+            }
+        } catch { /* an empty channel and an unreachable one look the same here */ }
+    }
+
+    /// One line typed in the composer.
+    private async submitChat(raw: string): Promise<void> {
+        // A reply belongs to one action, so the next action takes it away.
+        this.chatCmdNotice = '';
+        const cmd = parseChatInput(raw, this.chat.active());
+        switch (cmd.kind) {
+            case 'none':
+                return;
+            case 'error':
+                this.chatCmdNotice = cmd.message;
+                this.renderChat();
+                return;
+            case 'send': {
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: cmd.scope, target: cmd.target, text: cmd.text });
+                // The line comes back down the stream — the sender is in its
+                // own recipient list — so nothing is appended here. What the
+                // reply is for is the refusals: a mute, a flood drop, or a
+                // scope this client thinks it is in and the server does not.
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); }
+                return;
+            }
+            case 'pm': {
+                // Open the tab whatever happens, so a typed name that turns
+                // out to be nobody says so in the conversation it was aimed
+                // at rather than in the channel the player was reading.
+                const r = await this.lobbyPost('/api/chat/send',
+                    { scope: 'pm', target: cmd.username, text: cmd.text || ' ' });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                // `target` in the reply is CANONICAL (`<lo>:<hi>`); the tab is
+                // keyed on it and addressed by the name that was typed.
+                const other = pmOther(String(r?.target ?? ''), this.myPlayerId);
+                if (other) {
+                    const tab = this.chat.ensurePmTab(other, cmd.username);
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                }
+                this.renderChat();
+                return;
+            }
+            case 'ignore': {
+                const r = await this.lobbyPost('/api/chat/ignore',
+                    { username: cmd.username, on: cmd.on });
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on ? `Ignoring ${cmd.username}.` : `No longer ignoring ${cmd.username}.`;
+                this.renderChat();
+                return;
+            }
+            case 'channel': {
+                const r = await this.lobbyPost('/api/chat/channel',
+                    { channel: cmd.channel, join: cmd.join });
+                if (r?.error) { this.chatCmdNotice = String(r.error); this.renderChat(); return; }
+                if (cmd.join) {
+                    const tab = this.chat.ensureTab({
+                        scope: 'channel', target: cmd.channel, sendTarget: cmd.channel,
+                        label: `#${cmd.channel}`, closable: true,
+                    });
+                    this.chat.setActive(tab.key);
+                    void this.backfillActiveTab();
+                } else {
+                    this.chat.close(tabKey('channel', cmd.channel));
+                }
+                this.chatCmdNotice = '';
+                this.renderChat();
+                return;
+            }
+            // ── The moderation verbs (task 9d) ─────────────────────────────
+            //
+            // Every one of them reports its REPLY, refusal or not. A
+            // moderation action whose only evidence is a system line in the
+            // channel looks like it worked to the one person who has to know
+            // whether it did — the moderator is not necessarily reading the
+            // scope they acted in (`/gmute` is told to nobody at all).
+            case 'mute': {
+                const body: Record<string, unknown> = {
+                    username: cmd.username, on: cmd.on,
+                };
+                if (cmd.scope) { body.scope = cmd.scope; body.target = cmd.target; }
+                if (cmd.on) {
+                    body.seconds = cmd.seconds;
+                    if (cmd.reason) body.reason = cmd.reason;
+                }
+                const r = await this.lobbyPost('/api/chat/mute', body);
+                const where = cmd.scope ? 'here' : 'everywhere';
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : cmd.on
+                        ? `Muted ${cmd.username} ${where}` +
+                          (cmd.seconds > 0 ? ` for ${cmd.seconds}s.` : ' until lifted.')
+                        : `Unmuted ${cmd.username} ${where}.`;
+                // The list is stale the moment a mute changes, and a stale
+                // list of who is muted is worse than none.
+                if (!r?.error && this.chatMuteList) void this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
+            case 'kick': {
+                const body: Record<string, unknown> = {
+                    channel: cmd.channel, username: cmd.username,
+                };
+                if (cmd.seconds > 0) body.seconds = cmd.seconds;
+                if (cmd.reason) body.reason = cmd.reason;
+                const r = await this.lobbyPost('/api/chat/kick', body);
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Kicked ${cmd.username} from #${cmd.channel}.`;
+                this.renderChat();
+                return;
+            }
+            case 'broadcast': {
+                const r = await this.lobbyPost('/api/chat/broadcast', { text: cmd.text });
+                // The line itself arrives down the stream like any other
+                // `#main` line, so the reply's job is only the count.
+                this.chatCmdNotice = r?.error
+                    ? String(r.error)
+                    : `Broadcast to ${r?.delivered ?? 0} in #main.`;
+                this.renderChat();
+                return;
+            }
+            case 'mutes': {
+                await this.refreshMuteList();
+                this.renderChat();
+                return;
+            }
+        }
+    }
+
+    /// `/api/chat/mute` with no `username` — "who is muted", which the service
+    /// answers to admins only (the list names accounts and reasons, which is
+    /// moderation record rather than chat).
+    private async refreshMuteList(): Promise<void> {
+        try {
+            const r = await this.lobbyPost('/api/chat/mute', {});
+            if (Array.isArray(r)) { this.chatMuteList = r as ChatMuteRow[]; return; }
+            this.chatMuteList = null;
+            this.chatCmdNotice = String(r?.error ?? 'Could not read the mute list.');
+        } catch {
+            this.chatMuteList = null;
+            this.chatCmdNotice = 'Could not read the mute list.';
+        }
+    }
+
+    /// One message body, with §3.5's auto-detected links.
+    ///
+    /// The segmentation runs on the RAW text and each piece is escaped here,
+    /// which is the only order that is safe: a linkifier that runs over
+    /// already-escaped text sees `&amp;` as five characters and is one
+    /// mis-slice away from emitting markup. `rel="noopener noreferrer"` and no
+    /// embed of any kind — §3.5 says plain anchors.
+    private chatBody(text: string): string {
+        return linkSegments(text).map(s => s.href
+            ? `<a class="chat-link" href="${this.escAttr(s.href)}" target="_blank" ` +
+              `rel="noopener noreferrer">${this.esc(s.text)}</a>`
+            : this.esc(s.text)).join('');
+    }
+
+    private renderChat(): void {
+        const dock = document.getElementById('chat-dock');
+        if (!dock) return;
+        if (this.chatAvailable !== true) { dock.style.display = 'none'; return; }
+        dock.style.display = '';
+
+        const active = this.chat.active();
+        const tabs = this.chat.list().map(t => {
+            const unread = t.unread > 0 ? `<span class="chat-unread">${t.unread}</span>` : '';
+            const close = t.closable
+                ? `<span class="chat-tab-close" data-close="${this.escAttr(t.key)}">×</span>` : '';
+            return `<button class="chat-tab${t.key === this.chat.activeKey ? ' chat-tab-active' : ''}" ` +
+                   `data-tab="${this.escAttr(t.key)}">${this.esc(t.label)}${unread}${close}</button>`;
+        }).join('');
+
+        const myName = this.myChatName();
+        const lines = (active?.messages ?? []).map(m => {
+            const time = `<span class="chat-time">${chatTime(m.ts)}</span>`;
+            if (m.system) {
+                // A server line has no name and no mention highlight: it is
+                // the room talking, and it says everybody's name.
+                return `<div class="chat-line chat-line-system">${time}` +
+                       `<span class="chat-text">${this.esc(m.text)}</span></div>`;
+            }
+            // §3.5's mention highlight. Never on my own line — I know I said
+            // my name — and computed on the raw text, before linkification
+            // splits it.
+            const mine = m.fromId === this.myPlayerId;
+            const mention = !mine && hasMention(m.text, myName) ? ' chat-line-mention' : '';
+            if (isActionLine(m.text)) {
+                // No colon, no name-then-text: an action reads as one
+                // sentence or it is not an action.
+                return `<div class="chat-line chat-line-action${mention}">${time}` +
+                       `<span class="chat-text">${this.esc(m.from)} ` +
+                       `${this.chatBody(actionBody(m.text))}</span></div>`;
+            }
+            return `<div class="chat-line${mine ? ' chat-line-mine' : ''}${mention}">${time}` +
+                   `<span class="chat-from">${this.esc(m.from)}</span>` +
+                   `<span class="chat-text">${this.chatBody(m.text)}</span></div>`;
+        }).join('');
+
+        const empty = !active || active.messages.length === 0
+            ? `<div class="empty-state">Nothing said here yet. ` +
+              `<code>/w player</code>, <code>/join #channel</code>, <code>/me</code>.</div>`
+            : '';
+        const stopped = this.chatErrors >= CHAT_STREAM_MAX_ATTEMPTS;
+        // Three notices, in the order they explain a failure. A standing mute
+        // outranks everything — it is *why* sending fails, and it is true of
+        // the account rather than of this connection — then the stream's state,
+        // then the reply to the last command ("chat is disconnected" explains
+        // a refusal that "unknown command" does not).
+        const muted = moderationActive(this.chatMod, Date.now() / 1000);
+        const modNotice = muted
+            ? `<div class="chat-notice chat-notice-mod">` +
+              `${this.esc(moderationNoticeText(this.chatMod!))}</div>`
+            : '';
+        const noticeText = this.chatStreamNotice || this.chatCmdNotice;
+        const notice = noticeText
+            ? `<div class="chat-notice">${this.esc(noticeText)}` +
+              (stopped ? ' <button id="chat-reconnect-btn" class="secondary">Reconnect</button>' : '') +
+              `</div>`
+            : '';
+        const muteList = this.chatMuteList
+            ? `<div class="chat-mutes"><div class="chat-mutes-head">` +
+              `${this.chatMuteList.length} mute(s) in force` +
+              `<button id="chat-mutes-close" class="chat-mutes-close">×</button></div>` +
+              (this.chatMuteList.length
+                  ? this.chatMuteList.map(m =>
+                        `<div class="chat-mutes-row">` +
+                        `${this.esc(muteRowLine(m, Date.now() / 1000))}</div>`).join('')
+                  : `<div class="chat-mutes-row">Nobody is muted.</div>`) +
+              `</div>`
+            : '';
+
+        // The sound toggle rides in the head rather than in a settings screen
+        // the lobby does not have: §3.5 makes the sound optional, and an
+        // option nobody can find is not one.
+        const sound = `<button id="chat-sound-btn" class="chat-sound-btn" ` +
+                      `title="Notification sound for mentions and PMs">` +
+                      `${this.chatSoundOn ? '🔔' : '🔕'}</button>`;
+
+        dock.innerHTML =
+            `<div class="chat-head"><h3>Chat</h3><div class="chat-tabs">${tabs}</div>` +
+            `${sound}</div>` +
+            modNotice + notice + muteList +
+            `<div id="chat-log" class="chat-log">${lines}${empty}</div>` +
+            `<form id="chat-form" class="chat-compose">` +
+            `<input type="text" id="chat-input" class="chat-input" autocomplete="off" ` +
+            `maxlength="500" placeholder="Message ${this.escAttr(active?.label ?? '')}">` +
+            `<button type="submit" class="chat-send-btn">Send</button></form>`;
+
+        // Newest line at the bottom, and the view pinned to it: a chat panel
+        // that opens scrolled to the oldest line looks empty.
+        const log = document.getElementById('chat-log');
+        if (log) log.scrollTop = log.scrollHeight;
+
+        const form = document.getElementById('chat-form') as HTMLFormElement | null;
+        const input = document.getElementById('chat-input') as HTMLInputElement | null;
+        if (form && input) {
+            form.onsubmit = (e) => {
+                e.preventDefault();
+                const text = input.value;
+                input.value = '';
+                void this.submitChat(text);
+            };
+        }
+        dock.querySelectorAll('.chat-tab').forEach(b => {
+            (b as HTMLElement).onclick = (e) => {
+                const closeKey = (e.target as HTMLElement).getAttribute('data-close');
+                if (closeKey) { this.chat.close(closeKey); this.renderChat(); return; }
+                this.chat.setActive(b.getAttribute('data-tab')!);
+                this.chatCmdNotice = '';
+                this.renderChat();
+                void this.backfillActiveTab();
+            };
+        });
+        const again = document.getElementById('chat-reconnect-btn');
+        if (again) again.onclick = () => {
+            this.chatErrors = 0;
+            this.chatStreamNotice = '';
+            void this.remintAndReopen();
+        };
+        const soundBtn = document.getElementById('chat-sound-btn');
+        if (soundBtn) soundBtn.onclick = () => {
+            this.chatSoundOn = !this.chatSoundOn;
+            localStorage.setItem('springrts-chat-sound', this.chatSoundOn ? 'on' : 'off');
+            // Play the sound the toggle just turned on: a mute button whose
+            // effect is only audible the next time somebody else speaks is a
+            // control nobody can check.
+            if (this.chatSoundOn) this.chatPing();
+            this.renderChat();
+        };
+        const closeMutes = document.getElementById('chat-mutes-close');
+        if (closeMutes) closeMutes.onclick = () => {
+            this.chatMuteList = null;
+            this.renderChat();
+        };
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
@@ -968,11 +2551,21 @@ export class LobbyUI {
             sel.disabled = true;
             return;
         }
+        // An archived game stays listed and is rendered disabled with its
+        // reason (PLAN-endtoend.md D26). Disabled rather than dropped so a
+        // player looking for a game they know is in the tree finds it and
+        // learns why, instead of doubting the list; and the server refuses
+        // it on POST /api/rooms anyway, so the disable is what makes that
+        // 400 unreachable rather than silent — the shape D40 settled on for
+        // the faction team-select.
         sel.innerHTML = this.availableGames.map(g => {
-            const label = this.esc(g.displayName)
-                + (g.version ? ` (${this.esc(g.version)})` : '');
+            const label = this.esc(gameOptionLabel(g));
             const selAttr = g.id === this.selectedGameId ? ' selected' : '';
-            return `<option value="${this.esc(g.id)}"${selAttr}>${label}</option>`;
+            const state = gameOptionState(g);
+            const disAttr = state.disabled
+                ? ` disabled title="${this.esc(state.title)}"` : '';
+            return `<option value="${this.esc(g.id)}"${selAttr}${disAttr}>`
+                + `${label}</option>`;
         }).join('');
         sel.disabled = false;
         sel.onchange = () => {
@@ -1030,12 +2623,33 @@ export class LobbyUI {
 
         const offerable = this.scenariosForSelectedMap();
         if (offerable.length === 0) {
-            row.style.display = 'none';
             // Don't leave a pick from a previous map applied to this one.
             this.selectedScenarioId = null;
+
+            // A game that ships no scenarios at all keeps its create form
+            // unchanged — there is nothing to say about wars to Paper Tanks.
+            // But a scenario-driven game whose selected map has no offerable
+            // war has something to say, and saying nothing is what made
+            // retiring Meridian Basin's war (PLAN-metalstorm-wars.md §7.6)
+            // present as a map card that silently offers no war and no reason.
+            if (this.availableScenarios.length === 0 || !this.selectedMapId) {
+                row.style.display = 'none';
+                return;
+            }
+            row.style.display = 'block';
+            sel.style.display = 'none';
+            sel.innerHTML = '';
+            if (note) {
+                const { className, text } =
+                    noWarNote(noWarReason(this.availableScenarios,
+                                          this.selectedMapId));
+                note.className = className;
+                note.textContent = text;
+            }
             return;
         }
         row.style.display = 'block';
+        sel.style.display = '';
 
         // The default entry carries no value, so the create request omits
         // `scenario` entirely and the server applies the map's default —
@@ -1180,16 +2794,226 @@ export class LobbyUI {
         return parts.length > 0 ? parts.join(' &middot; ') : '';
     }
 
-    private renderRoomList(): void {
-        const el = document.getElementById('room-list');
-        if (!el) return;
+    /// The war browser (§4, task 6).
+    ///
+    /// Wars are rendered in their own list, above the rooms, because they
+    /// answer a different question: a room browser asks "is there a game?", a
+    /// war browser asks "is there room for ME, on my side". The whole section
+    /// stays hidden on a lobby with no wars, so a skirmish-only lobby is
+    /// untouched by this feature rather than merely unaffected by it.
+    /// The war rows, joined to this account's per-war preview.
+    ///
+    /// Extracted from `renderWarList` (PLAN-persistence task 4d) because the
+    /// `war-state` notice needs the same join: whether a transition is worth
+    /// telling this player about is decided off `enlisted`, which lives in the
+    /// preview and not in the room row. Two spellings of the join would be two
+    /// answers to "is this war mine".
+    private warRows(): WarRow[] {
+        return this.rooms
+            .filter(r => r.sessionKind === 'persistent' && r.war && !r.replayFile)
+            .map(r => {
+                const p = this.warPreviews.get(r.id);
+                return {
+                    id: r.id, name: r.name, mapId: r.mapId, state: r.state,
+                    war: r.war!,
+                    returning: p?.returning ?? false,
+                    // The durable half of "is this war mine" (task 4c). Left
+                    // undefined when the lobby does not publish it, so
+                    // `filterWars` falls back to `returning` rather than
+                    // reading a defaulted `false` as "not enlisted".
+                    enlisted: p?.enlisted,
+                    seat: p?.seat,
+                    awaySec: p?.away_sec,
+                    mySide: p?.side || undefined,
+                };
+            });
+    }
 
-        if (this.rooms.length === 0) {
-            el.innerHTML = '<div class="empty-state">No games available — create one!</div>';
+    private renderWarList(): void {
+        const section = document.getElementById('war-section');
+        const list = document.getElementById('war-list');
+        const filters = document.getElementById('war-filters');
+        if (!section || !list || !filters) return;
+
+        const wars: WarRow[] = this.warRows();
+
+        if (wars.length === 0) { section.style.display = 'none'; return; }
+        section.style.display = '';
+
+        // Deploy needs a faction to deploy: without one the server can only
+        // answer `no_faction`, and a button whose only possible reply is "this
+        // does nothing for you" is worse than no button (D41's lesson).
+        const deployBtn = document.getElementById('deploy-btn');
+        if (deployBtn) deployBtn.style.display = this.myFaction ? '' : 'none';
+
+        // The friends chip only exists on a lobby whose friends routes answer.
+        // A chip that can only ever be empty advertises a feature this lobby
+        // does not have — the same call the Friends button itself makes.
+        if (this.friends === null && this.warFilter === 'friends-here')
+            this.warFilter = 'my-faction';
+        const filterKeys = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+            .filter(f => f !== 'friends-here' || this.friends !== null);
+        filters.innerHTML = filterKeys
+            .map(f => `<button class="war-filter-chip${f === this.warFilter ? ' active' : ''}"` +
+                      ` data-filter="${f}">${this.esc(WAR_FILTER_LABELS[f])}</button>`)
+            .join('');
+        filters.querySelectorAll('.war-filter-chip').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                this.warFilter = btn.getAttribute('data-filter') as WarFilter;
+                this.renderWarList();
+            };
+        });
+
+        const friends = this.friends ?? [];
+        const friendRooms = friendWarRooms(friends);
+        const shown = filterWars(wars, this.warFilter, this.myFaction, friendRooms);
+        if (shown.length === 0) {
+            // Named per filter: "no wars" and "none for your faction" send a
+            // player to two different places, and the second one is the whole
+            // reason the default filter exists.
+            const why = this.warFilter === 'my-faction'
+                ? 'No war is fielding your faction right now.'
+                : this.warFilter === 'my-wars'
+                    ? 'You hold no seat in any war yet.'
+                    : this.warFilter === 'friends-here'
+                        // Says which fact is missing: presence, not friendship.
+                        // "You have no friends" would be wrong for a player
+                        // whose friends are simply not fighting right now.
+                        ? 'None of your friends are in a war right now.'
+                        : 'No wars are running.';
+            list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
 
-        el.innerHTML = this.rooms.map(r => {
+        // One clock read for the whole list, so every "3h ago" on screen is
+        // measured from the same instant.
+        const nowSec = Math.floor(Date.now() / 1000);
+        list.innerHTML = shown.map(row => {
+            const preview = this.warPreviews.get(row.id);
+            const previewText = preview ? formatJoinPreview(preview) : '';
+            const previewHtml = previewText
+                ? `<div class="room-preview${preview!.will_fight ? '' : ' room-preview-watch'}">` +
+                  `${this.esc(previewText)}</div>`
+                : '';
+            // The badge is the war's STATE, not the one "is a digest being
+            // published" bit (PLAN-persistence task 4): hibernated, crashed
+            // and unresumable all used to read "Idle", and they are three
+            // different things to walk into.
+            // The while-you-were-away digest (PLAN-persistence task 4b). Only
+            // a returning player has one — the lobby sends it only for an
+            // account that already holds a seat here — so this is empty on
+            // every war a player is meeting for the first time, which is the
+            // correct reading of "what did I miss".
+            const digest = preview
+                ? formatDigest(preview.digest, preview.digest_total, row.war.sides, {
+                      awaySec: preview.away_sec,
+                      myTeam: preview.team,
+                  })
+                : null;
+            const digestHtml = digest
+                ? `<div class="war-digest"><span class="war-digest-head">` +
+                  `${this.esc(digest.heading)}</span><ul>` +
+                  // Above the lines, not below: it counts what was cut off the
+                  // FRONT of the story, and a card with a bounded height put
+                  // it under the fold when it trailed.
+                  (digest.more > 0
+                      ? `<li class="war-digest-more">${digest.more} earlier, not shown</li>`
+                      : '') +
+                  digest.lines.map(l => `<li>${this.esc(l)}</li>`).join('') +
+                  `</ul></div>`
+                : '';
+            // What is MINE in this war (task 4c): my side, how long I have been
+            // gone, how much world is frozen waiting. Rendered on every filter,
+            // not just "My wars" — a war a player holds a seat in reads the
+            // same wherever they find it.
+            const yours = formatYourWar(row);
+            // A superseded seat is a loss, not a greeting, and must not wear
+            // the accent colour the other "your side" lines do — the same call
+            // task 4a made for the crashed badge, which deliberately does not
+            // share the muted "nothing here" colour with a clean freeze.
+            const yoursCls = row.seat === 'superseded'
+                ? 'war-yours war-yours-lost' : 'war-yours';
+            const yoursHtml = yours
+                ? `<div class="${yoursCls}">${this.esc(yours)}</div>` : '';
+            // Who of MINE is in this war (task 9a). Rendered in every filter,
+            // not only under "Friends here": the filter is a way of finding
+            // these rows and the line is the reason they were kept, and a
+            // marker that appears only inside its own filter cannot be
+            // discovered by anyone who has not already found it.
+            const friendsHere = formatFriendsHere(friends, row.id);
+            const friendsHtml = friendsHere
+                ? `<div class="war-friends">${this.esc(friendsHere)}</div>` : '';
+            const badge = warStateBadge(row.war);
+            const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
+            const warStateIsKnown =
+                !!row.war.state && row.war.state !== 'not_a_war';
+            // The operator's own E1 sentence, hashes and all, one hover away
+            // from the player sentence on the card.
+            const refusal = row.war.resume_blocked_reason
+                ? ` title="${this.escAttr(row.war.resume_blocked_reason)}"`
+                : '';
+            // Disabled only when this account could not take a seat under any
+            // reading — no side for its faction, or no seat left on it. A
+            // returning player is never disabled: their seat is held for them
+            // and bypasses capacity (task 4), which is exactly the case a
+            // naive "is it full" test gets wrong.
+            const canFight = row.returning ||
+                (!!this.myFaction && hasRoomForFaction(row.war, this.myFaction));
+            return renderTemplate(this.templates.browserWarEntry, {
+                id: row.id,
+                name: this.esc(row.name),
+                // The ROOM state is dropped once the WAR state is known: a
+                // hibernated war keeps `state = InGame` (the room is what the
+                // world was doing when the process left), so the two badges
+                // side by side read "In game · Hibernated". The war word is
+                // the true one, and two badges that disagree is worse than one.
+                state: warStateIsKnown ? '' : (ROOM_STATE_LABELS[row.state] || '?'),
+                live_badge: liveBadge,
+                detail: this.esc(formatWarDetail(row, nowSec)),
+                detail_title: refusal,
+                control: this.esc(formatControl(row.war)),
+                friends_html: friendsHtml,
+                yours_html: yoursHtml,
+                preview_html: previewHtml,
+                digest_html: digestHtml,
+                fight_label: fightLabel(row),
+                fight_disabled: canFight ? '' : ' disabled',
+            });
+        }).join('');
+
+        // Scoped to `.war-actions` rather than given hook classes of their
+        // own: the two buttons already ARE the two shapes the room browser
+        // uses (`join-btn` / `spectate-btn`), and a class that exists only for
+        // a querySelector is a class the stylesheet will never hear about.
+        list.querySelectorAll('.war-actions .join-btn:not([disabled])').forEach(btn => {
+            (btn as HTMLElement).onclick = () =>
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/false);
+        });
+        list.querySelectorAll('.war-actions .spectate-btn').forEach(btn => {
+            (btn as HTMLElement).onclick = () =>
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/true);
+        });
+    }
+
+    private renderRoomList(): void {
+        this.renderWarList();
+        const el = document.getElementById('room-list');
+        if (!el) return;
+
+        // Wars have their own list above; a war left in this one would offer
+        // the plain Join that seats by roster and would say "0/8 players" for
+        // a war whose fighters the room row never sees.
+        const rooms = this.rooms.filter(
+            r => !(r.sessionKind === 'persistent' && r.war && !r.replayFile));
+
+        if (rooms.length === 0) {
+            el.innerHTML = this.rooms.length === 0
+                ? '<div class="empty-state">No games available — create one!</div>'
+                : '';
+            return;
+        }
+
+        el.innerHTML = rooms.map(r => {
             const detail = r.replayFile
                 ? `replay · ${this.esc(r.replayFile)} · ` +
                   `${r.playerCount} watching`
@@ -1208,11 +3032,23 @@ export class LobbyUI {
             const spectateHtml = (!r.replayFile && r.state < 3 && r.state < 5)
                 ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
                 : '';
+            // §2.4: a war's card says what joining it will DO to you — which
+            // side your faction puts you on, whether the seat is already
+            // yours, and the authority you arrive with. Escaped like every
+            // other interpolation here: the sentence is built from server
+            // numbers, but the faction key inside it is account data.
+            const preview = this.warPreviews.get(r.id);
+            const previewText = preview ? formatJoinPreview(preview) : '';
+            const previewHtml = previewText
+                ? `<div class="room-preview${preview!.will_fight ? '' : ' room-preview-watch'}">` +
+                  `${this.esc(previewText)}</div>`
+                : '';
             return renderTemplate(this.templates.browserRoomEntry, {
                 id: r.id,
                 name: this.esc(r.name),
                 state: ROOM_STATE_LABELS[r.state] || '?',
                 detail,
+                preview_html: previewHtml,
                 join_label: joinLabel,
                 disabled_attr: r.state >= 5 ? ' disabled' : '',
                 spectate_html: spectateHtml,
@@ -1239,6 +3075,21 @@ export class LobbyUI {
     }
 
     // ===================== ROOM =====================
+
+    /// Q-P3: resolve one room row to a seat. The war half of the question is
+    /// answered by this account's join preview, which is the only per-account
+    /// seat source the lobby has for a room the game server is seating itself.
+    private seatFor(p: RoomPlayerInfo, running: boolean): RoomSeat {
+        const r = this.currentRoom;
+        const isWar = r?.sessionKind === 'persistent';
+        return resolveRoomSeat({
+            running,
+            isWar,
+            mine: p.playerId === this.myPlayerId,
+            isSpectatorFlag: p.isSpectator,
+            preview: (isWar && r) ? this.warPreviews.get(r.id) : undefined,
+        });
+    }
 
     /// Patch the room DOM in-place without rebuilding innerHTML.
     /// Returns true if the patch succeeded, false if a full re-render
@@ -1272,10 +3123,13 @@ export class LobbyUI {
                 teamSel.value = String(p.team);
             }
 
-            // Ready status
+            // Ready status — same seat source as the full render (Q-P3), or
+            // the patch would put the flag's label back on the next poll.
             const statusEl = row.querySelector('.player-status');
             if (statusEl) {
-                statusEl.textContent = p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—');
+                const running = r.state === 3 || r.state === 4;
+                statusEl.textContent =
+                    roomSeatStatus(this.seatFor(p, running), p.ready, running);
             }
 
             // Start pos select
@@ -1393,18 +3247,29 @@ export class LobbyUI {
         // can restyle the row layout. The `{{startpos_html}}` and
         // `{{team_options}}` placeholders receive the start-pos select
         // (possibly empty if the map ships no positions) and the side list.
+        // The side my own faction binds me to in this room, if any (D40). The
+        // server seated me there and refuses any other team, so the dropdown
+        // must not offer one — a control whose every alternative is a 403 is
+        // D41's silent refusal waiting to happen.
+        const myBoundSide = sideForFaction(sides, this.myFaction);
         const playersHtml = r.players.map(p => {
+            const seat = this.seatFor(p, gameRunning);
             const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
             const posSel = renderStartPosSelect(
                 p.startPos, `player:${p.playerId}`, canEdit);
+            const mine = p.playerId === this.myPlayerId;
             return renderTemplate(this.templates.roomPlayerRow, {
                 pid: p.playerId,
                 name: this.esc(p.username),
                 host_icon: p.isHost ? '★' : '●',
                 ready_class: p.ready ? 'ready' : '',
-                select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
+                select_disabled: !mine
+                    ? ' disabled'
+                    : (myBoundSide
+                        ? ` disabled title="You fight for ${this.esc(myBoundSide.label)}"`
+                        : ''),
                 team_options: renderSideOptions(sides, p.team),
-                status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
+                status: roomSeatStatus(seat, p.ready, gameRunning),
                 startpos_html: posSel,
             });
         }).join('');
@@ -1470,10 +3335,21 @@ export class LobbyUI {
                 addAIHtml =
                     `<div class="ai-add-row"><span class="muted">Loading AI list…</span></div>`;
             } else {
+                // Default to the AI the GAME ships, not option 0.
+                // AIDiscovery lists engine AIs first on purpose (a game AI
+                // sharing an id has to be able to override one), and a
+                // `<select>` with no `selected` takes option 0 — so on
+                // Metalstorm the host's Add AI defaulted to "Null AI
+                // (engine)", an opponent that issues no commands, in the
+                // one click that decides whether the room is a game
+                // (PLAN-endtoend.md D26).
+                const aiDefaultId = defaultAIId(this.availableAIs);
                 const options = this.availableAIs.map(ai => {
                     const label = this.esc(ai.displayName)
                         + (ai.isEngineProvided ? ' (engine)' : '');
-                    return `<option value="${this.esc(ai.id)}">${label}</option>`;
+                    const selAttr = ai.id === aiDefaultId ? ' selected' : '';
+                    return `<option value="${this.esc(ai.id)}"${selAttr}>`
+                        + `${label}</option>`;
                 }).join('');
                 // Default the new slot to a side nobody holds, so "Add AI" on
                 // a fresh room produces an *opponent* rather than a second
@@ -1501,17 +3377,21 @@ export class LobbyUI {
         // Spectators (PLAN-metalstorm-onboarding.md §4) aren't part of the
         // ready-check (RoomManager::AllReady already excludes them) — Ready
         // doesn't apply to them; Enlist is their path to a team slot instead.
-        if (preGame && !myPlayer?.isSpectator) {
+        // Q-P3: read the seat, not the flag. On a running war `is_spectator` is
+        // true of every fighter in it, which offered a resumed player **Enlist**
+        // and called the one button that worked "Watch Game".
+        const mySeat = myPlayer ? this.seatFor(myPlayer, gameRunning) : 'unknown';
+        if (preGame && mySeat !== 'spectator') {
             actions.push(`<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>`);
         }
-        if (myPlayer?.isSpectator) {
+        if (mySeat === 'spectator') {
             actions.push('<button id="enlist-btn" class="primary">Enlist</button>');
         }
         if (preGame && amHost) {
             actions.push('<button id="start-btn" class="primary">Start Game</button>');
         }
         if (gameRunning) {
-            actions.push(`<button id="rejoin-btn" class="primary">${myPlayer?.isSpectator ? 'Watch Game' : 'Rejoin Game'}</button>`);
+            actions.push(`<button id="rejoin-btn" class="primary">${mySeat === 'spectator' ? 'Watch Game' : 'Rejoin Game'}</button>`);
         }
         // No "End Game" or "Close Room" buttons. Room lifecycle is
         // handled via Leave: last human out kills the game and room.
@@ -1525,6 +3405,10 @@ export class LobbyUI {
         });
 
         document.getElementById('leave-btn')!.onclick = () => this.leave();
+        this.wireLogoutButton();
+        // The room screen hosts the same dock: the room and ally tabs only
+        // exist while a seat does, and this is where the seat is known.
+        this.wireChatDock();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
         document.getElementById('enlist-btn')?.addEventListener('click',
@@ -1547,7 +3431,7 @@ export class LobbyUI {
                 this.inGame = true;
                 this.gameStartedForRoomId = this.currentRoom.id;
                 this.hide();
-                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             }
         });
         // "End Game" and "Close Room" buttons removed — room lifecycle
@@ -1666,14 +3550,23 @@ export class LobbyUI {
     async joinRoom(roomId: number, asSpectator: boolean = false): Promise<void> {
         if (!this.authToken) return;
         let data: any = null;
+        // Q-P3: every caller of this method is a button — the war notice's
+        // Rejoin, a war card's Fight/Rejoin, a room-list Join, the saved-room
+        // auto-rejoin at boot. So the request itself is the intent, and it is
+        // set before the await because a poll landing mid-flight is welcome to
+        // consume it: whichever update arrives first enters the game, and the
+        // other one then reads `inGame` and stays put.
+        this.rejoinRequestedRoomId = roomId;
         try {
             data = await this.lobbyPost('/api/rooms/join', { room_id: roomId, as_spectator: asSpectator });
         } catch { /* network / non-JSON error — handled as a failed join below */ }
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
+            this.rejoinRequestedRoomId = null;
             if (this.currentRoom) this.showRoom();
             return;
         }
+        this.rejoinRequestedRoomId = null;
         // Join failed (room deleted/reset, full, or no longer joinable).
         // Self-heal the auto-reconnect: if this was the saved-room rejoin
         // (tryAutoLogin), clear the stale `springrts-game-room` so we don't
@@ -1721,9 +3614,24 @@ export class LobbyUI {
         return data?.id ? data : null;
     }
 
+    /// Start the room's game. The server's refusal is the ONLY feedback a
+    /// host gets, so it has to reach the screen: this used to discard the
+    /// response entirely, which made a refused Start Game completely silent
+    /// — the commonest cause being the host's own un-pressed Ready, since
+    /// RoomManager::AllReady() counts the host like any other player
+    /// (PLAN-endtoend.md D41, found fire 19).
     async startGame(): Promise<void> {
         if (!this.authToken) return;
-        await this.lobbyPost('/api/rooms/start');
+        const data = await this.lobbyPost('/api/rooms/start');
+        const msgEl = document.getElementById('room-msg');
+        if (!msgEl) return;
+        if (data?.error) {
+            msgEl.textContent = data.error;
+            msgEl.className = 'msg error';
+        } else {
+            msgEl.textContent = '';
+            msgEl.className = 'msg';
+        }
     }
 
     // endGame() and closeRoom() removed — room lifecycle is handled
@@ -1753,9 +3661,15 @@ export class LobbyUI {
                     id: g.id ?? '', displayName: g.displayName ?? '',
                     description: g.description ?? '', version: g.version ?? '',
                     lighting: g.lighting ?? 'gameplay',
+                    archived: !!g.archived,
+                    archivedReason: g.archivedReason ?? '',
                 }));
+                // First PLAYABLE game, not games[0] — the list is
+                // alphabetical, so games[0] is `bar` on any tree that still
+                // carries the archived ports (PLAN-endtoend.md D26).
                 if (!this.selectedGameId && this.availableGames.length > 0) {
-                    this.selectedGameId = this.availableGames[0].id;
+                    this.selectedGameId =
+                        defaultGameId(this.availableGames) ?? '';
                 }
                 if (this.currentScreen === 'browser') this.renderGameOptions();
             }
@@ -1879,13 +3793,21 @@ export class LobbyUI {
                 description: g.description() ?? '',
                 version: g.version() ?? '',
                 lighting: g.lighting() ?? 'gameplay',
+                // Same field the HTTP path reads. Nothing currently sends
+                // GameListUpdate — the live list comes from
+                // `GET /api/games` — but an ingestion path that cannot see
+                // `archived` would show an archived game as playable the
+                // moment anything did send it (PLAN-endtoend.md D26/D59).
+                archived: g.archived(),
+                archivedReason: g.archivedReason() ?? '',
             });
         }
-        // Auto-select the first game so a user who immediately
-        // clicks "New Game" after login has a valid selection
-        // without having to touch the dropdown.
+        // Auto-select the first PLAYABLE game so a user who immediately
+        // clicks "New Game" after login has a valid selection without
+        // having to touch the dropdown — "valid" meaning one the create
+        // route will accept (PLAN-endtoend.md D26).
         if (!this.selectedGameId && this.availableGames.length > 0) {
-            this.selectedGameId = this.availableGames[0].id;
+            this.selectedGameId = defaultGameId(this.availableGames) ?? '';
         }
         if (this.currentScreen === 'browser') {
             this.renderGameOptions();
@@ -1923,15 +3845,21 @@ export class LobbyUI {
         // "War:" label every time a player readies up. A different room id
         // means different modoptions, so those start empty until the JSON
         // path (updateCurrentRoomFromJson) fills them in.
-        const carriedModOptions =
-            this.currentRoom && this.currentRoom.id === u.roomId()
-                ? this.currentRoom.modOptions : {};
+        const sameRoom =
+            this.currentRoom !== null && this.currentRoom.id === u.roomId();
+        const carriedModOptions = sameRoom ? this.currentRoom!.modOptions : {};
+        // Carried for the same reason as the modoptions above: the flatbuffer
+        // RoomUpdate has no session-kind field, and dropping it here would
+        // make every war look like a skirmish the moment a binary update
+        // arrived — which is most of them.
+        const carriedSessionKind = sameRoom ? this.currentRoom!.sessionKind : undefined;
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapId: u.mapId() ?? '',
             gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
             modOptions: carriedModOptions,
+            sessionKind: carriedSessionKind,
         };
 
         // The AI list is per-game (each game has its own ai/ folder
@@ -1961,7 +3889,7 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId, this.currentRoom.modOptions);
             return;
         }
 
@@ -1983,6 +3911,15 @@ export class LobbyUI {
 
     private esc(s: string): string {
         return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    /// `esc` for a value going inside a quoted ATTRIBUTE. `esc` alone leaves
+    /// quotes standing, which is safe between tags and is not safe here — a
+    /// value carrying `"` would close the attribute. Server-authored strings
+    /// (an E1 refusal names a map id) reach attributes now, so the two cases
+    /// get two functions rather than one that is right most of the time.
+    private escAttr(s: string): string {
+        return this.esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     /**

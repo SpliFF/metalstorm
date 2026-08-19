@@ -57,7 +57,14 @@ struct sqlite3;
 /// impostors/map-pipeline file scope this fix touched) and moot for every
 /// checkout observed 2026-08-03 (main + every active clone already has a
 /// `.processed-stamp` newer than 98fbd46bda and older than e55f0d9400).
-constexpr int MAP_FORMAT_VERSION = 16;
+/// 17: MapDecalData::splatDetailNormalDiffuseAlpha (D48 — the client needs
+///     Recoil's SMF_DETAIL_NORMAL_DIFFUSE_ALPHA flag to pick the right
+///     branch of GetDetailTextureColor for splat-normal maps).
+/// 18: MapMetadata::groundTex — the map-space ground albedo (PLAN-maps M7f
+///     option A, user ruling §2n). A map that declares `resources.groundtex`
+///     ships its whole ground colour as one texture and the SMT tile
+///     dictionary is not extracted for it at all.
+constexpr int MAP_FORMAT_VERSION = 18;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -107,6 +114,13 @@ struct MapDecalData {
     std::string detailNormalTex;       // global detail normal map
     float splatScales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
     float splatMults[4]  = {1.0f, 1.0f, 1.0f, 1.0f};
+    /// mapinfo `resources.splatDetailNormalDiffuseAlpha` (or the
+    /// `splatDetailNormalTex` sub-table's `alpha` key). Recoil's
+    /// SMF_DETAIL_NORMAL_DIFFUSE_ALPHA: when set, the alpha channel of the
+    /// blended splat detail *normals* supplies the ground's near-field
+    /// albedo detail; when clear, that branch contributes no albedo at all.
+    /// See CMapInfo::ReadSMF and SMFRenderState.cpp:115.
+    bool splatDetailNormalDiffuseAlpha = false;
 };
 
 /// Water rendering properties. Spring's "water" system is also used for
@@ -171,6 +185,19 @@ struct MapMetadata {
     /// path, footprint, etc. parsed from the map's `features/*.lua`.
     std::vector<MapFeatureDef> featureDefs;
     MapDecalData decals;
+    /// mapinfo `resources.groundtex` — the map-space ground albedo, converted
+    /// to `ground.ktx2` in the processed dir (empty = this map delivers its
+    /// ground colour through the SMT tile dictionary, as Spring does).
+    ///
+    /// DEVIATION from Recoil, recorded per the code-session contract: Recoil
+    /// has no such key and no such path. M7f measured the SMT dictionary this
+    /// generator writes against ground truth — 12.5 % of texels >4 levels off
+    /// and a 15.7x seam jump on the 32-elmo tile grid, against 7.5 % and 1.2x
+    /// for a 2048² map-space texture at a third of the bytes — and the user
+    /// ruled the map-space path in, opt-in per map (PLAN-maps.md §2n). A map
+    /// that does not declare it is unaffected, which is what keeps real
+    /// Spring maps (whose SMTs are exactly deduped) on the faithful path.
+    std::string groundTex;
     MapWaterData water;
     /// `mapinfo.lua → sound.preset` — names an OpenAL EFX preset that
     /// Recoil binds to the map-wide reverb chain. Client side, we map

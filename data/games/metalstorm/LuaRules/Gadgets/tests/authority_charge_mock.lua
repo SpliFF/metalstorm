@@ -24,6 +24,7 @@ function M.new()
         unitDefIdByUnit = {},   -- unitID -> unitDefID
         orgGroups = {},         -- teamID -> { {id=.., members={...}}, ... }
         players = {},           -- playerID -> teamID
+        playerActive = {},      -- playerID -> bool (false = a seat, nobody in it)
         unitRulesParams = {},   -- unitID -> key -> value
     }
 
@@ -40,8 +41,14 @@ function M.new()
 
     --- Register a player's team so playerTeam()/getPlayerPool() (which read
     --- it via Spring.GetPlayerInfo) can resolve it.
-    function world.setPlayer(playerID, teamID)
+    ---
+    --- `active` defaults to true. Pass false for a seat that EXISTS in the
+    --- roster but that nobody is sitting in — the Σ slotCap player slots a war
+    --- is pre-allocated at spawn (PLAN-metalstorm-wars.md §8.1), and a
+    --- disconnected row. Both are what GameStart's `activeOnly` filter is for.
+    function world.setPlayer(playerID, teamID, active)
         world.players[playerID] = teamID
+        world.playerActive[playerID] = active ~= false
     end
 
     --- Seed a unit's authority_cost_base via a fake unitDefID (auto-assigned).
@@ -76,11 +83,39 @@ function M.new()
             table.sort(out)
             return out
         end,
-        GetPlayerList = function() return {} end,
+        -- Mirrors rts/Lua/LuaSyncedRead.cpp GetPlayerList, and the same model
+        -- tests/spring_mock.lua carries: teamID<0 (or nil) = no team filter,
+        -- `active` additionally filters to active==true. It used to return {}
+        -- unconditionally, which made GameStart's roster seed untestable here.
+        GetPlayerList = function(a, b)
+            local teamID, activeOnly
+            if type(a) == 'number' then
+                teamID, activeOnly = a, b
+            elseif type(a) == 'boolean' then
+                activeOnly, teamID = a, b
+            end
+            local out = {}
+            for playerID, playerTeamID in pairs(world.players) do
+                local include = true
+                if teamID ~= nil and teamID >= 0 and playerTeamID ~= teamID then
+                    include = false
+                end
+                if activeOnly and world.playerActive[playerID] == false then
+                    include = false
+                end
+                -- FLOAT, for the reason tests/spring_mock.lua spells out: the
+                -- engine hands playerIDs back as Lua-5.4 floats, and
+                -- PlayerAdded's `authority_granted_<id>` guard keys off them.
+                if include then out[#out + 1] = playerID + 0.0 end
+            end
+            table.sort(out)
+            return out
+        end,
         GetPlayerInfo = function(playerID, _)
             local teamID = world.players[playerID]
             if not teamID then return nil end
-            return 'player' .. playerID, true, false, teamID
+            return 'player' .. playerID, world.playerActive[playerID] ~= false,
+                   false, teamID
         end,
         SetTeamRulesParam = function(teamID, key, value, _los)
             world.teamRulesParams[teamID] = world.teamRulesParams[teamID] or {}

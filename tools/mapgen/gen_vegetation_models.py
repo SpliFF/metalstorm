@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """gen_vegetation_models — procedural map-feature models (PLAN-maps.md M6).
 
-Builds the four vegetation/rock props terragen's scatter places
-(`terragen/vegetation.py` TEMPERATE_SPECIES — the def names MUST match):
+Builds the vegetation/rock props terragen's scatter places
+(`terragen/vegetation.py` climate palettes — the def names MUST match):
 
     tree_conifer    stacked skirt cones on a tapered trunk
     tree_broadleaf  bent trunk + displaced icosphere canopy cluster
     bush_scrub      low displaced-icosphere cluster
     rock_boulder    displaced icosphere with a flattened base
+    dead_snag       snapped bare trunk, three stripped branches   (arctic/arid)
+    cactus_column   fluted column with two elbowed arms           (arid)
+    desert_shrub    dry tan lobes over bare twigs                 (arid)
+    palm            leaning ringed trunk under seven fronds       (tropical)
+
+`--climate` selects which of them a package gets: a map should carry the
+props its placement list names and no others. `temperate` is the original
+eleven in the original order, so a regenerated shipped map is byte-identical.
 
 Everything is deterministic (one seed per species, no wall-clock, no
 unordered iteration) and authored in **elmos** — map features are drawn at
@@ -51,6 +59,9 @@ sys.path.insert(0, FORGE)
 import bake_impostors                      # noqa: E402
 import gltf_export                         # noqa: E402
 from meshlib import Part                   # noqa: E402
+
+sys.path.insert(0, HERE)
+from terragen import vegetation as veg     # noqa: E402
 
 # ── palette atlas ───────────────────────────────────────────────────────
 # 4x4 grid of 64px swatches in a 256^2 atlas. Every face is UV'd inside one
@@ -231,14 +242,33 @@ def _lumpy(dirs: np.ndarray, rng: np.random.Generator, amp: float,
     return 1.0 + amp * acc
 
 
+def _rot(yaw: float, pitch: float) -> np.ndarray:
+    """Rotation about +Y by `yaw`, then about the resulting +Z-ish axis by
+    `pitch` (tilting the +X axis up). Both are proper rotations, so a mesh
+    passed through them keeps its winding — the property `_transform`'s note
+    relies on, and what makes `blob(rot=...)` safe."""
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+    rp = np.array([[cp, -sp, 0.0], [sp, cp, 0.0], [0.0, 0.0, 1.0]])
+    return ry @ rp
+
+
 def blob(part: Part, pal: Palette, rng: np.random.Generator, centre,
-         radii, subdiv: int, amp: float, swatches, floor: float | None = None):
+         radii, subdiv: int, amp: float, swatches, floor: float | None = None,
+         rot: np.ndarray | None = None):
     """Displaced ellipsoid. `swatches` is (lit, mid, shadow) — the facet's
     own normal picks which, so the palette does the tonal work the flat
-    normals alone can't. `floor`, if given, clamps world Y (flat base)."""
+    normals alone can't. `floor`, if given, clamps world Y (flat base).
+    `rot`, if given, is a proper rotation applied after scaling and before
+    the translation — how a stretched ellipsoid becomes a palm frond, a
+    cactus elbow or a dead branch without hand-winding a swept tube."""
     unit, faces = icosphere(subdiv)
     disp = _lumpy(unit, rng, amp)
-    pts = unit * disp[:, None] * np.asarray(radii) + np.asarray(centre)
+    pts = unit * disp[:, None] * np.asarray(radii)
+    if rot is not None:
+        pts = pts @ np.asarray(rot).T
+    pts = pts + np.asarray(centre)
     if floor is not None:
         pts[:, 1] = np.maximum(pts[:, 1], floor)
     lit, mid, dark = swatches
@@ -254,16 +284,17 @@ def blob(part: Part, pal: Palette, rng: np.random.Generator, centre,
 
 
 def trunk(part: Part, pal: Palette, rng: np.random.Generator, stations,
-          n: int, swatch: str, lean=(0.0, 0.0)):
+          n: int, swatch: str, lean=(0.0, 0.0), base=(0.0, 0.0)):
     """Tapered n-gon trunk. `stations` = [(y, radius), ...] bottom-up;
     `lean` is the total (x, z) offset applied at the top, eased in so the
-    base stays planted."""
+    base stays planted. `base` offsets the whole column in (x, z) — a
+    cactus arm is a second column beside the first, not a lean on it."""
     rings = []
     ymin, ymax = stations[0][0], stations[-1][0]
     for (y, r) in stations:
         t = (y - ymin) / max(ymax - ymin, 1e-6)
         wob = 1.0 + rng.uniform(-0.09, 0.09, n)
-        c = (lean[0] * t * t, y, lean[1] * t * t)
+        c = (base[0] + lean[0] * t * t, y, base[1] + lean[1] * t * t)
         rings.append(_ring(c, r, n, phase=0.2, wobble=wob))
     for i in range(len(rings) - 1):
         _skin(part, rings[i], rings[i + 1], pal, swatch)
@@ -367,6 +398,112 @@ def build_boulder(pal: Palette, rng: np.random.Generator) -> Part:
         else:
             sw = "rock_dk"
         p.add_face([tuple(v) for v in tri], uvs=pal.uvs(sw, 3))
+    return p
+
+
+def _spindle(part: Part, pal: Palette, rng: np.random.Generator, origin,
+             yaw: float, pitch: float, length: float, thick: float,
+             swatches, subdiv: int = 0, amp: float = 0.18) -> None:
+    """A stretched, rotated ellipsoid growing out of `origin` — the cheap
+    closed-and-correctly-wound swept tube. Used for bare branches, cactus
+    elbows and palm fronds; `subdiv=0` keeps a 1-elmo-thick twig at 20 tris
+    instead of the 80 a smooth one would cost for no visible gain."""
+    r = _rot(yaw, pitch)
+    d = r @ np.array([length * 0.82, 0.0, 0.0])
+    blob(part, pal, rng,
+         (origin[0] + d[0], origin[1] + d[1], origin[2] + d[2]),
+         (length, thick, thick), subdiv=subdiv, amp=amp,
+         swatches=swatches, rot=r)
+
+
+def build_dead_snag(pal: Palette, rng: np.random.Generator) -> Part:
+    """Bare standing deadwood — a snapped, stripped trunk with three
+    branches left. ~72 elmos. The arctic and arid palettes' way of saying
+    trees stood here, on ground whose living cover is a treeline or a
+    wash."""
+    p = Part("dead_snag")
+    top = trunk(p, pal, rng,
+                [(0.0, 4.2), (18.0, 3.2), (42.0, 2.4), (62.0, 1.5)],
+                n=7, swatch="bark_dk", lean=(2.4, -1.6))
+    # snapped crown: a ragged spike, not a sawn cap
+    _fan_apex(p, top, (3.2, 72.0, -2.2), pal, "bark_lt")
+    for yaw, pitch, y, ln in ((0.42, 0.50, 44.0, 16.0),
+                              (2.65, 0.30, 32.0, 13.0),
+                              (4.40, 0.72, 54.0, 11.0)):
+        _spindle(p, pal, rng, (1.0, y, -0.6), yaw, pitch, ln, 1.5,
+                 ("bark_lt", "bark", "bark_dk"))
+    return p
+
+
+def build_cactus(pal: Palette, rng: np.random.Generator) -> Part:
+    """Columnar cactus: a fluted 8-gon trunk with two arms that elbow out
+    and turn back up. ~54 elmos. The flutes are free — they are the ring
+    wobble `trunk()` already applies."""
+    p = Part("cactus_column")
+    top = trunk(p, pal, rng,
+                [(0.0, 5.6), (10.0, 6.2), (30.0, 5.6), (46.0, 4.4)],
+                n=8, swatch="needle")
+    _fan_apex(p, top, (0.0, 54.0, 0.0), pal, "needle_lt")
+    for yaw, reach, y0, h in ((0.90, 13.0, 20.0, 24.0),
+                              (3.85, 12.0, 27.0, 17.0)):
+        ax, az = reach * np.cos(yaw), reach * np.sin(yaw)
+        # elbow: half-length `reach*0.52` puts the spindle's far tip at
+        # 1.82x that — i.e. on the arm's axis, so the two overlap instead of
+        # leaving the arm hanging in the air beside the trunk
+        _spindle(p, pal, rng, (0.0, y0, 0.0), yaw, 0.50, reach * 0.52, 3.4,
+                 ("needle_lt", "needle", "needle_dk"), subdiv=1, amp=0.14)
+        atop = trunk(p, pal, rng,
+                     [(y0 + reach * 0.22, 3.4), (y0 + h * 0.6, 3.2),
+                      (y0 + h, 2.4)],
+                     n=7, swatch="needle", base=(ax, az))
+        _fan_apex(p, atop, (ax, y0 + h + 4.0, az), pal, "needle_lt")
+    return p
+
+
+def build_desert_shrub(pal: Palette, rng: np.random.Generator) -> Part:
+    """Half-dead dry shrub, ~14 elmos: mostly bare twigs with three small
+    tufts caught in them. Deliberately NOT a scaled-down `bush_scrub` — the
+    first attempt was, and it read as a mossy boulder, because a dry shrub
+    is defined by the gaps in it. Tan rather than green: the existing atlas
+    already carries the range (`scrub_dk` + `bark_*`), so no swatch is
+    added and every shipped model keeps its UVs."""
+    p = Part("desert_shrub")
+    for yaw, pitch, ln in ((0.35, 1.05, 9.5), (1.55, 1.25, 8.0),
+                           (2.70, 0.95, 8.8), (3.95, 1.20, 7.2),
+                           (5.15, 1.00, 8.2)):
+        _spindle(p, pal, rng, (0.0, 1.2, 0.0), yaw, pitch, ln, 0.65,
+                 ("bark_lt", "bark", "bark_dk"), amp=0.22)
+    for centre, radii, amp in (((1.4, 9.6, -1.0), (4.2, 3.0, 3.8), 0.34),
+                               ((-4.4, 6.2, 3.0), (3.4, 2.4, 3.2), 0.36),
+                               ((4.2, 5.0, 3.4), (3.0, 2.2, 2.9), 0.36)):
+        blob(p, pal, rng, centre, radii, subdiv=1, amp=amp,
+             swatches=("scrub_lt", "scrub_dk", "bark_dk"), floor=0.0)
+    return p
+
+
+def build_palm(pal: Palette, rng: np.random.Generator) -> Part:
+    """Leaning palm: a ringed trunk under seven fronds, ~81 elmos. Fronds
+    alternate between held-up and drooping so the crown reads as a crown
+    from the side and not as a flat starburst from above."""
+    p = Part("palm")
+    lean = (9.0, -5.0)
+    top = trunk(p, pal, rng,
+                [(0.0, 4.4), (16.0, 3.6), (38.0, 3.0), (58.0, 2.6), (70.0, 2.4)],
+                n=7, swatch="bark_lt", lean=lean)
+    _cap(p, top, pal, "bark", down=False)
+    crown = (lean[0], 71.0, lean[1])
+    for i in range(7):
+        yaw = 2.0 * np.pi * i / 7 + 0.31
+        pitch = (0.34, 0.05, -0.14)[i % 3]
+        r = _rot(yaw, pitch)
+        d = r @ np.array([20.0, 0.0, 0.0])
+        blob(p, pal, rng,
+             (crown[0] + d[0], crown[1] + d[1], crown[2] + d[2]),
+             (24.0, 2.0, 6.5), subdiv=1, amp=0.22,
+             swatches=("leaf_lt", "leaf", "leaf_dk"), rot=r)
+    # crownshaft / nut cluster where the fronds meet the trunk
+    blob(p, pal, rng, crown, (5.2, 4.6, 5.2), subdiv=1, amp=0.20,
+         swatches=("bark_lt", "bark", "bark_dk"))
     return p
 
 
@@ -525,7 +662,10 @@ def build_boulder_large(pal: Palette, rng: np.random.Generator) -> Part:
 
 SPECIES = {
     # name -> (builder, seed)   names MUST match the feature defs referenced
-    # by terragen placement layers (vegetation.py species + placement.py)
+    # by terragen placement layers (vegetation.py palettes + placement.py).
+    # Each entry has its own seed and its own Palette, so appending to this
+    # table cannot perturb an existing model — which is what lets a climate
+    # bring new props without moving a shipped map's bytes.
     "tree_conifer":   (build_conifer,  0xC0F1),
     "tree_broadleaf": (build_broadleaf, 0xB2EA),
     "bush_scrub":     (build_bush,     0x5C2B),
@@ -537,7 +677,30 @@ SPECIES = {
     "ruin_pillar":    (build_ruin_pillar, 0x9111),
     "ruin_wall":      (build_ruin_wall,  0x9A11),
     "log_fence":      (build_log_fence,  0xFE2C),
+    # climate-scoped (PLAN-maps M8o) — never referenced by the temperate
+    # palette, so `--climate temperate` writes exactly the eleven above
+    "dead_snag":      (build_dead_snag,  0xD5A6),
+    "cactus_column":  (build_cactus,     0xCAC7),
+    "desert_shrub":   (build_desert_shrub, 0xD53B),
+    "palm":           (build_palm,       0x9A1E),
 }
+
+
+def species_for_climate(climate: str) -> dict:
+    """The subset of SPECIES a map on `climate` actually references.
+
+    A map package should carry the props its placement list names and no
+    others: every extra species is ~5 files and a manifest entry the client
+    downloads and never draws. `temperate` resolves to the original eleven,
+    in the original order, so a regenerated shipped map is byte-identical.
+    """
+    want = veg.feature_names_for(climate)
+    missing = [n for n in want if n not in SPECIES]
+    if missing:
+        raise SystemExit(
+            f"climate {climate!r} references feature defs with no model "
+            f"builder: {missing}")
+    return {n: SPECIES[n] for n in SPECIES if n in want}
 
 
 # ── driver ──────────────────────────────────────────────────────────────
@@ -570,6 +733,11 @@ def main() -> None:
     ap.add_argument("--no-impostors", action="store_true")
     ap.add_argument("--keep-png", action="store_true",
                     help="keep the intermediate PNG sources next to the ktx2")
+    ap.add_argument("--climate", default="temperate",
+                    choices=sorted(veg.CLIMATE_PALETTES),
+                    help="write only the props this climate's vegetation "
+                         "palette references (terragen/vegetation.py); "
+                         "'temperate' is the original eleven, unchanged")
     ap.add_argument("--selftest", action="store_true",
                     help="build every species, check winding/extents, "
                          "write nothing")
@@ -579,7 +747,10 @@ def main() -> None:
     if not args.selftest:
         os.makedirs(out_dir, exist_ok=True)
 
-    for name, (builder, seed) in SPECIES.items():
+    # --selftest checks every builder; a real run writes one climate's set
+    species = SPECIES if args.selftest else species_for_climate(args.climate)
+
+    for name, (builder, seed) in species.items():
         rng = np.random.default_rng(seed)
         pal = Palette(rng)
         part = builder(pal, rng)
@@ -622,7 +793,7 @@ def main() -> None:
             os.remove(orm_png)
 
     if args.selftest:
-        print(f"[veg] selftest OK ({len(SPECIES)} species)")
+        print(f"[veg] selftest OK ({len(species)} species)")
         return
 
     if not args.no_impostors:
@@ -630,8 +801,16 @@ def main() -> None:
         # type's atlas from this in a single request, and it carries each
         # species' own swap distance (a 20-elmo fence post has no business
         # staying a full mesh as far out as a 137-elmo conifer).
-        bake_impostors.write_manifest(out_dir, list(SPECIES))
-    print(f"[veg] wrote {len(SPECIES)} species -> {out_dir}")
+        bake_impostors.write_manifest(out_dir, list(species))
+        # ...and immediately check it back against the models and the pixels
+        # just baked. write_manifest() hand-picks the fields it copies out of
+        # each sidecar, which is exactly how `azimuthPhaseDegrees` once went
+        # missing; `centreY` going the same way would silently hover every
+        # prop rather than raising anything. Cheap, and it fails the run.
+        if not bake_impostors.verify_manifest(out_dir):
+            raise SystemExit("[veg] impostors.json does not describe the "
+                             "atlases that were just baked")
+    print(f"[veg] wrote {len(species)} species ({args.climate}) -> {out_dir}")
 
 
 if __name__ == "__main__":

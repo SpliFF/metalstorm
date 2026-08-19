@@ -10,6 +10,7 @@
 #include "AI/AICommandQueue.h"
 
 #include "Server/RulesParamKeyDict.h"
+#include "Server/IdRecycleAnnouncer.h"
 
 struct GameServerContext;
 
@@ -123,6 +124,12 @@ private:
     // Per-team stats-history send cursor (PLAN-bar Spring.GetTeamStatsHistory).
     std::vector<uint32_t> lastSentStatFinalized;
     int lastStatBroadcastClients = 0;
+
+    // PLAN-long-uptime S5 task 6 — unit-id recycle announcement. The window
+    // discipline (raise on the epoch move, retire on a LATER full snapshot)
+    // lives in the pure header so it can be tested; this streamer only feeds
+    // it the epoch and ORs the flag into the field mask.
+    EntityState::IdRecycleAnnouncer idRecycleAnnouncer;
 
     // Newest-wins State-tier lanes (WebTransportServer GW2). Each distinct
     // logical State stream needs its own lane so a new send only supersedes the

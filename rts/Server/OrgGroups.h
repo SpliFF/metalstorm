@@ -149,7 +149,19 @@ public:
     std::vector<const OrgGroup*> GetTeamGroups(int team) const;
     const std::vector<OrgGroup>& GetAllGroups() const { return groups; }
 
+    /// Size of the auto-naming callsign register. Exposed only so tests can
+    /// exhaust it and pin the numeric-suffix wrap.
+    static size_t CallsignCount();
+
     void Clear();
+
+    // ── Snapshot restore (PLAN-persistence task 1b) ──
+    // See StandingOrderManager::RestoreState for why the id counter travels
+    // with the state rather than being recomputed from max(id)+1: a group
+    // disbanded before the snapshot leaves a gap, and recomputing would be
+    // right only until the highest-id group is the one that gets disbanded.
+    uint32_t NextId() const { return nextId; }
+    void RestoreState(std::vector<OrgGroup> newGroups, uint32_t newNextId);
 
 private:
     std::vector<OrgGroup> groups;
@@ -160,6 +172,13 @@ private:
     /// Remove `unitId` from every group except `exceptGroupId`. Returns the
     /// team whose group lost the member, or -1. Enforces the one-platoon rule.
     int PullFromOtherGroups(uint32_t unitId, uint32_t exceptGroupId);
+
+    /// Pick a callsign not already in use by `team` ("Chimera Platoon"). The
+    /// used-set is derived from the team's live groups, so a disband frees the
+    /// name back up and a hand-typed rename blocks it — see OrgGroups.cpp.
+    /// Never returns empty: the register wraps with a numeric suffix.
+    std::string AssignCallsign(int team, Echelon echelon) const;
+
     void NotifyChange(int team) { if (changeNotifier) changeNotifier(team); }
 };
 
@@ -191,7 +210,13 @@ struct Directive {
     /// trailing type params (e.g. Escort guard-target id).
     std::vector<float> params;
     StandingOrderConditions conditions;   /// conditions.orgGroup mirrors groupId
-    uint32_t requestedStrength = 0;        /// demand model; 0 = take what idles
+    /// Demand model; 0 = take what idles (uncapped). ⚠ IN ABSOLUTE HITPOINTS,
+    /// the same scale as `assignedStrength` below — `Evaluate` stops recruiting
+    /// once `assignedStrength >= requestedStrength` and accrues that sum from
+    /// `CUnit::health`. A caller that states it as a unit COUNT caps every
+    /// directive at its first recruit (endtoend D68; the strategos AI did
+    /// exactly that, see `actuators.lua:_directiveSpec`).
+    uint32_t requestedStrength = 0;
     std::string phasesJson;                /// reserved v0 (macro-orders §4.4)
     bool active = true;
     uint32_t createdAtFrame = 0;
@@ -201,6 +226,23 @@ struct Directive {
     /// numerator streamed in DirectiveInfo.assigned_strength.
     float assignedStrength = 0.0f;
 };
+
+/// Conditions an AI-issued (planner) directive carries.
+///
+/// Its own function because the answer is a DECISION, not plumbing (endtoend
+/// D56 + D68): `idleOnly` is the wire default, and an idle-gated directive can
+/// only ever recruit a unit whose command queue is empty. Every Metalstorm
+/// scenario stages its army with opening orders, so an idle-gated AI directive
+/// addresses only the handful of units the scenario deliberately left
+/// unordered — the AI announces force at an objective and cannot move the army
+/// it is announcing. D56 settled this for a human ("the player picked a force
+/// and gave it an order, which is the definition of overriding what that force
+/// is doing"); an AI slot is a real player commanding its own team, and its
+/// directive is that same explicit order, so it gets the same answer.
+///
+/// `withinRadius <= 0` means no spatial filter (draw from anywhere).
+StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
+                                             float withinRadius);
 
 using DirectiveChangeNotifier = std::function<void(int team)>;
 
@@ -239,6 +281,10 @@ public:
     const std::vector<Directive>& GetAllDirectives() const { return directives; }
 
     void Clear();
+
+    // ── Snapshot restore (PLAN-persistence task 1b) ──
+    uint32_t NextId() const { return nextId; }
+    void RestoreState(std::vector<Directive> newDirectives, uint32_t newNextId);
 
 private:
     std::vector<Directive> directives;

@@ -1,5 +1,6 @@
 #include "ReplayPlayer.h"
 
+#include "ReplayCompatPolicy.h"
 #include "ReplayControlDeck.h"
 
 #include <algorithm>
@@ -12,6 +13,18 @@ bool Player::Load(const std::string& path, std::string& err) {
         err = res.error;
         return false;
     }
+    // The wire-schema gate, BEFORE anything is moved out of the result or fed
+    // anywhere (PLAN-protocol-guard task 7). A record's payload is an undecoded
+    // ClientMessage frame, so a schema the recording was not made against does
+    // not fail to parse — it parses into different fields, and the divergence
+    // surfaces frames later as an unexplained hash break. Refusing here is the
+    // difference between one legible error and a confident wrong replay.
+    const CompatVerdict compat = CheckSchemaHash(res.header.schemaHash);
+    if (!compat.accepted) {
+        err = compat.error;
+        return false;
+    }
+
     header      = std::move(res.header);
     records     = std::move(res.records);
     checkpoints = std::move(res.checkpoints);

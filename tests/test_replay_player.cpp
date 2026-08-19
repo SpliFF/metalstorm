@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <string>
 
+#include "Server/ReplayCompatPolicy.h"
 #include "Server/ReplayFile.h"
 #include "Server/ReplayPlayer.h"
 #include "protocol_generated.h"
@@ -39,6 +40,11 @@ replay::Player LoadFrom(const std::string& path, const std::vector<Record>& recs
         replay::Header h;
         h.gameId = "papertanks";
         h.mapId  = "green_flat_x34_v3";
+        // Stamped like a real recording: `Player::Load` refuses an unstamped or
+        // foreign-schema file (PLAN-protocol-guard task 7), so every fixture
+        // here has to claim this build's schema or it never gets to the
+        // ordering behaviour these cases are about.
+        h.schemaHash = Protocol::SCHEMA_HASH;
         std::string err;
         REQUIRE(w.Open(path, h, err));
         for (const Record& r : recs) {
@@ -295,6 +301,7 @@ TEST_CASE("a file's own hash track is installed on load") {
     {
         replay::Writer w;
         replay::Header h;
+        h.schemaHash = Protocol::SCHEMA_HASH;   // else the gate refuses the fixture
         h.gameId = "papertanks";
         std::string err;
         REQUIRE(w.Open(path, h, err));
@@ -332,6 +339,7 @@ TEST_CASE("a truncated segment ends at its last hash point, not its last record"
     {
         replay::Writer w;
         replay::Header h;
+        h.schemaHash = Protocol::SCHEMA_HASH;   // else the gate refuses the fixture
         std::string err;
         REQUIRE(w.Open(path, h, err));
         w.Append(Rec(1, -1, TickPhase::Inbound, InputKind::GameStart));
@@ -427,6 +435,7 @@ TEST_CASE("a corrupt identity record fails the load instead of vanishing") {
     {
         replay::Writer w;
         replay::Header h;
+        h.schemaHash = Protocol::SCHEMA_HASH;   // else the gate refuses the fixture
         std::string err;
         REQUIRE(w.Open(path, h, err));
         Record bad = Rec(1, -1, TickPhase::Inbound, InputKind::AuthIdentity);
@@ -456,4 +465,71 @@ TEST_CASE("identity records stay in the stream and are fed as no-ops") {
     REQUIRE(due.size() == 2);
     CHECK(due[0]->kind == InputKind::AuthIdentity);
     CHECK(due[1]->kind == InputKind::GameStart);
+}
+
+// ────────── The wire-schema gate (PLAN-protocol-guard task 7) ──────────
+//
+// A record's payload is an undecoded ClientMessage frame. Fed to a binary built
+// from a different protocol.fbs it does not fail to parse — it parses into
+// different fields, and the replay confidently plays a game nobody played. So
+// the driver refuses at ingest, before a single record is handed out.
+
+namespace {
+
+/// Write a one-record file whose header claims `schemaHash`, and try to load a
+/// Player from it. Returns the load error ("" on success).
+std::string LoadWithSchemaHash(const std::string& path,
+                               const std::string& schemaHash) {
+    {
+        replay::Writer w;
+        replay::Header h;
+        h.gameId     = "papertanks";
+        h.mapId      = "green_flat_x34_v3";
+        h.schemaHash = schemaHash;
+        std::string werr;
+        REQUIRE(w.Open(path, h, werr));
+        Record r = Rec(1, 0, TickPhase::Inbound, InputKind::GameStart);
+        w.Append(std::move(r));
+        replay::Trailer t;
+        t.endFrame = 30;
+        t.recordCount = 1;
+        w.Close(t);
+    }
+    replay::Player p;
+    std::string err;
+    const bool ok = p.Load(path, err);
+    std::remove(path.c_str());
+    // A refused load must leave the driver INERT, not half-populated: a caller
+    // that ignored the return value would otherwise feed a stale stream.
+    if (!ok) CHECK(p.RecordCount() == 0);
+    return ok ? std::string() : err;
+}
+
+}  // namespace
+
+TEST_CASE("a recording from another wire schema is refused at load") {
+    const std::string foreign(64, 'a');
+    const std::string err =
+        LoadWithSchemaHash("/tmp/springweb-replay-foreign.msr", foreign);
+    REQUIRE_FALSE(err.empty());
+    CHECK(err.find(foreign.substr(0, 12)) != std::string::npos);
+    CHECK(err.find(std::string(Protocol::SCHEMA_HASH).substr(0, 12)) !=
+          std::string::npos);
+}
+
+TEST_CASE("a pre-guard recording with no schema stamp is refused at load") {
+    // Every .msr already on disk is this case (§2.2: no migration, refusal is
+    // the whole treatment). It must be refused by its own wording — "<none>"
+    // rather than a second hash to go looking for.
+    const std::string err =
+        LoadWithSchemaHash("/tmp/springweb-replay-preguard.msr", "");
+    REQUIRE_FALSE(err.empty());
+    CHECK(err.find("<none>") != std::string::npos);
+}
+
+TEST_CASE("a recording from this build loads and feeds normally") {
+    // The other half of the gate: it admits, and it admits the real constant
+    // rather than anything that merely looks like a hash.
+    CHECK(LoadWithSchemaHash("/tmp/springweb-replay-current.msr",
+                             Protocol::SCHEMA_HASH).empty());
 }

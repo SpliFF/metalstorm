@@ -42,6 +42,7 @@ class LuaSyncedCtrl
 		static int KillTeam(lua_State* L);
 		static int AssignPlayerToTeam(lua_State* L);
 		static int GameOver(lua_State* L);
+		static int SpawnAIPlayer(lua_State* L);
 		static int SetGlobalLos(lua_State* L);
 		static int SetCheatingEnabled(lua_State* L);
 		static int SetGodMode(lua_State* L);

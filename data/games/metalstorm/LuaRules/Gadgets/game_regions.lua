@@ -34,10 +34,18 @@ local Partition = VFS.Include("LuaRules/Gadgets/regions/partition.lua")
 local Control   = VFS.Include("LuaRules/Gadgets/regions/control.lua")
 local Ownership = VFS.Include("LuaRules/Gadgets/regions/ownership.lua")
 local Cost      = VFS.Include("LuaRules/Gadgets/regions/cost.lua")
+local Tick      = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 GG.Regions = GG.Regions or {}
 
 local EVAL_PERIOD = 150            -- frames (5 s)
+-- D15: skip-safe cadence (see tick.lua). Observation policy — ownership is
+-- sampled from where units are standing *now*, so a stall that stepped over
+-- several periods must yield one sample, not several copies of one. The
+-- stickiness counters in regions/ownership.lua count ticks, so under sustained
+-- overload FLIP_TICKS/DECAY_TICKS stretch in frame terms; that is the
+-- conservative direction and is documented in tick.lua's header.
+local evalGate = Tick.new(EVAL_PERIOD)
 
 local provider              -- partition provider in use (grid or graph)
 local providerKind          -- "grid" | "graph" — mirrors client's regions.json provider field
@@ -208,30 +216,82 @@ end
 -- client-side; without PUBLIC the client's rulesParams mirror never sees them.
 local PUBLIC = { public = true }
 
---- Publish each region's static descriptor — display name + polygon centroid —
+--- Publish each region's static descriptor — display name + centre point —
 --- ONCE at setup. Names and geometry don't change during a game, so this is a
---- one-shot write, not part of the per-change publish() path. Only the graph
---- provider carries authored metadata; grid regions are synthetic and nameless
---- (byKey empty), so a grid map contributes no named *places* to the composer —
---- objectives (which publish their own x/z) still populate the Target picker.
---- The centroid is the vertex average: enough for a locate-ping and an
---- "attack <region>" target, never a point-in-region fill test (regions.js
---- owns the exact partition geometry from the map export).
+--- one-shot write, not part of the per-change publish() path.
+---
+--- BOTH providers publish, through the identical `region_<key>_name/_x/_z`
+--- shape (PLAN-metalstorm-command-language.md §5):
+---
+---   * graph — the AUTHORED name and the region's own `centre` when it ships
+---     one (M9m), else the polygon's vertex-average centroid.
+---     Enough for a locate-ping and an "attack <region>" target, never a
+---     point-in-region fill test (regions.js owns the exact partition geometry
+---     from the map export).
+---   * grid  — a DERIVED name ("Sector B9", partition.lua) and the clipped
+---     cell centre. Grid cells carry no authored metadata (byKey is empty), so
+---     until this landed a grid map contributed zero named places and "zoom to
+---     sector B9" was impossible on every map without a hand-written
+---     mapdata/regions.lua. Authored names stay primary: a map that ships a
+---     valid graph never reaches the grid branch at all.
+---
+--- The client needs no change for either — entity-index-producer.ts already
+--- parses this shape, so the names reach the command console, the AI and the
+--- authority layer by the path that was already there.
 local function publishRegionStatics()
+    if provider.sectors then
+        for _, s in ipairs(provider.sectors()) do
+            Spring.SetGameRulesParam('region_' .. s.key .. '_name', s.name, PUBLIC)
+            Spring.SetGameRulesParam('region_' .. s.key .. '_x', s.x, PUBLIC)
+            Spring.SetGameRulesParam('region_' .. s.key .. '_z', s.z, PUBLIC)
+        end
+        return
+    end
+
     if not provider.byKey then return end
     for _, key in ipairs(provider.keys and provider.keys() or {}) do
         if key ~= "wilds" then
             local meta = provider.byKey[key]
             if meta and type(meta.polygon) == "table" and #meta.polygon > 0 then
-                local sx, sz = 0, 0
-                for _, v in ipairs(meta.polygon) do sx = sx + v.x; sz = sz + v.z end
-                local n = #meta.polygon
+                local cx, cz
+                local centre = meta.centre
+                if type(centre) == "table" and type(centre.x) == "number"
+                        and type(centre.z) == "number" then
+                    -- An AUTHORED centre wins. Since M9m a generated region's
+                    -- polygon is its component's coastline rather than a
+                    -- rectangle, and the vertex average of a coastline lands
+                    -- wherever the vertices are dense — routinely outside the
+                    -- region and often at sea. The generator knows a point that
+                    -- is inside and on the region's own passable ground, so it
+                    -- ships one; this is the locate-ping and the "attack
+                    -- <region>" target, so it has to be somewhere an order can
+                    -- actually be sent.
+                    cx, cz = centre.x, centre.z
+                else
+                    local sx, sz = 0, 0
+                    for _, v in ipairs(meta.polygon) do sx = sx + v.x; sz = sz + v.z end
+                    cx, cz = sx / #meta.polygon, sz / #meta.polygon
+                end
                 Spring.SetGameRulesParam('region_' .. key .. '_name', meta.name or key, PUBLIC)
-                Spring.SetGameRulesParam('region_' .. key .. '_x', sx / n, PUBLIC)
-                Spring.SetGameRulesParam('region_' .. key .. '_z', sz / n, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_x', cx, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_z', cz, PUBLIC)
             end
         end
     end
+end
+
+-- Owner as of the last publish, per key. Only the digest reads it (below):
+-- `changedKeys` is the hysteresis machine's "something about this key moved"
+-- list and includes contest flips, which are not a change of hands and must
+-- not read as one in a week-long war's history.
+local lastLoggedOwner = {}
+
+--- The authored display name of a region, or the raw key on a grid map (which
+--- is synthetic and nameless). Read from the provider rather than from the
+--- published `_name` param so it works before publishRegionStatics has run.
+local function regionLabel(key)
+    local meta = provider.byKey and provider.byKey[key]
+    return (meta and meta.name) or key
 end
 
 local function publish(changedKeys)
@@ -240,6 +300,16 @@ local function publish(changedKeys)
         local rs = ownershipState[key]
         Spring.SetGameRulesParam('region_' .. key .. '_team', rs.owner or -1, PUBLIC)
         Spring.SetGameRulesParam('region_' .. key .. '_contested', rs.contested and 1 or 0, PUBLIC)
+        -- The while-you-were-away digest (PLAN-persistence task 4b). A region
+        -- changing hands is the coarsest true statement about how a war moved
+        -- while nobody was watching, so it is the digest's backbone.
+        if lastLoggedOwner[key] ~= rs.owner then
+            if GG.WarLog then
+                GG.WarLog.Emit('region', regionLabel(key),
+                               rs.owner and 'captured' or 'lost', rs.owner or -1)
+            end
+            lastLoggedOwner[key] = rs.owner
+        end
     end
     regionsRev = regionsRev + 1
     Spring.SetGameRulesParam('regions_rev', regionsRev, PUBLIC)
@@ -256,6 +326,34 @@ function gadget:Initialize()
     publishRegionStatics()
 end
 
+--- Rename a region, and optionally move the centre it publishes.
+---
+--- The one thing that changes a region's STATIC descriptor after
+--- `publishRegionStatics` has run, and it exists for exactly one caller: a
+--- scenario that plants a town in a region (tools/mapgen/town_planner.py, via
+--- game_scenario.lua's `world.regions[].name`). A region is kilometres of
+--- ground; when a settlement is the only part of it a player can point at, the
+--- name and the locate-ping should both be the settlement's.
+---
+--- `x`/`z` are optional and are omitted rather than defaulted, so a rename
+--- alone leaves the polygon centroid `publishRegionStatics` computed in place.
+--- Both go out PUBLIC on the same keys the one-shot publish uses — the client's
+--- named-entity index re-reads `region_<key>_name/_x/_z` off its rulesParams
+--- mirror, so a later write simply wins; there is no separate rename channel to
+--- keep in step.
+---
+--- Note this does NOT touch `region_<key>_team`/`_contested` or bump
+--- `regions_rev`: that counter means "control changed", and a scenario naming
+--- its towns at GameStart has changed no control.
+function GG.Regions.SetName(key, name, x, z)
+    if type(key) ~= 'string' or type(name) ~= 'string' then return end
+    Spring.SetGameRulesParam('region_' .. key .. '_name', name, PUBLIC)
+    if type(x) == 'number' and type(z) == 'number' then
+        Spring.SetGameRulesParam('region_' .. key .. '_x', x, PUBLIC)
+        Spring.SetGameRulesParam('region_' .. key .. '_z', z, PUBLIC)
+    end
+end
+
 --- Explicit ownership override (scenario preset at GameStart, GM tools).
 --- teamID = nil clears to uncontrolled; the periodic evaluator (GameFrame)
 --- may still flip a key on its next EVAL_PERIOD tick once units are present
@@ -263,10 +361,65 @@ end
 function GG.Regions.SetControllingTeam(key, teamID)
     Ownership.setOwner(ownershipState, key, teamID)
     Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1, PUBLIC)
+    -- Deliberately NOT a digest event, and the cursor is moved so the next
+    -- publish() does not report it as one: a scenario preset is the war's
+    -- starting position, not something that happened during it, and a GM
+    -- override is an operator action the audit trail already records.
+    lastLoggedOwner[key] = teamID
+end
+
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — `ownershipState`. It is the hysteresis machine itself, and every
+-- field of it is authored by ticks that already happened: `owner` (which a
+-- scenario or a GM may also have set outright, so it is not a function of the
+-- current board), the per-team `leadTicks` streaks, `contested`, and
+-- `emptyTicks`. Recomputing it from the restored world would be wrong in the
+-- direction that matters most: a region three ticks into a flip reverts to
+-- zero progress, and a sticky owner 59 ticks into its 60-tick decay is handed
+-- another five minutes of ownership.
+--
+-- CAPTURED — `regionsRev`. It is a generation counter clients diff against;
+-- restoring the world without it lets a client that has seen rev 400 read the
+-- restored rev 12 and conclude nothing has changed since.
+--
+-- CAPTURED — the eval gate's phase (see tick.lua's own snapshot note).
+--
+-- RE-DERIVED, not captured — `provider`/`providerKind` (rebuilt by Initialize
+-- from `mapdata/regions.lua`, which is map content and cannot differ between
+-- capture and restore of the same war) and `gaiaTeam`.
+--
+-- NOT REPUBLISHED — the `region_*` rulesParams. They are game rules params and
+-- ride the snapshot's own `gameRules` section, which is applied immediately
+-- before this call: republishing here could only write the same values, and
+-- publish() is change-driven (it would write nothing at all, since it takes a
+-- changed-key list).
+function gadget:Save(state)
+    state.ownership = ownershipState
+    state.regionsRev = regionsRev
+    state.evalGate = Tick.save(evalGate)
+end
+
+function gadget:Load(state)
+    -- Defaults spelled out rather than "keep what this process has": a restore
+    -- to before a region was ever contested must CLEAR it, and an absent key
+    -- means the empty state machine, never the live one.
+    ownershipState = state.ownership or Ownership.newState()
+    regionsRev = tonumber(state.regionsRev) or 0
+    Tick.load(evalGate, state.evalGate)
+    -- RE-DERIVED, not captured. The digest cursor is a function of the state
+    -- that WAS captured, and re-deriving it is the only reading that is right
+    -- on both paths: nothing changed hands between the checkpoint and the
+    -- resume, so a resumed war must not open by reporting every region it
+    -- already held as freshly captured.
+    lastLoggedOwner = {}
+    for key, rs in pairs(ownershipState) do
+        if type(rs) == 'table' then lastLoggedOwner[key] = rs.owner end
+    end
 end
 
 function gadget:GameFrame(frame)
-    if frame % EVAL_PERIOD ~= 0 then return end
+    if not Tick.due(evalGate, frame) then return end
     local units = gatherUnits()
     local scores = Control.computeScores(units, provider, gaiaTeam)
     local _, changedKeys = Ownership.step(ownershipState, scores)

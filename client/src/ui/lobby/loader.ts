@@ -21,6 +21,7 @@ import reconnectingHtml from './reconnecting.html?raw';
 import loginHtml from './login/login.html?raw';
 import browserHtml from './browser/browser.html?raw';
 import roomEntryHtml from './browser/room-entry.html?raw';
+import warEntryHtml from './browser/war-entry.html?raw';
 import replayEntryHtml from './browser/replay-entry.html?raw';
 import mapCardHtml from './browser/map-card.html?raw';
 import roomHtml from './room/room.html?raw';
@@ -35,6 +36,12 @@ export interface LobbyTemplates {
     login: string;
     browser: string;
     browserRoomEntry: string;
+    /// One row of the WAR browser (PLAN-metalstorm-lobby.md §4, task 6). A
+    /// separate template from `browserRoomEntry` because it answers a
+    /// different question — which side, how many seats, how the front stands
+    /// — and a game that restyles one has no reason to be forced to restyle
+    /// the other.
+    browserWarEntry: string;
     /// One row of the replay browser (PLAN-replay task 4c).
     browserReplayEntry: string;
     browserMapCard: string;
@@ -51,6 +58,7 @@ const TEMPLATE_PATHS: Record<keyof LobbyTemplates, string> = {
     login:           'login/login.html',
     browser:         'browser/browser.html',
     browserRoomEntry: 'browser/room-entry.html',
+    browserWarEntry: 'browser/war-entry.html',
     browserReplayEntry: 'browser/replay-entry.html',
     browserMapCard:  'browser/map-card.html',
     room:            'room/room.html',
@@ -63,6 +71,7 @@ const DEFAULT_TEMPLATES: LobbyTemplates = {
     login:           loginHtml,
     browser:         browserHtml,
     browserRoomEntry: roomEntryHtml,
+    browserWarEntry: warEntryHtml,
     browserReplayEntry: replayEntryHtml,
     browserMapCard:  mapCardHtml,
     room:            roomHtml,

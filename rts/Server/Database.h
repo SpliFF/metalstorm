@@ -6,9 +6,12 @@
  */
 #pragma once
 
+#include "AuthTokens.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -26,12 +29,18 @@ struct UserRecord {
     /// Permanent faction allegiance (PLAN-metalstorm-lobby.md §1a/§1b/§7.1),
     /// e.g. "compact" / "union" — matches a key from the game's
     /// gamedata/sidedata.lua (FactionData::Discover). Set once at
-    /// registration and immutable thereafter in the normal flow; nullopt
-    /// only for a not-yet-upgraded guest/provisional account (guest
-    /// accounts themselves are not implemented yet — see PLAN-lobby.md
-    /// §7.1 guest→upgrade). The only normal-flow writer is CreateUser;
+    /// registration and immutable thereafter in the normal flow; on a
+    /// provisional (guest) account it is instead the *provisional* faction,
+    /// which the upgrade confirms or replaces (task 8c) — that is the one
+    /// path where a faction legitimately moves without the admin override.
+    /// The normal-flow writers are CreateUser and ConfirmProvisionalUpgrade;
     /// SetFactionByUsername exists solely for the audited admin override.
     std::optional<std::string> factionId;
+    /// True for a guest account: a real row with no password, reachable only
+    /// by its device token (GuestAccounts.h, task 8c). Cleared in place by
+    /// the upgrade — the row, and therefore every binding, preset and war
+    /// seat keyed on its id, is the same one afterwards.
+    bool isProvisional = false;
 };
 
 class Database {
@@ -57,7 +66,26 @@ public:
     /// normal player registrations.
     int64_t CreateUser(const std::string& username, const std::string& passwordHash,
                        const std::string& role = "player", bool isDev = false,
-                       const std::optional<std::string>& factionId = std::nullopt);
+                       const std::optional<std::string>& factionId = std::nullopt,
+                       bool isProvisional = false);
+
+    /// Complete a guest account's upgrade, in one statement (task 8c).
+    ///
+    /// One writer for the whole transition rather than a setter per field,
+    /// because the fields are not independent: an account that cleared
+    /// `is_provisional` without landing its password hash would be a full
+    /// account nobody — including its owner — can log into, and it would look
+    /// entirely normal in every query. The single UPDATE makes that state
+    /// unreachable.
+    ///
+    /// Guarded on `is_provisional=1` in the WHERE clause, so a concurrent
+    /// second upgrade of the same account writes nothing and reports false —
+    /// the check is not merely re-done at the write, it IS the write.
+    ///
+    /// Returns true if a row was updated.
+    bool ConfirmProvisionalUpgrade(int64_t userId, const std::string& username,
+                                   const std::string& passwordHash,
+                                   const std::string& factionId);
 
     /// Look up a user by username. Returns nullopt if not found.
     std::optional<UserRecord> FindUser(const std::string& username);
@@ -78,7 +106,19 @@ public:
 
     /// Validate a session token. Returns the user ID if valid, 0 if invalid.
     /// Tokens older than maxAgeSeconds are considered expired.
-    int64_t ValidateSession(const std::string& token, int maxAgeSeconds = 86400);
+    ///
+    /// 8a-follow-on: the default is the real constant, not a hard-coded 86400.
+    /// It WAS a literal, and the game server's reconnect path silently took it
+    /// — so the access TTL had two definitions and only one of them was named.
+    int64_t ValidateSession(const std::string& token,
+                            int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
+
+    /// Seconds left before `token`'s session ages out; 0 if it already has or
+    /// there is no such row. See the definition for why /api/auth/validate
+    /// needs the REMAINING life rather than the TTL.
+    int64_t SessionRemainingSeconds(
+        const std::string& token,
+        int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
 
     /// Grant the "admin" role to an existing account by username. Used at
     /// startup to provision the operator/admin account (privileged console
@@ -119,6 +159,26 @@ public:
     bool SetFactionByUsername(const std::string& username, const std::string& factionId,
                               int64_t& userId);
 
+    /// Registered accounts per faction — the population §6's war seeding sizes
+    /// a new war's sides against (PLAN-metalstorm-lobby.md §6, task 7).
+    ///
+    /// Counts every account that HAS a faction, banned or not: a side's
+    /// capacity is a ceiling on how many people could want in, and a war seeded
+    /// while an account is suspended must still have room for it when the
+    /// suspension lifts. Accounts with no faction are not counted at all —
+    /// they can never take a side (§2.3), so they are not population for this
+    /// purpose.
+    ///
+    /// PROVISIONAL (guest) accounts are excluded, and that is a rule rather
+    /// than an oversight (task 8c): `POST /api/auth/guest` is the one route in
+    /// the app that mints an account without a credential, so guests are the
+    /// one population an outsider can inflate at will — and an abandoned one
+    /// keeps its faction until the 30-day sweep. Counting them would let a
+    /// script size every new war's sides against a crowd that does not exist.
+    /// A guest that upgrades joins the count at that moment, which is exactly
+    /// when it becomes a person who will be there next week.
+    std::unordered_map<std::string, unsigned> CountAccountsByFaction();
+
     /// Delete every session belonging to a user (immediate logout). Paired
     /// with SetBanned() so a ban ejects a currently-connected player from the
     /// lobby auth path. Returns the number of sessions deleted.
@@ -130,7 +190,7 @@ public:
 
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
-    int CleanExpiredSessions(int maxAgeSeconds = 86400);
+    int CleanExpiredSessions(int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
 
     /// PLAN-long-uptime S8 / T2a-4: retention for the two append-only tables
     /// the S9 sweep left behind. Both are written on every admin action and

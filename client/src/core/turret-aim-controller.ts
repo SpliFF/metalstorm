@@ -6,7 +6,11 @@
  * turreted native's gun stays welded forward even as it shoots. This
  * controller closes that gap CLIENT-SIDE, off events we already receive —
  * no new wire, no sim change (same philosophy as §16b walk/idle playback
- * and squad fan-out). It engages purely off projectile `Fired` events:
+ * and squad fan-out). It engages off projectile `Fired` events, and — for
+ * statistical-resolution weapons (Metalstorm Model 1 MGs/autocannons/
+ * mortars, which spawn no projectile at all) — off `VolleyOutcome` events
+ * via `onVolley`, an adapter onto the same engage path (PLAN-metalstorm-
+ * combat-fixes §B):
  *
  *   - A template may carry more than one turret piece — `turret`, `turret2`,
  *     `turret3`, … — one per weapon slot, per the authoring convention set
@@ -210,6 +214,25 @@ export interface AimFiredEvent {
     pos?: AimVec;
 }
 
+/** Minimal Volley-outcome event shape the controller consumes
+ *  (VolleyOutcomeInfo). Statistical-resolution weapons spawn no projectile —
+ *  VolleyOutcome is their only per-shot wire event — so `onVolley` adapts it
+ *  onto the same fields `onFired` expects: `attackerId` → `ownerId`, and the
+ *  event's impact position (its only position field — there is no separate
+ *  frozen targetPos on this event, since fire and resolution are the same
+ *  wire message) doubles as the fallback target position. `attackerId` is 0
+ *  when the firer is hidden (already visibility-filtered server-side); such
+ *  a volley never engages, same as a Fired event simply never arriving for
+ *  a hidden shooter. */
+export interface AimVolleyEvent {
+    attackerId: number;
+    targetId: number;
+    weaponDefId: number;
+    x: number;
+    y: number;
+    z: number;
+}
+
 interface Engagement {
     slot: number;
     turret: AimPiece;
@@ -295,6 +318,31 @@ export class TurretAimController {
             releasing: false,
         });
         if (!unitSlots) this.engaged.set(unitId, slots);
+    }
+
+    /**
+     * Register / refresh an engagement from a statistical-combat
+     * `VolleyOutcome` event — the counterpart to `onFired` for weapons that
+     * never spawn a projectile. Adapts the event onto `onFired`'s shape and
+     * reuses the identical engage + `resolveSlot` machinery: `ownerId` is
+     * the volley's `attackerId`, `targetPos` falls back to the volley's
+     * impact position, and the muzzle-position tiebreak (only relevant for a
+     * multi-turret unit whose slots share a weaponDefId) uses the attacker's
+     * live world position — the closest approximation available, since a
+     * volley carries no per-shot muzzle position on the wire the way a Fired
+     * event does. A unit that receives both Fired and Volley events (e.g. a
+     * multi-weapon unit mixing resolution models) keeps one engagement per
+     * slot either way, keyed the same as `onFired`.
+     */
+    onVolley(ev: AimVolleyEvent, nowMs: number): void {
+        const attackerPos = this.deps.unitPose(ev.attackerId);
+        this.onFired({
+            ownerId: ev.attackerId,
+            targetId: ev.targetId,
+            targetPos: { x: ev.x, y: ev.y, z: ev.z },
+            weaponDefId: ev.weaponDefId,
+            pos: attackerPos ? { x: attackerPos.x, y: attackerPos.y, z: attackerPos.z } : undefined,
+        }, nowMs);
     }
 
     /**

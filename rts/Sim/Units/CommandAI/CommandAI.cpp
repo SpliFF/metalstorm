@@ -495,6 +495,28 @@ void CCommandAI::AddCommandDependency(const Command& c) {
 	AddDeathDependence(ref, DEPENDENCE_COMMANDQUE);
 }
 
+void CCommandAI::RestoreCommandQueue(const std::vector<Command>& cmds, int tagCounter)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// ADDED (not upstream) for PLAN-persistence task 1c. See the header for why
+	// this is not GiveCommand().
+	ClearCommandDependencies();
+	SetOrderTarget(nullptr);
+	commandQue.clear();
+
+	for (const Command& c: cmds) {
+		// straight onto the deque: CCommandQueue::push_back() stamps a fresh
+		// tag, and the tags in a snapshot are the ones a client already knows.
+		commandQue.queue.push_back(c);
+		AddCommandDependency(c);
+	}
+
+	commandQue.SetTagCounter(tagCounter);
+
+	targetDied = false;
+	inCommand = false;
+}
+
 
 bool CCommandAI::HandleBuildOptionInsertion(int cmdId)
 {

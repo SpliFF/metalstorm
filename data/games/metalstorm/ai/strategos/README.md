@@ -71,7 +71,8 @@ few directives/minute at 0.2 Hz).
 The AI runtime is real but incomplete (`rts/Server/AI/*`, ARCHITECTURE.md Phase
 4 ⏳). The VM exposes reads (`AI.getOwnUnits / getVisibleEnemies / getFrame /
 getMapSize / getTeamId / getRulesParam / getMapData / getDefExport`) and the
-AI2 directive-shaped writes (`AI.createGroup / issueDirective / setPosture`); it
+AI2 directive-shaped writes (`AI.createGroup / issueDirective / setPosture`)
+plus the I1 message verb (`AI.sendMessage`); it
 opens only `base/table/string/math/utf8`. Each ask below flips a feature-detect
 from stub to live with no rewrite:
 
@@ -84,7 +85,7 @@ from stub to live with no rewrite:
 | **AI2** | org-group / directive / posture verbs on the command interface | the real actuator (standing-order fallback DELETED) | ✅ 2026-07-27 — `AI.createGroup / issueDirective / setPosture`; drained on the sim thread through the SAME `OrgGroupManager`/`DirectiveManager` + `AllowDirectiveCreate` charge path as a human's wire message (`StateStreamer::TickAI`). Directive-shaped only — no per-squad verb (strategic floor). §8 E6 rate clamp (≤1/group/tick) enforced in the drain unconditionally |
 | **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration | ✅ 2026-07-27 — each `--ai` slot is a real `CPlayer` registered before GameStart, so `game_authority.lua`'s `PlayerAdded` mints `authority_player_<id>` for it; `AI.getPlayerId()` + `GG.Authority.SetOwnPoolOnly` make the §5 co-commander invariant enforceable. `picture.economy.ownPool` reads the real pool |
 | **AI-team** | `AI.getTeamId()` / squad views / `AI.getLODLevel()` | friendly-vs-enemy scoring, squad-accurate ledger, LOD cadence | ◑ partial — `AI.getTeamId()` landed 2026-07-20; squad views + `getLODLevel` still pending. **LOD no longer waits on it:** `lod.lua` derives a tier from CONTACT (region-graph hops between our ground and visible enemies), because a plugin must not read player viewports (§2 no cheating channels) — see that file's divergence note. `getLODLevel` still wins the moment it exists |
-| **I1** | AI-side `SendLuaRulesMsg`-equivalent (`AI.sendGameMessage`) | parley responses + the intent-report blob (interaction §6) | pending |
+| **I1** | AI-side `SendLuaRulesMsg`-equivalent | parley responses + the intent-report goal ids (interaction §6) | ✅ 2026-08-14 — landed as **`AI.sendMessage(msg) -> bool`** (not the `sendGameMessage` name this row guessed): the drain hands the opaque string to `gadget:RecvLuaMsg(msg, playerID)` with this AI's real playerID, so validated writers work unchanged. See PLAN-ai-synced-write.md. `actuators.lua` uses it for the `ai.intent` tag that carries the planner goal id to the guidance gadget (closing the veto loop); parley responses are still stubbed on top of it |
 | **I2** | team-private rulesParam visibility survives streaming | guidance-store privacy (co-commander orders hidden from enemies) | pending |
 
 AI0-loader + AI1 + AI4 landed: the plugin **boots in the engine VM**, reads
@@ -154,5 +155,5 @@ fallback, instant escalation vs. per-tier dwell on the way down, the role
 clamp, and deferral to `AI.getLODLevel()` when the engine ever ships it.
 
 This is the plan's §11 test surface; expand it as the remaining stubs
-(AI3 own-pool edge cases, `compositionGap`, I1 writes) fill in.
+(AI3 own-pool edge cases, `compositionGap`, the parley/stake verbs) fill in.
 ```

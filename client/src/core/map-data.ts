@@ -63,6 +63,11 @@ export interface MapDecalsInfo {
     detailNormalTex: string;
     splatScales: [number, number, number, number];
     splatMults: [number, number, number, number];
+    /** Recoil `SMF_DETAIL_NORMAL_DIFFUSE_ALPHA` (mapinfo
+     *  `resources.splatDetailNormalDiffuseAlpha`). Only meaningful on the
+     *  splat-normal branch, where it says the blended detail normals' alpha
+     *  channel carries the ground's near-field albedo detail. */
+    splatDetailNormalDiffuseAlpha: boolean;
 }
 
 export interface MapWaterInfo {
@@ -96,6 +101,17 @@ export interface ParsedMapData {
     metalmap: Uint8Array;
     minimapUrl: string;
     tilesUrl: string;
+    /**
+     * Map-space ground albedo, or '' when the map delivers its ground colour
+     * through the SMT tile dictionary at `tilesUrl`.
+     *
+     * DEVIATION from Recoil (PLAN-maps.md §2n ruling 1): the tile dictionary
+     * terragen writes is a lossy vector quantizer whose 32-elmo seam grid M7d
+     * measured at 15.7x the interior gradient. One 2048² map-space texture
+     * beats it on error, on seams and on bytes; a map opts in and the server
+     * then does not extract `tiles.ktx2` for it at all.
+     */
+    groundTexUrl: string;
     mapDataUrl: string;
     mapSourceUrl: string;
     decals: MapDecalsInfo;
@@ -207,6 +223,7 @@ export async function fetchMapDataHttp(mapId: string): Promise<ParsedMapData> {
             md.splatMults?.[2] ?? 1.0,
             md.splatMults?.[3] ?? 1.0,
         ],
+        splatDetailNormalDiffuseAlpha: !!md.splatDetailNormalDiffuseAlpha,
     };
 
     const mw = meta.water ?? {};
@@ -251,6 +268,7 @@ export async function fetchMapDataHttp(mapId: string): Promise<ParsedMapData> {
         metalmap: new Uint8Array(mmBuf),
         minimapUrl: meta.minimapUrl ?? '',
         tilesUrl: meta.tilesUrl ?? '',
+        groundTexUrl: meta.groundTexUrl ?? '',
         mapDataUrl: meta.mapDataUrl ?? '',
         mapSourceUrl: meta.mapSourceUrl ?? '',
         decals,
@@ -366,6 +384,8 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
             fbDecals?.splatMults(2) ?? 1.0,
             fbDecals?.splatMults(3) ?? 1.0,
         ],
+        splatDetailNormalDiffuseAlpha:
+            fbDecals?.splatDetailNormalDiffuseAlpha() ?? false,
     };
 
     const mapx = fb.mapx();
@@ -393,6 +413,7 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
         heightmap, tileindex, typemap, metalmap,
         minimapUrl: fb.minimapUrl() ?? '',
         tilesUrl: fb.tilesUrl() ?? '',
+        groundTexUrl: fb.groundTexUrl() ?? '',
         mapDataUrl: fb.mapDataUrl() ?? '',
         mapSourceUrl: fb.mapSourceUrl() ?? '',
         decals,

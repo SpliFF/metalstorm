@@ -209,11 +209,35 @@ local function resolve()
     -- §7 resolving: "every unresolved objective with staked authority disposes
     -- deterministically... no authority is destroyed or awarded to the enemy
     -- by war end". ExpireAllActive routes each through the objectives gadget's
-    -- own terminal path, which calls GG.Authority.SettleEscrow(id, 'expired')
-    -- and refunds the stakes.
-    local swept = GG.Objectives and GG.Objectives.ExpireAllActive
-        and GG.Objectives.ExpireAllActive() or 0
-    Spring.Echo('[game_gameover] resolving: settled ' .. swept .. ' unresolved objective(s)')
+    -- own terminal path: an objective whose criteria are MET at this instant
+    -- settles normally (reward + escrow paid out), and every other one expires
+    -- with its stakes refunded to the STAKERS' TEAM POOLS — wars §7's "not to
+    -- individuals", which is the rule §7.2 recorded as unimplemented.
+    local settledComplete, settledExpired = 0, 0
+    if GG.Objectives and GG.Objectives.ExpireAllActive then
+        settledComplete, settledExpired = GG.Objectives.ExpireAllActive()
+        settledComplete = settledComplete or 0
+        settledExpired  = settledExpired or 0
+    end
+    Spring.Echo('[game_gameover] resolving: settled ' ..
+                (settledComplete + settledExpired) .. ' unresolved objective(s) — ' ..
+                settledComplete .. ' met and paid, ' .. settledExpired ..
+                ' expired with stakes refunded team-ward')
+    Spring.SetGameRulesParam('war_settled_complete', settledComplete, PUBLIC)
+    Spring.SetGameRulesParam('war_settled_expired', settledExpired, PUBLIC)
+
+    -- §7 `resolving`: "Record the final scoreboard (teams §6) into the
+    -- archive." The sim cannot write the archive — that is a lobby-side table
+    -- and this process has no handle on it (WarStateSim.h: there is no DB
+    -- callout from synced Lua). What it CAN do is freeze the scoreboard at the
+    -- instant the war ended and stamp it, so the server's heartbeat scraper
+    -- publishes THAT rather than whatever the params happen to hold when the
+    -- lobby next looks. Without the stamp the archive would race the freeze:
+    -- game_teams re-publishes its scoreboard on a 30 s cadence, so a war that
+    -- ends 29 s into a cadence archives a scoreboard that is half a minute out
+    -- of date, and one that ends after the sim freeze archives whatever the
+    -- last tick left behind.
+    Spring.SetGameRulesParam('war_final_frame', Spring.GetGameFrame(), PUBLIC)
 
     warState = 'over'
     publishState()
@@ -289,6 +313,102 @@ local function checkWarCanEnd()
                 'See PLAN-metalstorm-wars.md §7.1.')
 end
 
+-- ───────── The foothold census (PLAN-metalstorm-wars.md §7, task 4) ─────────
+--
+-- §7's second terminal condition is **faction elimination — a faction loses its
+-- last foothold in the theatre**, explicitly NOT "a side has no players"
+-- (teams §4.5: persistence keeps empty sides frozen, and an unmanned side is
+-- not a defeated one). §7 assigns the condition itself to the War Director,
+-- because it also has to weigh operator-retire and the season boundary, which
+-- are live-ops facts no sim can see.
+--
+-- What the Director CANNOT see is the census: a side's start regions are
+-- declared by the scenario (`world.regions` — each side opens owning exactly
+-- its own landing zone) and their current ownership lives in game_regions'
+-- rulesParams. Both are sim-local. So the split is: the sim COUNTS, the
+-- Director DECIDES. This publishes the count.
+--
+-- Published per TEAM rather than per faction because a team is what the
+-- scenario's regions block names and what `war_sides` maps faction-ward; the
+-- lobby already owns that mapping and folding it in here would be a second
+-- copy of it.
+--
+-- `war_footholds_known` gates the whole rule. A war with no scenario, or one
+-- whose scenario declares no starting regions, publishes 0 and the Director
+-- reads that as "cannot tell" — never as "everybody is eliminated". Ending a
+-- war because a census was unavailable is the one failure mode worth spending
+-- a flag to make unrepresentable.
+local FOOTHOLD_PERIOD = 150   -- frames (5 s); a strategic quantity, not a tick
+
+local function publishFootholds()
+    local regions = GG.Scenario and GG.Scenario.data and GG.Scenario.data.world
+        and GG.Scenario.data.world.regions
+    if not regions or #regions == 0 then
+        Spring.SetGameRulesParam('war_footholds_known', 0, PUBLIC)
+        return
+    end
+
+    -- Count each side's DECLARED start regions that it still owns. A region it
+    -- captured elsewhere is not a foothold in §7's sense — the condition is
+    -- "all its start regions … gone", so a faction pushed off its own ground
+    -- while sitting on someone else's is eliminated, which is the reading that
+    -- makes the condition reachable at all.
+    local held = {}
+    for _, r in ipairs(regions) do
+        if r.team then
+            held[r.team] = held[r.team] or 0
+            local owner = Spring.GetGameRulesParam('region_' .. tostring(r.key) .. '_team')
+            if owner and math.floor(owner) == r.team then
+                held[r.team] = held[r.team] + 1
+            end
+        end
+    end
+    for team, n in pairs(held) do
+        Spring.SetGameRulesParam('war_footholds_' .. string.format('%d', team), n, PUBLIC)
+    end
+    Spring.SetGameRulesParam('war_footholds_known', 1, PUBLIC)
+end
+
+-- ─────────────── Snapshot state (PLAN-persistence task 1d, §7.1d) ───────────────
+--
+-- The whole terminal-condition machine is four values, and every one of them is
+-- authored here rather than derivable: `warState` is a latch (§7's chain is
+-- one-way and the first declaration wins), `resolveAtFrame` is an absolute frame
+-- stamp, and `winners`/`winningTeam` are the *decision* — winnersFor() reads the
+-- staffed roster at the moment of the win, so recomputing it after a restore
+-- could produce a different answer than the one the players were shown.
+--
+-- Why this matters more than its size suggests: a war restored mid-wind-down
+-- with `warState` back at 'active' has silently un-won itself, and the objective
+-- that won it has already resolved — so nothing would ever declare it again.
+--
+-- `endlessChecked` travels too, for the opposite reason: it is a one-shot warn,
+-- and a restore that resets it re-announces "this war has no victory objective"
+-- to a client that has been playing for an hour. (`war_can_end` and the other
+-- rulesParams are C++-side and ride the `teams` section, so they are not here.)
+function gadget:Save(state)
+    state.warState = warState
+    state.resolveAtFrame = resolveAtFrame
+    state.winningTeam = winningTeam
+    state.winners = winners
+    state.endlessChecked = endlessChecked
+end
+
+function gadget:Load(state)
+    -- Defaults spelled out, not inherited from the live values: a rollback to
+    -- before the win must CLEAR the latch, so an absent field means 'active',
+    -- never "keep what this process happens to hold".
+    warState       = state.warState or 'active'
+    resolveAtFrame = state.resolveAtFrame
+    winningTeam    = state.winningTeam
+    winners        = state.winners
+    endlessChecked = state.endlessChecked or false
+    -- Re-publish: the rulesParams a client reads are restored by the snapshot's
+    -- own team/game sections, but GG.WarState is this gadget's live mirror and
+    -- other gadgets (game_objectives) branch on it in the same tick.
+    publishState()
+end
+
 function gadget:GameFrame(frame)
     if not endlessChecked and frame >= ENDLESS_CHECK_FRAME then
         endlessChecked = true
@@ -297,5 +417,11 @@ function gadget:GameFrame(frame)
     if resolveAtFrame and frame >= resolveAtFrame then
         resolveAtFrame = nil
         resolve()
+    end
+    -- Keeps running through wind-down: the census is what the Director archives
+    -- as the war's final territorial state, and freezing it at the moment the
+    -- victory objective completed would miss the grace period's last push.
+    if frame % FOOTHOLD_PERIOD == 0 then
+        publishFootholds()
     end
 end

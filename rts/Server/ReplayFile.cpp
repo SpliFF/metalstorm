@@ -182,6 +182,7 @@ std::string EncodeHeaderJson(const Header& h) {
     j["gameVersion"]  = h.gameVersion;
     j["mapId"]        = h.mapId;
     j["defsCacheKey"] = h.defsCacheKey;
+    j["schemaHash"]   = h.schemaHash;
     j["roomId"]       = h.roomId;
     j["startFrame"]   = h.startFrame;
     j["seed"]         = h.seed;
@@ -218,6 +219,11 @@ bool DecodeHeaderJson(const std::string& text, Header& out, std::string& err) {
     out.gameVersion  = j.value("gameVersion", std::string());
     out.mapId        = j.value("mapId", std::string());
     out.defsCacheKey = j.value("defsCacheKey", std::string());
+    // Absent in every file written before task 7. It decodes to empty rather
+    // than failing here: an unstamped recording is still listable and still
+    // packable — it is only unplayable, and that refusal belongs to
+    // ReplayCompatPolicy at re-execution ingest, with an error that can say so.
+    out.schemaHash   = j.value("schemaHash", std::string());
     out.roomId       = j.value("roomId", 0u);
     out.startFrame   = j.value("startFrame", 0);
     out.seed         = j.value("seed", uint64_t{0});

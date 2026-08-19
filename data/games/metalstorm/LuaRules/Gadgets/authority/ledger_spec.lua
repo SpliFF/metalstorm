@@ -22,7 +22,7 @@ describe("authority ledger", function()
         assert.are.equal('mint', Ledger.classify('stipend'))
         assert.are.equal('mint', Ledger.classify('admin_grant'))
 
-        assert.are.equal('burn', Ledger.classify('order'))
+        assert.are.equal('burn', Ledger.classify('micro'))
         assert.are.equal('burn', Ledger.classify('directive'))
         assert.are.equal('burn', Ledger.classify('build'))
         assert.are.equal('burn', Ledger.classify('posture'))
@@ -57,6 +57,57 @@ describe("authority ledger", function()
         local cls, unmapped = Ledger.classify('standing')
         assert.are.equal('burn', cls)
         assert.is_false(unmapped)
+    end)
+
+    -- endtoend D43 census: the two reasons the game emits that the taxonomy did
+    -- not name. Both were found by enumerating the Award/Charge call sites
+    -- rather than by reading a log, which is why they outlived D13 and D43 —
+    -- neither had ever been seen in a warn, because the warn fires once per
+    -- distinct reason per process and 'micro' fires on frame one.
+    it("classifies the order class Classify.orderClass actually emits", function()
+        local Classify = require('classify')   -- sibling, same cwd rule as 'ledger'
+        -- Not a hardcoded 'micro': whatever the default branch returns must map.
+        for _, cmdID in ipairs({ 0, 10, 20, -5 }) do
+            local reason = Classify.orderClass(cmdID)
+            local cls, unmapped = Ledger.classify(reason)
+            assert.is_false(unmapped)
+            assert.are.equal('burn', cls)
+        end
+    end)
+
+    it("classifies a parley tribute payout as move", function()
+        local cls, unmapped = Ledger.classify('tribute')
+        assert.are.equal('move', cls)
+        assert.is_false(unmapped)
+    end)
+
+    -- endtoend D62. The documented 'order' spelling is gone: a census of every
+    -- Award/Charge call site found nothing emitting it, and leaving a dead
+    -- reason in the table looking authoritative is what let the live spelling
+    -- ('micro') go unmapped through D13 and D43 unnoticed.
+    it("no longer maps the retired 'order' spelling", function()
+        local cls, unmapped = Ledger.classify('order')
+        assert.are.equal('unmapped', cls)
+        assert.is_true(unmapped)
+    end)
+
+    -- endtoend D62, the accounting half. A tribute is pool-to-pool: the payer
+    -- team books a move OUT and the payee team a move IN. Counters are per
+    -- team, so that is one movement recorded once on each side — and crucially
+    -- the payer's half must not land in `burn`, which is what happened while
+    -- ChargeOrder had no `reason` parameter and reused the order class.
+    it("books both halves of a tribute as move, on their own teams", function()
+        Ledger.tagCharge(state, 1, 100, 'tribute')   -- payer team
+        Ledger.tagAward(state, 2, 100, 'tribute')    -- payee team
+
+        local payer = Ledger.counters(state, 1)
+        assert.are.equal(0, payer.burn)
+        assert.are.equal(100, payer.move)
+        assert.are.equal(0, payer.mint)
+
+        local payee = Ledger.counters(state, 2)
+        assert.are.equal(100, payee.move)
+        assert.are.equal(0, payee.mint)
     end)
 
     it("still reports a genuinely unknown reason even near a prefix", function()

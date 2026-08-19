@@ -51,6 +51,19 @@ export { createPassability } from './passability.js';
 export { computeTier, screenPxFor, createLodState, LOD_FULL, LOD_CENTROID, LOD_ICON } from './lod.js';
 export { MOVEMENT_PROFILES, profileFor } from './movement-profiles.js';
 
+// SoA engine (PLAN-metalstorm-squad-performance.md §10) — `config.engine:
+// 'soa'` on createSquadSystem/SquadManager routes through these instead of
+// Squad/Member; exported so tests and (later) the kernel can reach the store
+// and grid directly without an ad-hoc relative import.
+export { createStore, allocPool, layoutViews, allocRun, freeRun, growStore, isAlive, isReleased, MFLAG_ALIVE, MFLAG_RELEASED, MFLAG_COLUMN } from './soa-store.js';
+export { createGrid, rebuildGrid, queryInto } from './soa-grid.js';
+export { SquadRec, createSquadRec } from './soa-squad.js';
+export {
+  stepMembers, createSchedule, scheduleReset, schedulePush,
+  centroidStep, coastSquad, stepTransport,
+  STEP_FULL, STEP_CENTROID, STEP_COAST,
+} from './soa-kernel.js';
+
 /**
  * Create a squad system.
  * @param {import('./render-backend.js').RenderBackend} [backend]

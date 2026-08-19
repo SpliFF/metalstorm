@@ -55,7 +55,7 @@ describe('isSquadDef routing predicate (H3)', () => {
 describe('def-after-state ordering (H1)', () => {
   it('buffers pose+strength arriving before the def, then flushes on noteDef', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
 
     // State arrives first — def not yet known (on-demand def streaming).
     mgr.syncPose(1, { x: 100, y: 0, z: 200, heading: 0 });
@@ -79,14 +79,14 @@ describe('def-after-state ordering (H1)', () => {
 
   it('is a no-op when a def arrives with nothing pending (the common order)', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.noteDef(42, makeDef());
     expect(mgr.squads.has(42)).toBe(false);
   });
 
   it('does not drop a squad already constructed via the def-carrying path', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.syncSquad(7, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
     expect(mgr.squads.has(7)).toBe(true);
     // A late/duplicate def notification must not reconstruct or throw.
@@ -98,7 +98,7 @@ describe('def-after-state ordering (H1)', () => {
 describe('id reuse (H2)', () => {
   it('EntityDestroy clears buffered pending state so a reused id starts clean', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
 
     // Old entity: state arrives, def never resolves before destroy.
     mgr.syncPose(3, { x: 500, y: 0, z: 500, heading: 0 });
@@ -121,7 +121,7 @@ describe('id reuse (H2)', () => {
 
   it('destroying a live squad also cascades member deaths', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.syncSquad(9, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef({ squadSize: 4 }));
     expect(backend.created.length).toBe(4);
     mgr.removeSquad(9);
@@ -133,7 +133,7 @@ describe('id reuse (H2)', () => {
 describe('LOD release/rebuild preserves aliveCount (Pitfalls #2, #3)', () => {
   it('full → icon releases instances without touching aliveCount; icon → full rebuilds exactly aliveCount', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.syncSquad(11, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef({ squadSize: 6 }));
     const sq = mgr.squads.get(11);
     expect(backend.created.length).toBe(6);
@@ -181,7 +181,7 @@ describe('LOD release/rebuild preserves aliveCount (Pitfalls #2, #3)', () => {
 describe('reconnect reconstructs count without resurrection (§6)', () => {
   it('a fresh squad at partial strength spawns exactly curve(strength) members with zero destroyMember calls', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
 
     // Full snapshot on reconnect: pose + strength arrive together, as one
     // syncSquad call, at 60% health — simulating a squad damaged before the
@@ -199,7 +199,7 @@ describe('reconnect reconstructs count without resurrection (§6)', () => {
 
   it('buffered def-after-state reconnect path is equally replay-free', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.syncStrength(22, 30, 100);
     mgr.syncPose(22, { x: 0, y: 0, z: 0, heading: 0 });
     mgr.noteDef(22, makeDef({ squadSize: 10 }));
@@ -214,7 +214,7 @@ describe('reconnect reconstructs count without resurrection (§6)', () => {
 describe('applyAtFrame stub (§7, no-op until PLAN-latency L1)', () => {
   it('accepts the parameter and applies immediately regardless of its value', () => {
     const backend = new RecordingBackend();
-    const mgr = new SquadManager(backend);
+    const mgr = new SquadManager(backend, { engine: 'oo' });
     mgr.syncSquad(30, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef({ squadSize: 4 }));
     const sq = mgr.squads.get(30);
     mgr.syncStrength(30, 25, 100, /* applyAtFrame */ 99999);

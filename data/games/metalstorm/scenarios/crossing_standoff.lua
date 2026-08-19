@@ -73,9 +73,61 @@ return {
     -- team is endtoend D19's shape). Both are staged an army in `units`,
     -- which is what makes ScenarioDiscovery resolve them with staged == true
     -- and what makes the room's `war_sides` modoption read `compact:0,union:1`.
+    --
+    -- BOTH SIDES ARE EXPEDITIONARY (PLAN-metalstorm-transports.md §7.1), and
+    -- this file's own briefing is why: "Compact landing barges ground ashore
+    -- at Amber Row while Union drop-lifters flared down over Iron Bend". Two
+    -- armies were SENT here; neither is standing in its own town. That flag is
+    -- not decoration — it gates `ms_stranded_<team>` and the
+    -- `war_side_stranded` guard, which exist only for a force that arrived by
+    -- transport and can therefore be trapped. A home defender must NOT carry
+    -- it (see meridian_basin.lua, where neither side does), or the guard fires
+    -- on people standing in their own kitchen, forever.
+    --
+    -- `departure` is §3.4's withdrawal zone — and, under the §7.10
+    -- unification, the same circle the objectives layer calls `extractArea`
+    -- (objectives/escort.lua's header carries the full reasoning). Each sits
+    -- BEHIND its own army, on the far side from the basin: you leave the way
+    -- you came. Placed >= 900 elmos from the parked carrier below on purpose —
+    -- a departure zone drawn over your own staged transport deletes it on the
+    -- first poll after frame 60, which is a mechanic that reads as a crash.
     sides = {
-        { faction = 'compact', team = 0 },
-        { faction = 'union',   team = 1 },
+        { faction = 'compact', team = 0, expeditionary = true,
+          departure = { x = 400, z = 6900, radius = 500 } },
+        { faction = 'union',   team = 1, expeditionary = true,
+          departure = { x = 5776, z = 1524, radius = 500 } },
+    },
+
+    -- Briefing (S2): lobby/client DISPLAY ONLY. ScenarioDiscovery parses it
+    -- for the loading splash; game_scenario.lua ignores the key entirely.
+    -- Like everything else in this file it must stay inside the pure table
+    -- literal — no concatenation, no function calls — or the whole scenario
+    -- silently vanishes from the lobby's list (see the FILE-SCOPE NOTE above).
+    -- The one easy way to break it: an apostrophe inside a single-quoted tip.
+    -- Escape it (\') or use a [[long string]].
+    -- Edits here are invisible until the lobby restarts or
+    -- POST /api/admin/scenarios/resync runs — the lobby snapshots scenarios
+    -- at startup.
+    briefing = {
+        title    = 'The Standoff',
+        subtitle = 'Scorched Crossing',
+        story    = [[The armistice died at dawn. Compact landing barges ground ashore at Amber Row while Union drop-lifters flared down over Iron Bend — two armies, diagonal across a scorched river country, each sent to take the same prize.
+
+Between them lies Raven Basin: the dead-centre crossing every supply road on this map runs through. Whoever holds the basin holds the war. The towns of the crossing — Marrow Watch on the far diagonal, Storm Sound and Ash Verge on the flanks — declared for nobody. They will trade with whoever controls their streets, and they will remember who let their people die.
+
+Your column is already rolling. The enemy's is too. You will meet in the middle.]],
+        tips     = {
+            'Both armies open with standing FIGHT orders converging on Raven Basin — the battle starts without you, but it will not be won without you.',
+            'Victory is holding Raven Basin for 3 unbroken minutes (earliest decision ~2 minutes in). A contested basin resets the hold clock: winning means holding the middle against the other army, not touching it first.',
+            'Three neutral settlements pay control rewards: Marrow Watch sits equally far from both armies; Storm Sound is your flank if you land in the south-west, Ash Verge if you land in the north-east.',
+            'Each side has a protect objective on its own flank town\'s civilians — it expires at the 10-minute mark, and a raid on the enemy\'s town denies them the reward.',
+            'Your engineers and radar mast start at home, not in the push. Put them to work: radar coverage of the basin approaches decides who sees the fight first.',
+            'Artillery outranges tanks. Keep the ms_artillery_s2 batteries behind your tank line and the basin approaches become killing ground.',
+        },
+        -- image: none yet — the splash falls back to /api/maps/thumb/
+        -- (scorched_crossing_v2.4's processed thumbnail). Add
+        -- scenarios/img/crossing_standoff.jpg (3:1 banner) when art exists.
+        parTimeSec = 900,
     },
 
     -- No `ai` block, deliberately — see the team-seating note at the top of
@@ -102,6 +154,14 @@ return {
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 765, z = 6046, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 1026, z = 6046, facing = 'north' },
+        -- The lift that brought this army here, parked where it set down
+        -- (§3.2: staged-as-arrived, NOT a frame-0 drive-in — serially
+        -- unloading an army at the top of the match buys theatre and costs the
+        -- opening pacing D20 spent seven fires fixing). No order: a carrier
+        -- that flies off on its own is a carrier the player cannot use, and
+        -- withdrawal is a mechanic, not a menu (§3.4) — load it, protect it,
+        -- fly it to the departure zone yourself.
+        { def = 'fable_airship', team = 0, x = 1300, z = 6600, facing = 'north' },
 
         -- ================= UNION (team 1) — landing zone `iron_bend` =======
         { def = 'ms_tanks_s2', team = 1, x = 6532, z = 896, facing = 'south', count = 4, spacing = 150,
@@ -114,6 +174,9 @@ return {
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
         { def = 'ms_engineers_s1', team = 1, x = 6142, z = 670, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 1, x = 6402, z = 670, facing = 'south' },
+        -- The union lift, mirrored on the same (+5376, -5376) diagonal offset
+        -- every other entry on this side uses.
+        { def = 'fable_airship', team = 1, x = 6676, z = 1224, facing = 'south' },
 
         -- ================= NEUTRAL SETTLEMENTS (Gaia) =====================
         -- `team = 'neutral'` resolves to the Gaia team at stage time: the
@@ -172,6 +235,69 @@ return {
             { def = 'ms_civilians', x = 6507, z = 2690, facing = 'north', role = 'ambient' }, -- Ash Verge
             { def = 'ms_civilians', x = 6038, z = 2721, facing = 'north', role = 'ambient' }, -- Ash Verge
         },
+    },
+
+    -- ========================================================================
+    -- REINFORCEMENT ARRIVALS (PLAN-metalstorm-transports.md §3.3, staged by
+    -- game_transports.lua).
+    -- ========================================================================
+    -- Since the 2026-08-19 field-engineering ruling removed production from
+    -- battle maps, an arrival is the ONLY way force enters a battle after the
+    -- opening. There is deliberately no in-battle way to ASK for one (§7.2):
+    -- the schedule is fixed when the scenario materialises at staging end,
+    -- because a request verb is production wearing a hat and would make a
+    -- battle's outcome a function of world wallet size rather than of what you
+    -- chose to bring.
+    --
+    -- WHERE `eta` COMES FROM (§7.8's projection rule, §7.4's clock). The world
+    -- layer resolves a committed force's transit and hands the battle a single
+    -- number: forces landing before battle start are staged on field (the
+    -- carriers above); forces landing after it become entries here, with
+    -- `eta = worldETA - battleStart` at the world clock's 24x ratio — one world
+    -- hour is ~4500 frames. 4500 is therefore "these two squads were one world
+    -- hour behind the main body when the shooting started". It lands after the
+    -- victory objective's `notBefore = 3600`, so a wave can never arrive into a
+    -- war that has already been decided (an eta past the ending is cancelled,
+    -- not spawned).
+    --
+    -- Mirrored, because this file's whole argument is symmetry: same eta, same
+    -- cargo, same slot cost. Each wave enters over its own side's BACK edge —
+    -- west for the south-west landing, north for the north-east one — and sets
+    -- down on its own landing zone rather than in the middle, so the wave is a
+    -- reinforcement to a fight and not a flank nobody could see coming.
+    --
+    -- `order` is not optional in spirit even though the schema allows nil
+    -- (D20 finding 1: a unit nobody ordered never moves, and a wave that
+    -- unloads into silence is a wave that never fights). Both point at the
+    -- same (4480, 4480) basin centroid every staged column is already
+    -- converging on.
+    --
+    -- Capacity is real and checked at load: `fable_airship` carries 2 slots,
+    -- an s1 squad costs 1 slot (§7.7 counts slots in scale tiers, so an s3
+    -- formation would cost 3 and not fit). Two s1 squads is exactly full.
+    arrivals = {
+        { id       = 'compact_wave_1',
+          team     = 0,
+          kind     = 'air',
+          def      = 'fable_airship',
+          eta      = 4500,
+          -- The west edge, well clear of this side's own departure zone at
+          -- (400, 6900): a wave that enters INSIDE its own exit is a wave that
+          -- can withdraw itself the moment it stops being cargo.
+          entry    = { x = 150,  z = 5400 },
+          dropZone = { x = 1091, z = 6609 },
+          cargo    = { { def = 'ms_soldiers_s1', count = 2 } },
+          order    = { cmd = 'FIGHT', x = 4480, z = 4480 } },
+
+        { id       = 'union_wave_1',
+          team     = 1,
+          kind     = 'air',
+          def      = 'fable_airship',
+          eta      = 4500,
+          entry    = { x = 6467, z = 150 },
+          dropZone = { x = 6467, z = 1233 },
+          cargo    = { { def = 'ms_soldiers_s1', count = 2 } },
+          order    = { cmd = 'FIGHT', x = 4480, z = 4480 } },
     },
 
     objectives = {

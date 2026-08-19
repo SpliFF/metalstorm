@@ -15,7 +15,14 @@
  * Extracted from lua-widget-worker.ts as part of PLAN-refactor-p3.md WP2c.
  */
 
-import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial,
+    RenderTargetTexture } from '@babylonjs/core';
+// P5: high-res RTT screenshot. Imported from its module path (not the barrel)
+// so the DumpTools side-effects it needs come along in a tree-shaken build.
+import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
+import { luminanceStats } from './frame-stats.js';
+import { CLIENT_EVAL_DISABLED, clientEvalAllowed, clientEvalRunsOnMain, isClientEvalTarget }
+    from './client-eval-gate.js';
 import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
     GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
@@ -33,11 +40,13 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `window.__*` injections in scene-lighting/client-settings were switched to
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
-    buildTerrainMesh, loadTerrainTextures, attachTerrainSplatFromDecals,
+    buildTerrainMesh, loadTerrainTextures, attachTerrainDetailFromDecals,
+    setTerrainDetailPluginEnabled,
     TerrainFog, DeformableTerrain, isTerrainMesh, attachTerrainDecalOverlay,
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
     type MapDimensions, type FogDarkening, type TerrainMeshGroup,
 } from './terrain.js';
+import { TerrainPageStreaming } from './terrain-page-streaming.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
     loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
@@ -53,7 +62,7 @@ import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort, setMemberModelMemo } from './entity-renderer.js';
 import {
     SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
-    setPoolCompaction, setPoolCompactionGate,
+    setPoolCompaction, setPoolCompactionGate, setLegacyFullUpload,
 } from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
@@ -79,9 +88,11 @@ const CLIENT_MATERIAL_PORTS = new Set(['zk-939', 'cus-pbr']);
 import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
+import { resolveUnitClassToDefIds } from './unit-class-filter.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 import { PendingActionRegistry } from './pending-actions.js';
+import { MotionLeanRegistry } from './motion-lean.js';
 import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
@@ -94,6 +105,10 @@ import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { FrameProfiler } from './frame-profiler.js';
+import {
+    createEntityPhaseAccumulator, resetEntityPhaseAccumulator,
+    buildEntityPhaseReport,
+} from './entity-phase-profiler.js';
 import { EntityFxFence } from './entity-fx-fence.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
@@ -114,6 +129,7 @@ import { ClipAutoPolicy, nominalSpeedFor, isStaticFor } from './clip-auto-policy
 import { TurretAimController } from './turret-aim-controller.js';
 import { WheelSpinDriver, wheelRadiusFor } from './wheel-spin-driver.js';
 import { WorkerSelection } from './worker-selection.js';
+import { IdRecycleGuard } from './id-recycle-guard.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
 import { DirectiveShapeCapture, type ArmedDirective } from './directive-shape-capture.js';
@@ -121,7 +137,7 @@ import type { ShapeKind } from './shape-gesture-capture.js';
 import { CMD, OPT } from './command-buffer.js';
 import { groupFactoryQueueRuns } from './factory-queue.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
-import { resolveSoundRef, pickUnitDefSound,
+import { resolveSoundRef, pickUnitDefSound, SoundCategory,
     type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
 import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
@@ -267,6 +283,28 @@ let gpPendingActions: PendingActionRegistry | null = null;
 /// nothing for a config flag to protect — the control arm exists to measure
 /// against, not to fall back to.
 let gpOptimisticInput = true;
+/// The ~1 Hz `BuildUnitCommandQueues` beat, tallied for the L4 gate's
+/// build-ghost race measurement (bullet 6) — see `snapshotStats`.
+let gpQueueSnapshotCount = 0;
+let gpQueueSnapshotLastMs = 0;
+/// PLAN-latency L4.3 — the bounded positional lean. Separate registry from
+/// `gpPendingActions` on purpose: the overlay's lifecycle is "until the server
+/// confirms", the lean's is "until the server's own motion catches up", and
+/// they are neither the same clock nor the same evidence.
+let gpMotionLean: MotionLeanRegistry | null = null;
+/// A/B switch for the L4.3 measurement (gp:test 'setPositionalLean'), the same
+/// shape as `gpOptimisticInput`: off restores the pre-L4.3 body pose exactly.
+let gpPositionalLean = true;
+/// A/B switch for the L4.4 measurement (gp:test 'setSnapshotRefutation'): off
+/// restores the pre-L4.4 rule that a confirmed entry can only leave via the
+/// flat 3 s cap. Module-scope so it survives a registry rebuild on rejoin.
+let gpSnapshotRefutation = true;
+/// PLAN-latency L4.2 measurement counters for the order-ack bark. `attempts`
+/// counts player commands the sink acked; `played` counts the ones whose def
+/// actually carried an `ok` sound. The gap between them is the real coverage
+/// number — a def with no `ok` sound is silent no matter where the call sits.
+let gpOrderAckAttempts = 0;
+let gpOrderAckPlayed = 0;
 
 /// The overlay view: the last snapshot with outstanding optimistic orders
 /// merged on top. Identical to `gpLastCommandQueues` when nothing is pending.
@@ -297,10 +335,23 @@ let gpTrackingCamera = false;
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// P5: in-flight `captureFrame` task. A capture owns one rendered frame; a
+/// second call while one is pending awaits the SAME promise (both callers get
+/// that frame) instead of racing a second render into the same buffer.
+let gpCaptureInFlight: Promise<unknown> | null = null;
 /// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
 /// `gp:resync` can re-open the game connection with the same creds/map without
 /// a fresh boot. Null until gpConnect runs.
 let gpInitMsg: GpInitToWorker | null = null;
+
+/// PLAN-test-automation P7 gate 3: `?allowClientEval=1` on the page URL,
+/// passed in by main (the worker has no page URL). A DEV build relays evals
+/// regardless; this is the only way to open the relay in a prod bundle.
+let gpAllowClientEval = false;
+/// In-flight relayed evals forwarded to main, keyed by the server's
+/// request_id → the 8s giveup timer. Cleared on teardown so a worker recycle
+/// mid-eval leaks no timers (the server's 10s waiter then times out cleanly).
+const gpPendingClientEvals = new Map<number, ReturnType<typeof setTimeout>>();
 /// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
 /// against a double detach and lets diagnostics see the parked state.
 let gpParked = false;
@@ -386,6 +437,10 @@ let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// PLAN-maps M4: the terrain is a chunk grid sharing one material, not a
 /// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
 let gpTerrain: TerrainMeshGroup | null = null;
+/// PLAN-maps.md §1.2.1 streaming v2 vertical slice. Opt-in via the
+/// `__terrainPages` debug handle only — the shipped source is synthetic
+/// (one hue per pyramid level); the real page producer is lane queue item 2.
+let gpTerrainPages: TerrainPageStreaming | null = null;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
@@ -450,6 +505,10 @@ interface SquadSystemHandle {
     /// budget. Optional because data/games/*/client is runtime-served and can
     /// be older than this bundle; gpTickSquads warns once if it is missing.
     setViewPos?(x: number, y: number, z: number): void;
+    /// PLAN-metalstorm-squad-performance.md §12c: backend-flush cost for the
+    /// frame-time governor's sample. Optional for the same runtime-served
+    /// reason as setViewPos — an older module just measures a smaller cost.
+    recordFlush?(ms: number): void;
     update(dt: number): void;
 }
 /// One-time warn latch for a squad module with no M20 `setViewPos`.
@@ -477,6 +536,11 @@ let gpClipPlayer: ClipPlayer | null = null;
 /// gpClipPlayer for every native whose model ships a `walk` clip. Harness
 /// playClip marks a unit manual so the F8 buttons still win.
 let gpClipPolicy: ClipAutoPolicy | null = null;
+/// PLAN-long-uptime S5 task 6: latches the server's unit-id recycle
+/// announcement and fires the id-keyed-state flush on the first full snapshot
+/// after it. Lives for the whole worker — a recycle is a property of the world
+/// stream, not of any one renderer.
+const gpIdRecycleGuard = new IdRecycleGuard();
 /// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
 /// Fired events (native models with a `turret` piece that the sim isn't
 /// already piece-driving) and ticked from the render loop for smooth slew.
@@ -617,6 +681,21 @@ function gpUiTaxReset(): void {
     gpUiTax.frames = 0; gpUiTax.save = 0; gpUiTax.lua = 0;
     gpUiTax.restore = 0; gpUiTax.wipe = 0; gpUiTax.rml = 0;
 }
+/// PLAN-perf M27: measurement-only split of the `entity` phase into its own
+/// call list (interpolation tick / per-squad pose sync / squad update / backend
+/// flush / impostor flush / event drain / residual). OFF by default and gated
+/// on a boolean, so the unarmed frame pays nothing — M26's instrument set the
+/// precedent and the same reason applies: every future A/B on this loop would
+/// otherwise carry the clock calls. Arm/read through the entityBreakdownArm /
+/// entityBreakdownDump dispatch verbs (window.test.entityBreakdown*).
+let gpEbOn = false;
+const gpEb = createEntityPhaseAccumulator();
+/// Frame-scoped scratch: the phase's start stamp, and the squad-tick slices
+/// gpTickSquads measures on the render loop's behalf.
+let gpEbPhaseT0 = 0;
+let gpEbPose = 0;
+let gpEbUpdate = 0;
+let gpEbFlush = 0;
 /// Wall-clock timestamp of the previous render frame, for the FX `dt`.
 let gpLastFrameTime = 0;
 /// Holds the per-allyteam LOS bitmaps (envelope 0x07) so a bitmap that
@@ -810,28 +889,38 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (fogMesh) sceneLighting.csm.removeShadowCaster(fogMesh, false);
     gpLosBitmapStore.forEach(bitmap => fog.apply(bitmap));
 
-    // DXT1/KTX2 tile textures over HTTP.
-    if (map.tilesX > 0 && map.tilesZ > 0) {
-        loadTerrainTextures(scene, terrain, mapBaseUrl, mapDims).catch(e => {
+    // Ground albedo: one map-space texture where the map ships one
+    // (PLAN-maps.md §2n ruling 1 — the server does not extract `tiles.ktx2`
+    // for such a map at all), otherwise the DXT1/KTX2 tile atlas over HTTP.
+    if (map.groundTexUrl || (map.tilesX > 0 && map.tilesZ > 0)) {
+        loadTerrainTextures(scene, terrain, mapBaseUrl, mapDims,
+                            map.groundTexUrl).catch(e => {
             postLog(2, `[gp] terrain texture loading failed: ${e}`);
         });
     }
 
-    // Recoil splat-detail shading (PLAN-maps.md §1.2): near-field signed
-    // detail layers over the baked tile albedo. No-op when the map ships no
-    // splat textures. Attached now (before the async tile-atlas swap lands);
-    // the reattach dance in terrain.ts carries it across material swaps.
-    if (map.decals?.splatDistrTex && map.decals?.splatDetailTex) {
+    // Recoil near-field terrain detail (PLAN-maps.md §1.2,
+    // PLAN-terrain-detailtex.md): signed detail layers over the baked tile
+    // albedo. The three paths are mutually exclusive per map and take
+    // SMFFragProg's own precedence — the splat detail-*normal* block
+    // (`SMF_DETAIL_NORMAL_TEXTURE_SPLATTING`) wraps the whole detail section,
+    // so where it applies `GetDetailTextureColor` is never reached; then the
+    // splat pair (`SMF_DETAIL_TEXTURE_SPLATTING`); then the plain
+    // `detailTex`. No-op when the map ships none of them. Attached now
+    // (before the async tile-atlas swap lands); the reattach dance in
+    // terrain.ts carries it — and its mode — across swaps.
+    if (map.decals) {
         try {
-            attachTerrainSplatFromDecals(scene, terrain, {
-                splatDistrTex: map.decals.splatDistrTex,
-                splatDetailTex: map.decals.splatDetailTex,
-                splatScales: map.decals.splatScales,
-                splatMults: map.decals.splatMults,
-            }, mapBaseUrl, mapDims);
-            postLog(0, '[gp] terrain splat-detail attached');
+            const mode = attachTerrainDetailFromDecals(
+                scene, terrain, map.decals, mapBaseUrl, mapDims);
+            if (mode) {
+                postLog(0, `[gp] terrain near-field detail attached (${mode}` +
+                    (mode === 'splatNormal'
+                        ? `, diffuseAlpha=${map.decals.splatDetailNormalDiffuseAlpha}`
+                        : '') + ')');
+            }
         } catch (e) {
-            postLog(2, `[gp] terrain splat attach failed: ${e}`);
+            postLog(2, `[gp] terrain detail attach failed: ${e}`);
         }
     }
 
@@ -952,18 +1041,21 @@ async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void
     // the centre to [half, mapDim-half] exactly like an RTS camera clamps at a
     // map edge. On maps larger than VP_SIZE the box still tracks the camera
     // (a tighter frustum-derived box + zoom LOD is the later optimisation noted
-    // at GW4-c5b). Rotation 0 / zoom 1 remain placeholders until the LOD path lands.
+    // at GW4-c5b). Rotation stays 0 (unused by the server); zoom is now the live
+    // camera height normalised to [0,1] against RTSCamera.zoomMaxHeight, for the
+    // server-side zoom-LOD work at GW4-c5b (server ignores it today).
     const clampCenter = (c: number, mapDim: number): number =>
         VP_SIZE >= mapDim ? mapDim / 2 : Math.min(Math.max(c, VP_HALF), mapDim - VP_HALF);
 
     const send = () => {
         const cam = gpViewCameras.get(0);
         const t = cam?.target;
+        const zoom = cam ? Math.min(1, Math.max(0, cam.position.y / cam.zoomMaxHeight)) : 1;
         gpCtx.connection?.sendViewportUpdate(
             0,
             clampCenter(t ? t.x : centerX, mapW),
             clampCenter(t ? t.z : centerZ, mapH),
-            VP_SIZE, VP_SIZE, 0, 1);
+            VP_SIZE, VP_SIZE, 0, zoom);
     };
     send();
     if (gpViewportTimer) clearInterval(gpViewportTimer);
@@ -984,8 +1076,9 @@ function domButtonToSpring(b: number): number {
 
 /** KeyboardEvent.code → Spring/SDL keysym. Named keys are mapped; letters,
  *  digits and numpad digits fall back to the ASCII code of the character they
- *  produce (matching the lua-widget-manager springKeyCode table on main, which
- *  worked off `.key` — here we derive the same numbers from `.code`). */
+ *  produce (matching the springKeyCode table the retired lua-widget-manager
+ *  used to carry, which worked off `.key` — here we derive the same numbers
+ *  from `.code`). */
 function codeToSpringKeysym(code: string): number {
     const m: Record<string, number> = {
         Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, Escape: 27, Space: 32,
@@ -1096,6 +1189,46 @@ function gpConnect(msg: GpInitToWorker): void {
     gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
+        // PLAN-test-automation P7: the server relayed an eval request. Every
+        // path here MUST answer — an HTTP caller is parked on a waiter.
+        onClientEvalRequest: (requestId, target, code) => {
+            const answer = (ok: boolean, out: string) =>
+                gpCtx.connection?.sendClientEvalResponse(requestId, ok, out);
+            // GATE 3. Deliberately not URL-param-only: a DEV build must work
+            // with no param at all.
+            if (!clientEvalAllowed(import.meta.env.DEV, gpAllowClientEval)) {
+                answer(false, CLIENT_EVAL_DISABLED);
+                return;
+            }
+            if (!isClientEvalTarget(target)) {
+                answer(false, `unknown eval target: ${target}`);
+                return;
+            }
+            if (!clientEvalRunsOnMain(target)) {
+                // Same indirect-eval + clone-safe path as the `evalJs` test op.
+                void (async () => {
+                    try {
+                        const v = (0, eval)(code);  // eslint-disable-line no-eval
+                        const r = v && typeof (v as { then?: unknown }).then === 'function'
+                            ? await (v as Promise<unknown>) : v;
+                        const safe = gpCloneSafe(r);
+                        answer(true, typeof safe === 'string' ? safe
+                            : (JSON.stringify(safe) ?? 'undefined'));
+                    } catch (e) {
+                        answer(false, `worker eval error: ${(e as Error).message}`);
+                    }
+                })();
+                return;
+            }
+            // 'js' | 'widgets' | 'test' run on main; the reply rides back
+            // through this worker (main has no socket of its own). 8s, so the
+            // server's 10s waiter always gets a structured answer.
+            gpPendingClientEvals.set(requestId, setTimeout(() => {
+                gpPendingClientEvals.delete(requestId);
+                answer(false, 'timeout: main thread did not answer in 8s');
+            }, 8000));
+            postToMain({ type: 'gp:clientEval', requestId, target, code });
+        },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
@@ -1171,6 +1304,15 @@ function gpConnect(msg: GpInitToWorker): void {
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
+        // PLAN-protocol-guard task 4: a wire-schema refusal. Recorded in
+        // `gpAuthFailed` too so `window.test`'s readiness probe still reports
+        // a reason rather than a blind timeout, and handed to main, which owns
+        // the reload/loop-guard decision (no sessionStorage in a worker).
+        onVersionMismatch: (m) => {
+            gpAuthFailed = m;
+            postLog(4, `[gp] wire schema refused: ${m}`);
+            postToMain({ type: 'gp:schemaMismatch', message: m });
+        },
         onServerError: (code, m) => {
             postLog(4, `[gp] server error ${code}: ${m}`);
             // PLAN-replay task 4b: a refused playback control comes back as a
@@ -1186,6 +1328,21 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
+            // PLAN-long-uptime S5 task 6: the sim has handed a used unit id
+            // back out, so every association we hold keyed on an id now names
+            // whatever took the slot. Drop them BEFORE applying the snapshot —
+            // this only ever fires on a full snapshot, which repopulates the
+            // world in the same call, so there is no blank frame.
+            if (gpIdRecycleGuard.observe(snapshot.fieldMask, isDelta)) {
+                postLog(1, '[gp] unit-id recycle announced — flushing id-keyed state');
+                gpCtx.entityRenderer?.resetForResync();
+                gpCombatFX?.reset();
+                gpClipPolicy?.reset();
+                gpResetSquads();
+                // The renderer's own mirror is cleared by resetForResync; this
+                // is the authoritative selection, the one that issues orders.
+                gpCtx.selection?.setSelectionExternal([]);
+            }
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             // PLAN-metalstorm-squads.md §6: route squad-def units (squad_size > 1)
             // into the fan-out. Runs after the renderer's update so entityMeta +
@@ -1443,6 +1600,19 @@ function gpConnect(msg: GpInitToWorker): void {
         onVolleyOutcomes: (events) => {
             gpCombatFX?.onVolleyOutcome(events,
                 (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            // §B (PLAN-metalstorm-combat-fixes): statistical weapons spawn no
+            // projectile, so VolleyOutcome is the only per-shot event that
+            // can engage cosmetic turret aim for them — mirrors the
+            // onProjectileFired engage call above (§16c). NOTE this is a
+            // different family from onFireOutcomes' engage: that one is
+            // Tier-C foreknowledge for BALLISTIC weapons, which do spawn a
+            // projectile. Both are "outcome" events; only this one is
+            // statistical, and only this one reaches MS MGs/ACs/mortars.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onVolley(e, now);
+            }
             for (const e of events) {
                 if (e.revealAttacker)
                     postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
@@ -1461,6 +1631,11 @@ function gpConnect(msg: GpInitToWorker): void {
         // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
         onUnitCommandQueues: (queues) => {
             gpLastCommandQueues = queues;
+            // L4 gate bullet 6: the race being tested is "a ghost placed just
+            // before a snapshot". A trial can only aim for that gap if it can
+            // see the ~1 Hz beat, so tally it. (`snapshotStats` probe.)
+            gpQueueSnapshotCount++;
+            gpQueueSnapshotLastMs = performance.now();
             // PLAN-latency L4.1: hand off every optimistic entry this snapshot
             // now carries authoritatively, THEN merge what is still outstanding
             // on top. Order matters — retiring first is what keeps an order
@@ -1473,6 +1648,11 @@ function gpConnect(msg: GpInitToWorker): void {
             // PLAN-playable.md G4: the selected factory's queue may have
             // changed (unit completed, order added/removed) — re-resolve.
             gpRecomputeFactoryQueue();
+            // L4.2: the build-row queue chips read the same queues. Patch the
+            // counts in place rather than rebuilding the tiles — the buildable
+            // *set* cannot change on a queue update, and a full rebuild would
+            // re-ship the whole tile array to main every second.
+            gpRefreshBuildQueueChips();
             // PLAN-playable.md G3b: reap pending build-ghosts whose order has
             // left the queue (construction started / cancelled).
             // L4.1: fed the MERGED view, which fixes a race that predates this
@@ -1826,19 +2006,45 @@ function gpConnect(msg: GpInitToWorker): void {
             } }
         },
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
+    }, {
+        // PLAN-protocol-guard task 4 (dev harness): claim a different wire
+        // schema so the server's refusal can be driven from a browser.
+        // Absent ⇒ this build's own SCHEMA_HASH.
+        schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
     // PLAN-latency L4.1: register every command that goes on the wire, in the
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).
-    conn.setCommandSink((commands) => {
-        for (const c of commands) gpPendingActions?.register(c);
+    conn.setCommandSink((commands, source) => {
+        for (const c of commands) {
+            gpPendingActions?.register(c);
+            // L4.3: the same sink drives the body lean. Two registries, one
+            // subscription — a command that reaches the overlay always reaches
+            // the lean, so they can never disagree about what was ordered.
+            if (gpPositionalLean) gpMotionLean?.onCommandSent(c);
+        }
         // Draw it now. This is the whole point of the phase: the artifact
         // appears on the click, not on the ack and not on the next snapshot.
         const sel = gpCtx.selection?.selection ?? [];
         const merged = gpMergedCommandQueues();
         gpCommandPathRenderer?.update(merged, sel);
         gpWaypointMarkerRenderer?.update(merged, sel);
+        // L4.2: the two production panels read the same merged view, so a
+        // queued item shows up on the click too. The build ghost already did
+        // (L4.1 fed it the merged view); these were the remaining consumers
+        // still waiting on the 1 Hz snapshot.
+        gpRecomputeFactoryQueue();
+        gpRefreshBuildQueueChips();
+        // L4.2: the audible half. Recoil acks a player order with the first
+        // targeted unit's `ok` sound; widget-issued orders are silent.
+        if (source === 'player' && commands.length > 0) {
+            const unitId = commands[0].unitIds[0];
+            if (unitId !== undefined) {
+                gpOrderAckAttempts++;
+                gpCtx.selection?.playOrderAck(unitId);
+            }
+        }
     });
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
@@ -1917,7 +2123,9 @@ export function gpSoftRecover(): boolean {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     // (3) Reconnect the SAME Connection for a fresh full snapshot (its
     // onAuthenticated re-seeds identity + re-registers the viewport pump). The
     // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
@@ -1967,6 +2175,18 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
         getMemberModel: (defId, team) => er.getMemberModel(defId, team),
         getImpostorDistance: (defId) =>
             gpDefCache?.getUnitDef(defId)?.lodThresholds?.impostorDistance,
+        // Proxy-capsule sizing (memberCapsuleHeight): aggregate def mass +
+        // the squad_size fan-out hint, so a model-less member draws at ~its
+        // body size instead of the legacy 9-elmo pill.
+        getMemberStats: (defId) => {
+            const def = gpDefCache?.getUnitDef(defId);
+            if (!def) return undefined;
+            const squadSize = Number(def.customParams?.squad_size);
+            return {
+                mass: def.mass,
+                squadSize: Number.isFinite(squadSize) && squadSize > 0 ? squadSize : 1,
+            };
+        },
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {
@@ -2050,11 +2270,16 @@ function gpTickSquads(dt: number): void {
             gpInstallSquadPassability(er, size.width, size.height);
         }
     }
+    // PLAN-perf M27: this loop is per-squad, per-frame render-adapter work
+    // OUTSIDE SquadManager.update() — exactly the population M26's breakdown
+    // could not see from inside the manager. Timed as its own slice.
+    const ebPose0 = gpEbOn ? performance.now() : 0;
     const H = Math.PI * 2 / 65535;
     for (const id of gpSquadIds) {
         const pose = er?.getEntityPose(id);
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
     }
+    if (gpEbOn) gpEbPose = performance.now() - ebPose0;
     // PLAN-perf M20: the squad system's reduced-detail member budget ranks
     // squads by distance to the camera, and the camera only exists out here.
     // Push it every frame (the policy itself re-ranks on its own slow cadence).
@@ -2069,8 +2294,21 @@ function gpTickSquads(dt: number): void {
             postLog(2, '[gp] squad module has no setViewPos — PLAN-perf M20 member budget disabled');
         }
     }
+    const ebUpd0 = gpEbOn ? performance.now() : 0;
     gpSquadSystem.update(dt);
-    gpSquadBackend?.flush();
+    if (gpEbOn) gpEbUpdate = performance.now() - ebUpd0;
+    // PLAN-metalstorm-squad-performance.md §12c: the frame-time governor's cost
+    // sample is update() + the backend flush, and the flush is owned out here —
+    // update() cannot time it. Without this the ladder still works, it just
+    // under-reads its own cost and escalates later than it should.
+    gpEbFlush = 0;
+    if (gpSquadBackend) {
+        const t0 = performance.now();
+        gpSquadBackend.flush();
+        const flushMs = performance.now() - t0;
+        gpSquadSystem.recordFlush?.(flushMs);
+        gpEbFlush = flushMs;   // M27: the flush clock is already taken, unarmed
+    }
 }
 
 /// Build the passability sampler from the client heightmap and install it, so
@@ -2122,6 +2360,10 @@ export function gpInit(msg: GpInitToWorker): void {
     // worker's asset URLs match main's (no stale-cache skew on a new deploy, and
     // a shared same-origin HTTP cache hit instead of two distinct URLs).
     if (msg.buildStamp) CONFIG.buildStamp = msg.buildStamp;
+
+    // PLAN-test-automation P7 gate 3: main read `?allowClientEval=1` off the
+    // page URL for us. Not the whole gate — a DEV build relays regardless.
+    gpAllowClientEval = msg.allowClientEval === true;
 
     // GW4-c5c-3: seed the worker's clientSettings cache with the main thread's
     // gfx.* snapshot BEFORE createSceneLighting / the FX gating below read it.
@@ -2263,6 +2505,11 @@ export function gpInit(msg: GpInitToWorker): void {
     gpPendingActions = new PendingActionRegistry({
         getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
     });
+    gpPendingActions.setSnapshotRefutation(gpSnapshotRefutation);
+    gpMotionLean = new MotionLeanRegistry({
+        getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
+        warn: (msg) => postLog(3, msg),
+    });
 
     // PLAN-lazy-loading.md: one AssetLoader shared across unit/feature/
     // projectile model fetches so their concurrency is capped together —
@@ -2274,6 +2521,12 @@ export function gpInit(msg: GpInitToWorker): void {
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setAssetLoader(gpAssetLoader);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L4.3: the body starts moving on the click, by a bounded
+    // few elmos, and gives the lead back one-for-one as the server's own
+    // motion arrives. Applied downstream of the L1 reveal gate, so an
+    // un-revealed entity can never be leaned.
+    entityRenderer.setLeanProvider((id, x, z, heading) =>
+        gpPositionalLean ? (gpMotionLean?.offsetFor(id, x, z, heading) ?? null) : null);
     // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
     // before the sim frame it became visible on. Put the reveal on the
     // presentation timeline so it appears on that frame rather than early,
@@ -2322,6 +2575,11 @@ export function gpInit(msg: GpInitToWorker): void {
         /** Hazard #1: the ~10-tap terrain decal-overlay fragment block. */
         terrainPlugin: (on: boolean): boolean =>
             setTerrainDecalPluginEnabled(gpTerrain, on),
+        /** PLAN-terrain-detailtex §4: A/B the near-field terrain detail
+         *  (splat or plain mode, whichever the map attached). The acceptance
+         *  shots need it because CDP screenshots cannot see the canvas. */
+        terrainDetail: (on: boolean): boolean =>
+            setTerrainDetailPluginEnabled(gpTerrain, on),
         /** Hazard #2: the periodic + pan-driven full RTT re-stamp. */
         decalFade: (on: boolean): boolean => {
             if (!gpDecalOverlay) return false;
@@ -2379,6 +2637,14 @@ export function gpInit(msg: GpInitToWorker): void {
          *  already compacted, so an off-arm has to be re-grown by churn.
          *  `squadPoolCompactGate(fraction, minDead)` moves the trigger;
          *  `__squadBackend.poolOccupancy()` reads drawn/live/dead per pool. */
+        /** S5: A/B the squad backend's dirty-range upload. `squadFullUpload(true)`
+         *  restores the pre-S5 shape — every flush uploads the whole live prefix
+         *  and a sprite pool re-billboards every live slot even with a still
+         *  camera; `false` is the shipped default (upload the tracked range,
+         *  recompose only the slots whose pose moved). Takes effect on the next
+         *  flush. It does not restore the per-member Babylon matrix compose,
+         *  which S5 replaced with §13b's inline write under test. */
+        squadFullUpload: (on: boolean): boolean => setLegacyFullUpload(on),
         squadPoolCompact: (on: boolean): boolean => setPoolCompaction(on),
         squadPoolCompactGate: (fraction: number, minDead?: number) =>
             setPoolCompactionGate(fraction, minDead),
@@ -2396,6 +2662,39 @@ export function gpInit(msg: GpInitToWorker): void {
         combatFxPooled: (on: boolean): boolean =>
             gpCombatFX?.setPooled(on) ?? false,
     };
+    // PLAN-maps.md §1.2.1: streaming v2 vertical slice, synthetic pages (one
+    // hue per pyramid level) — the fallback chain and cross-fade on screen
+    // before any real map bytes exist. Opt-in only; nothing enables this in
+    // normal play. From the main DevTools console:
+    //   window.__gp('__terrainPages.enable()')        // cache + shader up
+    //   window.__gp('__terrainPages.plugin(false)')   // A/B arm: shader off
+    //   window.__gp('__terrainPages.stats()')         // residency counters
+    //   window.__gp('__terrainPages.disable()')       // full teardown
+    (globalThis as Record<string, unknown>).__terrainPages = {
+        enable: (): string => {
+            if (gpTerrainPages) return 'already enabled';
+            if (!gpScene || !gpTerrain || !gpMapData) return 'no map loaded';
+            try {
+                gpTerrainPages = new TerrainPageStreaming(
+                    gpScene, gpTerrain, gpMapData);
+                return 'enabled';
+            } catch (e) {
+                return `failed: ${e}`;
+            }
+        },
+        disable: (): string => {
+            if (!gpTerrainPages) return 'not enabled';
+            gpTerrainPages.dispose(gpTerrain);
+            gpTerrainPages = null;
+            return 'disabled';
+        },
+        /** ⚠ toggles `isEnabled` (not `enabled`) and returns whether a plugin
+         *  was actually found — a false here means the A/B never armed. */
+        plugin: (on: boolean): boolean =>
+            gpTerrainPages?.setPluginEnabled(gpTerrain, on) ?? false,
+        stats: (): unknown => gpTerrainPages?.getStats() ?? null,
+    };
+
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts
     //   window.__gp('__featureLod.set({impostorDistance: 800})')
@@ -2604,16 +2903,36 @@ export function gpInit(msg: GpInitToWorker): void {
         gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
+        // PLAN-perf M27: the phase's own start stamp. gpMark(0) already took
+        // one, but FrameProfiler owns it and does not hand it back.
+        if (gpEbOn) gpEbPhaseT0 = performance.now();
+        // PLAN-latency L4.3: roll the lean's per-frame memo over and expire
+        // leans whose hold + decay has run out. Must run before the entity
+        // pass, which is what queries it (body and selection ring both).
+        gpMotionLean?.beginFrame();
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
+        const ebT1 = gpEbOn ? performance.now() : 0;
         gpCtx.entityRenderer?.tick();
+        if (gpEbOn) gpEb.interp += performance.now() - ebT1;
         // PLAN-metalstorm-squads.md §6: drive the squad fan-out off the freshly
         // interpolated centroid poses, then flush member/wreck instances.
+        // The three squad slices are zeroed here, not inside gpTickSquads: it
+        // returns early when no squad module is loaded, and a stale slice
+        // would then be re-added every frame.
+        gpEbPose = 0; gpEbUpdate = 0; gpEbFlush = 0;
         gpTickSquads(dt);
+        if (gpEbOn) {
+            gpEb.squadPose += gpEbPose; gpEb.squadUpdate += gpEbUpdate;
+            gpEb.squadFlush += gpEbFlush;
+            gpEb.squadSum += gpSquadIds.size;
+        }
         // Flush this frame's Impostor-tier instances entityRenderer.tick()
         // just routed to impostorRenderer.addInstance() into thin-instance
         // buffers (PLAN-metalstorm-beta-units.md §2.1, engine ask B1).
+        const ebT2 = gpEbOn ? performance.now() : 0;
         gpCtx.impostorRenderer?.render(camera.position);
+        if (gpEbOn) gpEb.impostor += performance.now() - ebT2;
         // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
         // poses via setAimPose based on ground speed derived from position delta).
         gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
@@ -2626,6 +2945,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // than early on arrival. Drained after the cursor advanced (tick above)
         // and before projectileRenderer.tick() / the A3 mirror so a scheduled
         // impact removes its projectile from this frame's live snapshot.
+        const ebT3 = gpEbOn ? performance.now() : 0;
         if (gpPresentationClock && gpEventScheduler) {
             // PLAN-latency L2.2: invented Tier-C flights are parametrised by
             // the cursor, not by wall time. Push it before the drain so a
@@ -2647,6 +2967,7 @@ export function gpInit(msg: GpInitToWorker): void {
             // independently of its state).
             gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
         }
+        if (gpEbOn) gpEb.events += performance.now() - ebT3;
         // PLAN-latency L4.1: retire optimistic orders whose window has run out.
         // Deliberately on wall time, not the presentation cursor — an
         // unconfirmed order is a control-timeline artifact and its deadline is
@@ -2664,6 +2985,14 @@ export function gpInit(msg: GpInitToWorker): void {
             }
         }
         gpMark(1);  // entity
+        if (gpEbOn) {
+            // Total is the phase's own wall time, so `other` = total − slices
+            // is a residual and not an assumption: nothing in the phase can
+            // hide from the split.
+            gpEb.total += performance.now() - gpEbPhaseT0;
+            gpEb.entitySum += gpCtx.entityRenderer?.entityCount ?? 0;
+            gpEb.frames++;
+        }
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
         // A3 read-seam (PLAN-latency-impl.md L-pre.1): mirror the renderer's
@@ -2800,6 +3129,8 @@ export function gpInit(msg: GpInitToWorker): void {
             if (req.kind === 'unit') {
                 const def = gpDefCache?.getUnitDef(req.defId);
                 const ref = pickUnitDefSound(def?.sounds, req.category);
+                if (req.category === SoundCategory.OrderAck && ref)
+                    gpOrderAckPlayed++;
                 if (!ref) return;
                 const e: SoundEventInfo = {
                     soundId: ref.id, sourceDefId: req.defId, sourceKind: 0,
@@ -2975,9 +3306,11 @@ function gpRecomputeBuildTiles(): void {
         return a - b;
     });
 
+    const queued = gpBuildQueueCounts();
     const tiles: BuildMenuTile[] = [];
     for (const defId of sorted) {
         const def = dc?.getUnitDef(defId);
+        const q = queued.get(defId);
         tiles.push({
             defId,
             name:       def?.name ?? '',
@@ -2987,6 +3320,8 @@ function gpRecomputeBuildTiles(): void {
             energyCost: def?.energyCost ?? 0,
             buildTime:  def?.buildTime ?? 0,
             tooltip:    def?.tooltip ?? '',
+            queued:        q?.total ?? 0,
+            queuedPending: q?.pending ?? 0,
         });
         // PLAN-lazy-loading.md P4 pre-warm trigger: cheap insurance so a
         // player who actually clicks one of these tiles isn't starting the
@@ -2998,17 +3333,70 @@ function gpRecomputeBuildTiles(): void {
     gpBuildTilesDirty = true;
 }
 
+/// PLAN-latency L4.2 — the build-row queue chip. Count, per unit-def, how many
+/// build orders the current own-team selection has queued, read off the MERGED
+/// command-queue view so an order we have just sent is counted immediately.
+/// `pending` is the still-optimistic subset (synthetic tag <= 0), which is what
+/// makes the chip appear on the click rather than up to a snapshot period
+/// later. Cheap: a few queues of a few orders each, and only ever called from a
+/// selection change, a snapshot, or a click.
+function gpBuildQueueCounts(): Map<number, { total: number; pending: number }> {
+    const out = new Map<number, { total: number; pending: number }>();
+    const sel = gpCtx.selection?.selection ?? [];
+    if (sel.length === 0) return out;
+    const selSet = new Set(sel);
+    for (const q of gpMergedCommandQueues()) {
+        if (!selSet.has(q.unitId)) continue;
+        for (const o of q.orders) {
+            if (o.cmdId >= 0) continue;   // negative cmdId = build command
+            const defId = -o.cmdId;
+            let c = out.get(defId);
+            if (!c) { c = { total: 0, pending: 0 }; out.set(defId, c); }
+            c.total++;
+            if (o.tag <= 0) c.pending++;
+        }
+    }
+    return out;
+}
+
+/// Patch the queue chips on the existing build tiles without re-resolving the
+/// buildable set (which needs cmd-descs and the def cache and does not change
+/// on a queue update). Marks the tiles dirty ONLY when a count actually moved,
+/// so the 1 Hz snapshot does not re-ship the whole tile array every second.
+function gpRefreshBuildQueueChips(): void {
+    if (gpBuildTiles.length === 0) return;
+    const queued = gpBuildQueueCounts();
+    let changed = false;
+    for (const t of gpBuildTiles) {
+        const q = queued.get(t.defId);
+        const total = q?.total ?? 0;
+        const pending = q?.pending ?? 0;
+        if (t.queued === total && t.queuedPending === pending) continue;
+        t.queued = total;
+        t.queuedPending = pending;
+        changed = true;
+    }
+    if (changed) gpBuildTilesDirty = true;
+}
+
 /// PLAN-playable.md G4: recompute the production-queue rows for the native
 /// FactoryQueuePanel. Picks the first own-team factory (UnitDef bit 11) in
 /// the current selection — multi-factory queue merging isn't implemented,
 /// matching the "selected factory" (singular) framing of the ZK Phase D
-/// item this closes. Groups gpLastCommandQueues' build entries (cmdId<0,
+/// item this closes. Groups the merged view's build entries (cmdId<0,
 /// same convention gpRecomputeBuildTiles decodes) into consecutive
 /// same-defId runs, mirroring how Spring's FactoryCAI stacks repeated
 /// identical build commands one slot each. Non-build orders (e.g. a WAIT
 /// a player inserted between batches) are skipped rather than splitting a
 /// run — an acceptable simplification for this native (non-Lua-port) panel.
-/// Called on selection change and on every UnitCommandQueuesUpdate.
+/// Called on selection change, on every UnitCommandQueuesUpdate, and (L4.2)
+/// from the command sink so a queued item shows on the click.
+///
+/// PLAN-latency L4.2: reads `gpMergedCommandQueues()`, not the raw snapshot.
+/// The panel was the last consumer still on the 1 Hz poll after L4.1 wired the
+/// overlays and the build-ghost reaper to the merged view — clicking a factory
+/// build tile left the row blank for up to a snapshot period, which reads as a
+/// dropped click and provokes the double-click that queues two.
 function gpRecomputeFactoryQueue(): void {
     const sel = gpCtx.selection?.selection ?? [];
     const er = gpCtx.entityRenderer;
@@ -3029,7 +3417,8 @@ function gpRecomputeFactoryQueue(): void {
 
     let tiles: FactoryQueueTile[] = [];
     if (factoryId >= 0) {
-        const orders = gpLastCommandQueues.find(q => q.unitId === factoryId)?.orders ?? [];
+        const orders = gpMergedCommandQueues()
+            .find(q => q.unitId === factoryId)?.orders ?? [];
         const runs = groupFactoryQueueRuns(orders);
         tiles = runs.map(r => {
             const def = dc?.getUnitDef(r.defId);
@@ -3039,8 +3428,9 @@ function gpRecomputeFactoryQueue(): void {
                 name: def?.name ?? '',
                 humanName: def?.humanName ?? '',
                 buildPic: def?.buildPic ?? '',
-                count: r.tags.length,
+                count: r.tags.length + r.pending,
                 tags: r.tags.slice(),
+                pending: r.pending,
             };
         });
     }
@@ -3448,7 +3838,9 @@ export function gpResync(token?: string): void {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     gpParked = false;
     gpRenderPaused = false;
     gpLastFrameTime = performance.now();
@@ -3461,6 +3853,26 @@ export function gpResync(token?: string): void {
     gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
     postLog(1, '[gp] resynced — reconnecting; full snapshot will repopulate the world');
     postToMain({ type: 'gp:resynced' });
+}
+
+/**
+ * 8a-follow-on: adopt an access token renewed on the main thread.
+ *
+ * Updates the credential the worker will present on its NEXT authentication —
+ * `gpResync`, the R1 soft-recovery reconnect, and any `gp:init`-derived
+ * reconnect all read `gpInitMsg.token`. The live connection is deliberately
+ * NOT re-authenticated: the game server validates once at `AuthRequest` and
+ * the session then belongs to the connection, so tearing it down to present a
+ * newer token would drop the player out of the world to fix a problem they do
+ * not yet have.
+ *
+ * The telemetry channel is reconfigured immediately, because that one DOES
+ * present the token per request.
+ */
+export function gpAdoptToken(token: string): void {
+    if (!token) return;
+    if (gpInitMsg) gpInitMsg.token = token;
+    configureErrorTelemetry({ token });
 }
 
 export function gpShutdown(): void {
@@ -3497,6 +3909,8 @@ export function gpShutdown(): void {
     gpLastCommandQueues = [];
     gpPendingActions?.clear();
     gpPendingActions = null;
+    gpMotionLean?.clear();
+    gpMotionLean = null;
     gpShiftHeld = false;
     gpTrackingCamera = false;
     gpCtx.connection?.setCommandSink(null);
@@ -3558,6 +3972,8 @@ export function gpShutdown(): void {
     gpWheelSpin = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
+    gpTerrainPages?.dispose(gpTerrain);
+    gpTerrainPages = null;
     gpTerrain = null;
     gpDeformTerrain = null;
     gpMapData = null;
@@ -3654,6 +4070,48 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setOptimisticInput':
             gpOptimisticInput = args[0] !== false;
             return gpOptimisticInput;
+        // A/B control for the L4.4 measurement (PLAN-latency-impl §L4.4): with
+        // snapshot refutation off, a confirmed entry rides the flat 3 s
+        // RETIRE_MS cap exactly as it did before L4.4, so the two arms share
+        // one binary. `pendingStats.lastRefuteMs` / `refutedTotal` are the
+        // readout — how long an order the server acked and then REFUSED stayed
+        // on screen.
+        case 'setSnapshotRefutation':
+            gpSnapshotRefutation = args[0] !== false;
+            gpPendingActions?.setSnapshotRefutation(gpSnapshotRefutation);
+            return gpSnapshotRefutation;
+        // — bounded positional lean (PLAN-latency L4.3). `leanStats` is the
+        //   correction-budget alarm's readout: `maxOffsetElmos` must stay at
+        //   or under `maxLeanElmos` and `boundExceededTotal` must be 0, while
+        //   `decayedTotal` counts the leans the server never justified (the
+        //   ones a player could see walked back). `setPositionalLean(false)`
+        //   is the A/B control arm — same binary, body pose exactly pre-L4.3. —
+        case 'leanStats':
+            return gpMotionLean?.stats() ?? null;
+        case 'leanReset':
+            gpMotionLean?.resetStats();
+            return null;
+        case 'setPositionalLean':
+            gpPositionalLean = args[0] !== false;
+            if (!gpPositionalLean) gpMotionLean?.clear();
+            return gpPositionalLean;
+        // Probe for the L4.3 measurement: the *drawn* position of a unit,
+        // lean included, against `getEntityPosition` which reads through it.
+        // The gap between the two IS the lean, so one call measures both the
+        // bound and the hand-back.
+        case 'leanOffset': {
+            // Reads through the same per-frame memo the render pass filled, so
+            // for a drawn unit this is the exact offset on screen rather than
+            // a re-evaluation at a different instant.
+            const p = gpCtx.entityRenderer?.getEntityPose(num(0));
+            if (!p) return null;
+            const o = gpMotionLean?.offsetFor(num(0), p.x, p.z, p.heading) ?? null;
+            return {
+                dx: o?.dx ?? 0, dz: o?.dz ?? 0, dHeading: o?.dHeading ?? 0,
+                elmos: o ? Math.hypot(o.dx, o.dz) : 0,
+                authoritativeX: p.x, authoritativeZ: p.z,
+            };
+        }
         // Probes for that measurement: `overlayOrders` counts the orders in
         // the view handed to the overlay renderers for one unit;
         // `markerCount` counts the marker meshes actually in the scene.
@@ -3680,6 +4138,61 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             gpCtx.connection?.sendPlayerCommand(
                 num(1), obj<number[]>(0, []), obj<number[]>(2, []), num(3), 0);
             return null;
+        // — L4.2 probes (build-placement + queue-chip feedback) —
+        // `clientBuildPick` is the build-tile click as the native BuildMenu
+        // delivers it (gp:startBuildPlacement). With a pure-factory selection
+        // WorkerBuildPlacement queues immediately and never arms a ghost, so
+        // this is the whole factory-build gesture minus the DOM click — the
+        // same relationship `clientOrder` has to a right-click.
+        case 'clientBuildPick':
+            gpBuildPlacement?.startBuildPlacement(
+                num(0), { shift: args[1] === true, ctrl: args[2] === true });
+            return null;
+        // — L4 gate bullet 6 probes (the build-ghost race) —
+        // `clientBuildPlace` is the left-click that commits an armed ghost,
+        // minus the terrain pick; `pendingBuilds` is the only observable of
+        // the reaper's verdict, since reaping is a `dispose()`.
+        case 'clientBuildPlace':
+            return gpBuildPlacement?.placeArmedBuildAt(
+                num(0), num(1), args[2] === true) ?? false;
+        case 'pendingBuilds':
+            return gpBuildPlacement?.pendingBuildList ?? [];
+        // The ~1 Hz command-queue beat. A bullet-6 trial has to place its
+        // ghost *into* the gap before a snapshot, which needs the phase.
+        case 'snapshotStats':
+            return {
+                count: gpQueueSnapshotCount,
+                lastAtMs: gpQueueSnapshotLastMs,
+                sinceMs: gpQueueSnapshotLastMs > 0
+                    ? performance.now() - gpQueueSnapshotLastMs : -1,
+                nowMs: performance.now(),
+            };
+        // What the native FactoryQueuePanel would render right now: one row per
+        // production run, with the confirmed/optimistic split L4.2 added. This
+        // is the worker-side value, so it is free of the sceneState post's
+        // ~10 Hz cadence — the panel is a pure renderer of it.
+        case 'factoryQueue':
+            return gpFactoryQueueTiles.map(t => ({
+                unitId: t.unitId, defId: t.defId, name: t.name,
+                count: t.count, confirmed: t.tags.length, pending: t.pending,
+            }));
+        // The build-row queue chips for the current selection.
+        case 'buildChips':
+            return gpBuildTiles
+                .filter(t => t.queued > 0)
+                .map(t => ({ defId: t.defId, name: t.name,
+                             queued: t.queued, pending: t.queuedPending }));
+        // Selection is normally a pointer gesture; drive it directly so a
+        // measurement can put a factory under the panels without hit-testing.
+        case 'selectUnits':
+            gpCtx.selection?.setSelectionExternal(obj<number[]>(0, []));
+            return gpCtx.selection ? [...gpCtx.selection.selection] : [];
+        // Order-ack bark coverage. Pass `true` to reset.
+        case 'orderAckStats': {
+            const s = { attempts: gpOrderAckAttempts, played: gpOrderAckPlayed };
+            if (args[0] === true) { gpOrderAckAttempts = 0; gpOrderAckPlayed = 0; }
+            return s;
+        }
         // — per-phase frame-time distribution (PLAN-perf P0 attribution) —
         //   arg 0 = window ms (default 30 s); returns structured stats + a
         //   pre-formatted table.
@@ -3687,6 +4200,15 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             return gpFrameProfiler.dump(num(0, gpFrameProfiler.windowMs));
         case 'perfReset':
             gpFrameProfiler.reset();
+            return null;
+        // — P5 item 4: the squad perf counters live inside the runtime-served
+        //   squad module, which is free not to expose them. These cases existed
+        //   nowhere before, so window.test.squadPerf() threw `unknown test
+        //   method` on EVERY build; null is the honest answer. —
+        case 'squadPerf':
+            return (gpSquadSystem as { perf?: () => unknown } | null)?.perf?.() ?? null;
+        case 'squadPerfReset':
+            (gpSquadSystem as { resetPerf?: () => void } | null)?.resetPerf?.();
             return null;
         // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
         //   most-expensive-first, same shape/convention as uiProfileDump. —
@@ -3764,6 +4286,17 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const err = widgetProfileStop(rt);
             return err ? { error: err } : { ok: true };
         }
+        // — entity-phase cost split (PLAN-perf M27). Arming resets the
+        //   accumulator, so arm → run the window → dump gives that window's
+        //   own means, exactly like M26's setUpdateBreakdown. Measurement
+        //   only: disarm when the session ends, never ship armed. —
+        case 'entityBreakdownArm': {
+            gpEbOn = args[0] === undefined ? true : !!args[0];
+            resetEntityPhaseAccumulator(gpEb);
+            return { armed: gpEbOn };
+        }
+        case 'entityBreakdownDump':
+            return buildEntityPhaseReport(gpEb);
         case 'uiProfileDump': {
             const rt = getRuntime();
             const dump = rt ? widgetProfileDump(rt) : null;
@@ -3898,6 +4431,9 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const d = (gpDefCache?.getAllUnitDefs() ?? []).find((x) => x.name === name);
             return d ? gpCloneSafe(d) : null;
         }
+        // — PLAN-metalstorm-command-language.md §6.4 (M3): the NL query engine's
+        //   census. See gpNlCensus for why this op exists at all. —
+        case 'nlCensus': return gpNlCensus();
         // — Worker game-connection readiness (see gpAuthFailed / gpFirstStateReceived).
         //   Lets the scenario runner gate spawns on a live connection and the
         //   model-viewer report the real cause of a non-streaming entity. —
@@ -3964,17 +4500,197 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                 ? gpClipPlayer?.state()
                 : gpClipPlayer?.state(num(0))) ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
+        //   Reads whenever the message happens to be processed, so it can catch
+        //   a between-render moment. Prefer 'captureFrame' below.
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
             if (!canvas) throw new Error('no rendering canvas');
             const blob = await canvas.convertToBlob({ type: 'image/png' });
-            const bytes = new Uint8Array(await blob.arrayBuffer());
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            return `data:image/png;base64,${btoa(binary)}`;
+            return gpBlobToDataUrl(blob, 'image/png');
+        }
+        // — P5 item 1: deterministic capture — render and read pixels in ONE
+        //   worker task. The canvas is created with preserveDrawingBuffer
+        //   (gp:init), so historical black captures were *timing* (a read with
+        //   no render behind it), which this closes by construction. —
+        case 'captureFrame': {
+            if (gpCaptureInFlight) return gpCaptureInFlight;
+            const opts = obj<{
+                format?: 'png' | 'jpeg'; quality?: number; maxDim?: number;
+                region?: { x: number; y: number; width: number; height: number };
+                stats?: boolean; render?: boolean;
+            }>(0, {});
+            const scene = gpScene, engine = gpEngine;
+            if (!scene || !engine) throw new Error('no scene — worker not initialised');
+            gpCaptureInFlight = (async () => {
+                // 1. Own the frame. Paused → the render loop early-returns, so
+                //    we render explicitly (a paused capture still reflects the
+                //    CURRENT camera/state — pause+focusOn+capture is a real
+                //    workflow — which is why a paused capture advances frameId).
+                //    Running → hook the frame the loop renders. The 2 s fallback
+                //    covers a pause that raced the observer registration, and a
+                //    wedged loop (R2).
+                //    `render: false` reads the preserved drawing buffer with no
+                //    render at all: byte-identical on repeat, and the only way
+                //    to compare two captures of ONE frame. It is only honest
+                //    while paused — a running loop overwrites the buffer.
+                if (opts.render === false) {
+                    /* read the preserved buffer as-is */
+                } else if (gpRenderPaused) {
+                    scene.render();
+                } else {
+                    await new Promise<void>((resolve) => {
+                        let done = false;
+                        const finish = (renderOurselves: boolean): void => {
+                            if (done) return;
+                            done = true;
+                            if (renderOurselves) {
+                                scene.onAfterRenderObservable.remove(obs);
+                                scene.render();
+                            }
+                            resolve();
+                        };
+                        const t = setTimeout(() => finish(true), 2000);
+                        const obs = scene.onAfterRenderObservable.addOnce(() => {
+                            clearTimeout(t);
+                            finish(false);
+                        });
+                    });
+                }
+                // 2. Downsample + encode in the same task. Nothing else renders
+                //    in between (the worker is single-threaded and every await
+                //    below is on our own canvas ops), and the preserved drawing
+                //    buffer keeps the frame stable regardless.
+                const src = engine.getRenderingCanvas() as unknown as OffscreenCanvas;
+                const r = opts.region ?? { x: 0, y: 0, width: src.width, height: src.height };
+                const maxDim = opts.maxDim ?? 1280;
+                const scale = Math.min(1, maxDim / Math.max(1, Math.max(r.width, r.height)));
+                const w = Math.max(1, Math.round(r.width * scale));
+                const h = Math.max(1, Math.round(r.height * scale));
+                const out = new OffscreenCanvas(w, h);
+                const ctx = out.getContext('2d', { willReadFrequently: true });
+                if (!ctx) throw new Error('no 2d context for the capture downsample');
+                ctx.drawImage(src as unknown as CanvasImageSource,
+                    r.x, r.y, r.width, r.height, 0, 0, w, h);
+                let stats: { min: number; max: number; mean: number } | undefined;
+                if (opts.stats) stats = luminanceStats(ctx.getImageData(0, 0, w, h).data);
+                const type = opts.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+                const blob = await out.convertToBlob({ type, quality: opts.quality });
+                return {
+                    dataUrl: await gpBlobToDataUrl(blob, type),
+                    width: w, height: h,
+                    // scene.getFrameId() counts RENDERS of this scene, so it
+                    // identifies the captured pixels. engine.frameId counts
+                    // render-LOOP ticks, which keep advancing while paused (the
+                    // loop returns early) and so cannot identify a frame.
+                    frameId: scene.getFrameId(),
+                    gameFrame: liveState.gameFrame,
+                    ...(stats ? { stats } : {}),
+                };
+            })().finally(() => { gpCaptureInFlight = null; });
+            return gpCaptureInFlight;
+        }
+        // — P5 item 1: honest high-res capture. The engine + camera are
+        //   worker-resident (the GW8 deferral's blocker), so Babylon's RTT
+        //   screenshot helper works here. It routes through DumpTools, which
+        //   needs an OffscreenCanvas-capable environment — if that path throws
+        //   in this worker we fall back to a manual RTT read (R3). —
+        case 'highResScreenshot': {
+            const scene = gpScene, engine = gpEngine, camera = gpCamera;
+            if (!scene || !engine || !camera) throw new Error('no scene — worker not initialised');
+            const width = num(0, 1920), height = num(1, 1080);
+            try {
+                return await CreateScreenshotUsingRenderTargetAsync(
+                    engine, camera, { width, height });
+            } catch (e) {
+                postLog(3, `[gp] screenshot tools unavailable (${String(e)}) — manual RTT`);
+                return await gpManualRttScreenshot(scene, camera, width, height);
+            }
+        }
+        // — P5 item 2: one-round-trip readiness probe (connection + render
+        //   census). Zero HTTP. The terrain regex is textually identical to
+        //   render-sanity.ts's SCENE_CENSUS_EXPR — keep them in step. —
+        case 'readyProbe': {
+            let meshCount = 0, terrainMeshCount = 0;
+            if (gpScene) {
+                meshCount = gpScene.meshes.length;
+                for (const m of gpScene.meshes) {
+                    if (/^terrain(_|Lod\d+_)/.test(m.name)) terrainMeshCount++;
+                }
+            }
+            return {
+                authenticated: gpCtx.connection?.authenticated ?? false,
+                authFailed: gpAuthFailed,
+                receivedState: gpFirstStateReceived,
+                frameId: gpEngine?.frameId ?? -1,
+                meshCount,
+                terrainMeshCount,
+            };
+        }
+        // — P5 item 5: test input lock + transition-settle await. —
+        case 'lockInput':
+            cam?.setInputLocked(args[0] !== false);
+            return cam?.isInputLocked ?? false;
+        case 'cameraSettle': {
+            if (!cam) return false;
+            await Promise.race([
+                cam.waitForSettle(),
+                new Promise<void>((res) => setTimeout(res, num(0, 10000))),
+            ]);
+            return true;
+        }
+        // — P5 item 6: LuaUI widget list / toggle over gp:test. The legacy
+        //   fire-and-forget widget messages carry no correlation id, so main
+        //   could never read a reply; these are request/response. —
+        case 'widgetList':
+            return getWidgetList();          // '' until the LuaUI runtime boots
+        case 'setWidget': {
+            const name = String(args[0] ?? '');
+            if (args[1] === false) disableWidget(name);
+            else await enableWidget(name);   // async: re-fetches the source
+            return getWidgetList();
         }
         default:
             throw new Error(`unknown test method '${method}'`);
+    }
+}
+
+/// Blob → data URL, worker-side (there is no FileReader in a worker). Chunked
+/// so a multi-MB PNG doesn't blow the argument limit of String.fromCharCode.
+async function gpBlobToDataUrl(blob: Blob, type: string): Promise<string> {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return `data:${type};base64,${btoa(binary)}`;
+}
+
+/// R3 fallback for `highResScreenshot` when Babylon's DumpTools-backed helper
+/// is unusable in this worker: render the scene once into an offscreen RTT,
+/// read it back, Y-flip (GL origin is bottom-left), and encode.
+async function gpManualRttScreenshot(
+    scene: Scene, camera: FreeCamera, width: number, height: number,
+): Promise<string> {
+    const rtt = new RenderTargetTexture('hiRes', { width, height }, scene, false);
+    try {
+        rtt.renderList = scene.meshes.slice();
+        rtt.activeCamera = camera;
+        rtt.render();
+        const raw = await rtt.readPixels();
+        if (!raw) throw new Error('RTT readPixels returned nothing');
+        const src = new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.byteLength);
+        const flipped = new Uint8ClampedArray(src.length);
+        const stride = width * 4;
+        for (let y = 0; y < height; y++) {
+            flipped.set(src.subarray((height - 1 - y) * stride, (height - y) * stride), y * stride);
+        }
+        const out = new OffscreenCanvas(width, height);
+        const ctx = out.getContext('2d');
+        if (!ctx) throw new Error('no 2d context for the RTT readback');
+        ctx.putImageData(new ImageData(flipped, width, height), 0, 0);
+        return await gpBlobToDataUrl(await out.convertToBlob({ type: 'image/png' }), 'image/png');
+    } finally {
+        rtt.dispose();
     }
 }
 
@@ -4024,6 +4740,66 @@ function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
         }
     }
     return null;
+}
+
+/// PLAN-metalstorm-command-language.md §6.4 (M3) — the natural-language query
+/// engine's view of the world, and the ONLY one it gets.
+///
+/// Every entry comes from `liveState.units`: the client's own unit mirror, which
+/// the server already filtered to this player's LOS before sending. It is the
+/// same map `Spring.GetTeamUnitsSorted` and friends answer from, so this op adds
+/// no visibility that Lua widgets don't already have — it exists because the
+/// `ms_class`/`ms_scale` join needs the def cache, which lives HERE (main has no
+/// defs mirror), and because main should not have to build Lua source strings and
+/// parse prose back out of `window.widgets.eval` to ask a question.
+///
+/// `side` is resolved here rather than on main so the ally-team lookup uses
+/// `liveState.teams` — the roster the sim actually seeded — instead of main's
+/// identity guess (`gp:authenticated` reports a team, and myAllyTeam is set equal
+/// to it at auth time, which is only right for 1-team-per-ally games).
+///
+/// NOTHING outside this map is read. There is no "all units" collection on the
+/// client to accidentally reach for, which is what makes LOS honesty a property
+/// of the data path rather than of a filter someone has to remember.
+function gpNlCensus(): {
+    frame: number;
+    myTeam: number;
+    units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }>;
+} {
+    const myTeam = liveState.identity.myTeam;
+    const myAlly = liveState.teams.get(myTeam)?.allyTeam ?? liveState.identity.myAllyTeam;
+
+    const sideOf = (team: number): 'own' | 'ally' | 'enemy' => {
+        if (team === myTeam) return 'own';
+        const ally = liveState.teams.get(team)?.allyTeam;
+        return ally !== undefined && ally === myAlly ? 'ally' : 'enemy';
+    };
+
+    const units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }> = [];
+
+    for (const [unitId, u] of liveState.units) {
+        const cp = unitDefMap.get(u.defId)?.customParams;
+        const className = cp?.ms_class;
+        const scaleRaw = cp?.ms_scale;
+        const scale = scaleRaw !== undefined ? Number(scaleRaw) : undefined;
+        units.push({
+            unitId,
+            team: u.team,
+            side: sideOf(u.team),
+            ...(className ? { className } : {}),
+            ...(scale !== undefined && Number.isFinite(scale) ? { scale } : {}),
+            x: u.x,
+            z: u.z,
+        });
+    }
+
+    return { frame: liveState.gameFrame, myTeam, units };
 }
 
 /// Force the worker camera to a fixed height above its look-at target (ports the
@@ -4285,8 +5061,27 @@ export function gpHandleGroupPosture(groupId: number, postureJson: string): void
 }
 
 export function gpHandleGroupDirectiveUpdate(msg: GpGroupDirectiveUpdateToWorker): void {
+    // Resolve the subject's class name to the wire's `squad_types` here: the
+    // UI thread has the class vocabulary but not the streamed def table, and
+    // an unresolvable class must send NO filter rather than an empty one —
+    // empty `squad_types` is the wildcard, so a typo would silently widen the
+    // directive to the whole army instead of matching nothing (D56).
+    let conditions: { idleOnly?: boolean; squadTypes?: number[] } | undefined;
+    if (msg.conditions) {
+        conditions = { idleOnly: msg.conditions.idleOnly };
+        const cls = msg.conditions.unitClass;
+        if (cls) {
+            const defIds = resolveUnitClassToDefIds(cls, gpDefCache?.getAllUnitDefs() ?? []);
+            if (defIds.length > 0) {
+                conditions.squadTypes = defIds;
+            } else {
+                postLog(2, `[gp] directive subject class "${cls}" matches no unit def in this ` +
+                           `game — sending the directive unfiltered`);
+            }
+        }
+    }
     gpCtx.connection?.sendGroupDirective(msg.directiveId, msg.groupId, msg.directiveType, msg.shape, msg.params,
-        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active });
+        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active, conditions });
 }
 
 export function gpHandleGroupDirectiveRemove(directiveId: number): void {
@@ -4306,6 +5101,25 @@ export function gpHandleLuaRulesMsg(data: Uint8Array | string): void {
 
 export function gpHandleConsoleCommand(scope: string, command: string): void {
     gpCtx.connection?.sendConsoleCommand(scope, command);
+}
+
+/// PLAN-test-automation P7: main finished a `js`/`widgets`/`test` eval.
+/// Forward it to the server unless our 8s timer already answered for it.
+export function gpHandleClientEvalResult(
+    requestId: number, success: boolean, output: string): void {
+    const t = gpPendingClientEvals.get(requestId);
+    if (t === undefined) return;   // already timed out; the server has its answer
+    clearTimeout(t);
+    gpPendingClientEvals.delete(requestId);
+    gpCtx.connection?.sendClientEvalResponse(requestId, success, output);
+}
+
+/// Drop every in-flight relayed eval (worker teardown / recycle). The server
+/// waiter times out at 10s rather than hanging, and no timer outlives the
+/// connection it would have answered on.
+export function gpClearPendingClientEvals(): void {
+    for (const t of gpPendingClientEvals.values()) clearTimeout(t);
+    gpPendingClientEvals.clear();
 }
 
 export function gpHandlePlayerCommand(commandId: number, unitIds: number[], params: number[], options: number): void {

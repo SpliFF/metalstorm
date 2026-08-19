@@ -26,20 +26,22 @@
 //     is shared across all games (ZK/BAR/Metalstorm) and has no
 //     game-specific cost-override hook; wiring it in is its own task once
 //     that hook (or the native-ui loader) exists.
-//   - live rulesParams data at all: `handleRulesParamUpdate`
-//     (client/src/core/lua-ui-host.ts) has no producer anywhere in the
-//     server or worker (a dead-producer gap spanning the whole backbone,
-//     not authority-specific) — this widget is correct against the
-//     documented store contract but unverifiable end-to-end until that
-//     wire lands. See PLAN-metalstorm-authority field notes.
+// (The old note here said live rulesParams had no producer anywhere and this
+// widget was unverifiable end-to-end. That is obsolete: the wire landed, and
+// the bar has been read against `Spring.GetTeamRulesParam` server truth on the
+// player path in several PLAN-endtoend fires.)
+
+import { formatAuthority } from '../lib/authority-format.js';
 
 const EVENT_RING_SIZE = 8;
 const TOAST_TTL_MS = 4000;
 
+// Every amount here is a float32 rulesParam read, so it goes through
+// formatAuthority — see ui/lib/authority-format.js (PLAN-endtoend.md D49).
 const EVENT_LABEL = {
-  award: (amount, reason) => `+${amount} authority (${reason || 'award'})`,
-  refund: (amount, reason) => `+${amount} authority returned (${reason || 'refund'})`,
-  refusal: (amount) => `Insufficient authority (needed ${amount})`,
+  award: (amount, reason) => `+${formatAuthority(amount)} authority (${reason || 'award'})`,
+  refund: (amount, reason) => `+${formatAuthority(amount)} authority returned (${reason || 'refund'})`,
+  refusal: (amount) => `Insufficient authority (needed ${formatAuthority(amount)})`,
 };
 
 export default {
@@ -72,13 +74,27 @@ export default {
     // The award/charge event ring (task 4) is gameRulesParams
     // (authority_event counter + authority_event_<slot>_* — §2).
     this.unsub = ctx.store.subscribe(['teamRulesParams', 'gameRulesParams'], () => {
-      const team = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_pool');
-      const mine = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_player_' + ctx.identity.playerId);
-      this.el.querySelector('.ms-auth-player').textContent = String(mine ?? 0);
-      this.el.querySelector('.ms-auth-team').textContent = String(team ?? 0);
-
-      this._consumeEventRing(ctx);
+      this._paint(ctx);
     });
+
+    // Paint once from whatever the store already holds. A subscription only
+    // fires on the NEXT update, so a widget that mounts into an already-
+    // populated store would otherwise sit on its '—' placeholder until the
+    // server happened to publish again. That is not hypothetical: re-entering
+    // a finished war mounts the bar after the broadcast pipeline has stopped
+    // (game over freezes it), so the bar read '—/—' forever against a store
+    // holding 92/620 (PLAN-endtoend D44).
+    this._paint(ctx);
+  },
+
+  /** Render the two pools from the store, then drain the event ring. */
+  _paint(ctx) {
+    const team = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_pool');
+    const mine = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_player_' + ctx.identity.playerId);
+    this.el.querySelector('.ms-auth-player').textContent = formatAuthority(mine);
+    this.el.querySelector('.ms-auth-team').textContent = formatAuthority(team);
+
+    this._consumeEventRing(ctx);
   },
 
   /** Read new slots off the authority_event ring since last seen, toast each. */

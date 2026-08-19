@@ -31,6 +31,15 @@ struct FeatureDef: public SolidObjectDef
 
 	int smokeTime;
 
+	/// PLAN-maps.md §2j option C: height of the trafficable deck above this
+	/// def's own model origin, or 0 for "no deck declared" (every def that is
+	/// not a bridge span). A positive value SEATS the feature: it holds the y
+	/// it was staged at instead of being clamped up to the ground, so a chain
+	/// of spans lays a level deck. Resolved from the `deckHeight` featuredef
+	/// key or, failing that, from the already-published
+	/// `customparams.deck_top`. See Sim/Features/FeatureSeating.h.
+	float deckHeight;
+
 	bool destructable;
 	bool autoreclaim;
 	bool burnable;

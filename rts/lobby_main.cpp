@@ -10,17 +10,37 @@
 
 #include "Server/Database.h"
 #include "Server/GrowthCounters.h"
+#include "Server/GameEventsDb.h"
 #include "Server/GameServersDb.h"
+#include "Server/GuestAccounts.h"
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
 #include "Server/ReplayFile.h"
+#include "Server/PlayerSlotReservation.h"
 #include "Server/RoomManager.h"
+#include "Server/RuntimeAIRoster.h"
+#include "Server/WarDirector.h"
+#include "Server/WarPlayerBindings.h"
+#include "Server/JoinPreview.h"
+#include "Server/WarDeploy.h"
+#include "Server/WarDemandSeed.h"
+#include "Server/WarSeeding.h"
+#include "Server/WarLifecycleSweep.h"
+#include "Server/WarTheatrePool.h"
+#include "Server/WarOutcome.h"
+#include "Server/WarSideMaintenance.h"
+#include "Server/WarSlotReservation.h"
+#include "Server/WarSummary.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/CacheControl.h"
 #include "Server/DevBuildGate.h"
 #include "Server/FactionData.h"
+#include "Server/Chat.h"
+#include "Server/FriendPresence.h"
+#include "Server/Friends.h"
+#include "Server/SSETickets.h"
 #include "Server/GameDiscovery.h"
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
@@ -28,6 +48,10 @@
 #include "Server/ScenarioDb.h"
 #include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
+#include "Server/DeployDrain.h"
+#include "Server/WarLifecycle.h"
+#include "Server/WarResume.h"
+#include "Server/WarStateEvents.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -246,6 +270,32 @@ RunScenarioGen(const std::string &mapsDir, const std::string &mapId,
   addInt("--outposts", "outposts", 0, 32);
   addInt("--bases", "bases", 0, 32);
   addInt("--mines", "mines", 0, 32);
+  // The prop/landmark layer (scenariogen.py:3015-3022). CLI-only until now,
+  // which meant an author driving generation over HTTP could shape the
+  // military layout but not the terrain it fights over. Same 0-32 clamp as
+  // the neighbours, and the generator's own argparse re-validates.
+  addInt("--sites", "sites", 0, 32);
+  addInt("--relics", "relics", 0, 32);
+  addInt("--wrecks", "wrecks", 0, 32);
+  addInt("--bridges", "bridges", 0, 32);
+  // The civilian cluster kinds the coverage war needs (scenariogen.py's
+  // --works/--harbour/--shanty). Same clamp and rationale as above: without
+  // them an HTTP caller can ask for a full-coverage war but not shape it.
+  addInt("--works", "works", 0, 32);
+  addInt("--harbour", "harbour", 0, 32);
+  addInt("--shanty", "shanty", 0, 32);
+  // Boolean knobs. `coverage` forces the preset that can reach every def and
+  // then refuses unless the staged war really contains one of each; `player`
+  // drops the mutual-ground-reachability gate for a human-played war. Both
+  // were CLI-only, which made the full-coverage war unreachable over HTTP —
+  // i.e. unreachable from the picker, which is the only place it matters.
+  const auto addFlag = [&](const char *flag, const char *key) {
+    if (knobs.contains(key) && knobs[key].is_boolean() &&
+        knobs[key].get<bool>())
+      cmd += std::string(" ") + flag;
+  };
+  addFlag("--coverage", "coverage");
+  addFlag("--player", "player");
   const auto addEnum = [&](const char *flag, const char *key) {
     if (!knobs.contains(key) || !knobs[key].is_string())
       return;
@@ -311,7 +361,13 @@ struct GameServerInstance {
   pid_t pid = 0;
   std::string mapId;
   std::string gameId;
-  enum State { Starting, Running, Ended, Crashed } state = Starting;
+  /// `Hibernated` is the one state with no process behind it (PLAN-persistence
+  /// task 3b): a war whose server checkpointed itself and exited keeps its
+  /// `game_servers` row with `pid = 0` so /api/processes, the fleet view and the
+  /// MCP debug tools show a frozen war rather than nothing at all. Every
+  /// liveness check in this file goes through `isProcessAlive`, which returns
+  /// false for pid 0, so a hibernated row can never be mistaken for a server.
+  enum State { Starting, Running, Ended, Crashed, Hibernated } state = Starting;
 };
 
 /// Find a free TCP port by actually trying to bind one. Caller can
@@ -391,6 +447,16 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// property of the room being started.
 static std::string gReplayDir;
 
+/// PLAN-metalstorm-lobby.md §8, task 9a: "when did this account last make an
+/// authenticated request", the only source of the `online` presence state.
+///
+/// File scope because its one writer (the route-auth dispatch callback, wired
+/// in `main` before any route exists) and its one reader (the friends list
+/// route) are set up hundreds of lines apart, and because it is genuinely
+/// process-wide — the same reason `gReplayDir` above is. Not a database table:
+/// see FriendPresence.h for why, and for what a lobby restart costs.
+static PresenceTracker gPresence;
+
 /// Rooms that are WATCHING a replay rather than hosting a game (PLAN-replay
 /// task 4c), roomId → the `.msr` basename being served.
 ///
@@ -410,6 +476,99 @@ static std::string gReplayDir;
 /// (`unordered_map` rather than `map`: `rts/Map/` shadows the `<map>` header on
 /// a case-insensitive filesystem, so it cannot be included here at all.)
 static std::unordered_map<uint32_t, std::string> gReplayRooms;
+
+/// The game-server binary this lobby forks. Release wins when it exists —
+/// which is also task 3b's field note ("a debug-only rebuild is invisible in a
+/// lobby arm") and the reason the engine-hash probe below has to ask THIS file
+/// rather than the lobby's own build stamp.
+static std::string gameServerBinaryPath() {
+  if (std::filesystem::exists("./build/release/spring-server"))
+    return "./build/release/spring-server";
+  return "./build/debug/spring-server";
+}
+
+/// The E1 identity of that binary (PLAN-persistence task 3c), probed by running
+/// it with `--print-engine-hash` and cached on (path, mtime, size).
+///
+/// Cached rather than probed per call because it is consulted on every room
+/// broadcast, once per war — a fork+exec per card would be absurd. Keyed on the
+/// file's own stamp rather than on a lobby-lifetime flag because the case this
+/// exists for is precisely *the binary being replaced*: a deploy that swaps
+/// spring-server under a running lobby must be observed, or the lobby keeps
+/// promising resumes the new binary will refuse.
+///
+/// An empty return means "could not tell" (an older binary with no such flag,
+/// or a probe that failed). Every consumer treats that as "let the game server
+/// decide", i.e. exactly the pre-3c behaviour — see
+/// warresume::ResumeEligibility::UnknownBinary.
+static std::string gameServerEngineHash() {
+  static std::string cachedPath;
+  static std::string cachedHash;
+  static int64_t cachedMtime = 0;
+  static uintmax_t cachedSize = 0;
+  static bool warned = false;
+
+  const std::string bin = gameServerBinaryPath();
+  std::error_code ec;
+  const auto mtime = std::filesystem::last_write_time(bin, ec);
+  const int64_t mt =
+      ec ? 0 : static_cast<int64_t>(mtime.time_since_epoch().count());
+  std::error_code szEc;
+  const uintmax_t sz = std::filesystem::file_size(bin, szEc);
+  if (bin == cachedPath && mt == cachedMtime && sz == cachedSize)
+    return cachedHash;
+
+  std::string err;
+  const std::string hash = deploydrain::ProbeServerEngineHash(bin, err);
+  cachedPath = bin;
+  cachedMtime = mt;
+  cachedSize = sz;
+  cachedHash = hash;
+  if (hash.empty()) {
+    // Once per process: this is a capability gap, not a per-war event, and the
+    // consequence (no pre-flight, the server refuses instead) is the same for
+    // every room.
+    if (!warned) {
+      warned = true;
+      SLOG(SPRING_LOG_WARNING,
+           "snapshot E1 pre-check disabled — %s; a post-upgrade war will be "
+           "refused by the game server instead of by the lobby",
+           err.c_str());
+    }
+  } else {
+    SLOG(SPRING_LOG_NOTICE, "game server %s engine hash %s (snapshot E1)",
+         bin.c_str(), hash.c_str());
+  }
+  return cachedHash;
+}
+
+/// Σ slotCap for a room — the number of human player slots the game server
+/// this room spawns must pre-allocate (PLAN-metalstorm-wars.md §8.1, task 5).
+///
+/// Read off the ROOM rather than off the Director's `war_sides` table, and
+/// that is the same authority split `ReconcileSeededSides` records: the
+/// scenario owns which team a side sits on and how wide it is at boot, so the
+/// room's own `war_sides`/`war_side_capacities` modoptions are what the
+/// process is actually being launched with. Taking the number from anywhere
+/// else risks sizing the arrays for a war the boot did not produce.
+///
+/// 0 for everything that is not a finite war — a skirmish, a legacy room, a
+/// war with an unlimited side — which the server reads as "grow on demand".
+static unsigned warPlayerSlotCap(const GameRoom &room) {
+  if (room.sessionKind != SessionKind::PersistentWar)
+    return 0;
+  return playerslots::TotalSlotCap(room.SideTeams(), room.SideCapacities(),
+                                   WAR_SIDE_CAPACITY_DEFAULT);
+}
+
+/// The scenario a room was created with, or empty. RoomManager is
+/// deliberately scenario-agnostic (see its header) — the scenario travels as
+/// an ordinary modoption, written once by `applyRoomScenario` (§7.3), so this
+/// is a lookup rather than a field.
+static std::string scenarioOf(const GameRoom &room) {
+  const auto it = room.modOptions.find("scenario");
+  return it == room.modOptions.end() ? std::string() : it->second;
+}
 
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
@@ -432,7 +591,53 @@ static GameServerInstance spawnGameServer(
     //
     // Deliberately NO `--replay-seek`: a start frame is a control a watcher
     // sends, never a launch option. See the watch route for the live evidence.
-    const std::string &replayFile = "") {
+    const std::string &replayFile = "",
+    // PLAN-metalstorm-lobby.md task 1: the room's session kind, forwarded as
+    // `--session-kind`. The lobby is the authority on it — the game server
+    // could read `rooms.session_kind` out of the shared db (it already reads
+    // `persistent` there for its idle policy), but the kind decides whether
+    // GameStart waits for the roster, and that decision is made during set-up,
+    // before that read happens. One source, one reader.
+    SessionKind sessionKind = SessionKind::Skirmish,
+    // PLAN-persistence task 3b: bring this room's world up out of the snapshot
+    // store instead of staging a fresh one (`--resume`). Only ever true when
+    // the caller has SEEN a snapshot row for (gameId, roomId) — the server
+    // treats a missing snapshot as fatal by design, so an unconditional flag
+    // would abort every war's first launch. `warresume::PlanJoin` owns that
+    // decision; this parameter only carries it.
+    bool resumeFromSnapshot = false,
+    // PLAN-persistence task 3b: the idle window after which a war checkpoints
+    // itself and exits (`--hibernate-idle-seconds`). Passed by the LOBBY, for
+    // the same reason `--session-kind` is: hibernating is only safe for a room
+    // something will respawn on join, and the lobby is the only thing that
+    // can. The server binary keeps its own default of 0 so a bare
+    // `spring-server` still never exits a world nobody can bring back.
+    int hibernateIdleSeconds = 0,
+    // PLAN-metalstorm-wars.md §8.1 task 5: Σ slotCap — how many human player
+    // slots this server must pre-allocate (`--player-slots`). The War Director
+    // knows every side's `slotCap` at seed time, so the process is sized for
+    // the WAR rather than for the roster it boots with, and a dynamic joiner
+    // (§2.1) lands on a slot that already exists.
+    //
+    // Passed rather than left to the server to derive, even though the server
+    // CAN derive it from the same `war_side_capacities` modoption: this is the
+    // number that gets recorded as `wars.spawned_slot_cap`, i.e. what the
+    // running process was sized for, and after task 2's maintenance pass raises
+    // a side the recorded number and the live caps deliberately disagree. The
+    // lobby has to send what it recorded, not what the caps say later.
+    //
+    // 0 (the default) = not sized: a skirmish, a legacy room, or a war with an
+    // unlimited side. The server grows its player list on demand, as before.
+    unsigned playerSlotCap = 0,
+    // PLAN-test-automation/P3: idle-exit tuning forwarded to the child as
+    // --idle-startup-grace-seconds / --idle-exit-seconds. 0 (the default every
+    // other call site keeps) appends nothing, so the server binary's own
+    // flag > env > default precedence is undisturbed. Only runDirectStart ever
+    // passes these, which is what keeps the knob dev-only: a player-created
+    // room cannot reach it by construction. Without it, an exec-driven test
+    // that never opens a client is killed by the 120s startup-idle timer at
+    // frame -1, because a skirmish holds GameStart for its rostered humans.
+    int idleStartupGraceSeconds = 0, int idleExitSeconds = 0) {
   const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
@@ -446,10 +651,7 @@ static GameServerInstance spawnGameServer(
   inst.gameId = gameId;
 
   // Build the command
-  std::string serverBin = "./build/debug/spring-server";
-  // Check if release build exists
-  if (std::filesystem::exists("./build/release/spring-server"))
-    serverBin = "./build/release/spring-server";
+  const std::string serverBin = gameServerBinaryPath();
 
   // Create log directory
   std::filesystem::create_directories("data/logs");
@@ -539,6 +741,12 @@ static GameServerInstance spawnGameServer(
 
     std::string portStr = std::to_string(inst.port);
     std::string roomStr = std::to_string(roomId);
+    std::string hibernateIdleStr = std::to_string(hibernateIdleSeconds);
+    // Storage must outlive execvp: argv holds c_str() pointers, so a temporary
+    // std::to_string(...).c_str() here would be a use-after-free in the child.
+    std::string idleGraceStr = std::to_string(idleStartupGraceSeconds);
+    std::string idleExitStr = std::to_string(idleExitSeconds);
+    std::string playerSlotCapStr = std::to_string(playerSlotCap);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -577,6 +785,11 @@ static GameServerInstance spawnGameServer(
       argv.push_back("--replay");
       argv.push_back(replayFile.c_str());
     } else {
+      // Not on the replay path: a recording re-executes with the gating its
+      // own stream was produced under, and every argument that describes the
+      // world is withheld there on purpose (see the parameter comment).
+      argv.push_back("--session-kind");
+      argv.push_back(SessionKindToString(sessionKind));
       for (const auto &spec : playerArgStorage) {
         argv.push_back("--player");
         argv.push_back(spec.c_str());
@@ -592,6 +805,33 @@ static GameServerInstance spawnGameServer(
       if (!replayPathStorage.empty()) {
         argv.push_back("--journal-file");
         argv.push_back(replayPathStorage.c_str());
+      }
+      // Hibernation (PLAN-persistence task 3b). Both flags are war-only: a
+      // skirmish has its own idle exit and no world worth freezing, and
+      // `--resume` on a skirmish would ask the store for a snapshot nobody
+      // ever took.
+      if (resumeFromSnapshot)
+        argv.push_back("--resume");
+      if (hibernateIdleSeconds > 0) {
+        argv.push_back("--hibernate-idle-seconds");
+        argv.push_back(hibernateIdleStr.c_str());
+      }
+      // Idle-exit tuning (P3), dev-direct manifests only. Live-session flags,
+      // so they sit on this side of the replay branch with the rest.
+      if (idleStartupGraceSeconds > 0) {
+        argv.push_back("--idle-startup-grace-seconds");
+        argv.push_back(idleGraceStr.c_str());
+      }
+      if (idleExitSeconds > 0) {
+        argv.push_back("--idle-exit-seconds");
+        argv.push_back(idleExitStr.c_str());
+      }
+      // §8.1: the war's player-slot sizing. Not on the replay path for the
+      // same reason nothing else describing the world is — a re-execution
+      // rebuilds its block from the header's own modoptions.
+      if (playerSlotCap > 0) {
+        argv.push_back("--player-slots");
+        argv.push_back(playerSlotCapStr.c_str());
       }
     }
     if (devBuildAcknowledged)
@@ -617,11 +857,22 @@ static GameServerInstance spawnGameServer(
       SLOG(SPRING_LOG_NOTICE,
            "spawned REPLAY server pid=%d port=%d for room %u (%s)", pid,
            inst.port, roomId, replayFile.c_str());
-    else
+    else {
+      // A tuned idle grace is worth naming in the log: the failure it prevents
+      // (a server vanishing at frame -1) otherwise looks like a crash.
+      std::string idleNote;
+      if (idleStartupGraceSeconds > 0)
+        idleNote += " (idle-grace " + std::to_string(idleStartupGraceSeconds) + "s)";
+      if (idleExitSeconds > 0)
+        idleNote += " (idle-exit " + std::to_string(idleExitSeconds) + "s)";
       SLOG(SPRING_LOG_NOTICE,
            "spawned game server pid=%d port=%d for room %u "
-           "(%zu players, %zu AI)",
-           pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
+           "(%zu players, %zu AI, %u pre-allocated player slot(s))%s%s%s",
+           pid, inst.port, roomId, playerRoster.size(), aiSlots.size(),
+           playerSlotCap, resumeFromSnapshot ? " --resume" : "",
+           hibernateIdleSeconds > 0 ? " (hibernates when idle)" : "",
+           idleNote.c_str());
+    }
   } else {
     SLOG(SPRING_LOG_ERROR, "fork failed");
     inst.state = GameServerInstance::Crashed;
@@ -652,6 +903,36 @@ static bool isProcessAlive(pid_t pid) {
   if (::kill(pid, 0) == 0)
     return true;
   return (errno != ESRCH); // EPERM means alive but not ours; still "alive"
+}
+
+// A scenario's briefing block as the client sees it (PLAN-test-automation S2).
+//
+// ONE encoder, two routes: GET /api/games/<id>/scenarios (the Create Game
+// picker and the client splash) and POST /api/admin/scenarios/list (so an
+// admin can see whether a stored/generated war carries a briefing without
+// opening the file). They shared a copy-pasted body once and drifted; they
+// share this instead.
+//
+// Absent fields are OMITTED rather than emitted empty — a consumer tests
+// `"briefing" in entry` and then `entry.briefing.image ?? fallback`. Callers
+// must check `b.present` first; this never returns "no briefing", only the
+// encoding of one.
+static nlohmann::json
+briefingJson(const ScenarioDiscovery::ScenarioBriefing &b) {
+  nlohmann::json bj = nlohmann::json::object();
+  if (!b.title.empty())
+    bj["title"] = b.title;
+  if (!b.subtitle.empty())
+    bj["subtitle"] = b.subtitle;
+  if (!b.story.empty())
+    bj["story"] = b.story;
+  if (!b.tips.empty())
+    bj["tips"] = b.tips;
+  if (!b.image.empty())
+    bj["image"] = b.image;
+  if (b.parTimeSec > 0)
+    bj["parTimeSec"] = b.parTimeSec;
+  return bj;
 }
 
 int main(int argc, char *argv[]) {
@@ -713,6 +994,37 @@ int main(int argc, char *argv[]) {
   // pruning entirely (an operator who wants the whole history), which is why
   // the default is a real number and not a sentinel.
   int clientErrorRetentionDays = 30;
+  // PLAN-metalstorm-lobby.md §5.3, task 3: a persistent war's game server is
+  // deliberately NOT killed when this lobby shuts down — the next lobby's
+  // startup adoption pass re-attaches to the live pid, which is the only
+  // resume that keeps the sim (nothing snapshots the world yet; §5.4). This
+  // flag is the operator's way back to the old behaviour: a developer
+  // restarting the stack in a loop wants the machine back, and a harness that
+  // leaves wars running leaks a process per run. Env
+  // `SPRING_LOBBY_KILL_WARS_ON_EXIT=1` does the same for mprocs-managed runs
+  // that have no argv of their own to edit.
+  bool killWarsOnExit = [] {
+    const char *e = std::getenv("SPRING_LOBBY_KILL_WARS_ON_EXIT");
+    return e && *e && std::string(e) != "0";
+  }();
+  // PLAN-persistence task 3b: how long a war's game server may sit with no
+  // connected clients before it checkpoints itself and exits, freeing a process
+  // and a port (`--hibernate-idle-seconds` on the spawned server). Task 3a
+  // deliberately left the SERVER's default at 0, because a war that exits is
+  // unjoinable until something respawns it — that something is this file, so
+  // the default lives here and is ON.
+  //
+  // Five minutes, not five seconds: the window has to be longer than the gap a
+  // player leaves by reloading their browser (a reload disconnects, and a war
+  // that hibernated in that gap would make every refresh a resume). It also
+  // has to be longer than the server's own startup grace, which it is.
+  // `--war-hibernate-idle-seconds 0` switches hibernation off, which leaves
+  // wars behaving exactly as they did before 3b: the process stays up forever
+  // and the lossless resume is the adopted pid.
+  int warHibernateIdleSeconds = [] {
+    const char *e = std::getenv("SPRING_LOBBY_WAR_HIBERNATE_IDLE_SECONDS");
+    return (e && *e) ? std::atoi(e) : 300;
+  }();
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -749,6 +1061,10 @@ int main(int argc, char *argv[]) {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
       clientErrorRetentionDays = std::atoi(argv[++i]);
+    } else if (arg == "--kill-wars-on-exit") {
+      killWarsOnExit = true;
+    } else if (arg == "--war-hibernate-idle-seconds" && i + 1 < argc) {
+      warHibernateIdleSeconds = std::atoi(argv[++i]);
     } else if (arg == "--game" && i + 1 < argc) {
       // Back-compat: `--game <path>` is translated into
       // `--games-dir <parent>` so existing scripts that point
@@ -800,7 +1116,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Clean up expired sessions on startup
-  int cleaned = db.CleanExpiredSessions(86400); // 24h
+  int cleaned = db.CleanExpiredSessions(AuthTokens::kAccessTtlSeconds);
   if (cleaned > 0)
     SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
 
@@ -881,6 +1197,62 @@ int main(int argc, char *argv[]) {
   // only copy of the thing. See ScenarioDb.h.
   ScenarioDb::EnsureTable(mapDb);
 
+  // war_player_bindings — which side an account holds in a persistent war and
+  // the per-player war state that outlives the session (PLAN-metalstorm-lobby
+  // §2.5/§5.1, task 4). The game server is the writer; the lobby reads it, and
+  // the faction override deletes from it. Created here as well because a lobby
+  // that has never launched a war must still be able to serve those paths —
+  // and, like ScenarioDb above, it is migrated rather than dropped on a schema
+  // bump: a row here is the only copy of the thing.
+  WarPlayerBindings::EnsureTable(mapDb);
+
+  // wars / war_sides — the war OBJECT, as opposed to the room it runs in
+  // (PLAN-metalstorm-wars.md §1/§9 task 1, WarDirector.h). Strictly an
+  // extension of `rooms`: the map, the port, the session kind and the roster
+  // stay where RoomManager keeps them, and these two tables carry only what
+  // `rooms` has no column for — the war's lifecycle stage, why it was
+  // created, and what its sides are supposed to be when no game server is
+  // running to be asked. Lobby-only (the Director never touches sim state),
+  // and migrated additively rather than dropped for the same reason as the
+  // bindings above: a row here is the only copy of the thing.
+  WarDirector::EnsureTables(mapDb);
+
+  // war_slot_reservations — the last seat on a side, held for the join that is
+  // on its way (PLAN-metalstorm-wars.md §4, task 2). Created here rather than
+  // lazily because the busy timeout `EnsureTable` sets on this handle is half
+  // the mechanism: without it, losing the last-slot race reports a transport
+  // error instead of a full side.
+  WarSlotReservations::EnsureTable(mapDb);
+
+  // friend_edges — the §8 social graph (task 9a). Lobby-only: unlike the
+  // bindings above, nothing in the game server reads or writes it, so this is
+  // the single creation site rather than one of two.
+  Friends::EnsureTable(mapDb);
+
+  // chat_messages + chat_ignores — the one chat service (PLAN-lobby §3, task
+  // 9b). Lobby-only in the same sense friend_edges is: the in-game panel is a
+  // consumer of this service over the same HTTP surface, not a second writer
+  // in the game-server process, which is what §3's "one chat service" buys.
+  Chat::EnsureTables(mapDb);
+
+  // game_events — the war's strategic history, appended by the game server and
+  // read here as the while-you-were-away digest (PLAN-persistence §4, task
+  // 4b). Created from the lobby too, for the same reason and under the same
+  // additive-migration rule as the bindings above: the digest query has to
+  // work on a lobby that has never launched a war, and the alternative is a
+  // failed prepare on every join-preview until one does.
+  GameEventsDb::EnsureTable(mapDb);
+
+  // room_runtime_ai — the AI seats a war acquires while it is RUNNING (a
+  // caretaker seated on a side whose last human left: PLAN-metalstorm-ai task
+  // 4(b), RuntimeAIRoster.h). The game server is both writer and reader — the
+  // row carries the sim playerNum the AI holds, which only that process can
+  // mint and only that process can honour on resume. The lobby's whole stake in
+  // it is the DELETE that goes with the room (room ids are reused), and this
+  // create is what makes that delete work on a lobby that has never launched a
+  // war.
+  RuntimeAIRoster::EnsureTable(mapDb);
+
   // Helper: persist a game server entry to SQLite
   auto persistGameServer = [&](const GameServerInstance &inst) {
     if (!mapDb)
@@ -898,6 +1270,9 @@ int main(int argc, char *argv[]) {
       break;
     case GameServerInstance::Crashed:
       stateStr = "crashed";
+      break;
+    case GameServerInstance::Hibernated:
+      stateStr = "hibernated";
       break;
     }
     ExecPrepared(
@@ -918,17 +1293,25 @@ int main(int argc, char *argv[]) {
   auto removeGameServer = [&](uint32_t roomId) {
     if (!mapDb)
       return;
-    ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
-                 [&](sqlite3_stmt *s) {
-                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-                 });
+    // All three rows — the rendezvous row, the readiness flag and the war
+    // digest — now go through GameServersDb::DeleteForRoom, because a room
+    // being DELETED has to drop them too and never comes through here
+    // (PLAN-persistence 4e; RoomManager::DeleteRoomFromDb is the other
+    // caller). The reasons they must go are unchanged:
+    //
     // The game server normally clears its own game_status row on a clean
     // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
     // dead room never looks "ready".
-    ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
-                 [&](sqlite3_stmt *s) {
-                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-                 });
+    //
+    // Same reasoning for the war digest, and it started to matter with
+    // PLAN-persistence task 3b: nothing ever deleted this row, so a hibernated
+    // war's card carried `live: true` and the population and frame it had a
+    // minute before it froze, right next to `state: "hibernated"` — two halves
+    // of one card contradicting each other, and the stale half is the one with
+    // the numbers on it. `live` means "a running server is publishing a
+    // digest"; a room with no process is not that (observed live, room 1
+    // reporting frame 301 while frozen at 302).
+    GameServersDb::DeleteForRoom(mapDb, roomId);
   };
 
   // Read the readiness flag a running game server publishes into `game_status`
@@ -1068,6 +1451,70 @@ int main(int argc, char *argv[]) {
   std::unordered_map<uint32_t, GameServerInstance>
       gameServers; // roomId → instance
 
+  /// Everything `warresume` needs about one room, gathered in one place so the
+  /// room card, the join route and the health loop cannot disagree about what a
+  /// war is (PLAN-persistence task 3b).
+  ///
+  /// Liveness is by PID, never by the `game_servers` row: a stale row is the
+  /// case the whole hold-for-resume path exists for. Readiness is
+  /// `game_status.ready`, the only honest "is it serving?" signal — the room's
+  /// own Loading→Active flip is driven FROM it by the health loop.
+  auto warFactsFor = [&](const GameRoom &room) -> warresume::WarFacts {
+    warresume::WarFacts f;
+    f.roomState = room.state;
+    if (auto it = gameServers.find(room.id); it != gameServers.end()) {
+      f.serverProcessAlive = isProcessAlive(it->second.pid);
+      if (f.serverProcessAlive)
+        f.serverReady = gameServerReady(room.id);
+    }
+    if (room.sessionKind == SessionKind::PersistentWar) {
+      f.snapshot = warresume::LatestSnapshot(mapDb, room.gameId, room.id);
+      // Did this war END? (wars task 4, D4.) A scheduled post-game exit and a
+      // crash look identical from the room and the store — no process, no exit
+      // checkpoint (a finished war has nothing to resume, so Hibernation.h
+      // declines to take one), and a room still in the state it was playing
+      // in. The durable outcome is the one fact that separates them, and
+      // without it every war that ended correctly announced itself to its
+      // players as lost.
+      f.warEnded = WarOutcomeDb::HasOutcome(mapDb, room.id);
+      // The E1 pre-flight's other half (PLAN-persistence task 3c): what the
+      // spawn would run. `mapHash` is the room's map id, which is what
+      // server_main stamps into StoreConfig.mapHash, so a room re-pointed at
+      // another map (or a map re-processed under the same id — that one the
+      // stamp cannot see) is caught here rather than by an aborting process.
+      f.binary.engineHash = gameServerEngineHash();
+      f.binary.mapHash = room.mapId;
+    }
+    return f;
+  };
+
+  // A room whose game server is gone. Four callers reach this state (a stale
+  // `game_servers` row at startup, two startup sweeps over Loading/Active
+  // rooms with nothing adopted, and the health-check loop watching a pid
+  // exit), and every one of them used to recycle the room to Filling.
+  // PLAN-metalstorm-lobby.md §5.2/§5.3, task 3: that is right for a skirmish
+  // and wrong for a war — it demotes a running world into a set-up screen its
+  // host has to re-launch, and every player who walked up to it in between
+  // would find one. A war is held as a war and resumed by the next joiner
+  // (see the /api/rooms/join resume path); only its dead port is cleared, so
+  // nobody is offered a rejoin target that answers nothing.
+  auto onOrphanedRoom = [&](uint32_t rid, const char *why) {
+    auto *room = rooms.GetRoom(rid);
+    if (!room)
+      return;
+    if (ActionForOrphanedRoom(room->sessionKind) ==
+        OrphanedRoomAction::HoldForResume) {
+      room->gameServerPort = 0;
+      rooms.PersistRoomGameSession(rid);
+      SLOG(SPRING_LOG_NOTICE,
+           "war room %u: %s — held for resume (state kept; the next join "
+           "brings it back up)",
+           rid, why);
+      return;
+    }
+    rooms.ResetRoomForNextGame(rid);
+  };
+
   // --- Adopt-or-reset live game servers across a lobby restart ---
   //
   // Walk the `game_servers` table. For each row we either:
@@ -1097,6 +1544,30 @@ int main(int argc, char *argv[]) {
       const unsigned char *mid = sqlite3_column_text(stmt, 3);
       const unsigned char *gid = sqlite3_column_text(stmt, 4);
       const unsigned char *st = sqlite3_column_text(stmt, 5);
+      const std::string stateStr =
+          st ? reinterpret_cast<const char *>(st) : "running";
+
+      // A hibernated/crashed war (PLAN-persistence task 3b) is a row with NO
+      // process by construction — pid 0, written by the health loop when the
+      // server checkpointed and exited. It is not stale: deleting it would lose
+      // the "frozen at frame N" the fleet view shows, and the pid test below
+      // would delete it every single lobby start. Checked on the state string
+      // rather than on the pid so a recycled pid can never make it adoptable.
+      if (stateStr == "hibernated" || stateStr == "crashed") {
+        GameServerInstance held;
+        held.roomId = rid;
+        held.port = 0; // the port was handed back; the next resume picks one
+        held.pid = 0;
+        held.mapId = mid ? reinterpret_cast<const char *>(mid) : "";
+        held.gameId = gid ? reinterpret_cast<const char *>(gid) : "";
+        held.state = (stateStr == "hibernated") ? GameServerInstance::Hibernated
+                                                : GameServerInstance::Crashed;
+        gameServers[rid] = held;
+        SLOG(SPRING_LOG_NOTICE,
+             "adopted %s war room=%u (no process — the next join resumes it)",
+             stateStr.c_str(), rid);
+        continue;
+      }
 
       if (!isProcessAlive(pid)) {
         staleRooms.push_back(rid);
@@ -1112,8 +1583,6 @@ int main(int argc, char *argv[]) {
       // We don't know the live process's real state without
       // talking to it. Trust the persisted state for now; the
       // health-check loop downgrades to Ended if the pid dies.
-      const std::string stateStr =
-          st ? reinterpret_cast<const char *>(st) : "running";
       if (stateStr == "starting")
         inst.state = GameServerInstance::Starting;
       else if (stateStr == "ended")
@@ -1141,10 +1610,10 @@ int main(int argc, char *argv[]) {
                    [&](sqlite3_stmt *s) {
                      sqlite3_bind_int(s, 1, static_cast<int>(rid));
                    });
-      // Room metadata is persistent; if a row in `rooms` matches,
-      // reset it back to Filling so the host can launch again.
-      if (rooms.GetRoom(rid))
-        rooms.ResetRoomForNextGame(rid);
+      // Room metadata is persistent; if a row in `rooms` matches, recycle it
+      // so the host can launch again — unless it is a war, which is held
+      // (onOrphanedRoom).
+      onOrphanedRoom(rid, "its game server process is gone (stale row)");
       SLOG(SPRING_LOG_NOTICE,
            "game_servers row room=%u was stale (pid dead) — cleared", rid);
     }
@@ -1166,10 +1635,9 @@ int main(int argc, char *argv[]) {
     if ((room->state == ERoomState::Loading ||
          room->state == ERoomState::Active) &&
         gameServers.find(room->id) == gameServers.end()) {
-      SLOG(SPRING_LOG_NOTICE,
-           "room %u: %s with no live game server — resetting to Filling",
-           room->id, room->state == ERoomState::Active ? "Active" : "Loading");
-      rooms.ResetRoomForNextGame(room->id);
+      SLOG(SPRING_LOG_NOTICE, "room %u: %s with no live game server", room->id,
+           room->state == ERoomState::Active ? "Active" : "Loading");
+      onOrphanedRoom(room->id, "no live game server at startup");
     }
   }
 
@@ -1186,6 +1654,22 @@ int main(int argc, char *argv[]) {
     if (!reaped.empty())
       SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
            reaped.size());
+  }
+
+  // --- Rows left by rooms that were deleted before the rule existed ---
+  // PLAN-persistence task 4e. `DeleteRoomFromDb` keeps a war's story from
+  // outliving its room from here on; this collects what earlier lobbies left.
+  // It is not a leak sweep: the id counter re-seeds as MAX(id)+1 over the
+  // survivors and climbs back through those very numbers, so every orphaned
+  // row is on the reissue path (this tree's own database held five orphaned
+  // `game_status` rows — rooms 95, 124, 310, 317 and 330 — against a `rooms`
+  // table containing room 1). After the reap above, so a room reaped in the
+  // same startup is purged in the same pass rather than a restart later.
+  {
+    const int purged = rooms.PurgeOrphanedWarRows();
+    if (purged > 0)
+      SLOG(SPRING_LOG_NOTICE,
+           "startup: purged war rows for %d deleted room(s)", purged);
   }
 
   // --- Prune expired crash reports (PLAN-client-resilience task 4) ---
@@ -1216,10 +1700,12 @@ int main(int argc, char *argv[]) {
         continue;
       if (gameServers.count(room->id) > 0)
         continue; // adopted; alive
-      SLOG(SPRING_LOG_NOTICE,
-           "room %u stuck in state=%d with no game-server — resetting",
+      SLOG(SPRING_LOG_NOTICE, "room %u stuck in state=%d with no game-server",
            room->id, st);
-      rooms.ResetRoomForNextGame(room->id);
+      // Routed through the same policy as the sweep above (which this one
+      // duplicates): a held war stays Loading/Active by design, so a second
+      // pass that reset unconditionally would undo the hold a few lines later.
+      onOrphanedRoom(room->id, "stuck in-flight with no game-server");
       reset++;
     }
     if (reset > 0) {
@@ -1234,7 +1720,16 @@ int main(int argc, char *argv[]) {
   // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
   net.SetRouteAuthCallbacks({
       .validateToken = [&db](const std::string &authHeader) -> int64_t {
-        return HttpAuth::ValidateAuth(db, authHeader);
+        const int64_t id = HttpAuth::ValidateAuth(db, authHeader);
+        // Task 9a: the ONE presence funnel. Every RouteAuth::TokenRequired /
+        // AdminOnly route in this process is dispatched through this callback
+        // before its handler runs, so stamping here (and nowhere else) is what
+        // makes "online in the lobby" a single fact rather than a set of
+        // per-route ones that drift. `requireAuth` deliberately does NOT
+        // stamp: it re-validates inside handlers the dispatcher has already
+        // admitted. In-memory by design — see FriendPresence.h.
+        if (id > 0) gPresence.Touch(id, static_cast<int64_t>(std::time(nullptr)));
+        return id;
       },
       .isAdmin = [&db](int64_t userId) -> bool {
         auto user = db.FindUserById(userId);
@@ -1244,6 +1739,19 @@ int main(int argc, char *argv[]) {
 
   // SSE channel for real-time room list pushes (replaces client polling)
   uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
+
+  // Chat delivery (PLAN-lobby §3.2, task 9b). IDENTIFIED, unlike the room
+  // stream above: the room list is the same document for everybody, chat is
+  // not — a PM has two recipients and an ignore list is enforced on delivery,
+  // so every frame on this channel is addressed. See
+  // NetworkServer::AddIdentifiedSSE for why the credential is a ticket in the
+  // query string rather than the session token.
+  static SSETickets gChatTickets;
+  uint32_t chatStreamChannel = net.AddIdentifiedSSE("/api/chat/stream");
+  net.SetSSESubscriberResolver([](const std::string &query) -> int64_t {
+    return gChatTickets.Redeem(SSETickets::TicketFromQuery(query),
+                               static_cast<int64_t>(std::time(nullptr)));
+  });
 
   // Maps endpoint — full metadata from SQLite
   net.AddHttpGet(
@@ -1430,6 +1938,8 @@ int main(int argc, char *argv[]) {
                   m.decals.splatMults[2],
                   m.decals.splatMults[3],
               };
+              dj["splatDetailNormalDiffuseAlpha"] =
+                  m.decals.splatDetailNormalDiffuseAlpha;
               j["decals"] = std::move(dj);
             }
 
@@ -1463,6 +1973,11 @@ int main(int argc, char *argv[]) {
             // URLs for binary data and source assets
             j["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
             j["tilesUrl"] = "/api/maps/data/" + m.id + "/tiles.ktx2";
+            // Map-space ground albedo (PLAN-maps §2n ruling 1). Empty string
+            // when the map has none — the client then stays on tilesUrl.
+            j["groundTexUrl"] = m.groundTex.empty()
+                                    ? std::string()
+                                    : "/api/maps/data/" + m.id + "/" + m.groundTex;
             j["mapDataUrl"] = "/api/maps/data/" + m.id;
             j["mapSourceUrl"] = "/api/maps/data/" + m.id;
 
@@ -1472,7 +1987,11 @@ int main(int argc, char *argv[]) {
                 .contentType = "application/json",
                 .body = std::move(body),
                 .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
+                // Composed from the maps DB on every request, under a URL that
+                // never changes — immutable only if this caller stamped it
+                // (PLAN-protocol-guard task 5; `fetchMapDataHttp` does not).
+                .cacheControl = CacheControl::VersionedAssetHeader(
+                    NetworkServer::CurrentQueryString()),
             };
           }
         }
@@ -1514,6 +2033,9 @@ int main(int argc, char *argv[]) {
                        break;
                      case GameServerInstance::Crashed:
                        stateStr = "crashed";
+                       break;
+                     case GameServerInstance::Hibernated:
+                       stateStr = "hibernated";
                        break;
                      }
                      arr.push_back({
@@ -1974,6 +2496,361 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
+  // POST /api/admin/drain {timeout_ms, escalate} — the deploy drain
+  // (PLAN-persistence task 3c). The SINGLE-room specialization of everything
+  // below is POST /api/admin/rooms/end, registered right after this handler.
+  //
+  // SIGTERM every game server this lobby owns, wait for each to checkpoint and
+  // exit, and report which worlds survived. This is the operator's step BEFORE
+  // replacing the binary, and the report is what tells them whether it is safe
+  // to: `lossy` counts resumable worlds that were lost, and `drained` is false
+  // while anything is still running.
+  //
+  // Every kind is signalled, wars included — see DeployDrain.h for why this is
+  // deliberately NOT `ActionOnLobbyExit`'s rule (which leaves a war running,
+  // correct for a lobby restart and exactly wrong for a deploy: the binary that
+  // process is executing is about to be replaced under it).
+  //
+  // TWO THINGS THIS HANDLER DELIBERATELY DOES NOT DO:
+  //   * it does not touch room state, `gameServers` or `game_servers`. The
+  //     hibernated/crashed classification and the recycle-or-hold decision are
+  //     the health loop's, and this lane has twice paid for a second copy of a
+  //     policy. The exits it causes are observed there a fraction of a second
+  //     later, exactly as an idle hibernation is.
+  //   * it does not iterate any shared container while it waits. Targets are
+  //     snapshotted into a local vector in one pass and the (up to `timeout_ms`)
+  //     wait polls only local pids — the health loop runs on the main thread and
+  //     erases from `gameServers`, so a handler holding an iterator across a
+  //     ten-second sleep would be a use-after-erase rather than mere contention.
+  //
+  // It IS synchronous, so the lobby's HTTP surface is unresponsive for as long
+  // as the slowest server takes to checkpoint. That is accepted: a drain is the
+  // last thing an operator does before stopping the lobby, and an asynchronous
+  // one would have to publish progress somewhere just to be waited on.
+  net.AddHttpPost(
+      "/api/admin/drain", RouteAuth::AdminOnly,
+      [mapDb, &db, &rooms, &gameServers,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        // 10 s covers a Metalstorm checkpoint with room to spare (task 3a
+        // measured 12–13 kB written in well under a second); the 120 s ceiling
+        // exists so a typo cannot wedge the lobby's HTTP surface for an hour.
+        int timeoutMs = j.value("timeout_ms", 10000);
+        if (timeoutMs < 100) timeoutMs = 100;
+        if (timeoutMs > 120000) timeoutMs = 120000;
+        const bool escalate = j.value("escalate", true);
+
+        // One pass over the shared state, then nothing but local copies.
+        struct Pending {
+          deploydrain::DrainTarget target;
+          warresume::SnapshotFacts before;
+          bool exited = false;
+          bool escalated = false;
+          int64_t waitedMs = 0;
+        };
+        std::vector<Pending> pending;
+        for (const auto &[roomId, inst] : gameServers) {
+          Pending p;
+          p.target.roomId = roomId;
+          p.target.pid = inst.pid;
+          p.target.alive = inst.pid > 0 && isProcessAlive(inst.pid);
+          p.target.isReplay = gReplayRooms.count(roomId) > 0;
+          if (const auto *room = rooms.GetRoom(roomId)) {
+            p.target.kind = room->sessionKind;
+            if (p.target.kind == SessionKind::PersistentWar)
+              p.before = warresume::LatestSnapshot(mapDb, room->gameId, roomId);
+          }
+          pending.push_back(std::move(p));
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto elapsedMs = [&t0]() -> int64_t {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - t0)
+              .count();
+        };
+
+        int signalled = 0;
+        for (auto &p : pending) {
+          if (deploydrain::DecideDrainAction(p.target) !=
+              deploydrain::DrainAction::Signal)
+            continue;
+          kill(p.target.pid, SIGTERM);
+          ++signalled;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "drain requested by '%s': SIGTERM to %d game server(s), waiting up "
+             "to %d ms",
+             uname.c_str(), signalled, timeoutMs);
+
+        // Wait on local pids only.
+        while (elapsedMs() < timeoutMs) {
+          bool anyLeft = false;
+          for (auto &p : pending) {
+            if (p.exited ||
+                deploydrain::DecideDrainAction(p.target) !=
+                    deploydrain::DrainAction::Signal)
+              continue;
+            if (!isProcessAlive(p.target.pid)) {
+              p.exited = true;
+              p.waitedMs = elapsedMs();
+            } else {
+              anyLeft = true;
+            }
+          }
+          if (!anyLeft)
+            break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        for (auto &p : pending) {
+          if (p.exited ||
+              deploydrain::DecideDrainAction(p.target) !=
+                  deploydrain::DrainAction::Signal)
+            continue;
+          p.waitedMs = elapsedMs();
+          if (!escalate)
+            continue;
+          kill(p.target.pid, SIGKILL);
+          p.escalated = true;
+          // A SIGKILLed pid goes away promptly, but not instantly, and the
+          // outcome must not depend on how fast this loop got back to it.
+          for (int i = 0; i < 20 && isProcessAlive(p.target.pid); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+          p.exited = !isProcessAlive(p.target.pid);
+        }
+
+        // The store is read AFTER the exits: a checkpoint is committed by the
+        // dying process, so a read taken any earlier proves nothing.
+        std::vector<deploydrain::DrainResult> results;
+        nlohmann::json detail = nlohmann::json::array();
+        for (auto &p : pending) {
+          warresume::SnapshotFacts after;
+          std::string gameId;
+          if (const auto *room = rooms.GetRoom(p.target.roomId)) {
+            gameId = room->gameId;
+            if (p.target.kind == SessionKind::PersistentWar)
+              after = warresume::LatestSnapshot(mapDb, gameId, p.target.roomId);
+          }
+          auto r = deploydrain::BuildResult(p.target, p.exited, p.escalated,
+                                            p.waitedMs, p.before, after);
+          // "Resumable until the rebuild" — the eligibility under the CURRENT
+          // binary. Nothing here can know the next one's hash; see DeployDrain.h.
+          warresume::BinaryIdentity cur;
+          cur.engineHash = gameServerEngineHash();
+          if (const auto *room = rooms.GetRoom(p.target.roomId))
+            cur.mapHash = room->mapId;
+          r.eligibility =
+              warresume::DecideResumeEligibility(after, cur).eligibility;
+          const std::string line = deploydrain::Describe(r);
+          SLOG(r.lossy ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE, "drain: %s",
+               line.c_str());
+          detail.push_back({
+              {"roomId", r.roomId},
+              {"pid", r.pid},
+              {"kind", r.kind == SessionKind::PersistentWar ? "persistent_war"
+                                                           : "skirmish"},
+              {"outcome", deploydrain::ToString(r.outcome)},
+              {"frame", r.frame},
+              {"label", r.label},
+              {"waited_ms", r.waitedMs},
+              {"lossy", r.lossy},
+              {"resume_eligibility", warresume::ToString(r.eligibility)},
+              {"describe", line},
+          });
+          results.push_back(std::move(r));
+        }
+
+        const auto summary = deploydrain::Summarise(results);
+        const std::string headline = deploydrain::Describe(summary);
+        SLOG(summary.lossy > 0 || !summary.drained ? SPRING_LOG_WARNING
+                                                   : SPRING_LOG_NOTICE,
+             "%s", headline.c_str());
+        db.LogAudit(uid, uname, "deploy_drain", "lobby",
+                    "servers=" + std::to_string(summary.servers) +
+                        " checkpointed=" + std::to_string(summary.checkpointed) +
+                        " lossy=" + std::to_string(summary.lossy) +
+                        " killed=" + std::to_string(summary.killed) +
+                        " drained=" + (summary.drained ? "1" : "0"));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["drained"] = summary.drained;
+        out["servers"] = summary.servers;
+        out["checkpointed"] = summary.checkpointed;
+        out["lossy"] = summary.lossy;
+        out["killed"] = summary.killed;
+        out["still_alive"] = summary.stillAlive;
+        out["engine_hash"] = gameServerEngineHash();
+        out["summary"] = headline;
+        out["detail"] = detail;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/rooms/end {roomId, timeout_ms, escalate} — /api/admin/drain
+  // specialized to ONE room: SIGTERM its game server, wait for the exit
+  // checkpoint, verify it against the snapshot store, report. An operator /
+  // test-harness verb (AdminOnly), deliberately NOT a revival of the removed
+  // player-facing /api/rooms/end — see the design note beside the room routes:
+  // player room lifecycle stays leave-driven.
+  //
+  // TWO THINGS THIS HANDLER DELIBERATELY DOES NOT DO (drain's rules, verbatim):
+  //   * it does not touch room state, `gameServers` or `game_servers`. The
+  //     hibernated/crashed classification and the recycle-or-hold decision are
+  //     the health loop's, and this lane has twice paid for a second copy of a
+  //     policy. Consequence for callers: the room does NOT read "ended" in this
+  //     response — the lobby flips it asynchronously, a fraction of a second
+  //     later, exactly as it does for an idle hibernation.
+  //   * it does not hold shared state across the wait. The target is snapshotted
+  //     into locals in one pass (gameId and mapId copied too, so nothing is
+  //     re-read afterwards) and the wait polls a local pid only — the health
+  //     loop runs on the main thread and erases from `gameServers`, so a handler
+  //     holding an iterator across a ten-second sleep would be a use-after-erase
+  //     rather than mere contention.
+  //
+  // Synchronous like drain, and blocking for the same accepted reason — but
+  // capped at 30 s rather than 120 s: this is a routine per-test teardown that
+  // must never wedge the lobby's HTTP thread for minutes, not a once-per-deploy
+  // wall.
+  net.AddHttpPost(
+      "/api/admin/rooms/end", RouteAuth::AdminOnly,
+      [mapDb, &db, &rooms, &gameServers,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.contains("roomId") ||
+            !j["roomId"].is_number_integer() ||
+            j["roomId"].get<int64_t>() <= 0)
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"roomId (positive integer) is required"})");
+        const uint32_t roomId = static_cast<uint32_t>(j["roomId"].get<int64_t>());
+        int timeoutMs = j.value("timeout_ms", 10000);
+        if (timeoutMs < 100)
+          timeoutMs = 100;
+        if (timeoutMs > 30000)
+          timeoutMs = 30000;
+        const bool escalate = j.value("escalate", true);
+
+        // ---- one pass over the shared state, then nothing but locals ----
+        deploydrain::DrainTarget target;
+        warresume::SnapshotFacts before;
+        std::string gameId, mapHash;
+        bool known = false;
+        {
+          auto gsIt = gameServers.find(roomId);
+          if (gsIt != gameServers.end()) {
+            known = true;
+            target.roomId = roomId;
+            target.pid = gsIt->second.pid;
+            target.alive = target.pid > 0 && isProcessAlive(target.pid);
+            target.isReplay = gReplayRooms.count(roomId) > 0;
+          }
+          if (const auto *room = rooms.GetRoom(roomId)) {
+            known = true;
+            target.roomId = roomId;
+            target.kind = room->sessionKind;
+            gameId = room->gameId;
+            // Drain's spelling (`BinaryIdentity.mapHash = room->mapId`): if it
+            // is wrong it is wrong in one shared place, not two disagreeing
+            // ones.
+            mapHash = room->mapId;
+            if (target.kind == SessionKind::PersistentWar)
+              before = warresume::LatestSnapshot(mapDb, gameId, roomId);
+          }
+        }
+        // A room the lobby never heard of is a 404; a KNOWN room whose process
+        // is already gone is a truthful 200 with outcome "not_running" — the
+        // caller wanted it stopped and it is.
+        if (!known)
+          return HttpAuth::JsonResponse(404, R"({"error":"unknown roomId"})");
+
+        bool exited = false, escalated = false;
+        int64_t waitedMs = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto elapsedMs = [&t0]() -> int64_t {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - t0)
+              .count();
+        };
+
+        if (deploydrain::DecideDrainAction(target) ==
+            deploydrain::DrainAction::Signal) {
+          kill(target.pid, SIGTERM);
+          SLOG(SPRING_LOG_NOTICE,
+               "rooms/end: '%s' SIGTERM pid=%d room=%u, waiting up to %d ms",
+               uname.c_str(), target.pid, roomId, timeoutMs);
+          while (elapsedMs() < timeoutMs && isProcessAlive(target.pid))
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          exited = !isProcessAlive(target.pid);
+          waitedMs = elapsedMs();
+          if (!exited && escalate) {
+            kill(target.pid, SIGKILL);
+            escalated = true;
+            // A SIGKILLed pid goes away promptly, but not instantly, and the
+            // outcome must not depend on how fast this loop got back to it.
+            for (int i = 0; i < 20 && isProcessAlive(target.pid); ++i)
+              std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            exited = !isProcessAlive(target.pid);
+            waitedMs = elapsedMs();
+          }
+        }
+
+        // The store is read AFTER the exit: a checkpoint is committed by the
+        // dying process, so a read taken any earlier proves nothing.
+        warresume::SnapshotFacts after;
+        if (target.kind == SessionKind::PersistentWar && !gameId.empty())
+          after = warresume::LatestSnapshot(mapDb, gameId, roomId);
+        auto r = deploydrain::BuildResult(target, exited, escalated, waitedMs,
+                                          before, after);
+        // "Resumable until the rebuild" — eligibility under the CURRENT binary.
+        warresume::BinaryIdentity cur;
+        cur.engineHash = gameServerEngineHash();
+        cur.mapHash = mapHash;
+        r.eligibility =
+            warresume::DecideResumeEligibility(after, cur).eligibility;
+        const std::string line = deploydrain::Describe(r);
+        SLOG(r.lossy ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE, "rooms/end: %s",
+             line.c_str());
+
+        // `room=<id>` MUST lead the digest: the room-timeline audit view's
+        // anchored matcher is what attributes this row to the room.
+        db.LogAudit(uid, uname, "room_end", gameId.empty() ? "room" : gameId,
+                    "room=" + std::to_string(roomId) +
+                        " pid=" + std::to_string(target.pid) +
+                        " outcome=" + deploydrain::ToString(r.outcome) +
+                        " escalated=" + (escalated ? "1" : "0") +
+                        " waited_ms=" + std::to_string(waitedMs));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["roomId"] = r.roomId;
+        out["pid"] = r.pid;
+        out["kind"] =
+            r.kind == SessionKind::PersistentWar ? "persistent_war" : "skirmish";
+        out["exited"] = exited;
+        out["escalated"] = escalated;
+        out["waitedMs"] = waitedMs;
+        out["outcome"] = deploydrain::ToString(r.outcome);
+        out["frame"] = r.frame;
+        out["label"] = r.label;
+        out["lossy"] = r.lossy;
+        out["resume_eligibility"] = warresume::ToString(r.eligibility);
+        out["engine_hash"] = gameServerEngineHash();
+        out["describe"] = line;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
   // POST /api/admin/ban {username} — account ban + immediate session revoke.
   net.AddHttpPost(
       "/api/admin/ban", RouteAuth::AdminOnly,
@@ -2059,12 +2936,31 @@ int main(int argc, char *argv[]) {
         if (!db.SetFactionByUsername(target, faction, targetId))
           return HttpAuth::JsonResponse(
               404, R"({"ok":false,"error":"no such user"})");
-        // §1b: an admin faction reassignment "clears the account's
-        // per-war bindings" — no per-war binding store exists yet
-        // (PLAN-metalstorm-lobby §5.1/task 4 is unimplemented), so
-        // there is nothing to clear today. Tracked in that task's scope,
-        // not silently dropped: audit the override now regardless.
-        db.LogAudit(uid, uname, "set_faction", target, "faction=" + faction);
+        // §1b: an admin faction reassignment "clears the account's per-war
+        // bindings". Task 0 recorded this as a documented no-op because the
+        // binding store did not exist; task 4 built it, so the clause is now
+        // real. It has to be: a binding records the team the OLD faction was
+        // seated on, and leaving it in place would send the account back to
+        // its former side on the next rejoin — the one path in the whole
+        // seating rule that can put a player on a side their faction does not
+        // fight for. The count goes into the audit row, so an override that
+        // ejected somebody from three running wars says so.
+        const int clearedBindings =
+            WarPlayerBindings::DeleteForAccount(db.Handle(), targetId);
+        // Task 8a: the reconnect token has to go with the binding it was
+        // minted against. It does NOT by itself put the account back on the
+        // old side — the token only authenticates, and seating still runs
+        // through the faction rule, which now returns the new one. What it
+        // would otherwise leave behind is a week-long credential into a war
+        // that the account, by the route it is minted from, no longer
+        // qualifies to hold a seat in.
+        const int clearedWarTokens = AuthTokens::RevokeWarReconnectForAccount(
+            db.Handle(), targetId, static_cast<int64_t>(std::time(nullptr)));
+        db.LogAudit(uid, uname, "set_faction", target,
+                    "faction=" + faction + " cleared_bindings=" +
+                        std::to_string(clearedBindings) +
+                        " cleared_war_tokens=" +
+                        std::to_string(clearedWarTokens));
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
       });
 
@@ -2239,12 +3135,18 @@ int main(int argc, char *argv[]) {
                          {"staged", s.staged}});
     }
     j["sides"] = std::move(sides);
+    // Display-only splash content (S2), same encoding as the public
+    // /api/games/<id>/scenarios route. Omitted entirely when the war ships
+    // none, so "no briefing" and "an empty briefing" stay distinguishable.
+    if (info != nullptr && info->briefing.present)
+      j["briefing"] = briefingJson(info->briefing);
     return j;
   };
 
   // POST /api/admin/scenarios/generate
   //   {gameId, mapId, seed?, sides?, towns?, outposts?, bases?, mines?,
-  //    hostility?, roster?}
+  //    sites?, relics?, wrecks?, bridges?, works?, harbour?, shanty?,
+  //    hostility?, roster?, coverage?, player?}
   // Generate a war for `mapId`, store it, materialise it, and return the
   // entry exactly as the Create Game picker will now see it.
   net.AddHttpPost(
@@ -2629,8 +3531,47 @@ int main(int argc, char *argv[]) {
     return nullptr;
   };
 
+  // Read the digest a running war publishes into `war_summary`
+  // (PLAN-metalstorm-lobby.md §4, task 6 — written only by spring-server, see
+  // server_main.cpp). A row older than `kWarSummaryStaleSec` is treated as
+  // absent: nothing clears the row when a server is SIGKILLed, and a browser
+  // that keeps showing "4 fighting, 2 watching" for a war whose process died
+  // is worse than one that shows the durable half alone. Missing table, row,
+  // version or a malformed blob all land in the same place for the same
+  // reason.
+  auto warSummaryFor = [&](uint32_t roomId, WarSummary &out) -> bool {
+    if (!mapDb)
+      return false;
+    sqlite3_stmt *s = nullptr;
+    bool ok = false;
+    if (sqlite3_prepare_v2(mapDb,
+                           "SELECT summary_json, updated_at FROM war_summary "
+                           "WHERE room_id=?",
+                           -1, &s, nullptr) == SQLITE_OK) {
+      sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+      if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *json =
+            reinterpret_cast<const char *>(sqlite3_column_text(s, 0));
+        const int64_t updatedAt = sqlite3_column_int64(s, 1);
+        const int64_t age = static_cast<int64_t>(std::time(nullptr)) - updatedAt;
+        if (json && age <= kWarSummaryStaleSec)
+          ok = DecodeWarSummary(json, out);
+      }
+    }
+    if (s)
+      sqlite3_finalize(s);
+    return ok;
+  };
+
   // Helper: JSON-serialize a room for API responses
-  auto roomToJson = [](const GameRoom *room) -> std::string {
+  // `outState` (PLAN-persistence task 4d): the war state this row was built
+  // with, handed back to the caller that wants the TRANSITION rather than the
+  // datum. An out-param rather than a second computation because `warFactsFor`
+  // is a DB read per war per call, and rather than a member because a
+  // single-room GET must not be able to feed the transition watcher — a card
+  // refresh would then consume the flip and the toast would never be sent.
+  auto roomToJson = [&](const GameRoom *room,
+                        warresume::WarState *outState = nullptr) -> std::string {
     if (!room)
       return "null";
     nlohmann::json j;
@@ -2649,6 +3590,11 @@ int main(int argc, char *argv[]) {
       pj["is_host"] = p.isHost;
       pj["is_spectator"] = p.isSpectator;
       pj["start_pos"] = p.startPos;
+      // The account's faction, when it has one (D40). Sent so the room screen
+      // can say WHY a player holds the side they hold — a seat chosen by
+      // permanent allegiance is only legible if the allegiance is visible.
+      if (!p.factionId.empty())
+        pj["faction"] = p.factionId;
       j["players"].push_back(std::move(pj));
     }
     j["ai_slots"] = nlohmann::json::array();
@@ -2668,6 +3614,119 @@ int main(int argc, char *argv[]) {
       j["game_server_port"] = room->gameServerPort;
     if (room->persistent)
       j["persistent"] = true;
+    // Always emitted, unlike `persistent` above: the war browser
+    // (PLAN-metalstorm-lobby.md §4) has to tell a war from a skirmish for
+    // EVERY row, and an absent field would make "old lobby" and "skirmish"
+    // indistinguishable to it.
+    j["session_kind"] = SessionKindToString(room->sessionKind);
+    // ── The war row the browser lists (§4, task 6) ───────────────────────
+    //
+    // Two sources, and which fact comes from which is the whole design:
+    //
+    //   * `bound` — humans who hold a seat in this war — comes from
+    //     `war_player_bindings`, the durable half. A war's fighters are
+    //     seated by the GAME server and never appear in `room->players` at
+    //     all (the same trap JoinPreview documents: counting the room reports
+    //     a full war as empty), and a bound player who is offline still holds
+    //     their seat, which is what task 4 made true.
+    //   * `online` / `ais` / `regions` / spectators / control — come from the
+    //     live digest, and are simply absent when there is no running server
+    //     to publish one. A war whose process was killed still lists, with
+    //     its sides and its capacity, because task 3 made that a state a war
+    //     can be in rather than the end of it.
+    //
+    // `open` is derived from the durable number, not the live one: an offline
+    // veteran's seat is not free, and offering it would produce exactly the
+    // promise the game server then breaks.
+    if (room->sessionKind == SessionKind::PersistentWar) {
+      const auto sides = room->SideTeams();
+      WarSummary live;
+      const bool haveLive = warSummaryFor(room->id, live);
+      std::unordered_map<int, unsigned> boundPerTeam;
+      for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), room->id))
+        boundPerTeam[b.team]++;
+
+      // Task 7: capacity is per side. `capacity_per_side` stays on the war for
+      // the sides the war does not size (and for a client reading the old
+      // shape), but every side now states its own — an asymmetric war is the
+      // whole point of §6's seeding, and one number could only ever describe a
+      // symmetric one.
+      const WarSideCapacities caps = room->SideCapacities();
+      nlohmann::json wj;
+      wj["live"] = haveLive;
+      wj["capacity_per_side"] = WAR_SIDE_CAPACITY_DEFAULT;
+      wj["sides"] = nlohmann::json::array();
+      for (const auto &[faction, team] : sides) {
+        nlohmann::json sj;
+        sj["team"] = static_cast<int>(team);
+        sj["faction"] = faction;
+        const unsigned bound = boundPerTeam.count(static_cast<int>(team))
+                                   ? boundPerTeam[static_cast<int>(team)]
+                                   : 0u;
+        const unsigned capacity =
+            CapacityForSideIn(caps, faction, WAR_SIDE_CAPACITY_DEFAULT);
+        sj["bound"] = bound;
+        sj["capacity"] = capacity;
+        sj["open"] = (capacity > bound) ? (capacity - bound) : 0u;
+        // An unlimited side is stated, not encoded as a number. `open` there
+        // is 0 because there is no count to give, and 0 is exactly what "full"
+        // looks like — so the one side that can never be full would read as
+        // the only full one. A named flag cannot be misread that way.
+        if (capacity == WAR_SIDE_CAPACITY_UNLIMITED)
+          sj["unlimited"] = true;
+        if (haveLive) {
+          for (const auto &ls : live.sides) {
+            if (ls.team != static_cast<int>(team))
+              continue;
+            sj["online"] = ls.humans;
+            sj["ais"] = ls.ais;
+            sj["regions"] = ls.regions;
+            break;
+          }
+        }
+        wj["sides"].push_back(std::move(sj));
+      }
+      // ── The hibernation state the card shows (PLAN-persistence task 3b) ──
+      //
+      // `live` above is "is a digest being published"; this is what the war IS,
+      // which is a different question with three answers `live` cannot give:
+      // resuming (a process is up but not serving — the state E5's second
+      // joiner waits on), hibernated (frozen at a frame, brought back by the
+      // next join) and crashed (no exit checkpoint, so frames were lost).
+      //
+      // Costs one indexed SELECT per war per broadcast, the same shape and
+      // cadence as `warSummaryFor` immediately above.
+      const auto wfacts = warFactsFor(*room);
+      const auto wstate = warresume::Classify(room->sessionKind, wfacts);
+      wj["state"] = warresume::ToString(wstate);
+      if (outState != nullptr)
+        *outState = wstate;
+      // The frame the world would come back at. Emitted whenever there is
+      // history — including while the war is live, where it is the last
+      // durable point rather than the current frame (`frame` below is that).
+      if (wfacts.snapshot.has) {
+        wj["frozen_frame"] = wfacts.snapshot.frame;
+        wj["frozen_at"] = wfacts.snapshot.takenAt;
+        // Whether that frame is a promise or a loss (PLAN-persistence task 3c).
+        // Published beside the frame, never instead of it: a card that dropped
+        // the frame would say "fresh war" about a world somebody played for a
+        // week, and one that dropped the verdict would offer to resume it.
+        const auto elig =
+            warresume::DecideResumeEligibility(wfacts.snapshot, wfacts.binary);
+        wj["resume_eligibility"] = warresume::ToString(elig.eligibility);
+        if (warresume::RefusesResume(elig.eligibility))
+          wj["resume_blocked_reason"] = elig.reason;
+      }
+      if (haveLive) {
+        wj["spectators"] = live.spectators;
+        wj["frame"] = live.frame;
+        wj["uptime_sec"] = live.uptimeSec;
+        wj["control"] = {{"total", live.control.total},
+                         {"contested", live.control.contested},
+                         {"neutral", live.control.neutral}};
+      }
+      j["war"] = std::move(wj);
+    }
     // PLAN-replay task 4c: a replay room reaches the client through exactly the
     // same JSON as a game room — that is the whole reason it IS a room — but
     // the browser must not offer to "join" one as a player, so it says which
@@ -2682,22 +3741,67 @@ int main(int argc, char *argv[]) {
   if (userId <= 0)                                                             \
     return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
 
+  // PLAN-persistence task 4d: the last war state each room was broadcast in.
+  // Lives beside the broadcast because that is the only place allowed to feed
+  // it (see `roomToJson`'s `outState`). Pruned by `Retain` on every pass, so a
+  // lobby up for weeks does not accumulate a row per room ever created, and a
+  // reused room id starts from first-sight rather than inheriting the previous
+  // war's state.
+  warevents::Watcher warWatcher;
+
   // Broadcast the full room list to all SSE subscribers.
   // Called after every room mutation so clients stay in sync.
   auto broadcastRooms = [&]() {
     auto allRooms = rooms.GetAllRooms();
     std::string json = "[";
     bool first = true;
+    // Collected during the same pass that serialises the list: the war state is
+    // a DB read and this is the one place that has already paid for it.
+    std::vector<std::pair<uint32_t, warresume::WarState>> warStates;
+    std::set<uint32_t> liveRoomIds;
     for (const auto *r : allRooms) {
       if (!r)
         continue;
       if (!first)
         json += ",";
       first = false;
-      json += roomToJson(r);
+      warresume::WarState st = warresume::WarState::NotAWar;
+      json += roomToJson(r, &st);
+      liveRoomIds.insert(r->id);
+      if (st != warresume::WarState::NotAWar)
+        warStates.emplace_back(r->id, st);
     }
     json += "]";
     net.SendSSE(roomStreamChannel, json, "rooms");
+
+    // Then the transitions, as their own named event on the same channel.
+    //
+    // The list goes first deliberately: a browser handling `war-state` looks up
+    // the war it names in the list it holds (for the frame, the name and
+    // whether the account is enlisted), and an event that arrived before the
+    // row it describes would find the OLD state — or, for a war that just
+    // appeared, no row at all.
+    //
+    // Broadcast, not per-account: the SSE layer has no per-connection
+    // identity, and "is this war mine" is a question the browser can already
+    // answer off `enlisted`. Answering it in two places is how the two answers
+    // start disagreeing.
+    warWatcher.Retain(liveRoomIds);
+    for (const auto &[rid, st] : warStates) {
+      const auto kind = warWatcher.Observe(rid, st);
+      if (kind == warevents::Kind::None)
+        continue;
+      nlohmann::json ev;
+      ev["room"] = rid;
+      ev["kind"] = warevents::ToString(kind);
+      ev["state"] = warresume::ToString(st);
+      ev["headline"] = warevents::Headline(kind);
+      const std::string body = ev.dump();
+      SLOG(SPRING_LOG_NOTICE, "war %u: %s (state=%s) — %s", rid,
+           warevents::ToString(kind), warresume::ToString(st),
+           warevents::Headline(kind).c_str());
+      net.SendSSE(roomStreamChannel, body, "war-state");
+    }
   };
 
   // --- PLAN-quickstart.md Part A: direct-start composite ---
@@ -2764,6 +3868,67 @@ int main(int argc, char *argv[]) {
     if (!encoded.empty())
       SLOG(SPRING_LOG_NOTICE, "room %u: war sides '%s' (from scenario '%s')",
            roomId, encoded.c_str(), scenarioId.c_str());
+
+    // ── Per-side capacity (PLAN-metalstorm-lobby.md §6, task 7) ────────────
+    //
+    // Written in the same place and at the same moment as the sides
+    // themselves, because it is a property OF those sides and the two must
+    // never be able to describe different wars. Two sources, merged in this
+    // order:
+    //
+    //   1. the seeding rule (WarSeeding.h) sizes every side from the
+    //      registered population of its faction, spread over the wars that
+    //      will field it;
+    //   2. the scenario's own `capacity` overrides that, per side, for an
+    //      author who has a reason for one side's size.
+    //
+    // Only a persistent war gets one. A skirmish's cast is its roster: it was
+    // sized, seated and start-gated on that list (task 1), so a capacity is a
+    // limit on a join that cannot happen, and writing one would put a number
+    // on the room screen that means nothing.
+    std::string capsEncoded;
+    const GameRoom *capRoom = rooms.GetRoom(roomId);
+    if (!encoded.empty() && capRoom != nullptr &&
+        capRoom->sessionKind == SessionKind::PersistentWar) {
+      const WarSides sides = ParseWarSides(encoded);
+      WarSeedPopulation pop;
+      pop.registered = db.CountAccountsByFaction();
+      // Wars ALREADY fielding each faction — this room is not among them (its
+      // sides are being written right now), which is what `SeedSideCapacities`
+      // expects: it adds this war itself.
+      for (const auto *r : rooms.GetAllRooms()) {
+        if (r == nullptr || r->id == roomId ||
+            r->sessionKind != SessionKind::PersistentWar)
+          continue;
+        for (const auto &[faction, team] : r->SideTeams()) {
+          (void)team;
+          pop.warsFielding[faction]++;
+        }
+      }
+      WarSideCapacities caps = SeedSideCapacities(sides, pop);
+      if (!scenarioId.empty()) {
+        const ScenarioDiscovery::ScenarioInfo *info =
+            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+        if (info != nullptr) {
+          for (const auto &[faction, capacity] :
+               ScenarioDiscovery::AuthoredSideCapacities(*info)) {
+            auto it = std::find_if(caps.begin(), caps.end(),
+                                   [&f = faction](const auto &c) {
+                                     return c.first == f;
+                                   });
+            if (it != caps.end())
+              it->second = capacity;
+            else
+              caps.emplace_back(faction, capacity);
+          }
+        }
+      }
+      capsEncoded = EncodeWarSideCapacities(caps);
+    }
+    rooms.SetModOption(roomId, hostId, "war_side_capacities", capsEncoded);
+    if (!capsEncoded.empty())
+      SLOG(SPRING_LOG_NOTICE, "room %u: war side capacities '%s'", roomId,
+           capsEncoded.c_str());
   };
 
   // Resolve and apply the room's `scenario` modoption (PLAN-endtoend.md D10,
@@ -2821,11 +3986,18 @@ int main(int argc, char *argv[]) {
     return def->id;
   };
 
-  // The first side of the room's slot list, i.e. where a host who has
-  // expressed no preference belongs. CreateRoom seats the host on team 0,
-  // which is right for a legacy two-team room and right for Meridian by
-  // coincidence; this makes it right on purpose.
-  auto seatHostOnFirstSide = [&](uint32_t roomId, uint32_t hostId) {
+  // Where a host who has expressed no preference belongs: their own faction's
+  // side if this war declares one, else the first side of the room's slot
+  // list. CreateRoom seats the host on team 0, which is right for a legacy
+  // two-team room and right for Meridian by coincidence; this makes it right
+  // on purpose.
+  //
+  // The faction branch (D40) fires even when the host is already on an offered
+  // side, because "team 0 is a side this room offers" is exactly the state that
+  // seated a union host on compact. The first-side branch keeps its original
+  // "only if the current team isn't offered" guard — it is a repair, not a
+  // preference.
+  auto seatHostOnSide = [&](uint32_t roomId, uint32_t hostId) {
     const GameRoom *room = rooms.GetRoom(roomId);
     if (room == nullptr)
       return;
@@ -2836,6 +4008,15 @@ int main(int argc, char *argv[]) {
         host = &p;
     if (host == nullptr || host->isSpectator)
       return;
+    if (const auto sideTeam = room->TeamForFaction(host->factionId)) {
+      if (host->team != *sideTeam) {
+        rooms.SetTeam(roomId, hostId, *sideTeam);
+        SLOG(SPRING_LOG_NOTICE,
+             "room %u: host seated on team %u — faction '%s'", roomId,
+             static_cast<unsigned>(*sideTeam), host->factionId.c_str());
+      }
+      return;
+    }
     if (std::find(slotTeams.begin(), slotTeams.end(), host->team) !=
         slotTeams.end())
       return; // already on a side the room offers
@@ -2980,6 +4161,46 @@ int main(int argc, char *argv[]) {
       return result;
     }
 
+    // Session kind (PLAN-metalstorm-lobby.md task 1), same spelling and same
+    // refuse-on-typo rule as POST /api/rooms. Carried here too because this is
+    // the path a harness stages a war from: without it a persistent war could
+    // only ever be created through the browser.
+    SessionKind sessionKind = SessionKind::Skirmish;
+    if (manifest.contains("sessionKind")) {
+      const auto &sv = manifest["sessionKind"];
+      if (!sv.is_string()) {
+        result.error = "sessionKind must be a string";
+        return result;
+      }
+      auto parsed = SessionKindFromString(sv.get<std::string>());
+      if (!parsed) {
+        result.error = "sessionKind must be 'skirmish' or 'persistent'";
+        return result;
+      }
+      sessionKind = *parsed;
+    }
+
+    // Idle-exit tuning (PLAN-test-automation/P3), dev-direct only. Absent or 0
+    // means "leave the server binary's own default alone". Refuse on garbage
+    // for the same reason sessionKind does: a silently-ignored typo here
+    // reproduces the exact frame -1 mystery this field exists to kill.
+    int idleGraceSec = 0, idleExitSec = 0;
+    auto readIdleField = [&](const char *key, int &out) -> bool {
+      if (!manifest.contains(key))
+        return true;
+      const auto &v = manifest[key];
+      if (!v.is_number_integer() || v.get<int>() < 0) {
+        result.error = std::string(key) + " must be a non-negative integer";
+        return false;
+      }
+      out = v.get<int>();
+      return true;
+    };
+    if (!readIdleField("idleStartupGraceSeconds", idleGraceSec))
+      return result;
+    if (!readIdleField("idleExitSeconds", idleExitSec))
+      return result;
+
     if (!manifest.contains("players") || !manifest["players"].is_array() ||
         manifest["players"].empty()) {
       result.error = "players[] must declare at least one player (the host)";
@@ -3043,7 +4264,8 @@ int main(int argc, char *argv[]) {
     forceLeaveCurrentRoom(host.userId);
 
     uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "", host.userId,
-                                       0, host.username, /*persistent=*/false);
+                                       0, host.username, /*persistent=*/false,
+                                       /*hostFactionId=*/"", sessionKind);
     result.roomId = roomId;
 
     MapMetadataDb mdb;
@@ -3169,7 +4391,11 @@ int main(int argc, char *argv[]) {
       auto inst =
           spawnGameServer(roomId, gameId, gameVer, mapId, dbPath, room->players,
                           room->aiSlots, room->modOptions, busyPorts,
-                          devBuildAcknowledged, wtCertPath, wtKeyPath);
+                          devBuildAcknowledged, wtCertPath, wtKeyPath,
+                          /*replayFile=*/"", room->sessionKind,
+                          /*resumeFromSnapshot=*/false,
+                          /*hibernateIdleSeconds=*/0,
+                          warPlayerSlotCap(*room), idleGraceSec, idleExitSec);
       gameServers[roomId] = inst;
       persistGameServer(inst);
       room->gameServerPort = inst.port;
@@ -3198,8 +4424,36 @@ int main(int argc, char *argv[]) {
         std::string gameId = j.value("game", "");
         if (name.empty())
           name = "Game";
-        if (gameId.empty() && !availableGames.empty())
-          gameId = availableGames[0].id;
+        // An omitted `game` used to mean `availableGames[0]`, which is
+        // alphabetical — on this tree that is `bar`, an archived game the
+        // check below would then refuse (PLAN-endtoend.md D26). Default to
+        // the first PLAYABLE game instead.
+        if (gameId.empty()) {
+          const GameDiscovery::GameInfo *fallback =
+              GameDiscovery::DefaultPlayable(availableGames);
+          if (fallback == nullptr)
+            return HttpAuth::JsonResponse(
+                500, R"({"error":"no playable game is installed"})");
+          gameId = fallback->id;
+        }
+        // An archived game is on disk but does not run (PLAN.md 2026-08-02:
+        // the BAR and ZK ports are archived, not deferred). The picker
+        // already renders it disabled, so reaching here means a hand-made
+        // request or a stale client; refusing keeps the rule in one place
+        // the client cannot skip. Same shape — and same deliberate
+        // exemption — as the retired-scenario check below: the
+        // `/api/rooms/direct` manifest path does NOT check this, because
+        // archived content is still stageable for fixtures and crash
+        // repros (PLAN-bulk-spawn-crash.md runs on ZK content).
+        {
+          const GameDiscovery::GameInfo *picked =
+              GameDiscovery::FindById(availableGames, gameId);
+          if (picked != nullptr && picked->archived)
+            return HttpAuth::JsonResponse(
+                400, std::string(R"({"error":"that game is archived and )"
+                                 R"(cannot be created","game":")") +
+                         HttpAuth::JsonEscape(gameId) + "\"}");
+        }
         if (mapId.empty())
           return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
 
@@ -3218,6 +4472,26 @@ int main(int argc, char *argv[]) {
           }
         }
 
+        // Session kind (PLAN-metalstorm-lobby.md §1, task 1). Absent means
+        // skirmish — the classic bounded match, and the only thing every
+        // existing caller has ever created. An unrecognised spelling is a
+        // 400 rather than a silent downgrade: a client that asked for a war
+        // and got a skirmish would sit in a ready-check that a war never
+        // reaches.
+        SessionKind sessionKind = SessionKind::Skirmish;
+        if (j.contains("sessionKind")) {
+          const auto &sv = j["sessionKind"];
+          if (!sv.is_string())
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"sessionKind must be a string"})");
+          auto parsed = SessionKindFromString(sv.get<std::string>());
+          if (!parsed)
+            return HttpAuth::JsonResponse(
+                400,
+                R"({"error":"sessionKind must be 'skirmish' or 'persistent'"})");
+          sessionKind = *parsed;
+        }
+
         // `scenario` is optional (PLAN-endtoend.md D10). Absent means "use
         // whatever this map's war is", which is what the Create Game dialog
         // sends when the host leaves the picker on its default. An
@@ -3226,23 +4500,36 @@ int main(int argc, char *argv[]) {
         // behind.
         const bool hasScenarioChoice = j.contains("scenario");
         const std::string scenarioChoice = j.value("scenario", "");
-        if (hasScenarioChoice && !scenarioChoice.empty() &&
-            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice) ==
-                nullptr) {
-          return HttpAuth::JsonResponse(
-              400, R"({"error":"unknown scenario for this game"})");
+        if (hasScenarioChoice && !scenarioChoice.empty()) {
+          const ScenarioDiscovery::ScenarioInfo *picked =
+              ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice);
+          if (picked == nullptr)
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"unknown scenario for this game"})");
+          // A retired war is not a player choice (PLAN-metalstorm-wars.md
+          // §7.6). The picker already omits it, so reaching here means a
+          // hand-made request or a stale client; refusing keeps the rule in
+          // one place the client cannot skip. The `/api/rooms/direct`
+          // manifest path deliberately does NOT check this — retired
+          // scenarios stay stageable for fixtures and for the objective
+          // coverage they are kept for.
+          if (picked->retired)
+            return HttpAuth::JsonResponse(
+                400,
+                R"({"error":"that war is retired and cannot be created"})");
         }
 
         uint32_t roomId = rooms.CreateRoom(
             name, mapId, gameId, 8, "", static_cast<uint32_t>(userId),
-            0 /*no WS clientId*/, user->username, persistent);
+            0 /*no WS clientId*/, user->username, persistent,
+            user->factionId.value_or(""), sessionKind);
 
         applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
                           hasScenarioChoice ? &scenarioChoice : nullptr);
         // Only on this path: the direct-start manifest applies its own
         // explicit host team afterwards, and overruling it here would be the
         // same "chosen behind your back" property §7.3 rejected.
-        seatHostOnFirstSide(roomId, static_cast<uint32_t>(userId));
+        seatHostOnSide(roomId, static_cast<uint32_t>(userId));
 
         auto *room = rooms.GetRoom(roomId);
         broadcastRooms();
@@ -3285,7 +4572,12 @@ int main(int argc, char *argv[]) {
                   "\"" + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) +
                   "\"" + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) +
                   "\"" + ",\"modelMaterialPort\":\"" +
-                  HttpAuth::JsonEscape(g.modelMaterialPort) + "\"}";
+                  HttpAuth::JsonEscape(g.modelMaterialPort) + "\"" +
+                  ",\"archived\":" + (g.archived ? "true" : "false") +
+                  ",\"archivedReason\":\"" +
+                  HttpAuth::JsonEscape(g.archivedReason) + "\"" +
+                  ",\"resourceEconomy\":" +
+                  (g.resourceEconomy ? "true" : "false") + "}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
@@ -3405,6 +4697,13 @@ int main(int argc, char *argv[]) {
             sj["displayName"] = s.displayName;
             sj["map"] = s.mapId;
             sj["tutorial"] = s.tutorial;
+            // A retired war is shipped, loadable and not offerable
+            // (PLAN-metalstorm-wars.md §7.6). Reported rather than omitted for
+            // the same reason `tutorial` is: the room screen resolves a room's
+            // `scenario` modoption against this list, and a war staged through
+            // the `?direct=` manifest path must still resolve to its name
+            // instead of showing a raw id.
+            sj["retired"] = s.retired;
             sj["terminal"] = s.terminal;
             // The scenario's playable sides, resolved to one team each
             // (PLAN-metalstorm-wars.md §7.4). NPC sides are omitted — a
@@ -3420,6 +4719,12 @@ int main(int argc, char *argv[]) {
               sidesArr.push_back(std::move(sd));
             }
             sj["sides"] = std::move(sidesArr);
+            // The authored briefing splash content (S2): title, story, tips,
+            // banner image, par time. Display-only — the sim never reads it.
+            // The key is absent for a war that ships no briefing, which is
+            // how the client decides whether to mount the splash at all.
+            if (s.briefing.present)
+              sj["briefing"] = briefingJson(s.briefing);
             arr.push_back(std::move(sj));
           }
           const std::string body = arr.dump();
@@ -3494,7 +4799,10 @@ int main(int argc, char *argv[]) {
                 .contentType = "application/json",
                 .body = std::move(body),
                 .status = 200,
-                .cacheControl = CacheControl::StaticAssetHeader(),
+                // Parsed from the game's own files under a URL that never
+                // changes — see the metadata.json site above (task 5).
+                .cacheControl = CacheControl::VersionedAssetHeader(
+                    NetworkServer::CurrentQueryString()),
             };
           }
         }
@@ -3520,15 +4828,1730 @@ int main(int argc, char *argv[]) {
             .contentType = "application/json",
             .body = std::move(body),
             .status = 200,
-            .cacheControl = CacheControl::StaticAssetHeader(),
+            .cacheControl = CacheControl::VersionedAssetHeader(
+                NetworkServer::CurrentQueryString()),
         };
       });
+
+  // ── Spawning a game server, in one place ──
+  //
+  // Two paths spawn one now: the host pressing Start Game, and a player
+  // joining a persistent war whose server is down (task 3). They must not be
+  // two hand-rolled copies — a fork/exec that skips the fork-bomb brakes, the
+  // start-position assignment or the audit row on one of the two paths is the
+  // shape this lane keeps finding (task 2's `war_sides` decoder, task 1's
+  // session-kind string).
+  //
+  // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
+  // spring-server. The host-only check (delegated to RoomManager::StartGame)
+  // already scopes *who* may start *which* room, but nothing bounded the
+  // fork/exec rate or the total live process count — an authenticated user
+  // could loop create→start and fork-bomb the host. Two bounds:
+  //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
+  //   - a hard ceiling on concurrent live game servers.
+  // Both apply in dev and prod (a spawn is expensive regardless of build).
+  static TokenBucket roomSpawnLimiter(/*burst=*/10.0,
+                                      /*perSecond=*/10.0 / 60.0);
+  constexpr size_t kMaxConcurrentGameServers = 64;
+
+  /// Brakes only, evaluated before any state mutation. Returns the refusal to
+  /// send, or nullopt to proceed.
+  auto gameServerSpawnRefusal =
+      [&](uint32_t roomId) -> std::optional<HttpResponse> {
+    size_t aliveServers = 0;
+    for (const auto &[rid, gi] : gameServers)
+      if (gi.pid > 0 && isProcessAlive(gi.pid))
+        ++aliveServers;
+    if (aliveServers >= kMaxConcurrentGameServers) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u start refused: %zu/%zu game servers already live", roomId,
+           aliveServers, kMaxConcurrentGameServers);
+      return HttpAuth::JsonResponse(
+          503, R"({"error":"server capacity reached — try again shortly"})");
+    }
+    if (!roomSpawnLimiter.TryConsume())
+      return HttpAuth::JsonResponse(
+          429, R"({"error":"game-start rate limit exceeded"})");
+    return std::nullopt;
+  };
+
+  /// Fork the game server for a room whose state has already been moved to
+  /// Loading, and record it (in-memory instance, `game_servers` row, room
+  /// port, audit row). `auditAction` distinguishes the two callers in the
+  /// audit trail: a host starting a match and a war coming back up are not
+  /// the same operator event even though they run the same code.
+  /// A WAR always comes up on its stored world if it has one (PLAN-persistence
+  /// task 3b) — decided here rather than passed in, because there is exactly one
+  /// correct answer and a parameter would invite a caller to get it wrong. The
+  /// caller that gets it wrong silently discards a frozen war and stages a fresh
+  /// one over the top of it, which is the failure this whole task exists to
+  /// prevent; `/api/rooms/start` on a war room in Filling was one keystroke away
+  /// from being that caller.
+  auto spawnServerForRoom = [&](GameRoom &room, int64_t userId,
+                                const char *auditAction) {
+    // Last line of defence before the game server forks: say out loud whether
+    // the war we are about to spawn can ever finish (PLAN-endtoend.md D10).
+    warnIfWarCannotEnd(&room);
+
+    // Give every still-unassigned slot a distinct map start position before
+    // spawning. AutoAssignStartPositions skips slots that already picked one
+    // (via /api/rooms/startpos) and no-ops on maps with no start positions.
+    // Without it every slot stays at startPos=-1, the sim spawns ALL teams at
+    // map centre, and enemy commanders overlap into a premature GameOver.
+    {
+      MapMetadataDb mdb;
+      const size_t spCount = mdb.GetMap(mapDb, room.mapId).startPositions.size();
+      const int8_t maxStartPos =
+          static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+      rooms.AutoAssignStartPositions(room.id, maxStartPos);
+    }
+
+    auto it = gamePathsById.find(room.gameId);
+    if (it == gamePathsById.end())
+      return;
+    const auto vit = gameVersionsById.find(room.gameId);
+    const std::string &gameVer =
+        (vit != gameVersionsById.end()) ? vit->second : std::string();
+    // Skip ports currently held by live spring-server processes. Without this
+    // the new game-server binds via SO_REUSEPORT alongside the old one and
+    // incoming client connections round-robin between the two — see
+    // findFreePort.
+    std::unordered_set<int> busyPorts;
+    for (const auto &[rid, gi] : gameServers)
+      if (gi.pid > 0 && isProcessAlive(gi.pid))
+        busyPorts.insert(gi.port);
+    // Only a war gets an idle-hibernate window: a skirmish already has its own
+    // idle exit, and freezing a bounded match nobody will resume is a snapshot
+    // written for nothing.
+    const int hibernateIdle =
+        (room.sessionKind == SessionKind::PersistentWar) ? warHibernateIdleSeconds
+                                                        : 0;
+    // `--resume` only when a snapshot row was SEEN: the server treats a missing
+    // snapshot as fatal by design (Hibernation.h), so asking to resume a war
+    // that has never run would abort the process instead of launching it.
+    //
+    // The decision runs through `warresume::PlanJoin` rather than re-testing
+    // `.has` here (task 3c). The join route already logs that plan, and the two
+    // reads used to be able to disagree about more than a pruned row: a world
+    // this binary may not load (E1) has history and must NOT get the flag, and a
+    // second copy of that rule here is how one of them would eventually not
+    // learn it. `serverProcessAlive` is deliberately false in the facts we build
+    // — we are the spawn, and PlanJoin's live-process branch would otherwise
+    // short-circuit the resume decision the caller already made.
+    warresume::WarFacts spawnFacts = warFactsFor(room);
+    spawnFacts.serverProcessAlive = false;
+    spawnFacts.serverReady = false;
+    const auto spawnPlan = warresume::PlanJoin(room.sessionKind, spawnFacts);
+    const bool resumeFromSnapshot = spawnPlan.withResume;
+    if (!spawnPlan.blockedReason.empty())
+      SLOG(SPRING_LOG_WARNING, "war room %u: %s", room.id,
+           warresume::Describe(spawnPlan).c_str());
+    auto inst = spawnGameServer(room.id, room.gameId, gameVer, room.mapId,
+                                dbPath, room.players, room.aiSlots,
+                                room.modOptions, busyPorts, devBuildAcknowledged,
+                                wtCertPath, wtKeyPath,
+                                /*replayFile=*/"", room.sessionKind,
+                                resumeFromSnapshot, hibernateIdle,
+                                warPlayerSlotCap(room));
+    gameServers[room.id] = inst;
+    persistGameServer(inst);
+    room.gameServerPort = inst.port;
+    rooms.PersistRoomGameSession(room.id);
+
+    // ── Adopt the war (PLAN-metalstorm-wars.md §3, task 7) ────────────────
+    //
+    // §3's "operator pick": a war created the way a player or an operator
+    // creates one. It has always worked as a war and has never had a `wars`
+    // row — `Register` was called from exactly one place, the demand seeder.
+    // Every consequence of that only appears once something reads the
+    // Director's table as the population of live wars, and then they arrive
+    // together: the §7 lifecycle sweep iterates `ListLive`, so such a war
+    // could never wind down or archive however decisively its victory
+    // objective resolved; `WarsFielding` counted none of them, so the brake
+    // that makes demand seeding self-limiting was reading a fraction of the
+    // truth; and §5's "freshest" tie-break had no creation stamp.
+    //
+    // Registered from the room's OWN sides rather than by re-running
+    // `PlanWarSeed`, for the reason `ReconcileSeededSides` records: the
+    // scenario is the authority on which team a side sits on, and a second
+    // sizing pass here would disagree with the process just launched.
+    //
+    // Idempotent — `Register` upserts — so a war that hibernates and respawns
+    // re-asserts its row rather than duplicating it. A war the Director
+    // already knows keeps the STATE it has: `SetState(Open)` is refused from
+    // `winding_down` by `IsLegalWarTransition`, so a respawn cannot reopen a
+    // war that was ending.
+    if (room.sessionKind == SessionKind::PersistentWar) {
+      const auto plan = PlanWarFromRoom(
+          room.name, room.mapId, room.gameId, scenarioOf(room),
+          room.SideTeams(), room.SideCapacities(), WarOrigin::Operator);
+      if (!plan.ok) {
+        SLOG(SPRING_LOG_NOTICE,
+             "war room %u not adopted by the Director: %s", room.id,
+             plan.error.c_str());
+      } else {
+        const bool fresh = !WarDirector::Load(mapDb, room.id).has_value();
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (fresh)
+          WarDirector::Register(mapDb, room.id, plan, now);
+        WarDirector::SetState(mapDb, room.id, WarState::Open, now);
+        WarDirector::RecordSpawnedSlotCap(mapDb, room.id,
+                                          warPlayerSlotCap(room));
+        if (fresh)
+          SLOG(SPRING_LOG_NOTICE,
+               "war room %u adopted by the Director: theatre '%s' scenario "
+               "'%s', %zu side(s)",
+               room.id, plan.theatre.c_str(), plan.scenario.c_str(),
+               plan.sides.size());
+      }
+    }
+    // Audit the process spawn (G10 / §3): who started which game/map on what
+    // port. Append-only admin_audit row.
+    auto starter = db.FindUserById(userId);
+    db.LogAudit(userId, starter ? starter->username : std::string("?"),
+                auditAction, room.gameId,
+                "room=" + std::to_string(room.id) + " map=" + room.mapId +
+                    " port=" + std::to_string(inst.port) +
+                    " pid=" + std::to_string(inst.pid));
+  };
 
   // NOTE: /api/rooms/end and /api/rooms/close are removed.
   // Room lifecycle is handled entirely through /api/rooms/leave:
   //   - Last human leaves non-persistent room → room abandoned, game killed
   //   - Host leaves with others present → host transferred
   //   - Persistent room → stays alive with 0 humans
+  // The ADMIN single-room stop is POST /api/admin/rooms/end (beside
+  // /api/admin/drain): an operator / test-harness verb, not a player one. It
+  // signals the game server and reports the exit; it does not reintroduce
+  // player-driven room ending, and it does not touch room state at all.
+
+  // POST /api/wars/join-preview — what will happen to ME if I join these wars?
+  //
+  // PLAN-metalstorm-lobby.md §2.4, task 5: "the lobby's job is to make this
+  // legible pre-join ('you'll join Side B near the River Line with 100
+  // authority')". A war is the one room kind where the answer is neither
+  // obvious nor chosen — the side comes from an immutable faction the player
+  // cannot change, the seat may already be held from a previous session, and
+  // the authority they arrive with is one of three different things.
+  //
+  // POST rather than GET only because a GET handler in this server cannot see
+  // the Authorization header (`HttpGetHandler` takes the url alone), and this
+  // answer is per-account by construction. Body is optional and ignored.
+  //
+  // All wars in one response, not one call per room: the browser refreshes the
+  // whole list on every SSE tick, and N round-trips per tick is a lot of
+  // traffic for a line of text.
+  //
+  // It also carries the while-you-were-away digest (PLAN-persistence §4, task
+  // 4b) for the same reason it carries everything else here: this is already
+  // the per-account, per-war answer, and a returning player's "what did I
+  // miss" is exactly that shape. The cap is on the RESPONSE, not on the
+  // history — a war that moved a hundred times while somebody was on holiday
+  // is a war whose card must still fit on a card.
+  constexpr int kDigestMaxEvents = 8;
+  net.AddHttpPost(
+      "/api/wars/join-preview", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const std::string faction = user->factionId.value_or("");
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto *room : rooms.GetAllRooms()) {
+          if (!room || room->sessionKind != SessionKind::PersistentWar)
+            continue;
+
+          // Population per side comes from the BINDING table, not from the
+          // room's player list: a war's fighters are seated by the game
+          // server on dynamic join and never appear in `room->players` at
+          // all, so counting the room would report a full war as empty. The
+          // caller's own binding is excluded from the count for the same
+          // reason `DecideRejoin` grants `bypassCapacity` — a returning
+          // player must not be counted against the seat they are standing in.
+          const auto sides = room->SideTeams();
+          int factionTeam = -1;
+          if (!faction.empty()) {
+            if (const auto t = TeamForFactionIn(sides, faction))
+              factionTeam = static_cast<int>(*t);
+          }
+          unsigned humansOnSide = 0;
+          bool hasBinding = false;
+          int boundTeam = -1;
+          int64_t absenceSec = 0;
+          int64_t digestSince = 0;
+          double savedPool = 0.0;
+          bool hasSavedState = false;
+          for (const auto &b :
+               WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+            if (b.accountId == userId) {
+              hasBinding = true;
+              boundTeam = b.team;
+              absenceSec = now - b.lastSeenAt;
+              digestSince = b.lastSeenAt;
+              savedPool = b.state.authorityPool;
+              hasSavedState = b.HasSavedState();
+              continue;
+            }
+            if (factionTeam >= 0 && b.team == factionTeam)
+              humansOnSide++;
+          }
+
+          // The join grant the sim will actually mint. Same modoption
+          // `game_authority.lua` reads, and the same default (100) — a
+          // preview quoting a number the gadget does not use is worse than
+          // no preview at all.
+          double joinGrant = 100.0;
+          if (auto it = room->modOptions.find("authority_join_grant");
+              it != room->modOptions.end()) {
+            try {
+              joinGrant = std::stod(it->second);
+            } catch (...) {
+              // Leave the default: a malformed modoption is the room's
+              // problem and must not 500 the whole browser.
+            }
+          }
+
+          // Capacity comes from the room's own `war_side_capacities` (task 7),
+          // which is the same modoption the game server is launched with and
+          // reads at seating time — so the promise and the seating rule are
+          // reading one value, not two that agree today. The lobby still never
+          // passes `--war-side-capacity`, so `WAR_SIDE_CAPACITY_DEFAULT` is the
+          // fallback here exactly as it is in the game server's `ctx`.
+          const unsigned capacity = CapacityForSideIn(
+              room->SideCapacities(), faction, WAR_SIDE_CAPACITY_DEFAULT);
+          const JoinPreview p = PreviewJoin(
+              room->sessionKind, faction, sides, humansOnSide, capacity,
+              hasBinding, boundTeam, absenceSec, savedPool, hasSavedState,
+              joinGrant);
+
+          // §3, task 6: an account that asked to WATCH this war is not going
+          // to fight in it whatever the seating rule would allow, and the
+          // card has to say the thing that will actually happen. Read from
+          // the membership rather than folded into PreviewJoin: the intent is
+          // a fact about this room's roster, not about the seating policy,
+          // and the game server reads it from the same row (RoomWatchIntent).
+          const auto *member = room->FindPlayer(static_cast<uint32_t>(userId));
+          const bool watching = member && member->spectateOnly;
+
+          nlohmann::json jp;
+          jp["room_id"] = room->id;
+          jp["watching"] = watching;
+          jp["will_fight"] = p.willFight && !watching;
+          jp["reason"] = DynamicJoinOutcomeToString(p.outcome);
+          jp["team"] = p.team;
+          jp["side"] = p.side;
+          jp["humans_on_side"] = p.humansOnSide;
+          jp["capacity_per_side"] = p.capacityPerSide;
+          jp["authority"] = p.authority;
+          jp["authority_source"] = JoinAuthoritySourceToString(p.authoritySource);
+          jp["returning"] = p.returning;
+
+          // ── "Your games" (PLAN-persistence §4, task 4c) ─────────────────
+          // `returning` answers "would a join seat you back where you were",
+          // which is a seating question and goes false the moment the war's
+          // sides stop seating this faction on the bound team. Enlistment is
+          // the durable fact underneath it — this account has a binding, a
+          // saved pool and a frozen world in this war — and it is what the
+          // "My wars" list has to filter on. `seat` says which of the two the
+          // player is looking at, so a superseded seat can be named rather
+          // than silently rendered as a first-time join.
+          jp["enlisted"] = hasBinding;
+          jp["seat"] = RejoinSeatKey(p.seat);
+
+          // The while-you-were-away digest (PLAN-persistence §4, task 4b).
+          //
+          // The cursor is the binding's own `last_seen_at`, not a new column:
+          // the game server already stamps it on every state sweep and on
+          // disconnect, so it IS the instant this account stopped watching
+          // this war. That also makes the digest self-clearing — a player who
+          // is currently connected has it refreshed every minute, so their
+          // "while you were away" window is correctly empty.
+          //
+          // Only for a returning player, and deliberately: a first-time joiner
+          // has not missed anything, they have simply not arrived, and
+          // handing them a war's back-story as if it were news is a different
+          // feature (a war summary) that nothing has asked for.
+          if (hasBinding) {
+            int total = 0;
+            const auto events = GameEventsDb::Since(
+                db.Handle(), room->id, digestSince, kDigestMaxEvents, &total);
+            nlohmann::json jd = nlohmann::json::array();
+            for (const auto &e : events) {
+              nlohmann::json je;
+              je["seq"] = e.seq;
+              je["kind"] = e.kind;
+              je["subject"] = e.subject;
+              je["detail"] = e.detail;
+              je["team"] = e.team;
+              je["frame"] = e.frame;
+              jd.push_back(std::move(je));
+            }
+            jp["digest"] = std::move(jd);
+            // The true count, so the client can say "and 40 more" rather than
+            // let a truncated list read as the whole story.
+            jp["digest_total"] = total;
+            jp["away_sec"] = absenceSec;
+          }
+          out.push_back(std::move(jp));
+        }
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/wars/reconnect-token — mint this account's long-TTL key back
+  // into ONE war.
+  //
+  // PLAN-metalstorm-lobby.md §7.3, task 8a. The game server authenticates a
+  // returning player against the shared `sessions` row, which is an
+  // account-wide bearer credential with a 24 h life; §2.5's promise is that a
+  // player who closed the browser mid-war walks back into their side "later",
+  // and later is measured in days. Rather than stretch the account-wide
+  // credential to cover it, this mints a second one that authorises exactly
+  // one thing — "seat this account in room N" — which is what makes a week-
+  // long TTL defensible.
+  //
+  // The BINDING is the authority, not the room's player list: a war's fighters
+  // are seated by the game server on dynamic join and never appear in
+  // `room->players` (the same reason join-preview counts bindings). So the
+  // account that gets a token is exactly the account that already holds a seat
+  // in this war — a token is never the thing that grants one.
+  net.AddHttpPost(
+      "/api/wars/reconnect-token", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string roomIdStr = HttpAuth::JsonField(body, "room_id");
+        uint32_t roomId = 0;
+        try {
+          roomId = static_cast<uint32_t>(std::stoul(roomIdStr));
+        } catch (...) {
+          return HttpAuth::JsonResponse(400, R"({"error":"missing or invalid room_id"})");
+        }
+        const auto *room = rooms.GetRoom(roomId);
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such room"})");
+        // Skirmishes are excluded rather than silently served: a skirmish dies
+        // with its lobby, so a week-long key into one is a credential that
+        // outlives everything it could open.
+        if (room->sessionKind != SessionKind::PersistentWar)
+          return HttpAuth::JsonResponse(400, R"({"error":"not a persistent war"})");
+        if (!WarPlayerBindings::Find(db.Handle(), roomId, userId))
+          return HttpAuth::JsonResponse(403, R"({"error":"no seat held in this war"})");
+
+        auto token = AuthTokens::IssueWarReconnect(
+            db.Handle(), userId, roomId, AuthTokens::kWarReconnectTtlSeconds,
+            static_cast<int64_t>(std::time(nullptr)));
+        if (!token)
+          return HttpAuth::JsonResponse(500, R"({"error":"could not mint token"})");
+
+        nlohmann::json out;
+        out["room_id"] = roomId;
+        out["token"] = *token;
+        out["expires_in"] = AuthTokens::kWarReconnectTtlSeconds;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // ── Demand-driven seeding (PLAN-metalstorm-wars.md §4, task 2) ──────────
+  //
+  // The Director's `seed` outcome, made real. Until now `/api/wars/deploy`
+  // answered "every war that fields your faction is full" and stopped there,
+  // because nothing owned the act of creating one — task 1 wrote the war
+  // object and said so explicitly. This is that owner, and it is deliberately
+  // ONE composed call: `PlanWarSeed` decides, `BuildWarBootManifest` emits,
+  // and `runDirectStart` does every step of the actual creation, so there is
+  // no second room-creation path to drift out of sync with `POST /api/rooms`.
+  //
+  // Three properties this has to keep, none of them obvious:
+  //
+  //   1. **Never a reassignment.** A player always fights their own faction
+  //      (metalstorm §2), so the seeded war contains a side for the requesting
+  //      faction and is fought against whichever faction has the longest queue
+  //      of its own — nobody is moved anywhere.
+  //   2. **Self-limiting.** `warsFielding` comes from
+  //      `WarDirector::WarsFielding` — a JOIN over live wars, not a counter —
+  //      so each war a faction already fields halves the next one's side. A
+  //      surplus faction gets more wars, each smaller, until the floor; the
+  //      loop cannot run away. The cooldown below is a second, cruder brake on
+  //      the same thing, because a seed spawns a real process.
+  //   3. **Authored content only.** The theatre is chosen from the scenarios
+  //      that exist, never invented: a map with no side for this faction has
+  //      no start box and no staged army for it (§7.6), so if nothing fits,
+  //      `seed` stays the recommendation it was rather than becoming a war
+  //      that boots wrong.
+  //
+  // A demand seed is a whole game server process. One a minute is far above
+  // any rate a real population produces (each seeded war makes the next one
+  // unnecessary — it has open seats by construction) and far below the rate a
+  // stuck client retrying Deploy could produce.
+  constexpr int64_t kDemandSeedCooldownSeconds = 60;
+  int64_t lastDemandSeedAt = 0;
+  auto demandSeedWar = [&](const std::string &faction, int64_t now,
+                           uint32_t &seededRoom,
+                           std::string &err) -> bool {
+    if (faction.empty()) {
+      err = "account has no faction";
+      return false;
+    }
+    if (lastDemandSeedAt != 0 &&
+        now - lastDemandSeedAt < kDemandSeedCooldownSeconds) {
+      err = "a war was seeded moments ago";
+      return false;
+    }
+
+    // 1. Supply: registered players per faction, and the seats that exist for
+    // them right now across every live war. Reservations count as taken —
+    // that is the whole point of holding one.
+    const auto registered = db.CountAccountsByFaction();
+    std::unordered_map<std::string, unsigned> openSlots;
+    // §3's LRU input, over EVERY war this box ever seeded — archived ones
+    // included, deliberately. A theatre that hosted a war which ended an hour
+    // ago has been used more recently than one that has never been touched,
+    // and counting only live wars would rotate straight back onto the map the
+    // players just left.
+    std::unordered_map<std::string, int64_t> theatreLastUsed;
+    {
+      sqlite3_stmt *st = nullptr;
+      if (sqlite3_prepare_v2(
+              mapDb, "SELECT theatre, MAX(created_at) FROM wars GROUP BY theatre",
+              -1, &st, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW)
+          if (const unsigned char *m = sqlite3_column_text(st, 0))
+            theatreLastUsed[reinterpret_cast<const char *>(m)] =
+                sqlite3_column_int64(st, 1);
+      }
+      sqlite3_finalize(st);
+    }
+    std::unordered_map<std::string, unsigned> liveWarsOnMap;
+    for (const auto *room : rooms.GetAllRooms()) {
+      if (!room || room->sessionKind != SessionKind::PersistentWar)
+        continue;
+      liveWarsOnMap[room->mapId]++;
+      std::unordered_map<std::string, unsigned> boundPerFaction;
+      for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), room->id))
+        boundPerFaction[b.factionId]++;
+      const auto caps = room->SideCapacities();
+      for (const auto &[sideFaction, team] : room->SideTeams()) {
+        (void)team;
+        const unsigned cap = CapacityForSideIn(caps, sideFaction,
+                                               WAR_SIDE_CAPACITY_DEFAULT);
+        if (cap == WAR_SIDE_CAPACITY_UNLIMITED) {
+          // An unsized side is never full, so this faction never needs a war
+          // seeded for it.
+          openSlots[sideFaction] += WAR_SEED_MAX_CAPACITY;
+          continue;
+        }
+        const unsigned used =
+            boundPerFaction[sideFaction] +
+            WarSlotReservations::LiveCount(mapDb, room->id, sideFaction, now);
+        openSlots[sideFaction] += cap > used ? cap - used : 0u;
+      }
+    }
+    std::vector<FactionDemand> supply;
+    supply.reserve(registered.size());
+    for (const auto &[f, n] : registered) {
+      FactionDemand d;
+      d.factionId = f;
+      d.registered = n;
+      const auto it = openSlots.find(f);
+      d.openSlots = it == openSlots.end() ? 0u : it->second;
+      supply.push_back(std::move(d));
+    }
+    const auto opponents = ChooseDemandSeedOpponents(faction, supply,
+                                                     /*maxOpponents=*/3);
+    if (opponents.empty()) {
+      err = "no other faction has any registered players to fight";
+      return false;
+    }
+
+    // 2. Theatre: an authored, terminal scenario that fields us against one of
+    // them. `terminal` is required for the same reason `DefaultForMap` demands
+    // it — the one thing this must not do is create a war that cannot end.
+    const GameDiscovery::GameInfo *game =
+        GameDiscovery::DefaultPlayable(availableGames);
+    if (game == nullptr) {
+      err = "no playable game is installed";
+      return false;
+    }
+    MapMetadataDb mdb;
+    std::vector<TheatreOption> theatres;
+    for (const auto &info : scenariosFor(game->id)) {
+      if (info.tutorial || info.retired || !info.terminal || info.mapId.empty())
+        continue;
+      TheatreOption t;
+      t.mapId = info.mapId;
+      t.scenarioId = info.id;
+      for (const auto &s : ScenarioDiscovery::PlayableSides(info))
+        t.factions.push_back(s.faction);
+      if (t.factions.size() < 2)
+        continue;
+      t.startBoxCount =
+          static_cast<unsigned>(mdb.GetMap(mapDb, info.mapId).startPositions.size());
+      const auto it = liveWarsOnMap.find(info.mapId);
+      t.liveWars = it == liveWarsOnMap.end() ? 0u : it->second;
+      // §3's pool rotation (task 7). No cursor: `wars` already records every
+      // war ever seeded and which theatre it was on, so "when was this map
+      // last used" is a read of the world rather than something to remember
+      // — and a pool that grows a map cannot disagree with it.
+      const auto lu = theatreLastUsed.find(info.mapId);
+      t.use.lastSeededAt = lu == theatreLastUsed.end() ? 0 : lu->second;
+      theatres.push_back(std::move(t));
+    }
+    const TheatreOption *pick =
+        ChooseDemandSeedTheatre(theatres, faction, opponents);
+    if (pick == nullptr) {
+      err = "no authored theatre fields '" + faction +
+            "' against a faction with players";
+      return false;
+    }
+
+    // 3. Plan. The sides are the theatre's own, in its declaration order,
+    // filtered to us and the opponents we ranked — so the war is exactly the
+    // one the scenario knows how to stage.
+    WarSeedRequest req;
+    req.theatre = pick->mapId;
+    req.gameId = game->id;
+    req.scenario = pick->scenarioId;
+    req.origin = WarOrigin::Demand;
+    req.startBoxCount = pick->startBoxCount;
+    for (const auto &f : pick->factions)
+      if (f == faction || std::find(opponents.begin(), opponents.end(), f) !=
+                              opponents.end())
+        req.factions.push_back(f);
+    // Unique by construction: `runDirectStart` REPLACES a standing room of the
+    // same name (its idempotent-restart rule), so a fixed name would make
+    // every demand seed kill the previous one.
+    req.name = "War " + std::to_string(now) + " · " + pick->mapId;
+    WarSeedPopulation pop;
+    pop.registered = registered;
+    for (const auto &f : req.factions)
+      pop.warsFielding[f] = WarDirector::WarsFielding(mapDb, f);
+    const WarSeedPlan plan = PlanWarSeed(req, pop);
+    if (!plan.ok) {
+      err = plan.error;
+      return false;
+    }
+
+    // 4. One boot call.
+    nlohmann::json manifest = nlohmann::json::parse(
+        BuildWarBootManifest(plan), nullptr, /*allow_exceptions=*/false);
+    if (manifest.is_discarded()) {
+      err = "could not build the boot manifest";
+      return false;
+    }
+    auto result = runDirectStart(manifest);
+    if (!result.ok) {
+      err = result.error.empty() ? "boot failed" : result.error;
+      return false;
+    }
+    lastDemandSeedAt = now;
+    seededRoom = result.roomId;
+
+    // 5. Record what actually booted, not what was planned — see
+    // `ReconcileSeededSides` for why the scenario, not the Director, is the
+    // authority on which team a side sits on.
+    WarSeedPlan booted = plan;
+    unsigned spawnedSlotCap = 0;
+    if (const GameRoom *room = rooms.GetRoom(result.roomId)) {
+      booted = ReconcileSeededSides(plan, room->SideTeams(),
+                                    room->SideCapacities());
+      // The number the PROCESS was sized with, not the number the plan asked
+      // for (§8.1). Same function `spawnGameServer` was handed a moment ago,
+      // over the same room, so `wars.spawned_slot_cap` and `--player-slots`
+      // cannot drift — and drift is exactly what would make a dynamic joiner
+      // be promised a seat the game server has no player number for.
+      spawnedSlotCap = warPlayerSlotCap(*room);
+    }
+    WarDirector::Register(mapDb, result.roomId, booted, now);
+    WarDirector::SetState(mapDb, result.roomId, WarState::Open, now);
+    WarDirector::RecordSpawnedSlotCap(mapDb, result.roomId, spawnedSlotCap);
+    SLOG(SPRING_LOG_NOTICE,
+         "demand-seed: war '%s' (room %u) on '%s' scenario '%s' for faction "
+         "'%s', %zu side(s), Σ slotCap %u (%u player slot(s) pre-allocated)",
+         booted.name.c_str(), result.roomId, booted.theatre.c_str(),
+         booted.scenario.c_str(), faction.c_str(), booted.sides.size(),
+         booted.TotalSlotCap(), spawnedSlotCap);
+    return true;
+  };
+
+  // POST /api/wars/deploy — one click: which war should I fight in?
+  //
+  // PLAN-metalstorm-lobby.md §4/§6, task 7. The browser (task 6) gives a
+  // player every fact about every war; this is the answer for the player who
+  // does not want to read a table, and it is also where §6's balance lever
+  // lives: we cannot move anyone off their faction, but we can decide which
+  // war the next volunteer walks into, and sending them where their side is
+  // most outnumbered is the only choice that reduces a deficit.
+  //
+  // Answers, never refuses: an account whose faction is full in every war gets
+  // `seed` — §6's own alternative to a queue, and the reason no queue is built
+  // (see WarDeploy.h). The lobby does not create the war here; `seed` is a
+  // recommendation the client turns into the ordinary Create Game flow, so a
+  // war is still created by somebody who chose its map and scenario.
+  net.AddHttpPost(
+      "/api/wars/deploy", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const std::string faction = user->factionId.value_or("");
+
+        // §5's first ranking key. Read ONCE for the whole ranking rather than
+        // per war: the graph is per-account and does not change while we rank,
+        // and `MutualIds` is a join the loop below would otherwise re-run for
+        // every live war on the box.
+        std::set<int64_t> myFriends;
+        for (const int64_t fid : Friends::MutualIds(db.Handle(), userId))
+          myFriends.insert(fid);
+
+        std::vector<DeployCandidate> candidates;
+        for (const auto *room : rooms.GetAllRooms()) {
+          if (!room || room->sessionKind != SessionKind::PersistentWar)
+            continue;
+          // The Director's row, read once for two things. An archived war is
+          // history, not a destination (§7) — without that check the ranking
+          // would happily send a volunteer at a war that ended last Tuesday,
+          // whose side looks pleasantly empty precisely because its bindings
+          // are still in the table. A room with no `wars` row at all is a
+          // persistent room the Director never registered; it still ranks,
+          // it just has no creation stamp to be "freshest" on.
+          const auto directorRow = WarDirector::Load(mapDb, room->id);
+          if (directorRow && !directorRow->IsLive())
+            continue;
+          const auto sides = room->SideTeams();
+          const auto team = TeamForFactionIn(sides, faction);
+
+          DeployCandidate c;
+          c.roomId = room->id;
+          c.fieldsMyFaction = team.has_value();
+          c.myCapacity = CapacityForSideIn(room->SideCapacities(), faction,
+                                           WAR_SIDE_CAPACITY_DEFAULT);
+          // Same durable population the browser's card counts, for the same
+          // reason: an offline veteran's seat is not free, so a war that looks
+          // empty right now may have nothing to offer.
+          std::unordered_map<int, unsigned> boundPerTeam;
+          for (const auto &b :
+               WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+            boundPerTeam[b.team]++;
+            if (b.accountId == static_cast<int64_t>(userId))
+              c.iAmBound = true;
+            // On ANY side, deliberately — see DeployCandidate::friendsPresent.
+            else if (myFriends.count(b.accountId))
+              c.friendsPresent++;
+          }
+          if (team) {
+            const int t = static_cast<int>(*team);
+            c.myBound = boundPerTeam.count(t) ? boundPerTeam[t] : 0u;
+            for (const auto &[faction2, otherTeam] : sides) {
+              (void)faction2;
+              if (static_cast<int>(otherTeam) == t)
+                continue;
+              const unsigned n = boundPerTeam.count(otherTeam)
+                                     ? boundPerTeam[otherTeam]
+                                     : 0u;
+              c.opposingBound = std::max(c.opposingBound, n);
+            }
+          }
+          // Live population is the tie-break only, so its absence costs
+          // nothing — a war with no server still ranks, it just never wins a
+          // tie against one with people in it.
+          WarSummary live;
+          if (warSummaryFor(room->id, live)) {
+            for (const auto &ls : live.sides)
+              c.liveHumans += ls.humans;
+            // §5's "highest-stakes". Absent for a war whose server is down,
+            // which costs it a tie-break and nothing more.
+            c.stakes = live.stakes;
+          }
+          // §5's "freshest", off the war object rather than the room: the
+          // `wars` row is the only thing that records when the WAR began, and
+          // it is stamped once at Register.
+          if (directorRow)
+            c.createdAt = directorRow->createdAt;
+          candidates.push_back(c);
+        }
+
+        const int64_t nowSec = static_cast<int64_t>(std::time(nullptr));
+        DeployDecision d = DecideDeploy(faction, candidates);
+
+        // ── The reservation (§4, task 2) ────────────────────────────────
+        //
+        // Taken HERE, before this route answers, because this answer is what
+        // the client turns into a join — §4's "reserve the slot *before*
+        // handing the join token to the lobby". Ranking on a count that was
+        // read a moment ago is exactly the last-slot race lobby §2.3/§9.1
+        // names: two players both told to go to the same final seat.
+        //
+        // Losing the race is not an error and does not end the request. The
+        // war that just filled is dropped from the candidate list and the
+        // ranking runs again — which is the "others fall through" half of
+        // §10's test row, and is strictly better for the loser than a queue:
+        // they get the second-best war now instead of a promise.
+        SlotReserveResult held;
+        std::vector<uint32_t> lost;
+        while (d.outcome == DeployOutcome::JoinWar ||
+               d.outcome == DeployOutcome::ReturnToMyWar) {
+          held = WarSlotReservations::Reserve(mapDb, d.roomId, faction, userId,
+                                              nowSec);
+          if (held.MayJoin())
+            break;
+          lost.push_back(d.roomId);
+          std::vector<DeployCandidate> rest;
+          for (const auto &c : candidates)
+            if (std::find(lost.begin(), lost.end(), c.roomId) == lost.end())
+              rest.push_back(c);
+          candidates = std::move(rest);
+          d = DecideDeploy(faction, candidates);
+        }
+
+        // ── The seed, as an ACTION (§4) ─────────────────────────────────
+        //
+        // The outcome stays `seed`: it is still the true answer to "where do I
+        // fight", and a client that only understood task 1's contract keeps
+        // working. What is new is that a war now exists to point at.
+        std::string seedError;
+        if (d.outcome == DeployOutcome::SeedNewWar && !faction.empty()) {
+          uint32_t seededRoom = 0;
+          if (demandSeedWar(faction, nowSec, seededRoom, seedError)) {
+            d.roomId = seededRoom;
+            held = WarSlotReservations::Reserve(mapDb, seededRoom, faction,
+                                                userId, nowSec);
+          }
+        }
+
+        nlohmann::json j;
+        j["outcome"] = DeployOutcomeToString(d.outcome);
+        j["faction"] = faction;
+        j["underdog_by"] = d.underdogBy;
+        // §5's rejoin fall-through, surfaced rather than inferred: "you were
+        // sent somewhere other than your own front, and here is why" is the
+        // one sentence that keeps this from reading as a bug to the veteran it
+        // happens to.
+        if (d.rejoinFellThrough)
+          j["rejoin_fell_through"] = true;
+        if (d.roomId != 0) {
+          j["room_id"] = d.roomId;
+          if (const auto *room = rooms.GetRoom(d.roomId))
+            j["room_name"] = room->name;
+          j["seeded"] = d.outcome == DeployOutcome::SeedNewWar;
+        }
+        if (!seedError.empty())
+          j["seed_error"] = seedError;
+        // The reservation, reported whatever it said: a client that is handed
+        // a war it has no held seat in must be able to tell, or it walks into
+        // the refusal the reservation exists to prevent.
+        if (held.outcome != SlotReserveOutcome::Error || d.roomId != 0) {
+          j["reservation"] = SlotReserveOutcomeToString(held.outcome);
+          if (held.expiresAt > 0)
+            j["reservation_expires_in"] = held.expiresAt - nowSec;
+        }
+        // §4's underdog FLAG, surfaced. It is the Director's own row, not a
+        // number re-derived here, so the lobby, the browser and teams'
+        // `JOIN_GRANT` are all reading one answer about which side is
+        // outnumbered.
+        if (d.roomId != 0) {
+          for (const auto &s : WarDirector::SidesFor(mapDb, d.roomId))
+            if (s.factionId == faction)
+              j["incentivised"] = s.incentivised;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "deploy: account %lld (faction '%s') → %s (room %u, underdog by "
+             "%u) over %zu war(s)",
+             (long long)userId, faction.c_str(),
+             DeployOutcomeToString(d.outcome), d.roomId, d.underdogBy,
+             candidates.size());
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // ── Task 9a: friends, presence and "join my friend" (§8) ────────────────
+  //
+  // §8 calls friends "the primary discovery path in a persistent world —
+  // people play where their friends are". Four routes, all TokenRequired:
+  // the graph is per-account and there is nothing here a stranger may read.
+  //
+  // The presence half is assembled here rather than in Friends.cpp because
+  // its three sources belong to three different owners — the binding table
+  // (written by the game server), the room registry (in-memory, this process)
+  // and gPresence (HTTP activity) — and the store has no business knowing
+  // about any of them. FriendPresence.h holds the rule; this is the gathering.
+
+  /// One account's presence, from every source the lobby actually has.
+  auto presenceFactsFor = [&](int64_t accountId, int64_t now) -> PresenceFacts {
+    PresenceFacts f;
+    f.lobbyLastSeen = gPresence.LastSeen(accountId);
+    // Newest binding first (WarPlayerBindings::ForAccount orders it), so the
+    // first row that still points at a live war is the answer. A binding to a
+    // room that has since been deleted is skipped rather than reported: the
+    // seat is real but the war is not, and a friends list offering to join it
+    // sends the player at a room id nothing will resolve.
+    for (const auto &b : WarPlayerBindings::ForAccount(db.Handle(), accountId)) {
+      const auto *room = rooms.GetRoom(b.roomId);
+      if (!room || room->sessionKind != SessionKind::PersistentWar)
+        continue;
+      f.warRoomId = b.roomId;
+      f.warTeam = b.team;
+      f.warLastSeen = b.lastSeenAt;
+      break;
+    }
+    for (const auto *room : rooms.GetAllRooms()) {
+      if (room && room->FindPlayer(static_cast<uint32_t>(accountId))) {
+        f.roomId = room->id;
+        break;
+      }
+    }
+    (void)now;
+    return f;
+  };
+
+  /// Resolve a `{"username": ...}` body to an account, or an error response.
+  auto friendTarget = [&](const std::string &body, int64_t selfId,
+                          std::optional<UserRecord> &out) -> std::optional<HttpResponse> {
+    const std::string name = HttpAuth::JsonField(body, "username");
+    if (name.empty())
+      return HttpAuth::JsonResponse(400, R"({"error":"missing username"})");
+    auto target = db.FindUser(name);
+    if (!target)
+      return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+    if (target->id == selfId)
+      return HttpAuth::JsonResponse(400, R"({"error":"you cannot friend yourself"})");
+    out = std::move(target);
+    return std::nullopt;
+  };
+
+  // POST /api/friends/list — the list, with presence and where each friend is.
+  //
+  // POST despite reading nothing, for the reason /api/auth/totp/status states:
+  // an AddHttpGet handler is not handed the request headers, so a GET route
+  // cannot learn WHICH account the dispatcher just admitted — and this
+  // response is per-caller by construction.
+  net.AddHttpPost(
+      "/api/friends/list", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto &e : Friends::ListFor(db.Handle(), userId)) {
+          nlohmann::json fj;
+          fj["account_id"] = e.accountId;
+          fj["username"] = e.username;
+          if (!e.factionId.empty())
+            fj["faction"] = e.factionId;
+          fj["edge"] = FriendEdgeToString(e.edge);
+          fj["since"] = e.since;
+          // Presence is published for MUTUAL friends only. An outgoing
+          // request must not turn into a tracker for somebody who has not
+          // answered it — "add them and watch when they are online" is
+          // exactly the shape of surveillance a social graph should not hand
+          // out for free, and an incoming request is the same fact from the
+          // other end.
+          if (e.edge != FriendEdge::Mutual) {
+            fj["presence"] = "unknown";
+          } else {
+            const auto pf = presenceFactsFor(e.accountId, now);
+            const auto state = DecidePresence(pf, now);
+            fj["presence"] = PresenceStateToString(state);
+            if (state == PresenceState::Fighting) {
+              fj["war_room_id"] = pf.warRoomId;
+              fj["team"] = pf.warTeam;
+              if (const auto *room = rooms.GetRoom(pf.warRoomId))
+                fj["war_name"] = room->name;
+            }
+          }
+          out.push_back(std::move(fj));
+        }
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/friends/add — "I consider you a friend."
+  //
+  // There is no separate accept route: calling this on somebody who has
+  // already added you completes the friendship (Friends.h). `edge` in the
+  // response says which of the two just happened.
+  net.AddHttpPost(
+      "/api/friends/add", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (!Friends::Add(db.Handle(), userId, target->id, now))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not add friend"})");
+        const auto edge = Friends::EdgeBetween(db.Handle(), userId, target->id);
+        SLOG(SPRING_LOG_NOTICE, "friends: account %lld → %s: %s",
+             (long long)userId, target->username.c_str(), FriendEdgeToString(edge));
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = target->username;
+        j["edge"] = FriendEdgeToString(edge);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/friends/remove — withdraw, decline or unfriend. All one verb,
+  // because they are all "there is no edge between us any more", and the
+  // removal is symmetric (Friends::Remove).
+  net.AddHttpPost(
+      "/api/friends/remove", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        const int removed = Friends::Remove(db.Handle(), userId, target->id);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["removed"] = removed;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/friends/join — "take me to where my friend is fighting."
+  //
+  // Answers, it does not seat: the reply names the war and which side the
+  // caller would land on, and the client then calls the ordinary
+  // `/api/rooms/join`. That is task 3's "one spawn body, not two" applied
+  // again — a second join path here would be a copy that skips the fork
+  // brakes, the resume decision and the audit row.
+  //
+  // §8 says "join their side"; §1b says a faction is permanent and §2.3 says
+  // the side follows the faction. So the outcome distinguishes `same_side`
+  // from `opposing_side` rather than reporting one `ok` — see FriendPresence.h.
+  net.AddHttpPost(
+      "/api/friends/join", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        std::optional<UserRecord> target;
+        if (auto err = friendTarget(body, userId, target))
+          return *err;
+        // Mutual only. Following a stranger (or somebody who has not answered
+        // your request) around the world is not a feature.
+        if (Friends::EdgeBetween(db.Handle(), userId, target->id) !=
+            FriendEdge::Mutual)
+          return HttpAuth::JsonResponse(403, R"({"error":"not a mutual friend"})");
+
+        auto me = db.FindUserById(userId);
+        if (!me)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        FriendJoinFacts f;
+        f.myFaction = me->factionId.value_or("");
+        const auto their = presenceFactsFor(target->id, now);
+        f.friendInWar = DecidePresence(their, now) == PresenceState::Fighting;
+        f.friendTeam = their.warTeam;
+        const GameRoom *room =
+            f.friendInWar ? rooms.GetRoom(their.warRoomId) : nullptr;
+        if (room) {
+          f.sides = room->SideTeams();
+          f.myCapacity = CapacityForSideIn(room->SideCapacities(), f.myFaction,
+                                           WAR_SIDE_CAPACITY_DEFAULT);
+          if (const auto myTeam = TeamForFactionIn(f.sides, f.myFaction)) {
+            for (const auto &b :
+                 WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+              if (b.accountId == userId) { f.iAmBound = true; continue; }
+              if (b.team == static_cast<int>(*myTeam)) f.myBound++;
+            }
+          }
+        } else {
+          f.friendInWar = false;
+        }
+
+        const FriendJoinDecision d = DecideFriendJoin(f);
+        nlohmann::json j;
+        j["outcome"] = FriendJoinOutcomeToString(d.outcome);
+        j["friend"] = target->username;
+        if (FriendJoinSeats(d.outcome) && room != nullptr) {
+          j["room_id"] = room->id;
+          j["room_name"] = room->name;
+          j["team"] = d.myTeam;
+          j["friend_team"] = f.friendTeam;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "friends: account %lld → join '%s' → %s (room %u, team %d)",
+             (long long)userId, target->username.c_str(),
+             FriendJoinOutcomeToString(d.outcome), room ? room->id : 0u,
+             d.myTeam);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // ── Chat (PLAN-lobby.md §3, task 9b) ─────────────────────────────────────
+  //
+  // Five routes over one store. Every one of them is a POST, including the
+  // two that only read: an AddHttpGet handler is not handed the request
+  // headers, so a GET route cannot learn which account the dispatcher
+  // admitted — the same reason /api/friends/list states, and here it is not
+  // merely inconvenient but wrong, because both reads are per-caller by
+  // construction (a history filtered by the caller's ignore list, a channel
+  // list that is the caller's own).
+  //
+  // The state below is process-local and touched only from route handlers and
+  // the SSE resolver, all of which run on the NetworkServer network thread —
+  // the same single-threaded property the SQLite handle already depends on.
+  static ChatChannels gChatChannels;
+  static ChatFlood gChatFlood;
+
+  /// One resolution of "what conversation is this, and who hears it".
+  ///
+  /// Send and history BOTH go through it, and that is the point: a scope
+  /// whose membership was checked on the way in but not on the way out is a
+  /// channel you cannot post to and can still read.
+  struct ChatResolution {
+    ChatScope scope = ChatScope::Main;
+    std::string target;             ///< canonical, server-built
+    std::vector<int64_t> recipients; ///< everyone who hears it, sender included
+    /// Task 9c: the caller is the host of the room this scope belongs to.
+    /// Read off the roster here because this is where the roster is already
+    /// in hand — a moderation route that looked it up a second time would be
+    /// a second answer to "who runs this room".
+    bool callerIsRoomHost = false;
+  };
+  auto resolveChatScope =
+      [&](int64_t userId, const std::string &scopeWord, const std::string &rawTarget,
+          ChatResolution &out) -> std::optional<HttpResponse> {
+    if (!ChatScopeFromString(scopeWord, out.scope))
+      return HttpAuth::JsonResponse(400, R"({"error":"unknown scope"})");
+
+    // A room-shaped scope names a room by id; parse once for all three.
+    const uint32_t roomId =
+        static_cast<uint32_t>(std::strtoul(rawTarget.c_str(), nullptr, 10));
+    const GameRoom *room = roomId ? rooms.GetRoom(roomId) : nullptr;
+    // Room membership keys on the ACCOUNT id — `RoomPlayer::playerId` is the
+    // account, which is what presenceFactsFor above already relies on.
+    const RoomPlayer *me =
+        room ? room->FindPlayer(static_cast<uint32_t>(userId)) : nullptr;
+    out.callerIsRoomHost = me && me->isHost;
+
+    switch (out.scope) {
+      case ChatScope::Main:
+        out.target = Chat::MainTarget();
+        out.recipients = gChatChannels.Members(out.target);
+        break;
+
+      case ChatScope::Channel: {
+        const std::string name = Chat::NormalizeChannel(rawTarget);
+        if (name.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad channel name"})");
+        // Opt-in (§3.1): you speak in a channel you are standing in. Refused
+        // rather than auto-joined — a send that silently subscribes you is
+        // how a client ends up in channels nobody asked for.
+        if (!gChatChannels.IsMember(userId, name))
+          return HttpAuth::JsonResponse(403, R"({"error":"join the channel first"})");
+        out.target = name;
+        out.recipients = gChatChannels.Members(name);
+        break;
+      }
+
+      case ChatScope::Room: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        out.target = Chat::RoomTarget(roomId);
+        for (const auto &p : room->players)
+          out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Ally: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        // A spectator holds no team, so there is no ally channel to be in —
+        // and `team` on a spectator row is a leftover value, not a seat.
+        if (me->isSpectator)
+          return HttpAuth::JsonResponse(403, R"({"error":"spectators have no team"})");
+        // The TEAM comes off the roster, never off the request. A client that
+        // could name its own team could name the enemy's, and ally chat is
+        // the one scope where that is worth a match.
+        out.target = Chat::AllyTarget(roomId, me->team);
+        for (const auto &p : room->players)
+          if (!p.isSpectator && p.team == me->team)
+            out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Spectator: {
+        if (!room || !me)
+          return HttpAuth::JsonResponse(403, R"({"error":"not in that room"})");
+        if (!me->isSpectator && !me->spectateOnly)
+          return HttpAuth::JsonResponse(403, R"({"error":"not a spectator here"})");
+        out.target = Chat::SpectatorTarget(roomId);
+        for (const auto &p : room->players)
+          if (p.isSpectator || p.spectateOnly)
+            out.recipients.push_back(static_cast<int64_t>(p.playerId));
+        break;
+      }
+
+      case ChatScope::Pm: {
+        auto other = db.FindUser(rawTarget);
+        if (!other)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        if (other->id == userId)
+          return HttpAuth::JsonResponse(400, R"({"error":"you cannot PM yourself"})");
+        out.target = Chat::PmTarget(userId, other->id);
+        out.recipients = {userId, other->id};
+        break;
+      }
+    }
+    return std::nullopt;
+  };
+
+  // POST /api/chat/ticket — the credential an EventSource can carry.
+  //
+  // See SSETickets.h: the stream cannot send an Authorization header, so the
+  // client trades its real token for a short-lived, single-purpose one here.
+  // Joining `#main` happens on the same call because §3.1 makes it
+  // default-joined, and a client that has just asked for a stream is exactly
+  // the client that wants it.
+  net.AddHttpPost(
+      "/api/chat/ticket", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string ticket = HttpAuth::GenerateToken();
+        gChatTickets.Mint(ticket, userId, static_cast<int64_t>(std::time(nullptr)));
+        gChatChannels.Join(userId, Chat::MainTarget());
+        nlohmann::json j;
+        j["ticket"] = ticket;
+        j["ttl"] = kSSETicketTtlSec;
+        j["stream"] = "/api/chat/stream?ticket=" + ticket;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/send — { scope, target, text }
+  net.AddHttpPost(
+      "/api/chat/send", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string scopeWord = HttpAuth::JsonField(body, "scope");
+        const std::string rawTarget = HttpAuth::JsonField(body, "target");
+        const std::string rawText = HttpAuth::JsonField(body, "text");
+
+        std::string text, err;
+        if (!Chat::ValidateText(rawText, text, err))
+          return HttpAuth::JsonResponse(400, "{\"error\":\"" + err + "\"}");
+
+        ChatResolution res;
+        if (auto bad = resolveChatScope(userId, scopeWord, rawTarget, res))
+          return *bad;
+
+        // Task 9c: a moderator's mute is checked BEFORE flood control and is
+        // a 403, not a 429. A 429 says "you are going too fast" and every
+        // client answers it by trying again; a mute is a decision that will
+        // not change when the sender slows down, and one that outlives this
+        // process (see Chat.h's header block on the two mutes).
+        if (auto mute = Chat::ActiveMute(mapDb, userId,
+                                         Chat::MuteKey(res.scope, res.target),
+                                         static_cast<int64_t>(std::time(nullptr)))) {
+          nlohmann::json m;
+          m["error"] = "you are muted";
+          m["muted"] = true;
+          m["until"] = mute->until;  // 0 = until lifted
+          m["scope"] = mute->scopeKey.empty() ? "account" : mute->scopeKey;
+          if (!mute->reason.empty()) m["reason"] = mute->reason;
+          if (!mute->byName.empty()) m["by"] = mute->byName;
+          return HttpAuth::JsonResponse(403, m.dump());
+        }
+
+        // Flood control runs AFTER the scope check so a refused scope is not
+        // also charged a token — the budget is for what you said, not for
+        // what you got wrong.
+        const double nowSec =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        switch (gChatFlood.Check(userId, nowSec)) {
+          case ChatSendVerdict::Dropped:
+            return HttpAuth::JsonResponse(
+                429, R"({"error":"slow down","dropped":true})");
+          case ChatSendVerdict::Muted: {
+            nlohmann::json m;
+            m["error"] = "muted for flooding";
+            m["muted"] = true;
+            m["seconds"] = kChatMuteSec;
+            return HttpAuth::JsonResponse(429, m.dump());
+          }
+          case ChatSendVerdict::Allow:
+            break;
+        }
+
+        auto self = db.FindUserById(userId);
+        const std::string fromName = self ? self->username : std::string("player");
+        const int64_t ts = static_cast<int64_t>(std::time(nullptr));
+        const int64_t id = Chat::Append(mapDb, res.scope, res.target, userId,
+                                        fromName, text, ts);
+        if (id == 0)
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store message"})");
+
+        // Ignore is applied to the DELIVERY list, not to the store: the line
+        // was said, it belongs in the room's record, and the people who chose
+        // not to hear it simply do not get the frame (History applies the
+        // same filter to the backfill).
+        const auto deliver = Chat::FilterIgnored(mapDb, userId, res.recipients);
+        nlohmann::json ev;
+        ev["id"] = id;
+        ev["scope"] = ChatScopeToString(res.scope);
+        ev["target"] = res.target;
+        ev["from"] = fromName;
+        ev["fromId"] = userId;
+        ev["text"] = text;
+        ev["ts"] = ts;
+        net.SendSSETo(chatStreamChannel, deliver, ev.dump(), "chat");
+
+        nlohmann::json j;
+        j["ok"] = true;
+        j["id"] = id;
+        j["scope"] = ChatScopeToString(res.scope);
+        j["target"] = res.target;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/history — { scope, target, before, limit }
+  //
+  // §3.3's "backfills the UI on join — solves the classic 'empty channel on
+  // connect' annoyance". Newest-first; `before` is a message id, so a page
+  // stays stable while people keep talking.
+  net.AddHttpPost(
+      "/api/chat/history", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        int64_t before = 0;
+        int limit = 50;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object()) {
+            before = j.value("before", (int64_t)0);
+            limit = j.value("limit", 50);
+          }
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+
+        ChatResolution res;
+        if (auto bad = resolveChatScope(userId, HttpAuth::JsonField(body, "scope"),
+                                        HttpAuth::JsonField(body, "target"), res))
+          return *bad;
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto &m :
+             Chat::History(mapDb, res.scope, res.target, userId, before, limit)) {
+          nlohmann::json mj;
+          mj["id"] = m.id;
+          mj["from"] = m.fromName;
+          mj["fromId"] = m.fromId;
+          mj["text"] = m.text;
+          mj["ts"] = m.ts;
+          if (m.system)
+            mj["system"] = true;
+          out.push_back(std::move(mj));
+        }
+        nlohmann::json j;
+        j["scope"] = ChatScopeToString(res.scope);
+        j["target"] = res.target;
+        j["messages"] = std::move(out);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/ignore — { username, on }
+  net.AddHttpPost(
+      "/api/chat/ignore", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string name = HttpAuth::JsonField(body, "username");
+        if (name.empty()) {
+          // No target named: answer with the list. One route, because "who do
+          // I ignore" and "ignore this person" are the same object.
+          nlohmann::json out = nlohmann::json::array();
+          for (int64_t id : Chat::IgnoreList(mapDb, userId)) {
+            nlohmann::json ij;
+            ij["account_id"] = id;
+            if (auto u = db.FindUserById(id))
+              ij["username"] = u->username;
+            out.push_back(std::move(ij));
+          }
+          return HttpAuth::JsonResponse(200, out.dump());
+        }
+        auto target = db.FindUser(name);
+        if (!target)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        bool on = true;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object())
+            on = j.value("on", true);
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+        if (!Chat::SetIgnore(mapDb, userId, target->id, on))
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot ignore that account"})");
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = target->username;
+        j["ignored"] = on;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/channel — { channel, join } — join/leave a named channel.
+  //
+  // Membership is process-local (ChatChannels): being in `#help` is a
+  // property of a connected client, not of an account.
+  net.AddHttpPost(
+      "/api/chat/channel", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string name =
+            Chat::NormalizeChannel(HttpAuth::JsonField(body, "channel"));
+        if (name.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad channel name"})");
+        bool join = true;
+        try {
+          auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (j.is_object())
+            join = j.value("join", true);
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        }
+        // `#main` is default-joined and cannot be left: §3.1 makes it the
+        // scope everyone online is in, and a client that could leave it would
+        // silently stop hearing the one channel an admin broadcast reaches.
+        if (name == Chat::MainTarget() && !join)
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot leave #main"})");
+        // Task 9c: a channel mute refuses the RE-JOIN as well as the send.
+        // That is what makes a kick mean anything — membership is one POST
+        // away, so a kick that only removed you would be undone by the
+        // client's next reconnect, and an ejection that leaves you free to
+        // walk back in is theatre. `#main` is exempt because it cannot be
+        // left, so it cannot be re-entered either; a mute there silences.
+        if (join && name != Chat::MainTarget()) {
+          if (auto mute = Chat::ScopedMute(
+                  mapDb, userId, Chat::MuteKey(ChatScope::Channel, name),
+                  static_cast<int64_t>(std::time(nullptr)))) {
+            nlohmann::json m;
+            m["error"] = "you are muted in that channel";
+            m["muted"] = true;
+            m["until"] = mute->until;
+            if (!mute->reason.empty()) m["reason"] = mute->reason;
+            return HttpAuth::JsonResponse(403, m.dump());
+          }
+        }
+        if (join)
+          gChatChannels.Join(userId, name);
+        else
+          gChatChannels.Leave(userId, name);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["channel"] = name;
+        j["joined"] = join;
+        j["channels"] = gChatChannels.ChannelsFor(userId);
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // ── Moderation (PLAN-lobby §3.4's roles half, task 9c) ────────────────────
+  //
+  // Three routes and one policy. `ChatCanModerate` in Chat.h holds every rule
+  // about WHO may act; these routes hold what a moderator may act ON, and the
+  // one rule that lives here rather than there is that **you moderate a
+  // conversation you are standing in** — resolveChatScope refuses a
+  // non-member, admin included. An admin who needs to act on somebody they
+  // are not sharing a channel with has the account-level mute, which belongs
+  // to no conversation and therefore needs no membership.
+
+  // A system line: stored in the conversation (§3.1's "carries system lines")
+  // and delivered live with the same `system` marker History returns, so a
+  // moderation notice does not read as ordinary chat until the page is
+  // reloaded.
+  auto emitChatSystemLine = [&](ChatScope scope, const std::string &target,
+                                const std::vector<int64_t> &recipients,
+                                const std::string &text) {
+    const int64_t ts = static_cast<int64_t>(std::time(nullptr));
+    const int64_t id =
+        Chat::Append(mapDb, scope, target, 0, "", text, ts, /*system=*/true);
+    nlohmann::json ev;
+    ev["id"] = id;
+    ev["scope"] = ChatScopeToString(scope);
+    ev["target"] = target;
+    ev["from"] = "";
+    ev["fromId"] = 0;
+    ev["text"] = text;
+    ev["ts"] = ts;
+    ev["system"] = true;
+    // NOT ignore-filtered: a system line has no sender to ignore, and the
+    // channel telling you what happened to it is not somebody talking.
+    net.SendSSETo(chatStreamChannel, recipients, ev.dump(), "chat");
+  };
+
+  // POST /api/chat/mute — { username, scope?, target?, seconds?, reason?, on? }
+  //
+  // No `scope` means the account-level mute (§3.4's "timed/permanent mutes
+  // stored on the account"); a scope means that one conversation. No
+  // `username` means "list the mutes in force", because "who is muted" and
+  // "mute this person" are the same object — the same shape /api/chat/ignore
+  // already uses.
+  net.AddHttpPost(
+      "/api/chat/mute", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto caller = db.FindUserById(userId);
+        const bool callerIsAdmin = caller && caller->role == "admin";
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json in =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (in.is_discarded() || !in.is_object())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+        const std::string name = in.value("username", "");
+        const std::string scopeWord = in.value("scope", "");
+
+        if (name.empty()) {
+          // The read path is the operator's, so it is the operator's alone:
+          // the list names accounts and reasons, which is moderation record,
+          // not chat.
+          if (!callerIsAdmin)
+            return HttpAuth::JsonResponse(403, R"({"error":"admin only"})");
+          nlohmann::json out = nlohmann::json::array();
+          for (const auto &m : Chat::Mutes(mapDb, now)) {
+            nlohmann::json mj;
+            mj["account_id"] = m.accountId;
+            if (auto u = db.FindUserById(m.accountId)) mj["username"] = u->username;
+            mj["scope"] = m.scopeKey.empty() ? "account" : m.scopeKey;
+            mj["until"] = m.until;
+            mj["permanent"] = m.Permanent();
+            mj["reason"] = m.reason;
+            mj["by"] = m.byName;
+            mj["created_at"] = m.createdAt;
+            out.push_back(std::move(mj));
+          }
+          return HttpAuth::JsonResponse(200, out.dump());
+        }
+
+        auto subject = db.FindUser(name);
+        if (!subject)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+
+        // Resolve the scope key and the caller's standing in it together: a
+        // room host is an op because of the roster row this same call reads.
+        std::string scopeKey = Chat::GlobalMuteKey();
+        ChatResolution res;
+        bool haveScope = false;
+        if (!scopeWord.empty()) {
+          if (auto bad = resolveChatScope(userId, scopeWord,
+                                          in.value("target", ""), res))
+            return *bad;
+          // A PM is not a channel and has no ops: the tool for a
+          // conversation between two people is the ignore list, and a
+          // moderator who could mute one end of a PM would be reading it.
+          if (res.scope == ChatScope::Pm)
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"a PM has no moderators — use ignore"})");
+          scopeKey = Chat::MuteKey(res.scope, res.target);
+          haveScope = true;
+        }
+
+        const ChatRole role = callerIsAdmin      ? ChatRole::Admin
+                              : res.callerIsRoomHost ? ChatRole::RoomHost
+                                                     : ChatRole::Player;
+        const auto right =
+            ChatCanModerate(scopeKey, role, subject->role == "admin",
+                            subject->id == userId);
+        if (right != ChatModerationRight::Allowed) {
+          nlohmann::json e;
+          e["error"] = ChatModerationRightToString(right);
+          return HttpAuth::JsonResponse(403, e.dump());
+        }
+
+        const bool on = in.value("on", true);
+        const std::string callerName = caller ? caller->username : std::string("admin");
+        if (!on) {
+          const bool lifted = Chat::ClearMute(mapDb, subject->id, scopeKey);
+          db.LogAudit(userId, callerName, "chat_unmute", subject->username,
+                      scopeKey.empty() ? "account" : scopeKey);
+          if (!lifted)
+            return HttpAuth::JsonResponse(
+                404, R"({"error":"no mute in that scope"})");
+          if (haveScope) {
+            emitChatSystemLine(res.scope, res.target, res.recipients,
+                               subject->username + " was unmuted by " + callerName);
+          } else {
+            // The lift is told to the subject for the same reason the mute
+            // is, and the client cannot infer it: an account-level mute with
+            // `until = 0` never expires on a clock, so without this event the
+            // "you are muted" banner would stand for the rest of the session
+            // on an account that is free to speak. Told to nobody else —
+            // announcing a lift is announcing the mute.
+            nlohmann::json ev;
+            ev["scope"] = "notice";
+            ev["muted"] = false;
+            ev["until"] = 0;
+            ev["reason"] = "";
+            ev["by"] = callerName;
+            net.SendSSETo(chatStreamChannel, {subject->id}, ev.dump(), "moderation");
+          }
+          nlohmann::json j;
+          j["ok"] = true;
+          j["username"] = subject->username;
+          j["muted"] = false;
+          return HttpAuth::JsonResponse(200, j.dump());
+        }
+
+        ChatMute m;
+        m.accountId = subject->id;
+        m.scopeKey = scopeKey;
+        const int64_t seconds = in.value("seconds", (int64_t)0);
+        m.until = seconds > 0 ? now + seconds : 0;  // 0 = until lifted
+        m.reason = in.value("reason", "");
+        m.byId = userId;
+        m.byName = callerName;
+        m.createdAt = now;
+        if (!Chat::SetMute(mapDb, m))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store mute"})");
+        db.LogAudit(userId, callerName, "chat_mute", subject->username,
+                    (scopeKey.empty() ? std::string("account") : scopeKey) + " " +
+                        (seconds > 0 ? std::to_string(seconds) + "s"
+                                     : std::string("indefinite")));
+
+        if (haveScope) {
+          emitChatSystemLine(res.scope, res.target, res.recipients,
+                             subject->username + " was muted by " + callerName +
+                                 (seconds > 0 ? " for " + std::to_string(seconds) + "s"
+                                              : ""));
+        } else {
+          // An account-level mute is told to the account and to NOBODY else.
+          // It belongs to no conversation, so there is no channel it could be
+          // filed in — and announcing it in `#main` would make every
+          // moderation action a public event, which is a different policy
+          // than the one §3.4 asks for.
+          nlohmann::json ev;
+          ev["scope"] = "notice";
+          ev["muted"] = true;
+          ev["until"] = m.until;
+          ev["reason"] = m.reason;
+          ev["by"] = callerName;
+          net.SendSSETo(chatStreamChannel, {subject->id}, ev.dump(), "moderation");
+        }
+
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = subject->username;
+        j["muted"] = true;
+        j["until"] = m.until;
+        j["scope"] = scopeKey.empty() ? "account" : scopeKey;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/kick — { channel, username, seconds? }
+  //
+  // §3.4's "kick from channel". Named channels only: `#main` cannot be left
+  // (see /api/chat/channel), so there is nothing to eject anybody from, and a
+  // room's ejection verb is /api/rooms/kick — a player removed from a room
+  // channel but still seated would be in a war they cannot talk to.
+  net.AddHttpPost(
+      "/api/chat/kick", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto caller = db.FindUserById(userId);
+        const bool callerIsAdmin = caller && caller->role == "admin";
+        nlohmann::json in =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (in.is_discarded() || !in.is_object())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+        const std::string channel =
+            Chat::NormalizeChannel(in.value("channel", ""));
+        if (channel.empty() || channel == Chat::MainTarget())
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"kick applies to a named channel"})");
+        auto subject = db.FindUser(in.value("username", ""));
+        if (!subject)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+
+        const std::string scopeKey = Chat::MuteKey(ChatScope::Channel, channel);
+        const auto right = ChatCanModerate(
+            scopeKey, callerIsAdmin ? ChatRole::Admin : ChatRole::Player,
+            subject->role == "admin", subject->id == userId);
+        if (right != ChatModerationRight::Allowed) {
+          nlohmann::json e;
+          e["error"] = ChatModerationRightToString(right);
+          return HttpAuth::JsonResponse(403, e.dump());
+        }
+        if (!gChatChannels.IsMember(subject->id, channel))
+          return HttpAuth::JsonResponse(
+              404, R"({"error":"that player is not in the channel"})");
+
+        // The mute is what makes the kick stick — /api/chat/channel refuses
+        // the re-join while it is in force. Written BEFORE the eject so the
+        // window in which a client could rejoin does not exist.
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        const int64_t seconds = in.value("seconds", kChatKickMuteSec);
+        const std::string callerName = caller ? caller->username : std::string("admin");
+        ChatMute m;
+        m.accountId = subject->id;
+        m.scopeKey = scopeKey;
+        m.until = now + (seconds > 0 ? seconds : kChatKickMuteSec);
+        m.reason = in.value("reason", "kicked from #" + channel);
+        m.byId = userId;
+        m.byName = callerName;
+        m.createdAt = now;
+        if (!Chat::SetMute(mapDb, m))
+          return HttpAuth::JsonResponse(500, R"({"error":"could not store mute"})");
+        gChatChannels.Leave(subject->id, channel);
+        db.LogAudit(userId, callerName, "chat_kick", subject->username,
+                    channel + " " + std::to_string(m.until - now) + "s");
+
+        // The channel is told AFTER the eject, so the ejected client is not
+        // among the recipients of the line about itself.
+        emitChatSystemLine(ChatScope::Channel, channel,
+                           gChatChannels.Members(channel),
+                           subject->username + " was kicked from #" + channel +
+                               " by " + callerName);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["username"] = subject->username;
+        j["channel"] = channel;
+        j["until"] = m.until;
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
+
+  // POST /api/chat/broadcast — { text }
+  //
+  // §3.4's "admin broadcast lines". `#main` is the one channel §3.1 makes
+  // everyone a member of and /api/chat/channel refuses to let anybody leave,
+  // which is exactly why the broadcast lands there: it is the only scope a
+  // client cannot opt out of hearing.
+  net.AddHttpPost(
+      "/api/chat/broadcast", RouteAuth::AdminOnly,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = 0;
+        std::string callerName;
+        if (auto e = requireLobbyAdmin(headers, userId, callerName))
+          return *e;
+        std::string text, err;
+        if (!Chat::ValidateText(HttpAuth::JsonField(body, "text"), text, err))
+          return HttpAuth::JsonResponse(400, "{\"error\":\"" + err + "\"}");
+        if (callerName.empty()) callerName = "admin";
+        // Named in the line rather than only in the audit row: a server
+        // announcement with nobody's name on it is indistinguishable from a
+        // client that made one up.
+        const std::string line = callerName + ": " + text;
+        const auto recipients = gChatChannels.Members(Chat::MainTarget());
+        emitChatSystemLine(ChatScope::Main, Chat::MainTarget(), recipients, line);
+        db.LogAudit(userId, callerName, "chat_broadcast", "main", text);
+        nlohmann::json j;
+        j["ok"] = true;
+        j["delivered"] = recipients.size();
+        return HttpAuth::JsonResponse(200, j.dump());
+      });
 
   // POST /api/rooms/join — join a room
   net.AddHttpPost(
@@ -3551,9 +6574,49 @@ int main(int argc, char *argv[]) {
         std::string password = j.value("password", "");
         bool asSpectator = j.value("as_spectator", false);
 
+        // The account's faction decides the side (D40) — RoomManager does the
+        // deciding, this path just supplies the datum it never had.
         if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0,
-                            user->username, password, asSpectator))
+                            user->username, password, asSpectator,
+                            user->factionId.value_or("")))
           return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
+
+        // PLAN-metalstorm-lobby.md §5.2/§5.3, task 3 — resume on join. A war
+        // is not hosted: nobody presses Start Game for it, and after a lobby
+        // restart (or a server that died with nobody watching) the room is
+        // held rather than recycled, so there is no host action left that
+        // could bring it back. The player walking up to it is the trigger.
+        //
+        // PLAN-persistence task 3b: the respawn now carries the WORLD. If the
+        // store holds a snapshot for this room the server comes up with
+        // `--resume` and the war is where the players left it; without one it
+        // launches from frame 0 exactly as before, and the log says which of
+        // the two happened. `warresume::PlanJoin` owns the choice — including
+        // the E5 case, where a second joiner arriving mid-respawn is told to
+        // wait on the same `resuming` state instead of forking a rival sim.
+        if (auto *joined = rooms.GetRoom(roomId)) {
+          const auto facts = warFactsFor(*joined);
+          const auto plan = warresume::PlanJoin(joined->sessionKind, facts);
+          if (plan.action == warresume::WarJoinAction::Spawn) {
+            if (auto refusal = gameServerSpawnRefusal(roomId))
+              return *refusal;
+            rooms.SetRoomState(roomId, ERoomState::Loading);
+            // The plan's `withResume` is what this line REPORTS;
+            // spawnServerForRoom re-reads the store and is what actually
+            // happens. They can only differ if a prune lands between the two
+            // reads, and the honest outcome then is the spawn's, not the log's.
+            // A dropped world is a WARNING, not a notice: the frames are gone
+            // and this line is the only record of which ones (task 3c).
+            SLOG(plan.blockedReason.empty() ? SPRING_LOG_NOTICE
+                                            : SPRING_LOG_WARNING,
+                 "war room %u: %s for '%s'", roomId,
+                 warresume::Describe(plan).c_str(), user->username.c_str());
+            spawnServerForRoom(*joined, userId, "war_resume");
+          } else if (joined->sessionKind == SessionKind::PersistentWar) {
+            SLOG(SPRING_LOG_INFO, "war room %u: join by '%s' — %s", roomId,
+                 user->username.c_str(), warresume::Describe(plan).c_str());
+          }
+        }
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
@@ -3662,6 +6725,26 @@ int main(int argc, char *argv[]) {
             j.contains("team") && j["team"].is_string()
                 ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
                 : (uint8_t)j.value("team", 0);
+        // A faction is a permanent allegiance, so it has to hold against the
+        // player's own dropdown too — otherwise D40's seating fix is undone by
+        // the next click and the "permanent" claim is decoration. Refused
+        // here, at the route where a HUMAN chooses, rather than in
+        // RoomManager::SetTeam: that call stays deliberately permissive
+        // because `/api/rooms/direct` manifests seat NPCs (and real accounts)
+        // on teams no side declares, and §7.4's escape hatch is load-bearing
+        // for the test vehicles.
+        const RoomPlayer *self = room->FindPlayer(static_cast<uint32_t>(userId));
+        if (self != nullptr) {
+          if (const auto sideTeam = room->TeamForFaction(self->factionId)) {
+            if (team != *sideTeam)
+              return HttpAuth::JsonResponse(
+                  403, "{\"error\":\"you fight for " +
+                           HttpAuth::JsonEscape(self->factionId) +
+                           "\",\"team\":" +
+                           std::to_string(static_cast<unsigned>(*sideTeam)) +
+                           "}");
+          }
+        }
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -3715,15 +6798,33 @@ int main(int argc, char *argv[]) {
             j.contains("pos") && j["pos"].is_string()
                 ? (int8_t)std::atoi(j["pos"].get<std::string>().c_str())
                 : (int8_t)j.value("pos", 0);
-        // Find the target player — default to self
-        uint32_t target =
-            j.contains("target_player_id") && j["target_player_id"].is_string()
-                ? (uint32_t)std::atoi(
-                      j["target_player_id"].get<std::string>().c_str())
-                : (uint32_t)j.value("target_player_id",
-                                    static_cast<uint32_t>(userId));
-        rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target,
-                                pos, 6);
+        // An AI slot is a distinct kind of target, not a player id, so it gets
+        // read first: the client's `startpos-select` for an AI row sends
+        // `target_ai_slot` and no `target_player_id`, and this route used to
+        // parse only the latter. Since `target_player_id` defaults to the
+        // caller, "move AI slot 0" silently became "move my own start
+        // position" — the host's seat jumped and the AI never moved
+        // (PLAN-endtoend D63). `protocol_generated.h`'s RoomSetStartPos has
+        // documented `target_ai_slot >= 0: target that AI slot, host only`
+        // all along; only this HTTP path never honoured it.
+        const int aiSlot =
+            j.contains("target_ai_slot") && j["target_ai_slot"].is_string()
+                ? std::atoi(j["target_ai_slot"].get<std::string>().c_str())
+                : j.value("target_ai_slot", -1);
+        if (aiSlot >= 0) {
+          rooms.SetAIStartPos(room->id, static_cast<uint32_t>(userId),
+                              static_cast<uint8_t>(aiSlot), pos, 6);
+        } else {
+          // Find the target player — default to self
+          uint32_t target =
+              j.contains("target_player_id") && j["target_player_id"].is_string()
+                  ? (uint32_t)std::atoi(
+                        j["target_player_id"].get<std::string>().c_str())
+                  : (uint32_t)j.value("target_player_id",
+                                      static_cast<uint32_t>(userId));
+          rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId),
+                                  target, pos, 6);
+        }
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });
@@ -3897,18 +6998,6 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });
 
-  // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
-  // spring-server. The host-only check (delegated to RoomManager::StartGame)
-  // already scopes *who* may start *which* room, but nothing bounded the
-  // fork/exec rate or the total live process count — an authenticated user
-  // could loop create→start and fork-bomb the host. Two bounds:
-  //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
-  //   - a hard ceiling on concurrent live game servers.
-  // Both apply in dev and prod (a spawn is expensive regardless of build).
-  static TokenBucket roomSpawnLimiter(/*burst=*/10.0,
-                                      /*perSecond=*/10.0 / 60.0);
-  constexpr size_t kMaxConcurrentGameServers = 64;
-
   // POST /api/rooms/start — start the game
   net.AddHttpPost(
       "/api/rooms/start", RouteAuth::TokenRequired,
@@ -3922,23 +7011,8 @@ int main(int argc, char *argv[]) {
         // Fork-bomb brakes (G10), evaluated before any state mutation. Count
         // only genuinely-alive servers so ended/crashed rooms don't wedge the
         // cap.
-        {
-          size_t aliveServers = 0;
-          for (const auto &[rid, gi] : gameServers)
-            if (gi.pid > 0 && isProcessAlive(gi.pid))
-              ++aliveServers;
-          if (aliveServers >= kMaxConcurrentGameServers) {
-            SLOG(SPRING_LOG_WARNING,
-                 "room %u start refused: %zu/%zu game servers already live",
-                 room->id, aliveServers, kMaxConcurrentGameServers);
-            return HttpAuth::JsonResponse(
-                503,
-                R"({"error":"server capacity reached — try again shortly"})");
-          }
-        }
-        if (!roomSpawnLimiter.TryConsume())
-          return HttpAuth::JsonResponse(
-              429, R"({"error":"game-start rate limit exceeded"})");
+        if (auto refusal = gameServerSpawnRefusal(room->id))
+          return *refusal;
 
         // Auto-add a Null AI if every participant ends up on the same
         // team. Without an opposing ally, ZK's game_over.lua trips its
@@ -3978,72 +7052,34 @@ int main(int argc, char *argv[]) {
           }
         }
 
-        if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
-          return HttpAuth::JsonResponse(400,
-                                        R"({"error":"cannot start game"})");
-
-        // Last line of defence before the game server forks: say out loud
-        // whether the war we are about to spawn can ever finish
-        // (PLAN-endtoend.md D10). Deliberately does NOT back-fill a missing
-        // scenario here — applyRoomScenario at create time is the single
-        // owner of that decision, and silently overturning a host's choice at
-        // start is the same "chosen behind your back" property the design
-        // call rejected. Rooms created before this change (and persistent
-        // rooms restored from the DB) surface here as the warning.
-        warnIfWarCannotEnd(room);
-
-        // Give every still-unassigned slot a distinct map start position
-        // before spawning the game server. AutoAssignStartPositions skips
-        // slots that already picked a position (via /api/rooms/startpos)
-        // and no-ops on maps with no start positions (the sim then falls
-        // back to its map-centre default). This call was written for the
-        // start path but never wired in — without it every slot stays at
-        // startPos=-1, the sim spawns ALL teams at map centre, and enemy
-        // commanders overlap and immediately fight to a premature GameOver.
-        {
-          MapMetadataDb mdb;
-          const size_t spCount =
-              mdb.GetMap(mapDb, room->mapId).startPositions.size();
-          const int8_t maxStartPos =
-              static_cast<int8_t>(spCount > 127 ? 127 : spCount);
-          rooms.AutoAssignStartPositions(room->id, maxStartPos);
+        if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId))) {
+          // Say WHY. RoomManager::StartGame folds four distinct refusals
+          // into one bool, and the generic "cannot start game" that used to
+          // be returned here was the whole of the player's feedback — the
+          // client discarded it too, so pressing Start Game with an unready
+          // player in the room did nothing at all and said nothing at all
+          // (PLAN-endtoend.md D41, found fire 19). The commonest case by far
+          // is the host's own Ready: AllReady() counts the host like anyone
+          // else, so a host who adds an AI and presses Start is refused.
+          std::string reason =
+              room->StartRefusalReason(static_cast<uint32_t>(userId));
+          if (reason.empty())
+            reason = "cannot start game";
+          SLOG(SPRING_LOG_INFO, "room %u start refused: %s", room->id,
+               reason.c_str());
+          return HttpAuth::JsonResponse(
+              400, R"({"error":")" + HttpAuth::JsonEscape(reason) + R"("})");
         }
 
-        // Verify game exists before spawning
-        auto it = gamePathsById.find(room->gameId);
-
-        if (it != gamePathsById.end()) {
-          const auto vit = gameVersionsById.find(room->gameId);
-          const std::string &gameVer =
-              (vit != gameVersionsById.end()) ? vit->second : std::string();
-          // Skip ports currently held by live spring-server processes.
-          // Without this, the new game-server binds via SO_REUSEPORT
-          // alongside the old one and incoming client connections
-          // round-robin between the two — see findFreePort comment.
-          std::unordered_set<int> busyPorts;
-          for (const auto &[rid, gi] : gameServers) {
-            if (gi.pid > 0 && isProcessAlive(gi.pid)) {
-              busyPorts.insert(gi.port);
-            }
-          }
-          auto inst = spawnGameServer(
-              room->id, room->gameId, gameVer, room->mapId, dbPath,
-              room->players, room->aiSlots, room->modOptions, busyPorts,
-              devBuildAcknowledged, wtCertPath, wtKeyPath);
-          gameServers[room->id] = inst;
-          persistGameServer(inst);
-          room->gameServerPort = inst.port;
-          // Audit the process spawn (G10 / §3): who started which game/map on
-          // what port. Append-only admin_audit row.
-          {
-            auto starter = db.FindUserById(userId);
-            db.LogAudit(userId, starter ? starter->username : std::string("?"),
-                        "room_start", room->gameId,
-                        "room=" + std::to_string(room->id) + " map=" +
-                            room->mapId + " port=" + std::to_string(inst.port) +
-                            " pid=" + std::to_string(inst.pid));
-          }
-        }
+        // Everything from here — the can-this-war-end warning, start
+        // positions, the fork itself, the `game_servers` row and the audit
+        // entry — is shared with the war-resume path (task 3), so the two
+        // cannot drift apart. Deliberately does NOT back-fill a missing
+        // scenario: applyRoomScenario at create time is the single owner of
+        // that decision, and silently overturning a host's choice at start is
+        // the same "chosen behind your back" property the design call
+        // rejected.
+        spawnServerForRoom(*room, userId, "room_start");
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -4429,19 +7465,10 @@ int main(int argc, char *argv[]) {
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
   int errorPruneTick = 0;
-  while (keepRunning.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Prune expired crash reports ~hourly at 10 Hz. Cheap (one indexed
-    // DELETE on created_at) and idempotent, so a no-op hour costs nothing.
-    if (++errorPruneTick >= 36000) {
-      errorPruneTick = 0;
-      const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
-      if (pruned > 0)
-        SLOG(SPRING_LOG_NOTICE,
-             "pruned %d client error report(s) older than %d days", pruned,
-             clientErrorRetentionDays);
   int sessionSweepTick = 0;
+  /// War-browser refresh cadence (task 6) — see the tick below for why a war
+  /// needs one and a room does not.
+  int warBroadcastTick = 0;
   // PLAN-long-uptime task 3 (§3): the durable record of a growth alarm.
   // Per-room, the set of alarm labels this lobby has already written an audit
   // row for. The fleet view already *shows* live alarms off the same JSON;
@@ -4456,8 +7483,125 @@ int main(int argc, char *argv[]) {
   // (unordered_map, not map: `rts/Map/` shadows the `<map>` header on macOS.)
   int alarmScanTick = 0;
   std::unordered_map<int, std::set<std::string>> knownRoomAlarms;
+  // PLAN-metalstorm-wars.md §4, task 2: the side-sizing / underdog sweep.
+  int warSideMaintenanceTick = 0;
+  // §7, task 4: the meta-state machine's driver.
+  int warLifecycleTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Maintain every live war's sides (~every 30 s at 10 Hz). Two rules, both
+    // §4's, and both of which need a clock rather than an event: a cap is
+    // raised because a side has been full for a while, and the underdog flag
+    // follows a population that changes when the game server writes a binding
+    // — a write this process is not notified of.
+    //
+    // 30 s is chosen against the thing it feeds: the flag routes the NEXT
+    // volunteer (Deploy's ranking) and pays their join grant, so it has to be
+    // fresh on the scale of somebody clicking Deploy, not of a war ending.
+    if (++warSideMaintenanceTick >= 300) {
+      warSideMaintenanceTick = 0;
+      const int64_t now = static_cast<int64_t>(std::time(nullptr));
+      // Lapsed reservations are already not counted anywhere (expiry is read
+      // at query time); this only keeps the table from growing for the life of
+      // the db.
+      WarSlotReservations::ReleaseExpired(mapDb, now);
+      for (const auto &war : WarDirector::ListLive(mapDb)) {
+        WarSizingLimits limits;
+        // The map limit §4 says a raise must stay within, supplied by the only
+        // code that has it: `war_sides` deliberately does not know the map,
+        // and the room does — its `maxPlayers` is the seat count this theatre
+        // was actually opened with. `spawnedSlotCap` (the size of the running
+        // server's player arrays) is filled from the `wars` row.
+        if (const auto *room = rooms.GetRoom(war.roomId))
+          limits.mapSlotLimit = room->maxPlayers;
+        const auto r = MaintainWarSides(mapDb, war.roomId, limits, now);
+        if (r.capsRaised > 0 || r.flagsChanged > 0)
+          SLOG(SPRING_LOG_NOTICE,
+               "war %u: %u side cap(s) raised, %u incentive flag(s) changed",
+               war.roomId, r.capsRaised, r.flagsChanged);
+      }
+    }
+
+    // Advance every live war's meta-state (~every 5 s at 10 Hz) —
+    // PLAN-metalstorm-wars.md §7, task 4. This is the half §7.2 explicitly
+    // left to the Director: "the lobby still lists a finished room as In
+    // Progress ... that is the Director's half (task 1/4)". The game server
+    // now records its ending in `war_outcome` and exits; nothing was reading
+    // that.
+    //
+    // 5 s, not the 30 s the side sweep uses, because the chain is walked one
+    // link per pass (`NextWarState`) and there are three of them between a
+    // declared win and an archived war. At 30 s a finished war would keep
+    // advertising itself for a minute and a half; at 5 s the browser catches
+    // up inside the sim's own 10 s wind-down beat. The cost of a pass over an
+    // idle population is one indexed read per war and no transaction —
+    // `AdvanceWarLifecycle` returns early when nothing moved.
+    if (++warLifecycleTick >= 50) {
+      warLifecycleTick = 0;
+      const int64_t now = static_cast<int64_t>(std::time(nullptr));
+      for (const auto &war : WarDirector::ListLive(mapDb)) {
+        WarTerminationFacts facts;
+        // The sim's declaration. The DURABLE row is the signal, not the
+        // perishable summary: the game server exits a few minutes after
+        // declaring the result (§7.2's --postgame-exit-seconds) and its
+        // summary is dropped as stale half a minute later, so a lobby that
+        // was down for a maintenance restart would otherwise miss the ending
+        // entirely and leave the war live forever.
+        if (WarOutcomeDb::HasOutcome(mapDb, war.roomId))
+          facts.simWarState = "over";
+
+        // The foothold census and the live-human count both come off the
+        // summary, and both are absent for a hibernated war — which is
+        // exactly right. A frozen war ends for no reason at all: the census
+        // is unusable (so elimination is inert) and `hasLiveHumans` is false
+        // (so nothing is promoted). teams §4.5 as corrected by review §A8.
+        bool hasLiveHumans = false;
+        WarSummary live;
+        if (warSummaryFor(war.roomId, live)) {
+          // `wars.last_active_frame` had a store and a test and no production
+          // writer at all, so it read 0 for every war ever seeded (D3). The
+          // summary heartbeat is where the frame arrives, and this sweep is
+          // already reading it. Monotonic in the store, so a resumed war whose
+          // sim restarts at 0 cannot make the column go backwards.
+          if (live.frame > 0)
+            WarDirector::TouchActivity(mapDb, war.roomId, live.frame, now);
+          facts.footholdsKnown = live.footholdsKnown;
+          for (const auto &side : live.sides) {
+            if (side.humans > 0) hasLiveHumans = true;
+            if (live.footholdsKnown)
+              facts.footholds.push_back({side.faction, side.footholds});
+          }
+        }
+        facts.warSeasonId = war.seasonId;
+        // NOT WIRED YET, and deliberately visible as such rather than
+        // silently absent: `operatorRetire` needs a live-ops verb (a GmVerbs
+        // entry) and `currentSeasonId` needs a season the lobby is
+        // configured with. Neither exists, so both stay empty/false — which
+        // the rule reads as "no seasons configured, nobody pressed retire",
+        // the correct answer for this deployment rather than a default
+        // standing in for a missing one.
+
+        const auto step =
+            AdvanceWarLifecycle(mapDb, war.roomId, facts, hasLiveHumans, now);
+        if (!step) continue;
+        SLOG(SPRING_LOG_NOTICE, "war %u: %s -> %s (%s)%s", war.roomId,
+             WarStateToString(step->from), WarStateToString(step->to),
+             WarTerminalReasonToString(step->reason),
+             step->archived ? " — archived, digest emitted" : "");
+      }
+    }
+
+    // Prune expired crash reports ~hourly at 10 Hz. Cheap (one indexed
+    // DELETE on created_at) and idempotent, so a no-op hour costs nothing.
+    if (++errorPruneTick >= 36000) {
+      errorPruneTick = 0;
+      const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
+      if (pruned > 0)
+        SLOG(SPRING_LOG_NOTICE,
+             "pruned %d client error report(s) older than %d days", pruned,
+             clientErrorRetentionDays);
+    }
 
     // Scan for growth-alarm transitions (~every 60 s at 10 Hz). Matched to the
     // game server's own metric cadence deliberately: the scan only ever looks
@@ -4505,7 +7649,7 @@ int main(int argc, char *argv[]) {
     // `sessions` then grew one row per login for the lifetime of the process.
     if (haveMaintenanceDb && ++sessionSweepTick >= 36000) {
       sessionSweepTick = 0;
-      const int swept = maintenanceDb.CleanExpiredSessions(86400);
+      const int swept = maintenanceDb.CleanExpiredSessions(AuthTokens::kAccessTtlSeconds);
       if (swept > 0)
         SLOG(SPRING_LOG_INFO, "swept %d expired session(s)", swept);
 
@@ -4521,6 +7665,66 @@ int main(int argc, char *argv[]) {
       if (audit > 0 || errs > 0)
         SLOG(SPRING_LOG_INFO, "swept %d audit + %d client-error row(s)", audit,
              errs);
+
+      // PLAN-metalstorm-lobby.md task 8c: abandoned guest accounts, on the
+      // same cadence and the same connection. `POST /api/auth/guest` is the
+      // one route in the app that mints an account with nothing presented, so
+      // without this it is `users` that grows for the life of the deployment
+      // — the exact shape T2a-4 above closed for the other three tables.
+      //
+      // Deletes only a guest who never upgraded, has not been seen for 30
+      // days AND holds no war binding: a guest who took a seat owns durable
+      // per-player state in a world that may still be running, and the row is
+      // the only thing that can give it back to them.
+      const int guests =
+          GuestAccounts::PruneAbandoned(maintenanceDb.Handle(),
+                                        static_cast<int64_t>(std::time(nullptr)));
+      if (guests > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d abandoned guest account(s)", guests);
+
+      // Task 9a: friend edges whose other end the sweep above just deleted.
+      // Ordered AFTER the guest prune deliberately — running it first would
+      // leave this fire's own deletions dangling until the next hour. The
+      // guest sweep has no idea this table exists (and should not: it deletes
+      // accounts, not social graphs), so the cleanup belongs here.
+      const int edges = Friends::PruneOrphans(maintenanceDb.Handle());
+      if (edges > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d orphaned friend edge(s)", edges);
+
+      // Task 9b: §3.3's retention. `#main` is a ring buffer, named channels
+      // keep a month, and room channels are reaped by DeleteRoomFromDb — what
+      // this catches there is rows whose room went away without one (a lobby
+      // killed mid-room). PMs are kept; see Chat::Prune.
+      const int chat = Chat::Prune(maintenanceDb.Handle(),
+                                   static_cast<int64_t>(std::time(nullptr)));
+      if (chat > 0)
+        SLOG(SPRING_LOG_INFO,
+             "swept %d chat row(s) past retention (messages + served mutes)",
+             chat);
+    }
+
+    // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).
+    //
+    // PLAN-metalstorm-lobby.md §4, task 6. Every other broadcast in this file
+    // fires on a room MUTATION, which is the right rule for a room: nothing
+    // about a lobby room changes unless somebody changes it. A war is the
+    // opposite — its populations, its spectator count and its region control
+    // all move without anyone touching the room row, and the game server
+    // republishes them every 2s. Without this tick the browser would show a
+    // war's opening minute until somebody happened to create a room.
+    //
+    // Gated on a war existing so a lobby serving only skirmishes keeps its
+    // old mutation-only cadence and costs nothing.
+    if (++warBroadcastTick >= 50) {
+      warBroadcastTick = 0;
+      bool anyWar = false;
+      for (const auto *r : rooms.GetAllRooms())
+        if (r && r->sessionKind == SessionKind::PersistentWar) {
+          anyWar = true;
+          break;
+        }
+      if (anyWar)
+        broadcastRooms();
     }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
@@ -4564,10 +7768,54 @@ int main(int argc, char *argv[]) {
             continue;
           }
 
+          // A war's exit is classified, not just noted (PLAN-persistence task
+          // 3b). Two exits look identical from here — the pid is gone either
+          // way — and they mean opposite things to the next joiner:
+          //
+          //   * it checkpointed on the way out → 'hibernated', frozen at a
+          //     frame, and `--resume` hands the war back intact;
+          //   * it died without one → 'crashed', and whatever it had simulated
+          //     since the last snapshot is gone.
+          //
+          // The store's newest label is the evidence, NOT the exit status: on a
+          // debug build the pre-existing `~DynDamageArray` assert makes every
+          // exit report 134 (task 3a's field note), so a code-based verdict
+          // would call every clean hibernation a crash.
+          if (auto *war = rooms.GetRoom(roomId);
+              war && war->sessionKind == SessionKind::PersistentWar) {
+            const auto snap =
+                warresume::LatestSnapshot(mapDb, war->gameId, roomId);
+            inst.pid = 0;  // no process; keeps every isProcessAlive() honest
+            inst.port = 0; // the port went back to the pool with the process —
+                           // a row still naming it would send a tool at a port
+                           // the next room may already hold
+            inst.state = snap.fromHibernation ? GameServerInstance::Hibernated
+                                              : GameServerInstance::Crashed;
+            // Re-record the row removeGameServer() just dropped, so the fleet
+            // view lists a frozen war instead of losing it. game_status stays
+            // deleted — nothing about this room is ready.
+            persistGameServer(inst);
+            if (snap.fromHibernation)
+              SLOG(SPRING_LOG_NOTICE,
+                   "war room %u hibernated — frozen at frame %d (%s); the next "
+                   "join resumes it",
+                   roomId, snap.frame, snap.label.c_str());
+            else {
+              const std::string fallback =
+                  snap.has ? " (resumable from the older frame " +
+                                 std::to_string(snap.frame) + ")"
+                           : " and has no snapshot history at all";
+              SLOG(SPRING_LOG_WARNING,
+                   "war room %u CRASHED — its server left no exit checkpoint%s",
+                   roomId, fallback.c_str());
+            }
+          }
+
           // Recycle the room: transition back to Filling,
           // clear ready flags, zero gameServerPort, drop
-          // reconnection roster.
-          rooms.ResetRoomForNextGame(roomId);
+          // reconnection roster — unless it is a war, which keeps its state
+          // and is resumed by the next joiner (task 3).
+          onOrphanedRoom(roomId, "its game server exited");
           broadcastRooms();
           continue;
         }
@@ -4630,12 +7878,30 @@ int main(int argc, char *argv[]) {
 
   SLOG(SPRING_LOG_NOTICE, "shutting down...");
 
-  // Kill any running game servers
+  // Kill any running game servers — except the wars (PLAN-metalstorm-lobby.md
+  // §5.3, task 3). A persistent war is *supposed* to outlive the people in it,
+  // and this loop was the one end-on-empty path that killed one: the room
+  // abandon is gated on `persistent` and the server's own idle exit is gated
+  // on the session kind, but "the lobby restarted" tore the war down with the
+  // skirmishes. Leaving the process alive is also the only lossless resume
+  // that exists today — the startup adoption pass re-attaches by pid and the
+  // sim never stopped, whereas a respawn starts the world again at frame 0
+  // (§5.4 / PLAN-persistence owns snapshots; creg is stubbed out).
   for (auto &[roomId, inst] : gameServers) {
-    if (isProcessAlive(inst.pid)) {
-      kill(inst.pid, SIGTERM);
-      SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
+    if (!isProcessAlive(inst.pid))
+      continue;
+    const auto *room = rooms.GetRoom(roomId);
+    const SessionKind kind = room ? room->sessionKind : SessionKind::Skirmish;
+    if (ActionOnLobbyExit(kind, killWarsOnExit) ==
+        LobbyExitAction::LeaveRunning) {
+      SLOG(SPRING_LOG_NOTICE,
+           "left war room=%u (pid %d, port %d) running — it is adopted on the "
+           "next lobby start",
+           roomId, inst.pid, inst.port);
+      continue;
     }
+    kill(inst.pid, SIGTERM);
+    SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
   }
 
   net.Stop();

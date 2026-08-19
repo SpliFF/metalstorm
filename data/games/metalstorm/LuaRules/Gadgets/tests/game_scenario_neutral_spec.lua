@@ -27,6 +27,7 @@ local function newWorld(opts)
     local world = {
         createdUnits = {},      -- { def, team, x, z }
         orders = {},            -- { unitID, cmd }
+        neutralFlags = {},      -- unitID -> Spring.SetUnitNeutral flag
         echoes = {},
         gameRulesParams = {},
         teams = opts.teams or { 0, 1, 2, GAIA },
@@ -63,6 +64,9 @@ local function newWorld(opts)
         end,
         GiveOrderToUnit = function(unitID, cmd)
             world.orders[#world.orders + 1] = { unitID = unitID, cmd = cmd }
+        end,
+        SetUnitNeutral = function(unitID, flag)
+            world.neutralFlags[unitID] = flag
         end,
         SetTeamRulesParam = function() end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
@@ -212,6 +216,43 @@ describe("game_scenario `team = 'neutral'` (scenariogen §8)", function()
         g:GameFrame(60)
         assert.are.equal(0, world.gameRulesParams['war_units_unordered'])
         assert.are.equal(0, world.gameRulesParams['war_teams_unstaged'])
+    end)
+
+    it("marks Gaia set dressing NEUTRAL so a FIGHT column will not divert into it", function()
+        -- endtoend D53. Gaia is its own ally team with no allies, which is this
+        -- engine's definition of HOSTILE, so before this every neutral town was
+        -- a legitimate auto-target: measured on `crossing_standoff`, the union
+        -- army spent frames 2307-4104 levelling a settlement 202 elmos off its
+        -- own approach and reached the prize 2976 frames after the other side.
+        -- CWeapon::AutoTarget skips a neutral below FIRESTATE_FIREATNEUTRAL and
+        -- MobileCAI will not chase one, so this is the whole fix.
+        local world, g = newWorld({ scenario = scenario() })
+        g:GameStart()
+        local gaiaSeen = 0
+        for unitID, u in ipairs(world.createdUnits) do
+            if u.team == GAIA then
+                gaiaSeen = gaiaSeen + 1
+                assert.is_true(world.neutralFlags[unitID] == true)
+            else
+                -- A player's army must stay shootable.
+                assert.is_nil(world.neutralFlags[unitID])
+            end
+        end
+        assert.are.equal(3, gaiaSeen)
+    end)
+
+    it("marks the `civilians` block's ambient population neutral too", function()
+        -- The ambient entries route through GG.Civilians.Spawn, not stageUnits,
+        -- and they are the set dressing standing NEXT to the buildings — two of
+        -- the five things the union army destroyed in the D53 measurement.
+        local scn = scenario()
+        scn.civilians = { units = {
+            { def = 'ms_civilians', x = 4100, z = 3300, facing = 'south', role = 'ambient' },
+        } }
+        local world, g = newWorld({ scenario = scn })
+        g:GameStart()
+        -- The stubbed GG.Civilians.Spawn hands back unitID 5000.
+        assert.is_true(world.neutralFlags[5000] == true)
     end)
 
     it("staged neutral buildings receive no orders", function()

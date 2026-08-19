@@ -296,8 +296,36 @@ cost real diagnosis time twice:
 
 1. `python3 tools/mapgen/<id>.py` — check the E1 self-check prints all-OK;
    iterate `ELEVATION`/`MARGIN_OVERRIDE` per §2 until it does.
+
+   Regenerating a **shipped** map writes ~20 MB of *tracked* `.smf`/`.smt`
+   into the working tree and takes ~5 minutes. Uncommitted binary content in
+   the main checkout wedges every inplace lane checkout, so a live herd will
+   commit it out from under you — before you have verified anything. Either
+   generate to `/tmp` (`--out`) and move the bytes in as the last act before
+   committing, or pause the herd for the run.
 2. `./build/debug/tools/mapconverter/mapconverter --force content/maps/<id>`
    — confirms the C++ pipeline (including `ExtractRegions`) agrees.
+2b. **Can armour actually cross it?**
+   `python3 tools/mapgen/regions_from_map.py data/maps/<id> --class <C>
+   --verify` for `INFANTRY`, `VEH` **and** `HEAVY`. `--verify` is read-only
+   (it implies `--dry-run` — see the module docstring for why). A `FAIL —
+   start positions split across N disconnected components` is a map that
+   class cannot play, and it is the single most common defect a procedural
+   generator ships: erosion carves straits, and a strait is a line a vehicle
+   cannot cross. Every generated map this repo has shipped has failed it at
+   least once — `skerry_reach` splits 8 starts into 8 components for all
+   three classes.
+
+   `archipelago.py` answers it at generation time instead, with
+   `--connect-starts` (default ON for `--terrain arc`): `terragen.passability`
+   grades the same MoveDef test on the live array, finds the crossing whose
+   deepest point is shallowest by a minimax search, and raises a **submarine
+   sill** along it until VEH and HEAVY can ford. It is not a bridge: a Spring
+   unit drives on the heightmap, so a `features/bridges.lua` span is scenery
+   and does not make the water under it passable. The carve only ever raises
+   and never reaches the surface, so land fraction, island inventory, relief
+   and texture readings cannot move. The generator prints the before/after
+   reading; step 2b is the independent confirmation on the packaged bytes.
 3. Direct-start it for real: launch an isolated `spring-lobby`
    (`--dev-direct-start`, a fresh port) + client (`GAME_SERVER_PORT=<port>
    npx vite dev`), POST `manifests/<id>_direct.json` to
@@ -307,6 +335,18 @@ cost real diagnosis time twice:
    to catch scenario-file bugs (unknown unit defs, bad CMD names, region-key
    typos) — static Lua parsing and the E1 validator don't exercise
    `game_scenario.lua`'s `validate()`/staging path at all.
+
+   The one-URL form does all of that for you:
+   `?direct=/<id>_verify_solo.json`. Two things it will not tell you if you
+   get them wrong. **(a) The path is the document root, not `manifests/`** —
+   `?direct=` fetches its argument verbatim (no name resolution), and vite
+   serves `client/public/`, which is a *mirror* of `manifests/`. A manifest
+   that exists only in `manifests/` SPA-falls-back to `index.html` and the
+   boot dies on `Unexpected token '<'`. Adding a manifest means adding
+   **both** copies. **(b) Use the `_verify_solo` manifest, not `_direct`** —
+   the sim only ticks once every declared player has connected, so a
+   two-player `_direct` manifest driven by one browser sits at `frame=-1`
+   forever and looks like a map failure.
 4. Kill zombie `spring-server` processes on whatever port you used before
    relaunching (`lsof -i :<port>`) — a stale process from an earlier attempt
    silently breaks the next one's WebTransport bind and crashes it.

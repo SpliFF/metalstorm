@@ -60,6 +60,7 @@ local function newWorld(scn)
             return #world.createdFeatures
         end,
         GiveOrderToUnit = function() end,
+        SetUnitNeutral = function() end,   -- Gaia set dressing is marked neutral (D53)
         SetTeamRulesParam = function() end,
         SetGameRulesParam = function(key, value, los)
             world.gameRulesParams[key] = value

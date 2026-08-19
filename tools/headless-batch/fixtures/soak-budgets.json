@@ -1,0 +1,21 @@
+{
+  "rules_params": {
+    "slopePerDay": 25.04,
+    "tolerance": 12.52,
+    "basisSpanDays": 0.265,
+    "why": "Objective and parley params accrue as a war generates objectives, ~10 keys apiece, and task 2b's ring-capped archives (§9.2, 256 per gadget) bound the count. First baseline (PLAN-long-uptime §11, 2026-08-12): 25.0 params/sim-day on a base of 517 over 0.265 sim-day (n=192, r2=0.02 — significant only because the sample error is small). The longer 0.416-sim-day arm then read FLAT (10.6/sim-day inside 2 sigma of 6.1, n=301), which is the plateau this entry predicted: the licence is the war's opening ramp, not a steady state. Kept rather than deleted so a short arm reads too-short instead of unexplained; lower it if a longer ladder confirms flat again. Arms whose wars ended reported 19 754-45 864/sim-day from 5-minute windows and are refused by the span floor."
+  },
+  "unit_ids_used": {
+    "slopePerDay": 960,
+    "tolerance": 480,
+    "basisSpanDays": 0.416,
+    "why": "Live id occupancy in a war whose sides barely die: the fitted slope is IDENTICAL to unit_spawns' (959.93 vs 959.93, r2=1.00 both, over 0.416 sim-day and 301 samples; 960.01 on the independent 0.265-day arm) because the arm peaked at 501 units and buried 33, so SimObjectIDPool recycling is present but unexercised. Budgeted as the observed spawn-dominated rate rather than left red, but it is also this plan's headline number: 960 ids/sim-day against MAX_UNITS=32000 is ~33 simulated days of runway, i.e. inside the weeks-long campaign this plan set exists for, and §7.2/task 6's aliasing-on-recycle risk arrives long before exhaustion. Re-derive once an arm runs with real attrition."
+  },
+  "db_bytes": {
+    "slopePerDay": 37770000,
+    "tolerance": 18890000,
+    "basisSpanDays": 0.0382,
+    "minSpanDays": 0.0215,
+    "why": "WAL churn plus main-file growth, and it sawtooths. server_main.cpp:2500 commits one INSERT OR REPLACE INTO game_status every 2 wall-seconds (the liveness row the lobby reads); each commit appends one 4 kB page-frame to the -wal sidecar, which is 4096 B x 43200 = 176.9 MB/wall-day and is exactly what four 25-minute arms fitted (178-196 MB/wall-day, r2=1.00, identical across contents — a clock, not a game). It is bounded: SQLite's wal_autocheckpoint (1000 pages) folds the WAL back into the main file, measured live 2026-08-12 at 31 wall-minutes (4 MB -> 57 kB; main 4096 B -> 192 512 B) and again in a 55-minute arm's own series (4 086 856 B at wall 1775 s -> 723 832 B at 2109 s). Fitted over 1.8 cycles the rate is 37.8 MB/wall-day at r2=0.17. minSpanDays is one measured checkpoint cycle: an arm shorter than that fits the ramp and must not be ruled at all. The sampler sums main + -wal + -shm on purpose (server_main.cpp:2322) — stat'ing the main file alone reported a dead-flat 4096 bytes for twenty minutes."
+  }
+}

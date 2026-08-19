@@ -211,4 +211,77 @@ return lowerkeys({
 		category     = "ruin",
 	},
 
+	-- climate-scoped props (PLAN-maps M8o). A map package only carries the
+	-- blocks its climate's palette names — terragen.package.filter_defs_lua
+	-- drops the rest — so a temperate map's features/vegetation.lua is
+	-- byte-identical to what shipped before these existed.
+
+	dead_snag = {
+		name         = "Dead snag",
+		description  = "Standing deadwood",
+		object       = "dead_snag.gltf",
+		footprintX   = 2,
+		footprintZ   = 2,
+		height       = 72,
+		radius       = 12,
+		blocking     = true,
+		reclaimable  = true,
+		metal        = 0,
+		energy       = 120,
+		damage       = 260,
+		flammable    = 1,
+		category     = "vegetation",
+	},
+
+	cactus_column = {
+		name         = "Saguaro",
+		description  = "Columnar cactus",
+		object       = "cactus_column.gltf",
+		footprintX   = 2,
+		footprintZ   = 2,
+		height       = 54,
+		radius       = 14,
+		blocking     = true,
+		reclaimable  = true,
+		metal        = 0,
+		energy       = 90,
+		damage       = 200,
+		flammable    = 1,
+		category     = "vegetation",
+	},
+
+	desert_shrub = {
+		name         = "Dry shrub",
+		description  = "Desert scrub",
+		object       = "desert_shrub.gltf",
+		footprintX   = 2,
+		footprintZ   = 2,
+		height       = 16,
+		radius       = 10,
+		blocking     = false,
+		reclaimable  = true,
+		metal        = 0,
+		energy       = 30,
+		damage       = 90,
+		flammable    = 1,
+		category     = "vegetation",
+	},
+
+	palm = {
+		name         = "Palm",
+		description  = "Coastal palm",
+		object       = "palm.gltf",
+		footprintX   = 3,
+		footprintZ   = 3,
+		height       = 86,
+		radius       = 18,
+		blocking     = true,
+		reclaimable  = true,
+		metal        = 0,
+		energy       = 220,
+		damage       = 420,
+		flammable    = 1,
+		category     = "vegetation",
+	},
+
 })

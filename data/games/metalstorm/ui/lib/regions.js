@@ -75,6 +75,7 @@ export function createRegionIndex(geometryJson) {
 
   let regionSize = 0, gridW = 0, gridH = 0;
   const byKey = new Map();
+  const bboxes = new Map();
   let lookupGrid = null;
 
   if (provider === 'grid') {
@@ -82,7 +83,17 @@ export function createRegionIndex(geometryJson) {
     gridW = geometryJson.gridW ?? Math.max(2, Math.ceil(mapWidth / regionSize));
     gridH = geometryJson.gridH ?? Math.max(2, Math.ceil(mapHeight / regionSize));
   } else {
-    for (const r of geometryJson.regions ?? []) byKey.set(r.key, r);
+    for (const r of geometryJson.regions ?? []) {
+      byKey.set(r.key, r);
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const pt of r.polygon ?? []) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.z < minZ) minZ = pt.z;
+        if (pt.z > maxZ) maxZ = pt.z;
+      }
+      bboxes.set(r.key, [minX, maxX, minZ, maxZ]);
+    }
     lookupGrid = buildLookupGrid(geometryJson.regions ?? [], mapWidth, mapHeight);
   }
 
@@ -107,10 +118,17 @@ export function createRegionIndex(geometryJson) {
     // Always confirm via point-in-polygon, even for a single candidate: a
     // cell's bounding-box overlap list is a filter, not a verdict — an
     // isolated polygon's edge can still cut through a cell with no other
-    // region nearby.
+    // region nearby. The bbox pre-test is the sim's (regions/partition.lua):
+    // a generated polygon is its component's coastline since M9m, so walking
+    // a near-miss candidate's full outline is the common case, not the rare
+    // one. A point outside the bbox is outside the polygon, so the answer is
+    // unchanged.
     for (const key of cellRegions) {
       const r = byKey.get(key);
-      if (r && pointInPolygon(x, z, r.polygon)) return key;
+      if (!r) continue;
+      const bb = bboxes.get(key);
+      if (x < bb[0] || x > bb[1] || z < bb[2] || z > bb[3]) continue;
+      if (pointInPolygon(x, z, r.polygon)) return key;
     }
     return 'wilds';
   }

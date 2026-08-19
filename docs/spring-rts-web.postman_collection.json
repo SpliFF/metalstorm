@@ -212,15 +212,6 @@
 						"header": [{"key": "Content-Type", "value": "application/json"}],
 						"body": {"mode": "raw", "raw": "{}"}
 					}
-				},
-				{
-					"name": "Close Room",
-					"request": {
-						"method": "POST",
-						"url": "{{lobby_url}}/api/rooms/close",
-						"header": [{"key": "Content-Type", "value": "application/json"}],
-						"body": {"mode": "raw", "raw": "{}"}
-					}
 				}
 			]
 		},

@@ -19,13 +19,16 @@ import {
     compileIntent,
     validateIntent,
     getPriorityBand,
+    targetMenuOptions,
     getAcceptedTargetShapes,
+    explainShapeMismatch,
     PRIORITY_BANDS,
 } from '../ui/native-ui/compile-table.js';
 import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
 import { previewDirectiveCost, matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { listCommandPresets, saveCommandPreset, deleteCommandPreset } from '../ui/native-ui/command-presets.js';
 import { acceleratorFill } from '../ui/native-ui/free-text-accelerator.js';
+import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
 import { injectStyle } from '../ui/ui.js';
 import composerCss from './command-composer.css?raw';
 
@@ -43,11 +46,23 @@ import composerCss from './command-composer.css?raw';
 const AUTHORITY_COST_LIB_URL = '/api/games/data/metalstorm/ui/lib/authority-cost.js';
 const AUTHORITY_COST_SPEC_URL = '/api/games/data/metalstorm/authority_cost.json';
 
-/** Idle-filter subject classes offered by the Subject picker. A closed
- *  vocabulary (mirrors free-text-accelerator.ts's IDLE_FILTER_CLASSES) — the
- *  composer builds valid-by-construction intents, so it only offers filter
- *  classes the sim understands rather than a free-text box. */
-const IDLE_FILTER_CLASSES = ['armour', 'infantry', 'air', 'artillery'];
+/** Class subjects offered by the Subject picker, read from the shipped class
+ *  vocabulary (`class-vocabulary.json`) — the same table the free-text
+ *  accelerator parses against. The composer builds valid-by-construction
+ *  intents, so it only offers filter classes the sim actually has: these are
+ *  literal `customparams.ms_class` values, not the hand-kept
+ *  `['armour','infantry','air','artillery']` list that used to live here and
+ *  named two classes that never existed.
+ *
+ *  The options read "All <class>", not "Idle <class>": a directive from the
+ *  team's commander overrides what the force is already doing (D56). */
+function idleFilterClasses() {
+    return classVocabulary.current.classNames().map((className) => ({
+        className,
+        label: classVocabulary.current.data.classes[className].plural
+            || classVocabulary.current.data.classes[className].display,
+    }));
+}
 
 /** Entity types the Target picker searches — the "where to act" vocabulary
  *  (regions/objectives/landmarks), never Subjects (groups). Mirrors
@@ -93,6 +108,15 @@ const state = {
     accelVisible: false,    // Whether the text-field row is shown
     accelValue: '',         // Current text-field contents
     accelNotice: null,      // string | null
+
+    // Commit/preset outcome readout. Every one of these used to be a native
+    // `alert()` — a modal browser dialog on the game's PRIMARY command verb,
+    // which froze the render loop and had to be dismissed before the next
+    // order could be composed (endtoend fire 26, D54). The message is the
+    // same; it now lands inline next to the Commit button.
+    // `{ text: string, kind: 'ok' | 'error' } | null`
+    status: null,
+    statusTimer: null,      // setTimeout handle auto-clearing an 'ok' status
 
     // Context (set on init)
     ctx: null,
@@ -243,6 +267,10 @@ function render() {
         <div class="composer-row composer-controls">
             <div class="composer-echo${state.verb && state.subject && state.target ? ' is-ready' : ''}">${renderEcho()}</div>
             <div class="composer-cost" id="composer-cost"></div>
+            <div class="composer-status${state.status ? ' is-' + state.status.kind : ''}"
+                id="composer-status" role="status" aria-live="polite">${
+                    state.status ? escapeHtml(state.status.text) : ''
+                }</div>
             <button id="accel-toggle-btn" class="nui-btn${state.accelVisible ? ' is-active' : ''}"
                 title="Type a command in plain keywords (optional accelerator — the chips above stay in charge)"
                 aria-pressed="${state.accelVisible}">⌨</button>
@@ -447,8 +475,8 @@ function renderSubjectMenu() {
         .map((g) => `<div class="nui-menu__item subject-group-option" data-group-id="${g.groupId}">${escapeHtml(g.name || `Group ${g.groupId}`)} <span class="composer-menu-hint">${g.echelon}</span></div>`)
         .join('');
 
-    const idleItems = IDLE_FILTER_CLASSES
-        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${c}">Idle ${c}</div>`)
+    const idleItems = idleFilterClasses()
+        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${escapeHtml(c.className)}">All ${escapeHtml(c.label)}</div>`)
         .join('');
 
     menu.innerHTML = `
@@ -467,6 +495,16 @@ function renderSubjectMenu() {
         state.subject = subject;
         // A manual pick overrides whatever selection sync had set (task 4).
         state.subjectAutoFilled = false;
+        // The subject decides which compile path — and so which target shapes
+        // are accepted (D60): picking "the AI" invalidates a drawn route,
+        // leaving it invalidates a named place for patrol/screen. Same
+        // valid-by-construction rule the verb picker applies, but only when
+        // the shape genuinely stopped being accepted — a group→group change
+        // must not silently discard a painted area.
+        if (state.verb && state.target
+            && !getAcceptedTargetShapes(state.verb, state.subject).includes(state.target.shape)) {
+            state.target = null;
+        }
         menu.hidden = true;
         render();
     };
@@ -537,15 +575,24 @@ function renderTargetMenu() {
         return;
     }
 
-    const mapShapes = getAcceptedTargetShapes(state.verb).filter((s) => s !== 'entity');
-    const mapItems = mapShapes
-        .map((s) => `<div class="nui-menu__item target-map-option" data-shape="${s}">${mapShapeLabel(s)}</div>`)
+    // The offer comes from the compile table, not from this file (D51): the
+    // name search used to be listed for every verb, so `patrol Grey Flat`
+    // filled all three chips and then sat on a disabled Commit button. A shape
+    // the verb cannot compile is still shown — carrying the reason — because a
+    // silently missing option is the same dead surface one layer quieter.
+    // Subject-aware (D60): with `subject = the AI` the compile path never
+    // reaches the verb:shape table, so offering from it would refuse a named
+    // place the guidance payload encodes and offer a route it cannot.
+    menu.innerHTML = targetMenuOptions(state.verb, state.subject)
+        .map((opt) => {
+            if (opt.kind === 'map') {
+                return `<div class="nui-menu__item target-map-option" data-shape="${opt.shape}">${mapShapeLabel(opt.shape)}</div>`;
+            }
+            return opt.enabled
+                ? `<div class="nui-menu__item target-search-option">🔍 Search by name…</div>`
+                : `<div class="nui-menu__item nui-menu__item--disabled">🔍 Search by name — ${escapeHtml(opt.reason)}</div>`;
+        })
         .join('');
-
-    menu.innerHTML = `
-        ${mapItems}
-        <div class="nui-menu__item target-search-option">🔍 Search by name…</div>
-    `;
     openMenu(menu, 'target');
 
     for (const el of menu.querySelectorAll('.target-map-option')) {
@@ -710,7 +757,10 @@ function formatSubject(subject) {
         const label = `Group ${subject.groupId}`;
         return state.subjectAutoFilled ? `${label} (from selection)` : label;
     } else if (subject.type === 'idle-filter') {
-        return `Idle ${subject.filterClass}`;
+        // The slot carries the sim's own `ms_class`; the chip shows the
+        // vocabulary's spoken plural for it ("staticdefense" → "defences").
+        const entry = classVocabulary.current.data.classes?.[subject.filterClass];
+        return `All ${entry?.plural || entry?.display || subject.filterClass}`;
     } else if (subject.type === 'ai') {
         return 'the AI';
     }
@@ -914,18 +964,55 @@ function buildIntent() {
 }
 
 /**
+ * Show a commit/preset outcome inline, next to the Commit button.
+ *
+ * Replaces the native `alert()` this path used to raise. An 'ok' status
+ * auto-clears so a burst of orders doesn't leave stale confirmations behind;
+ * an 'error' stays until the player's next commit or Clear, because it is the
+ * only record of *why* an order did not go out.
+ *
+ * Updates the node in place rather than re-rendering — a full render() during
+ * commit would tear down any open menu and drop the Target-search hook.
+ */
+function setStatus(text, kind) {
+    if (state.statusTimer) {
+        clearTimeout(state.statusTimer);
+        state.statusTimer = null;
+    }
+
+    state.status = text ? { text, kind } : null;
+
+    const el = state.container?.querySelector('#composer-status');
+    if (el) {
+        el.textContent = text || '';
+        el.classList.toggle('is-ok', Boolean(text) && kind === 'ok');
+        el.classList.toggle('is-error', Boolean(text) && kind === 'error');
+    }
+
+    if (text && kind === 'ok') {
+        state.statusTimer = setTimeout(() => {
+            state.statusTimer = null;
+            setStatus(null);
+        }, STATUS_OK_MS);
+    }
+}
+
+/** How long a success readout stays up before clearing itself. */
+const STATUS_OK_MS = 4000;
+
+/**
  * Handle commit button click
  */
 function handleCommit() {
     const intent = buildIntent();
     if (!intent) {
-        alert('Cannot commit: missing required slots');
+        setStatus('Cannot commit: missing required slots', 'error');
         return;
     }
 
     const error = validateIntent(intent);
     if (error) {
-        alert(`Invalid command: ${error}`);
+        setStatus(`Invalid command: ${error}`, 'error');
         return;
     }
 
@@ -935,13 +1022,15 @@ function handleCommit() {
     // lets a click through the disabled button's own title tooltip.
     const preview = computeCostPreview();
     if (preview && !preview.affordable) {
-        alert(`Insufficient authority: needs ${preview.cost}, short by ${preview.shortfall}. Order not sent.`);
+        setStatus(
+            `Insufficient authority: needs ${preview.cost}, short by ${preview.shortfall}. Order not sent.`,
+            'error');
         return;
     }
 
     const compiled = compileIntent(intent);
     if (!compiled) {
-        alert('Failed to compile command');
+        setStatus('Failed to compile command', 'error');
         return;
     }
 
@@ -949,13 +1038,14 @@ function handleCommit() {
 
     if (state.ctx && state.ctx.sendCommand) {
         state.ctx.sendCommand(compiled);
-        alert('Command sent!');
+        // Clear first: handleClear() re-renders, which would otherwise wipe
+        // the status node we just wrote.
+        handleClear();
+        setStatus('Command sent', 'ok');
     } else {
-        alert('sendCommand not wired yet (see console for compiled payload)');
+        handleClear();
+        setStatus('sendCommand not wired yet (see console for compiled payload)', 'error');
     }
-
-    // Clear after commit
-    handleClear();
 }
 
 /**
@@ -976,6 +1066,11 @@ function handleClear() {
     state.subjectAutoFilled = false;
     state.staleNotice = null;
     state.accelNotice = null;
+    if (state.statusTimer) {
+        clearTimeout(state.statusTimer);
+        state.statusTimer = null;
+    }
+    state.status = null;
 
     render();
 }
@@ -1001,7 +1096,7 @@ async function refreshPresetsCache() {
 async function handleSavePreset() {
     const intent = buildIntent();
     if (!intent || validateIntent(intent)) {
-        alert('Fill all required slots (verb, subject, target) before saving a preset.');
+        setStatus('Fill all required slots (verb, subject, target) before saving a preset.', 'error');
         return;
     }
 
@@ -1010,11 +1105,12 @@ async function handleSavePreset() {
 
     const error = await saveCommandPreset(name.trim(), intent);
     if (error) {
-        alert(`Could not save preset: ${error}`);
+        setStatus(`Could not save preset: ${error}`, 'error');
         return;
     }
 
     await refreshPresetsCache();
+    setStatus(`Preset "${name.trim()}" saved`, 'ok');
 }
 
 /** Presets button: opens the saved-preset list. Each entry loads on click;
@@ -1145,7 +1241,7 @@ function loadPreset(preset) {
 function handleAccelFill() {
     if (!state.accelValue.trim()) return;
 
-    const result = acceleratorFill(state.accelValue, namedEntityIndex);
+    const result = acceleratorFill(state.accelValue, namedEntityIndex, classVocabulary.current);
 
     state.verb = result.verb;
     state.subject = result.subject;
@@ -1165,6 +1261,18 @@ function handleAccelFill() {
         : filled.length
         ? `Filled: ${filled.join(', ')}.`
         : 'Nothing recognised — try the chips above instead.';
+
+    // The accelerator resolves a target by NAME whatever the verb is, so it is
+    // the second way into the slot the target menu now guards (D51). A phrase
+    // like "patrol grey flat" resolves both slots and still cannot compile —
+    // say that here, at the fill, rather than leaving the player to read it off
+    // a disabled Commit button. The slots are left filled on purpose: the chips
+    // stay the source of truth and either one is a click from being changed.
+    if (state.verb && state.target
+        && !getAcceptedTargetShapes(state.verb, state.subject).includes(state.target.shape)) {
+        state.accelNotice +=
+            ` ⚠ ${explainShapeMismatch(state.verb, state.target.shape, state.subject)}.`;
+    }
 
     render();
 }

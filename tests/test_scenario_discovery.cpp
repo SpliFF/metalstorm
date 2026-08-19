@@ -527,11 +527,20 @@ TEST_CASE("FindById: exact match only") {
     CHECK(SD::FindById(found, "") == nullptr);
 }
 
-TEST_CASE("shipped metalstorm scenarios: meridian_basin is the terminable "
-          "default for the meridian_basin map") {
-    // Reads the real content, not a fixture. This is the assertion that
-    // would have failed before the fix: creating a Metalstorm room on
-    // Meridian Basin now resolves to a war with a victory objective.
+TEST_CASE("shipped metalstorm scenarios: meridian_basin is RETIRED, so its map "
+          "has no default war") {
+    // Reads the real content, not a fixture. This assertion INVERTED on
+    // 2026-08-07 (PLAN-metalstorm-wars.md §7.6): it used to say meridian_basin
+    // was the terminable default for its map, which was true and was the wrong
+    // thing to want. The map's 8 start positions sit in 3 disconnected
+    // components of the VEH/HEAVY passability mask, so the two armies cannot
+    // reach each other and the war ends uncontested at a deterministic frame
+    // whatever the player does — measured twice on the player path in endtoend
+    // fire 21 (two wars, 4 vs 52 player directives, both ending at frame 10560
+    // won by the same team, armies 4 040 elmos apart).
+    //
+    // Terminal is still true and the file is still shipped and loadable: what
+    // `retired` removes is the OFFER, not the content.
     const std::string gamePath =
         std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
     if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
@@ -544,12 +553,148 @@ TEST_CASE("shipped metalstorm scenarios: meridian_basin is the terminable "
     REQUIRE(meridian != nullptr);
     CHECK(meridian->mapId == "meridian_basin");
     CHECK(meridian->tutorial == false);
+    CHECK(meridian->retired == true);
     CHECK(meridian->terminal == true);
 
-    const auto* def = SD::DefaultForMap(found, "meridian_basin");
+    // Never defaulted to…
+    CHECK(SD::DefaultForMap(found, "meridian_basin") == nullptr);
+    // …and never silently dropped either: an id a `?direct=` manifest or a
+    // gadget spec still stages has to resolve, or the room screen would show a
+    // raw id and the create route could not tell "retired" from "typo".
+    CHECK(SD::FindById(found, "meridian_basin") == meridian);
+}
+
+TEST_CASE("shipped metalstorm scenarios: meridian_basin_soak is an ENDLESS "
+          "fixture no boot path can default to") {
+    // PLAN-long-uptime.md §11.5 T4-3 / task 4b. The growth ladder needs a war
+    // bounded by wall clock, and every shipped war is deliberately winnable —
+    // meridian_basin at frame 12 180, after which the sim freezes and an arm
+    // spends its remaining wall minutes sampling a stationary world (§11.1).
+    // `meridian_basin_soak` is the same content with no `victory` objective,
+    // which makes it the one shipped scenario that is *intentionally* endless.
+    //
+    // Two independent guards keep it out of a player's hands, and this asserts
+    // both because they fail differently: `terminal == false` is what
+    // DefaultForMap filters on (so a future author cannot un-retire it into a
+    // default), and `retired == true` is what the create route refuses by id.
+    // The Lua-side content parity with meridian_basin is asserted by
+    // LuaRules/Gadgets/tests/meridian_basin_soak_scenario_spec.lua.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    REQUIRE(!found.empty());
+
+    const auto* soak = Find(found, "meridian_basin_soak");
+    REQUIRE(soak != nullptr);
+    CHECK(soak->mapId == "meridian_basin");
+    CHECK(soak->terminal == false);
+    CHECK(soak->retired == true);
+    CHECK(soak->tutorial == false);
+
+    // Neither shipped war on this map may be defaulted to: meridian_basin for
+    // being retired (uncrossable, §7.6), the soak fixture for having no end.
+    CHECK(SD::DefaultForMap(found, "meridian_basin") == nullptr);
+    // Still resolvable by id — the `scenario` modoption is how the ladder
+    // stages it, and a fixture that vanished from discovery would stage an
+    // empty world, which is the defect §11.1 was.
+    CHECK(SD::FindById(found, "meridian_basin_soak") == soak);
+}
+
+TEST_CASE("shipped metalstorm scenarios: roundtrip_static is a STATIC fixture "
+          "no boot path can default to") {
+    // PLAN-persistence.md §8 / Q-P5. `--roundtrip-strict` asserts that a
+    // restored world's next N ticks are bit-for-bit the ticks it replaced, and
+    // that bar is only meaningful where nothing is under a move order: Q-P2
+    // decision D forces `inCommand` false, so a unit executing a command
+    // re-plans and the drift is declared behaviour. docs/debugging-tools.md
+    // asked for a staging-only fixture from the day the flag shipped and none
+    // existed; the standing check ran on `soak-ladder`, whose civilians and
+    // convoys are already moving at frame 2.
+    //
+    // Guarded exactly like meridian_basin_soak, and for the same reason: the
+    // two guards fail differently. `terminal == false` is what DefaultForMap
+    // filters on, `retired == true` is what the create route refuses by id.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    REQUIRE(!found.empty());
+
+    const auto* rt = Find(found, "roundtrip_static");
+    REQUIRE(rt != nullptr);
+    CHECK(rt->mapId == "green_flat_x34_v3");
+    CHECK(rt->terminal == false);
+    CHECK(rt->retired == true);
+    CHECK(rt->tutorial == false);
+
+    // Still resolvable by id — the fixture is staged through the `scenario`
+    // modoption, so a fixture that vanished from discovery would stage an
+    // empty world and the round-trip would compare two empty arms and pass.
+    CHECK(SD::FindById(found, "roundtrip_static") == rt);
+}
+
+TEST_CASE("shipped metalstorm scenarios: crossing_standoff is the default war "
+          "for scorched_crossing_v2.4") {
+    // The other half of §7.6's move: the showcase war is now authored on a map
+    // whose start positions are all in ONE component
+    // (`tools/mapgen/regions_from_map.py data/maps/scorched_crossing_v2.4
+    // --verify` — 6 starts, one component, largest component 94.5% of
+    // passable). This is the war a player who picks the default now gets.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    const auto* def = SD::DefaultForMap(found, "scorched_crossing_v2.4");
     REQUIRE(def != nullptr);
-    CHECK(def->id == "meridian_basin");
+    CHECK(def->id == "crossing_standoff");
     CHECK(def->terminal == true);
+    CHECK(def->retired == false);
+
+    // And it is a war two players can be seated in, one per side.
+    const auto playable = SD::PlayableSides(*def);
+    REQUIRE(playable.size() == 2);
+    CHECK(playable[0].staged == true);
+    CHECK(playable[1].staged == true);
+}
+
+TEST_CASE("retired: parsed, excluded from the default, still findable") {
+    // The unit-level statement of the rule, independent of shipped content.
+    TempGame g("retired");
+    g.Write("old_war.lua", R"(return {
+        name = 'Old War',
+        world = { map = 'basin' },
+        objectives = { { type = 'control', victory = true } },
+        retired = true,
+    })");
+    g.Write("new_war.lua", R"(return {
+        name = 'New War',
+        world = { map = 'crossing' },
+        objectives = { { type = 'control', victory = true } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 2);
+
+    const auto* old = Find(found, "old_war");
+    REQUIRE(old != nullptr);
+    CHECK(old->retired == true);
+    CHECK(old->terminal == true);
+    CHECK(SD::DefaultForMap(found, "basin") == nullptr);
+    CHECK(SD::FindById(found, "old_war") == old);
+
+    // `retired` is not contagious and defaults to false.
+    const auto* fresh = Find(found, "new_war");
+    REQUIRE(fresh != nullptr);
+    CHECK(fresh->retired == false);
+    REQUIRE(SD::DefaultForMap(found, "crossing") != nullptr);
+    CHECK(SD::DefaultForMap(found, "crossing")->id == "new_war");
 }
 
 // ==========================================================================
@@ -684,4 +829,321 @@ TEST_CASE("generated scenario: neutral (Gaia) entries are not counted as a side"
     REQUIRE(found.size() == 1);
     for (const auto& side : found[0].sides)
         CHECK(side.faction != "neutral");
+}
+
+// ── Per-side capacity (PLAN-metalstorm-lobby.md §6, task 7) ─────────────────
+//
+// A scenario may state how many humans a side holds. Partial on purpose: the
+// lobby seeds every side from the registered population and lets these
+// override, per side, so an author with a reason for ONE side's size states
+// that one and leaves the rest to a population they have no figures for.
+
+TEST_CASE("sides: a scenario may author a per-side capacity") {
+    TempGame g("sides_capacity");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 4 },
+            { faction = 'union',   team = 4 },
+        },
+        units = { { def = 'tank', team = 0 }, { def = 'tank', team = 4 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 2);
+    CHECK(found[0].sides[0].hasCapacity == true);
+    CHECK(found[0].sides[0].capacity == 4);
+    // Absence is not zero: the unsized side is left to the seeding rule, and a
+    // `capacity == 0` reading here would silently uncap it instead.
+    CHECK(found[0].sides[1].hasCapacity == false);
+
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "compact");
+    CHECK(caps[0].second == 4);
+}
+
+TEST_CASE("sides: 'unlimited' is a capacity, and a typo is not") {
+    TempGame g("sides_capacity_unlimited");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'horde',  team = 0, capacity = 'unlimited' },
+            { faction = 'keep',   team = 1, capacity = -3 },
+            { faction = 'nobody', team = 2, capacity = 'lots' },
+        },
+        units = { { def = 'tank', team = 0 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 3);
+    // Declared unlimited — authored, so it overrides the seeding rule.
+    CHECK(found[0].sides[0].hasCapacity == true);
+    CHECK(found[0].sides[0].capacity == WAR_SIDE_CAPACITY_UNLIMITED);
+    // A negative is a typo, not "unlimited". Reading it as unlimited would
+    // uncap a side by accident, which is the one direction that cannot be
+    // walked back once players are in.
+    CHECK(found[0].sides[1].hasCapacity == false);
+    CHECK(found[0].sides[2].hasCapacity == false);
+
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "horde");
+}
+
+TEST_CASE("sides: the first declaration of a multi-team side wins") {
+    // A side is one slot pool however many teams it spans, so two entries
+    // saying `capacity = 8` mean a side of 8 — not of 16.
+    TempGame g("sides_capacity_multi");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 8 },
+            { faction = 'compact', team = 1, capacity = 8 },
+        },
+        units = { { def = 'tank', team = 0 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 1);
+    CHECK(found[0].sides[0].capacity == 8);
+}
+
+TEST_CASE("sides: an NPC side authors no capacity anyone can use") {
+    // AuthoredSideCapacities runs over PlayableSides, so a capacity on an NPC
+    // side never reaches the modoption — it would name a faction no account
+    // can hold and no seating rule would ever consult.
+    TempGame g("sides_capacity_npc");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 6 },
+            { faction = 'reavers', team = 8, capacity = 99 },
+        },
+        units = { { def = 'tank', team = 0 } },
+        ai = { { id = 'strategos', team = 8 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "compact");
+}
+
+// ==========================================================================
+// briefing — the display-only splash content (PLAN-test-automation S2).
+//
+// The sim never reads this block; the lobby parses it so a scenario file can
+// carry its own narrative. The load-bearing property under test is
+// degrade-never-drop: every malformed shape must leave the SCENARIO offered,
+// because the alternative — a story typo removing a war from the lobby — is
+// the exact failure mode this format is most exposed to.
+
+TEST_CASE("briefing: every field parses off a pure table literal") {
+    TempGame g("brief_full");
+    g.Write("war.lua", R"(return {
+        name = 'War',
+        world = { map = 'basin' },
+        briefing = {
+            title = 'The Standoff',
+            subtitle = 'Scorched Crossing',
+            story = [[First paragraph.
+
+Second paragraph.]],
+            tips = { 'Hold the middle.', 'Artillery outranges tanks.' },
+            image = 'scenarios/img/war.jpg',
+            parTimeSec = 900,
+        },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    const auto& b = found[0].briefing;
+    CHECK(b.present == true);
+    CHECK(b.title == "The Standoff");
+    CHECK(b.subtitle == "Scorched Crossing");
+    // The blank line survives: the client splits paragraphs on it, so a parse
+    // that normalised whitespace would collapse the story into one block.
+    CHECK(b.story == "First paragraph.\n\nSecond paragraph.");
+    REQUIRE(b.tips.size() == 2);
+    CHECK(b.tips[0] == "Hold the middle.");
+    CHECK(b.tips[1] == "Artillery outranges tanks.");
+    CHECK(b.image == "scenarios/img/war.jpg");
+    CHECK(b.parTimeSec == 900);
+}
+
+TEST_CASE("briefing: absent leaves present == false") {
+    TempGame g("brief_absent");
+    g.Write("war.lua", R"(return {
+        name = 'War',
+        world = { map = 'basin' },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].briefing.present == false);
+    CHECK(found[0].briefing.title.empty());
+    CHECK(found[0].briefing.tips.empty());
+    CHECK(found[0].briefing.parTimeSec == 0);
+}
+
+TEST_CASE("briefing: an empty block is not a briefing") {
+    // `present` gates the splash. A block with chrome but no reading matter
+    // would otherwise mount an empty overlay in front of the loading screen.
+    TempGame g("brief_empty");
+    g.Write("war.lua", R"(return {
+        name = 'War',
+        briefing = { title = 'Titled but mute', parTimeSec = 60 },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].briefing.present == false);
+    CHECK(found[0].briefing.title == "Titled but mute");
+}
+
+TEST_CASE("briefing: tips alone are enough to be present") {
+    TempGame g("brief_tips_only");
+    g.Write("war.lua", R"(return {
+        briefing = { tips = { 'One tip is a briefing.' } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].briefing.present == true);
+    CHECK(found[0].briefing.story.empty());
+}
+
+TEST_CASE("briefing: BAR's string-valued briefing is ignored, never fatal") {
+    // BAR's campaign format puts a [[...]] blob at this key
+    // (data/games/bar/singleplayer/scenarios/scenario001.lua). Reading it as a
+    // table must not take the scenario down with it — an imported file stays
+    // offered, it simply has no structured splash.
+    TempGame g("brief_bar_string");
+    g.Write("war.lua", R"(return {
+        name = 'Imported War',
+        world = { map = 'basin' },
+        objectives = { { type = 'control', victory = true } },
+        briefing = [[A wall of text with Tips: baked into it.]],
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].id == "war");
+    CHECK(found[0].terminal == true);   // still fully discovered
+    CHECK(found[0].briefing.present == false);
+}
+
+TEST_CASE("briefing: non-string tips are skipped individually") {
+    // Skipping the entry, not truncating the list: an author who fat-fingers
+    // one line keeps the other five tips.
+    TempGame g("brief_tips_mixed");
+    g.Write("war.lua", R"(return {
+        briefing = { tips = { 'a', 42, {}, 'b' } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    const auto& tips = found[0].briefing.tips;
+    // Lua coerces a number to a string via lua_isstring, so 42 survives as
+    // "42"; the TABLE is what cannot be text, and it is the one dropped.
+    REQUIRE(tips.size() == 3);
+    CHECK(tips[0] == "a");
+    CHECK(tips[1] == "42");
+    CHECK(tips[2] == "b");
+}
+
+TEST_CASE("briefing: the tips list is capped") {
+    TempGame g("brief_tips_cap");
+    std::string body = "return { briefing = { tips = {";
+    for (int i = 0; i < 30; ++i)
+        body += "'tip',";
+    body += "} } }";
+    g.Write("war.lua", body);
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].briefing.tips.size() == 12);
+    CHECK(found[0].briefing.present == true);
+}
+
+TEST_CASE("briefing: a traversal or absolute image path is dropped") {
+    // Defense in depth: the client origin serves the image, but a path shaped
+    // like an escape never leaves the lobby in the first place. The rest of
+    // the briefing survives — the splash falls back to the map thumbnail.
+    TempGame g("brief_image_bad");
+    g.Write("up.lua", R"(return {
+        briefing = { story = 'x', image = '../../etc/passwd' },
+    })");
+    g.Write("abs.lua", R"(return {
+        briefing = { story = 'x', image = '/etc/passwd' },
+    })");
+    g.Write("ok.lua", R"(return {
+        briefing = { story = 'x', image = 'scenarios/img/a.jpg' },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 3);
+    const auto* up = Find(found, "up");
+    const auto* abs = Find(found, "abs");
+    const auto* ok = Find(found, "ok");
+    REQUIRE(up != nullptr);
+    REQUIRE(abs != nullptr);
+    REQUIRE(ok != nullptr);
+    CHECK(up->briefing.image.empty());
+    CHECK(up->briefing.present == true);
+    CHECK(abs->briefing.image.empty());
+    CHECK(abs->briefing.present == true);
+    CHECK(ok->briefing.image == "scenarios/img/a.jpg");
+}
+
+TEST_CASE("briefing: parTimeSec must be a positive number") {
+    TempGame g("brief_partime");
+    g.Write("neg.lua", R"(return { briefing = { story = 'x', parTimeSec = -5 } })");
+    g.Write("word.lua", R"(return { briefing = { story = 'x', parTimeSec = 'soon' } })");
+    g.Write("good.lua", R"(return { briefing = { story = 'x', parTimeSec = 615.5 } })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 3);
+    CHECK(Find(found, "neg")->briefing.parTimeSec == 0);
+    CHECK(Find(found, "word")->briefing.parTimeSec == 0);
+    CHECK(Find(found, "good")->briefing.parTimeSec == 615);   // truncated, kept
+}
+
+TEST_CASE("shipped metalstorm scenarios: the authored briefings still parse") {
+    // This is the silent-vanish guard made loud. Any non-literal construct in
+    // a briefing block removes the WHOLE scenario from discovery, with only a
+    // startup warning; the most likely cause is an unescaped apostrophe in a
+    // single-quoted tip. If someone edits the prose and breaks the literal,
+    // this test goes red instead of the lobby quietly losing a war.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+
+    const auto* standoff = Find(found, "crossing_standoff");
+    REQUIRE(standoff != nullptr);
+    const auto& sb = standoff->briefing;
+    CHECK(sb.present == true);
+    CHECK(sb.title == "The Standoff");
+    CHECK(!sb.story.empty());
+    CHECK(sb.story.find("\n\n") != std::string::npos);   // real paragraphs
+    CHECK(sb.tips.size() >= 4);
+    CHECK(sb.parTimeSec == 900);
+
+    // The stub exercises the all-optional path: story and tips, no par time,
+    // no image. If a future edit adds them that is fine — what must hold is
+    // that it still parses as a briefing at all.
+    const auto* tut = Find(found, "tutorial_01");
+    REQUIRE(tut != nullptr);
+    CHECK(tut->briefing.present == true);
+    CHECK(!tut->briefing.tips.empty());
+
+    // And a war that ships no briefing reports none, so the client's
+    // mount decision has something to be false about.
+    const auto* rt = Find(found, "roundtrip_static");
+    REQUIRE(rt != nullptr);
+    CHECK(rt->briefing.present == false);
 }

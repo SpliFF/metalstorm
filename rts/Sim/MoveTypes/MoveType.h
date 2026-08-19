@@ -8,6 +8,7 @@
 #include "System/float3.h"
 #include "System/SpringMath.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/MoveTypes/MoveTypeSnapshot.h"
 
 #include <algorithm>
 
@@ -95,6 +96,21 @@ public:
 	virtual void SyncWaypoints() {}
 	virtual unsigned int GetPathId() { return 0; }
 	virtual bool IsAtGoal() const { return false; }
+
+	// ── snapshot (PLAN-persistence §7.1c option A) ──
+	//
+	// ADDED (not upstream). Upstream carries move-type state through creg,
+	// which is stubbed out in this tree (-DNOT_USING_CREG), so the walk is
+	// authored — and it has to be authored *inside* the classes because every
+	// interesting member of CGroundMoveType and CHoverAirMoveType is private.
+	// Each override captures its own arm of MoveTypeState and nothing else;
+	// the discriminant is SnapshotKind(), read off the live object.
+	virtual movetypesnapshot::Kind SnapshotKind() const { return movetypesnapshot::Kind::None; }
+	virtual void SnapshotCapture(movetypesnapshot::MoveTypeState& s) const { SnapshotCaptureBase(s.base); }
+	virtual void SnapshotApply(const movetypesnapshot::MoveTypeState& s) { SnapshotApplyBase(s.base); }
+
+	void SnapshotCaptureBase(movetypesnapshot::BaseState& b) const;
+	void SnapshotApplyBase(const movetypesnapshot::BaseState& b);
 
 public:
 	CUnit* owner;

@@ -359,6 +359,10 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_setPosture);
     lua_setfield(L, -2, "setPosture");
 
+    // I1/SG1: the AI's only write into synced game Lua.
+    lua_pushcfunction(L, l_sendMessage);
+    lua_setfield(L, -2, "sendMessage");
+
     lua_setglobal(L, "AI");
 }
 
@@ -596,6 +600,43 @@ int AIScriptContext::l_setPosture(lua_State* L) {
     return 1;
 }
 
+// AI.sendMessage(msg) -> bool. I1/SG1: the AI's only write into synced game
+// Lua. The payload is opaque here — it drains a tick or two later into
+// `luaRules->RecvLuaMsg(msg, playerId)`, the SAME gadget entry point a human's
+// LuaRulesMsg lands on (PLAN-ai-synced-write §2.3 option A), so the guidance
+// gadget's existing validated-writer check works unchanged and `isAI` is what
+// discriminates the sender.
+//
+// Returns FALSE rather than raising when the size clamp rejects: a throttled
+// planner should degrade, not crash its tick (§2.4).
+int AIScriptContext::l_sendMessage(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    size_t len = 0;
+    const char* s = luaL_checklstring(L, 1, &len);
+
+    if (len > kAILuaMsgMaxBytes) {
+        // Rate-limited: a planner that overflows once usually overflows every
+        // tick, and this is the log a flooding AI would otherwise drown.
+        static uint32_t rejected = 0;
+        if ((rejected++ % 100) == 0) {
+            SLOG(SPRING_LOG_WARNING,
+                 "[ai] sendMessage rejected: team=%d player=%d bytes=%zu > %zu (reject #%u)",
+                 ctx->teamId, ctx->playerId, len, kAILuaMsgMaxBytes, rejected);
+        }
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    AICommand cmd;
+    cmd.kind     = AICommandKind::LuaMsg;
+    cmd.teamId   = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: the message attributes to the AI's own player
+    cmd.text.assign(s, len);
+    aiCommandQueue.Push(cmd);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 bool AIScriptContext::TryGetGlobalNumber(const char* name, double& out) const {
     if (!L) return false;
     lua_getglobal(L, name);
@@ -673,10 +714,21 @@ int AIScriptContext::l_getFrame(lua_State* L) {
 // headless server AI has no chat wire or HUD, so this is how a full-side run's
 // boot line, per-directive announcements and tick errors become visible (plan
 // §5.1). Best-effort and non-fatal: a non-string arg is coerced via tostring.
+//
+// NOTICE, not INFO: the default threshold is SPRING_LOG_NOTICE (SpringLog.cpp
+// g_minLevel), so every line this verb ever emitted was dropped before it
+// reached the console, the file sink or the log store. That left the AI's ONLY
+// observability channel silent on every default run — a co-commander could be
+// shown neither to be working nor to be inert, which is exactly where
+// PLAN-endtoend D39 stalled. The narration is the headless equivalent of a
+// gadget's Spring.Echo (also NOTICE), so it belongs at the same level. Volume
+// is one tick summary per strategic tick per AI plus a line per directive; a
+// run that wants it quieter can lower the "ai" section with
+// springlog_set_section_min_level.
 int AIScriptContext::l_log(lua_State* L) {
     auto* ctx = GetAIContext(L);
     const char* msg = lua_tostring(L, 1);
-    SLOG_SCOPED(SPRING_LOG_INFO, ctx->name.c_str(), "%s",
+    SLOG_SCOPED(SPRING_LOG_NOTICE, ctx->name.c_str(), "%s",
         msg != nullptr ? msg : "(nil)");
     return 0;
 }

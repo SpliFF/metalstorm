@@ -32,8 +32,16 @@ const CMD_DECOUPLE = 35002;
 const CMD_MOVE = 10;
 const CMD_ATTACK = 20;
 const CMD_STOP = 0;
-const CMD_LOAD_UNITS = 76;
-const CMD_UNLOAD_UNITS = 81;
+// Engine truth: rts/Sim/Units/CommandAI/Command.h:40-43. Pinned by
+// command-constants.test.ts.
+//   CMD_LOAD_ONTO (76) is given to the *cargo* unit with the transport as its
+//   single param — which is exactly this bench's call shape below. It was
+//   previously misnamed CMD_LOAD_UNITS here (75 is the transport-side verb),
+//   so the value was right and only the name lied.
+//   CMD_UNLOAD_UNITS (80) is the unload-all verb; the file previously used 81
+//   (CMD_UNLOAD_UNIT, the single-unit verb), which is not what the call means.
+const CMD_LOAD_ONTO = 76;
+const CMD_UNLOAD_UNITS = 80;
 const CMD_FIRE_STATE = 45;
 
 interface TrainTestState {
@@ -459,7 +467,7 @@ async function testSquadTransport(h: TestHarness, state: TrainTestState): Promis
 
     // Load squads into troop car
     for (const squadId of state.squadUnits) {
-        await h.order(squadId, CMD_LOAD_UNITS, [state.troopCar]);
+        await h.order(squadId, CMD_LOAD_ONTO, [state.troopCar]);
     }
 
     await sleep(3000);

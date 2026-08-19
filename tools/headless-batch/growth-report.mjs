@@ -26,8 +26,8 @@ import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import {
-    METRICS, DEFAULT_RULING, FAILING, INCONCLUSIVE,
-    seriesFromDump, fitLinear, classify, fmt,
+    METRICS, DEFAULT_RULING, FAILING, INCONCLUSIVE, SEED_SPAN_FLOOR_FRACTION,
+    seriesFromDump, fitLinear, classify, fmt, seedBudgets,
 } from './lib/growth-fit.mjs';
 import { checkFixtureNonVacuous } from './lib/fixture-checks.mjs';
 
@@ -82,11 +82,19 @@ function renderArm(arm) {
         (vac.ok ? '' : `\n  VACUOUS — ${vac.problems.join('; ')}`));
 
     const series = seriesFromDump(d);
-    const results = METRICS.map((m) => classify(m, fitLinear(series[m.key]), arm.budgets?.[m.key], arm.ruling));
+    const results = METRICS.map((m) => classify(m, fitLinear(series[m.key]), arm.budgets?.[m.key], arm.ruling, series[m.key]));
 
     const w = Math.max(...METRICS.map((m) => m.key.length));
     for (const r of results) {
-        const mark = FAILING.has(r.verdict) ? 'FAIL' : INCONCLUSIVE.has(r.verdict) ? '????' : ' ok ';
+        // `saturated` and `reclaimed` are passes, but neither is the same fact
+        // as `flat` or `explained` — one says a surface stepped and stopped,
+        // the other that it never stops and its reclaimer keeps up — so each
+        // gets its own mark rather than disappearing into the ok column.
+        const mark = FAILING.has(r.verdict) ? 'FAIL'
+            : INCONCLUSIVE.has(r.verdict) ? '????'
+            : r.verdict === 'saturated' ? 'STEP'
+            : r.verdict === 'reclaimed' ? 'SAW '
+            : ' ok ';
         const base = fmt(r.fit.base);
         const slope = fmt(r.fit.slope);
         lines.push(
@@ -115,9 +123,16 @@ async function main() {
         process.exit(2);
     }
 
+    // Spread the defaults rather than listing the two flags have: a ruling
+    // assembled field-by-field silently drops every parameter that has no CLI
+    // flag, and the reader sees a ruling that ran with `undefined` where a
+    // default was meant to be. That is not hypothetical — `reclaimDrawdownFraction`
+    // arrived that way and the sawtooth rule was inert through this entry point
+    // (and only this one) while its unit tests passed.
     const ruling = {
-        sigmas: values.sigmas ? Number(values.sigmas) : DEFAULT_RULING.sigmas,
-        minRelSlopePerDay: values['min-rel-slope'] ? Number(values['min-rel-slope']) : DEFAULT_RULING.minRelSlopePerDay,
+        ...DEFAULT_RULING,
+        ...(values.sigmas ? { sigmas: Number(values.sigmas) } : {}),
+        ...(values['min-rel-slope'] ? { minRelSlopePerDay: Number(values['min-rel-slope']) } : {}),
     };
     const budgets = values.budgets ? JSON.parse(await readFile(path.resolve(values.budgets), 'utf8')) : {};
 
@@ -141,34 +156,19 @@ async function main() {
     }
 
     if (values['emit-budgets']) {
-        // Seed a budget file from the observed slopes of the FIRST arm, with
-        // `why: null` on every entry so the file cannot pass the gate until a
-        // human has written down why each slope is legitimate. This is the
-        // "record budgets after the first green run" step of §2 made into a
-        // step you cannot accidentally skip.
-        // Only the metrics that actually FAILED get an entry. Seeding a budget
-        // for a metric already ruled `flat` would write that arm's noise into
-        // the file as a permanently permitted slope — the gate would then pass
-        // a later run that genuinely slopes by that much. A budget is a
-        // licence, and licences are only issued where one was needed.
-        //
-        // Every arm is scanned, not just the first: the churn arm is the one
-        // that stresses these surfaces, and a skeleton seeded off the baseline
-        // arm alone would be too tight for the ladder it has to gate. Where
-        // arms disagree, the largest observed slope wins.
-        const seed = {};
-        for (const arm of jsonOut) {
-            for (const r of arm.results) {
-                if (!FAILING.has(r.verdict)) continue;
-                if (!Number.isFinite(r.fit.slope) || r.fit.slope <= 0) continue;
-                if (seed[r.key] && seed[r.key].slopePerDay >= r.fit.slope) continue;
-                seed[r.key] = {
-                    slopePerDay: Number(r.fit.slope.toPrecision(4)),
-                    tolerance: Number((Math.abs(r.fit.slope) * 0.5).toPrecision(4)),
-                    why: null,
-                };
-            }
-        }
+        // Seed a budget file from the observed slopes, with `why: null` on every
+        // entry so the file cannot pass the gate until a human has written down
+        // why each slope is legitimate. This is the "record budgets after the
+        // first green run" step of §2 made into a step you cannot accidentally
+        // skip. The rules (failing metrics only; largest slope wins, but only
+        // among arms whose window is comparable) live in `seedBudgets` so they
+        // are unit-testable — see lib/growth-fit.mjs for why each exists.
+        const { seed, dropped } = seedBudgets(jsonOut);
+        // No silent caps: an arm refused as a seed is reported, because a
+        // seeding rule that quietly ignored arms reads exactly like one that
+        // never saw them.
+        for (const d of dropped)
+            console.log(`growth-report: seed ignores ${d.key}=${fmt(d.slope)}/day from [${d.label}] — its ${fmt(d.span)}-day window is under ${(SEED_SPAN_FLOOR_FRACTION * 100).toFixed(0)}% of the longest arm's ${fmt(d.longestSpan)}-day window for that metric`);
         await writeFile(path.resolve(values['emit-budgets']), JSON.stringify(seed, null, 2) + '\n');
         console.log(`\ngrowth-report: budget skeleton -> ${values['emit-budgets']} (every \`why\` is null; fill them in or the gate stays red)`);
     }

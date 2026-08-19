@@ -34,6 +34,7 @@ function M.new()
         escrow = {},               -- objectiveID -> total staked
         stakeResult = true,        -- GG.Authority.Stake return value (test-controlled)
         stakes = {},               -- recorded GG.Authority.Stake calls
+        logs = {},                 -- recorded Spring.Log calls
     }
 
     function world.setUnit(unitID, opts)
@@ -130,19 +131,29 @@ function M.new()
             return u and u.defID
         end,
         Echo = function() end,
+        -- Recorded rather than discarded: the DefsReconciled handler's one log
+        -- line is how a war operator learns a patch expired objectives, and a
+        -- no-op Log would let it be deleted without a spec noticing.
+        Log = function(section, level, msg)
+            world.logs[#world.logs + 1] = { section = section, level = level, msg = msg }
+        end,
     }
 
     _G.CMD = { MOVE = 1 }
+    _G.LOG = { ERROR = 'ERROR', WARNING = 'WARNING', NOTICE = 'NOTICE', INFO = 'INFO' }
     _G.UnitDefs = {}
 
     _G.gadgetHandler = { IsSyncedCode = function() return true end }
     _G.gadget = {}
 
     -- Resolve "LuaRules/Gadgets/objectives/X.lua" against the real files on
-    -- disk (tests run with cwd = LuaRules/Gadgets/objectives).
+    -- disk (tests run with cwd = LuaRules/Gadgets/objectives). The gadget also
+    -- pulls shared modules that live one level up (tick.lua, D15), so a
+    -- Gadgets-rooted path resolves to the parent directory.
     _G.VFS = {
         Include = function(path)
             local rel = path:gsub('^LuaRules/Gadgets/objectives/', './')
+            if rel == path then rel = path:gsub('^LuaRules/Gadgets/', '../') end
             return dofile(rel)
         end,
     }

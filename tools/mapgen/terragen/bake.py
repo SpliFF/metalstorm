@@ -21,6 +21,7 @@ import numpy as np
 
 from . import biomes as bio
 from . import noise as tn
+from . import roads as rd
 
 # Base material colours (linear-ish sRGB uint8) per biome id.
 BIOME_COLOR = {
@@ -35,6 +36,25 @@ BIOME_COLOR = {
 }
 ROCK_COLOR = np.array((118, 110, 102), dtype=np.float32)
 ROAD_COLOR = np.array((92, 84, 74), dtype=np.float32)
+
+# --- road surface classes (roads lane R1) ------------------------------------
+# Indexed by terragen.roads.SURF_*; index 0 (SURF_NONE) is never sampled but
+# keeps the LUT aligned to the typemap value, which is the same number.
+ROAD_SURFACE_COLOR = np.array([
+    (92, 84, 74),      # 0 unclassified — the pre-R1 single road colour
+    (62, 61, 63),      # 1 bitumen: weathered seal, grey with a blue cast
+    (132, 112, 84),    # 2 dirt: graded earth/gravel
+    (82, 68, 52),      # 3 mud: soaked, much darker than the dirt it came from
+], dtype=np.float32)
+
+# per class: (rut depth as an albedo darkening, rut lateral wander amplitude
+# as a fraction of the rut offset, slab-patch amplitude, pothole amplitude)
+ROAD_SURFACE_STYLE = np.array([
+    (0.00, 0.00, 0.00, 0.00),
+    (0.04, 0.06, 0.09, 1.70),   # bitumen: barely rutted, patched and potholed
+    (0.16, 0.22, 0.05, 0.30),   # dirt: clear wheel pair, wanders
+    (0.34, 0.30, 0.03, 0.15),   # mud: deep dark ruts that wander hard
+], dtype=np.float32)
 SAND_COLOR = np.array((178, 160, 128), dtype=np.float32)
 BED_SHALLOW = np.array((110, 108, 88), dtype=np.float32)   # wet gravel
 BED_DEEP = np.array((52, 64, 58), dtype=np.float32)        # dark silt
@@ -64,6 +84,7 @@ class AlbedoBaker:
         seed: int,
         road_width: float = 44.0,
         stamps: dict[str, np.ndarray] | None = None,   # placement.py ground stamps
+        road_class: np.ndarray | None = None,          # roads.rasterize_roads_classified
     ):
         self.h = height.astype(np.float32)
         self.slope = slope_deg.astype(np.float32)
@@ -74,6 +95,9 @@ class AlbedoBaker:
         self.cs = cellsize
         self.seed = seed
         self.road_w = road_width
+        # No class raster means a pre-R1 caller: every deck bakes as the one
+        # historical road colour with no ruts, byte for byte as before.
+        self.rclass = None if road_class is None else road_class.astype(np.uint8)
         self.gh, self.gw = height.shape
         self.map_w = int((self.gw - 1) * cellsize)
         self.map_h = int((self.gh - 1) * cellsize)
@@ -210,10 +234,66 @@ class AlbedoBaker:
 
         # --- roads: sharp deck, soft shoulder ---
         half = self.road_w * 0.5
-        deck = np.clip((half - rdist) / 3.0, 0.0, 1.0).astype(np.float32)       # sharp edge
+        if self.rclass is None:
+            deck = np.clip((half - rdist) / 3.0, 0.0, 1.0).astype(np.float32)   # sharp edge
+            road_tone = ROAD_COLOR * (1.0 + 0.08 * mid)[..., None]
+        else:
+            # Ragged edge: warping the distance field before thresholding makes
+            # the deck boundary wander a couple of elmos, which is what an
+            # unsealed road's edge does. The seal's edge wanders less, so the
+            # amplitude is scaled down on bitumen further below.
+            edge = tn.fbm(self.noise, X / 9.0 + 311.0, Z / 9.0 - 137.0,
+                          octaves=2).astype(np.float32)
+            # class is sampled through the same domain warp the biomes use, so
+            # a seal that ends mid-route ends on a ragged line rather than on
+            # an 8-elmo grid step
+            rcls = self._nearest(self.rclass, wx, wz).astype(np.int64)
+            style = ROAD_SURFACE_STYLE[rcls]                 # (rows, w, 4)
+            rut_amp = style[..., 0]
+            wander_amp = style[..., 1]
+            patch_amp = style[..., 2]
+            hole_amp = style[..., 3]
+
+            sealed = (rcls == rd.SURF_BITUMEN)
+            ragged = 2.6 * (1.0 - 0.7 * sealed)              # seal holds its edge
+            deck = np.clip((half - (rdist + ragged * edge)) / 3.0, 0.0, 1.0
+                           ).astype(np.float32)
+
+            road_tone = ROAD_SURFACE_COLOR[rcls] * (1.0 + 0.08 * mid)[..., None]
+
+            # Bitumen patchwork: a repaired seal is a mosaic of slabs at
+            # slightly different ages. Patch shapes come from a mid-scale
+            # field thresholded into blocks; potholes are the same field's
+            # sharp tail, kept at ~9 elmos rather than per-texel because the
+            # SMT dictionary would turn true per-texel speckle into a visibly
+            # repeating tile (see the module docstring).
+            patch = tn.fbm(self.noise, X / 34.0 - 211.0, Z / 34.0 + 83.0,
+                           octaves=2).astype(np.float32)
+            hole = tn.fbm(self.noise, X / 9.0 - 17.0, Z / 9.0 + 233.0,
+                          octaves=2).astype(np.float32)
+            # tanh rather than a hard threshold: a step turns the seal into
+            # cobbles, which is what the first pass looked like. `hole`'s
+            # cut is up at the 99.5th percentile of the field so potholes are
+            # rare enough to read as damage rather than as gravel.
+            slab = np.tanh(2.5 * patch).astype(np.float32)
+            holes = np.clip(hole - 0.77, 0.0, 1.0).astype(np.float32)
+            road_tone *= (1.0 + patch_amp * slab - hole_amp * holes)[..., None]
+
+            # Baked wheel ruts. `rdist` is UNSIGNED distance to the centreline,
+            # so one band at a fixed offset is already the pair of ruts — one
+            # on each side — without ever needing a signed lateral coordinate.
+            # The wander field is low-frequency along the map, so the pair
+            # drifts and, where it drifts far, the ruts of passing traffic
+            # overlap the verge exactly as a well-used track's do.
+            wander = tn.fbm(self.noise, X / 74.0 + 57.0, Z / 74.0 - 29.0,
+                            octaves=2).astype(np.float32)
+            rut_off = half * 0.42 * (1.0 + wander_amp * wander)
+            rut_w = max(2.5, self.road_w * 0.09)
+            band = np.exp(-((rdist - rut_off) / rut_w) ** 2).astype(np.float32)
+            road_tone *= (1.0 - rut_amp * band)[..., None]
+
         shoulder = np.clip((half * 2.2 - rdist) / (half * 2.2), 0.0, 1.0) ** 2
         shoulder = (shoulder * 0.35 * (deck < 0.5)).astype(np.float32)
-        road_tone = ROAD_COLOR * (1.0 + 0.08 * mid)[..., None]
         col = col * (1 - deck[..., None]) + road_tone * deck[..., None]
         col *= (1.0 - shoulder)[..., None]  # worn verge
 
@@ -326,9 +406,17 @@ def make_splat_distr(
     biome_ids: np.ndarray, slope_deg: np.ndarray, height: np.ndarray,
     water_level: float, size: int = 1024,
     stamps: dict[str, np.ndarray] | None = None,
+    road_class: np.ndarray | None = None,
 ) -> np.ndarray:
     """RGBA weights choosing the 4 detail layers (grass/rock/sand/snow) from
-    biome + slope (+ placement ground stamps), downsampled + blurred to `size`."""
+    biome + slope (+ placement ground stamps), downsampled + blurred to `size`.
+
+    Road decks claim the ROCK channel, because the runtime detail layer is
+    what supplies per-texel grain and a road's grain is aggregate, not grass —
+    without this a dirt track keeps the grass detail of the field it crosses.
+    There is no fifth channel to give roads their own detail layer (the format
+    is RGBA), so mud, whose surface is smooth rather than granular, is left to
+    the biome's own weights instead of being handed a gravel grain."""
     from scipy import ndimage
 
     grass = np.isin(biome_ids, [bio.GRASSLAND, bio.FOREST, bio.WETLAND]).astype(np.float32)
@@ -348,6 +436,13 @@ def make_splat_distr(
                        out=chans[style[2]])
     grass, rockb, sand, snow = chans
 
+    if road_class is not None:
+        aggregate = np.isin(road_class, [rd.SURF_BITUMEN, rd.SURF_DIRT])
+        grass = np.where(aggregate, 0.0, grass)
+        sand = np.where(aggregate, 0.0, sand)
+        snow = np.where(aggregate, 0.0, snow)
+        rockb = np.where(aggregate, 1.0, rockb)
+
     w = np.stack([grass, rockb, sand, snow], axis=-1)
     total = w.sum(axis=-1, keepdims=True)
     w = np.divide(w, total, out=np.zeros_like(w), where=total > 0)
@@ -358,3 +453,52 @@ def make_splat_distr(
         axis=-1,
     )
     return np.clip(w4 * 255, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Map-space ground albedo (PLAN-maps M7f option A, user ruling 2026-08-19 §2n)
+# ---------------------------------------------------------------------------
+# The shipped delivery path for the ground albedo is Spring's SMT tile
+# dictionary, which is LOSSY here (dxt1.cluster_tiles is a vector quantizer,
+# not Spring's exact dedup) and — measured in M7f — puts 12.5 % of texels more
+# than 4 levels off truth and a 15.7x seam discontinuity on the 32-elmo grid.
+# A single low-resolution map-space texture beats it on every axis at once
+# (2048²: error 2.51 -> 1.95, bad texels 12.5 -> 7.5 %, seam 15.74 -> 1.20,
+# 8.4 -> 2.8 MB), because the bake it delivers holds nothing finer than the
+# ~50-elmo wavelength floor §5 already imposes — per-texel grain is the
+# runtime splat layer's job.
+#
+# Derived by BOX-DOWNSAMPLING the same full-resolution tile bake the SMT is
+# clustered from, so the two delivery paths carry the same pixels and the
+# comparison eval_ground_albedo.py makes is the one that ships.
+GROUND_TEXTURE_SIZE_DEFAULT = 2048
+
+
+def ground_texture_from_tiles(
+    tiles: np.ndarray, tiles_x: int, tiles_z: int, size: int,
+) -> np.ndarray:
+    """Box-downsample the (N, 32, 32, 3) tile bake to a `size`² map-space
+    albedo. `size` must divide the full-resolution edge by a factor that
+    itself divides the 32-texel tile, so no output texel straddles two tiles
+    and the reduction is exact."""
+    full_x, full_z = tiles_x * 32, tiles_z * 32
+    if full_x != full_z:
+        raise ValueError(f"non-square bake {full_x}x{full_z}: ground texture "
+                         "assumes a square map")
+    if size <= 0 or full_x % size:
+        raise ValueError(f"ground texture size {size} does not divide the "
+                         f"{full_x}-texel bake")
+    factor = full_x // size
+    if 32 % factor:
+        raise ValueError(f"ground texture size {size} implies a {factor}x "
+                         "reduction, which does not divide the 32-texel tile")
+    out_per_tile = 32 // factor
+    out = np.empty((size, size, 3), dtype=np.uint8)
+    for tz in range(tiles_z):
+        row = np.asarray(tiles[tz * tiles_x:(tz + 1) * tiles_x], dtype=np.float32)
+        red = (row.reshape(tiles_x, out_per_tile, factor, out_per_tile, factor, 3)
+                  .mean(axis=(2, 4)))                       # (tiles_x, o, o, 3)
+        red = red.transpose(1, 0, 2, 3).reshape(out_per_tile, tiles_x * out_per_tile, 3)
+        out[tz * out_per_tile:(tz + 1) * out_per_tile] = np.clip(
+            np.rint(red), 0, 255).astype(np.uint8)
+    return out

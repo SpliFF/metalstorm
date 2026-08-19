@@ -114,6 +114,22 @@ public:
 
 	virtual bool AllowedCommand(const Command& c, bool fromSynced);
 
+	/**
+	 * ADDED (not upstream) for PLAN-persistence task 1c — snapshot restore.
+	 *
+	 * Replaces the whole queue with @p cmds, restores the queue's tag counter,
+	 * and re-establishes the death dependencies each command implies (a queued
+	 * attack references a unit; without the dependency a later death leaves a
+	 * dangling reference). GiveCommand() cannot be used for this: it applies
+	 * cancel/merge rules, renumbers tags and raises events, none of which are
+	 * wanted when the queue being installed is one this unit already had.
+	 *
+	 * inCommand is deliberately left FALSE — see PLAN-persistence §7.1c
+	 * decision 1: the front command must be re-entered so the move type,
+	 * order target and build site are rebuilt from the command itself.
+	 */
+	void RestoreCommandQueue(const std::vector<Command>& cmds, int tagCounter);
+
 	CWeapon* stockpileWeapon;
 
 	std::vector<const SCommandDescription*> possibleCommands;

@@ -51,6 +51,7 @@
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/GameOverState.h"
+#include "Server/AI/AISpawn.h"
 #include "Server/StandingOrders.h"
 #include "Server/OrgGroups.h"
 #include "Sim/Weapons/DamageField.h"
@@ -145,6 +146,7 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(KillTeam);
 	REGISTER_LUA_CFUNC(AssignPlayerToTeam);
 	REGISTER_LUA_CFUNC(GameOver);
+	REGISTER_LUA_CFUNC(SpawnAIPlayer);
 	REGISTER_LUA_CFUNC(SetGlobalLos);
 
 	REGISTER_LUA_CFUNC(CreateStandingOrder);
@@ -1070,6 +1072,59 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
 	gameOverRelay.Declare(winningAllyTeams, gs->frameNum);
 	// push the number of accepted allyteams
 	lua_pushnumber(L, winningAllyTeams.size());
+	return 1;
+}
+
+
+/*** Requests that an AI be seated on a team, mid-game.
+ *
+ * @function Spring.SpawnAIPlayer
+ * @number teamID          team the AI takes over
+ * @string aiID            AIDiscovery plugin id (the plugin's folder name)
+ * @treturn bool queued    false if the team is invalid, the id is malformed,
+ *                         or a request for this team is already queued
+ *
+ * FIDELITY-STANDIN: no such call exists in Spring/Recoil, where the AI roster
+ * is fixed by the game setup script. It is a fork addition under the
+ * client-server carve-out — this engine is server-authoritative and owns the
+ * player roster outright — and it exists for the `ai_caretaker` hook
+ * (PLAN-metalstorm-ai.md §10 task 4(b)): when the last human on a side leaves,
+ * a side that never had an AI had nothing to hand the war to.
+ *
+ * The call only DECLARES. The server drains the request on its next tick and
+ * decides, because the facts that decide it (does this team already have an
+ * AI, has the game started, does the plugin resolve) live on its side — see
+ * Server/AI/AISpawn.h. A queued request is therefore not a seated AI, and the
+ * caller must not assume a playerID came back; the AI announces itself the
+ * ordinary way, through the roster and its own PlayerAdded.
+ */
+int LuaSyncedCtrl::SpawnAIPlayer(lua_State* L)
+{
+	const int teamID = luaL_checkint(L, 1);
+	const std::string aiID = luaL_checkstring(L, 2);
+
+	if (!teamHandler.IsValidTeam(teamID)) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	// The id indexes a folder under content/engine/ai or <game>/ai. Discovery
+	// only ever yields plain folder names, so a separator or a dot segment
+	// could never match one — but refusing them here keeps a game-Lua typo
+	// from reaching a path join at all, and the refusal is visible rather than
+	// arriving later as "no matching plugin found".
+	if (aiID.empty() ||
+	    aiID.find('/') != std::string::npos ||
+	    aiID.find('\\') != std::string::npos ||
+	    aiID.find("..") != std::string::npos) {
+		luaL_error(L, "SpawnAIPlayer(): malformed AI id");
+		return 0;
+	}
+
+	AISpawnRequest rq;
+	rq.teamId = teamID;
+	rq.aiId   = aiID;
+	lua_pushboolean(L, aiSpawnRelay.Request(rq));
 	return 1;
 }
 

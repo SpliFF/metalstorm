@@ -27,6 +27,8 @@
 #include "System/Log/ILog.h"
 #include "ReplayPlayer.h"
 #include "AI/AIRuntimePool.h"
+#include "AI/AICommandCodec.h"
+#include "AI/AISpawnService.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaHandleSynced.h"
@@ -427,6 +429,26 @@ void StateStreamer::StreamEntityState(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         bool isFullSnapshot = (curFrame % 30) == 0;
 
+        // PLAN-long-uptime S5 task 6: has the sim handed a used unit id back
+        // out since we last said so? Read once per tick, before the fan-out —
+        // the epoch is a property of the world, not of a viewer, and every
+        // client holds the same aliasable ids.
+        const bool wasAnnouncing = idRecycleAnnouncer.IsPending();
+        const bool announceIdRecycle =
+            idRecycleAnnouncer.Tick(unitHandler.IdRecycleEpoch(), isFullSnapshot);
+        if (announceIdRecycle && !wasAnnouncing) {
+            // Loud on purpose: this is the one event that invalidates every
+            // client's id-keyed state, and in an ordinary match it should
+            // never fire at all (the pool holds MAX_UNITS ids and only drains
+            // on exhaustion or a snapshot restore). If it turns up in a live
+            // log, the frame it turns up on is the whole diagnosis.
+            LOG("[StateStreamer] unit-id recycle epoch %u at frame %d — "
+                "announcing FLAG_ID_RECYCLED to %d client(s)",
+                unitHandler.IdRecycleEpoch(), curFrame, rtcServer.GetClientCount());
+        }
+        const uint16_t fieldMask = EntityState::FIELD_ALL
+            | (announceIdRecycle ? EntityState::FLAG_ID_RECYCLED : uint16_t(0));
+
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             // Map session->team to its ally team so the
             // visibility filter can skip enemy units that
@@ -466,7 +488,7 @@ void StateStreamer::StreamEntityState(int) {
             if (isFullSnapshot) {
                 envelope = 0x02;
                 stateData = EntityState::SerializeUnits(
-                    candidates, EntityState::FIELD_ALL, viewerAllyTeam,
+                    candidates, fieldMask, viewerAllyTeam,
                     static_cast<uint32_t>(curFrame));
                 session.deltaCache.Clear();
                 for (CUnit* u : candidates)
@@ -482,7 +504,7 @@ void StateStreamer::StreamEntityState(int) {
 
                 envelope = 0x03;
                 stateData = EntityState::SerializeUnits(
-                    changed, EntityState::FIELD_ALL, viewerAllyTeam,
+                    changed, fieldMask, viewerAllyTeam,
                     static_cast<uint32_t>(curFrame));
             }
 
@@ -495,6 +517,7 @@ void StateStreamer::StreamEntityState(int) {
             // two don't RESET each other before either transmits.
             rtcServer.SendUnreliable(clientId, frame.data(), frame.size(), kStateLaneEntity);
         });
+
     }
 }
 
@@ -610,144 +633,6 @@ void StateStreamer::EvaluateStandingOrders(int) {
     }
 }
 
-namespace {
-/// Flatten one drained AICommand into the journal's opaque payload
-/// (PLAN-replay task 1). AICommand is not trivially copyable — it carries
-/// three heap fields — so it cannot be memcpy'd into a record. The encoding
-/// is deliberately dumb and self-describing-by-position rather than a
-/// flatbuffer: nothing but the replay driver ever reads it back, it must not
-/// acquire a schema dependency, and every field is fixed-width or
-/// length-prefixed so a decoder is a mirror of this function.
-///
-/// Ordering note: the CreateGroup→IssueDirective token correlation is resolved
-/// *within* a drained batch, so `groupToken`/`refToken` are meaningless across
-/// batches. They are recorded anyway — a replay re-pushes the whole batch in
-/// the same order and re-resolves them the same way.
-std::vector<uint8_t> SerializeAICommand(const AICommand& c) {
-    std::vector<uint8_t> out;
-    out.reserve(96);
-    auto putU8  = [&](uint8_t v)  { out.push_back(v); };
-    auto putU32 = [&](uint32_t v) {
-        for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
-    };
-    auto putI32 = [&](int32_t v)  { putU32(static_cast<uint32_t>(v)); };
-    auto putF32 = [&](float v)    {
-        uint32_t bits; std::memcpy(&bits, &v, 4); putU32(bits);
-    };
-
-    putU8(static_cast<uint8_t>(c.kind));
-    putI32(c.teamId);
-    putI32(c.playerId);
-    // UnitCommand fields
-    putU32(c.unitId);
-    putI32(c.commandId);
-    putU8(c.options);
-    const int nParams = (c.numParams < 0) ? 0
-                      : (c.numParams > 8) ? 8 : c.numParams;
-    putU8(static_cast<uint8_t>(nParams));
-    for (int i = 0; i < nParams; ++i) putF32(c.params[i]);
-    // Directive-shaped fields
-    putU8(c.echelon);
-    putU32(static_cast<uint32_t>(c.squadIds.size()));
-    for (uint32_t id : c.squadIds) putU32(id);
-    putU32(c.groupToken);
-    putU32(c.groupId);
-    putU32(c.refToken);
-    putU8(c.directiveType);
-    putU8(c.priority);
-    putU8(c.shape);
-    putU32(static_cast<uint32_t>(c.directiveParams.size()));
-    for (float f : c.directiveParams) putF32(f);
-    putU32(c.requestedStrength);
-    putU32(c.expiresInFrames);
-    putF32(c.withinX);
-    putF32(c.withinZ);
-    putF32(c.withinRadius);
-    putU32(static_cast<uint32_t>(c.text.size()));
-    out.insert(out.end(), c.text.begin(), c.text.end());
-    return out;
-}
-
-/// Exact mirror of SerializeAICommand — the replay side of chokepoint #4
-/// (PLAN-replay task 2). Returns false on any short/garbled buffer rather than
-/// producing a partly-filled command: a replay that applied half an AI order
-/// would diverge silently, which is the one outcome worse than stopping.
-///
-/// Kept adjacent to the encoder on purpose. The two functions are a matched
-/// pair and the only guard against them drifting apart is that a reader edits
-/// them together; a round-trip doctest lives in tests/test_replay_file.cpp for
-/// the framing, but the field list itself is enforced by proximity.
-bool DeserializeAICommand(const std::vector<uint8_t>& in, AICommand& out) {
-    size_t p = 0;
-    bool ok = true;
-    auto getU8 = [&](uint8_t& v) {
-        if (p + 1 > in.size()) { ok = false; return; }
-        v = in[p++];
-    };
-    auto getU32 = [&](uint32_t& v) {
-        if (p + 4 > in.size()) { ok = false; return; }
-        v = 0;
-        for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(in[p + i]) << (8 * i);
-        p += 4;
-    };
-    auto getI32 = [&](int& v) {
-        uint32_t u = 0; getU32(u); v = static_cast<int32_t>(u);
-    };
-    auto getF32 = [&](float& v) {
-        uint32_t u = 0; getU32(u);
-        if (ok) std::memcpy(&v, &u, 4);
-    };
-
-    AICommand c;
-    uint8_t kind = 0;
-    getU8(kind);
-    c.kind = static_cast<AICommandKind>(kind);
-    getI32(c.teamId);
-    getI32(c.playerId);
-    getU32(c.unitId);
-    getI32(c.commandId);
-    getU8(c.options);
-    uint8_t nParams = 0;
-    getU8(nParams);
-    if (!ok || nParams > 8) return false;
-    c.numParams = nParams;
-    for (int i = 0; i < nParams; ++i) getF32(c.params[i]);
-
-    getU8(c.echelon);
-    uint32_t nSquads = 0;
-    getU32(nSquads);
-    if (!ok || nSquads > in.size()) return false;   // length sanity, not a real bound
-    c.squadIds.resize(nSquads);
-    for (uint32_t i = 0; i < nSquads; ++i) getU32(c.squadIds[i]);
-    getU32(c.groupToken);
-    getU32(c.groupId);
-    getU32(c.refToken);
-    getU8(c.directiveType);
-    getU8(c.priority);
-    getU8(c.shape);
-    uint32_t nDirParams = 0;
-    getU32(nDirParams);
-    if (!ok || nDirParams > in.size()) return false;
-    c.directiveParams.resize(nDirParams);
-    for (uint32_t i = 0; i < nDirParams; ++i) getF32(c.directiveParams[i]);
-    getU32(c.requestedStrength);
-    getU32(c.expiresInFrames);
-    getF32(c.withinX);
-    getF32(c.withinZ);
-    getF32(c.withinRadius);
-    uint32_t textLen = 0;
-    getU32(textLen);
-    if (!ok || p + textLen > in.size()) return false;
-    c.text.assign(in.begin() + static_cast<long>(p),
-                  in.begin() + static_cast<long>(p + textLen));
-    p += textLen;
-
-    if (!ok) return false;
-    out = std::move(c);
-    return true;
-}
-} // namespace
-
 // Tick AI runtime and drain AI commands.
 //
 // AI commands are applied here, on the sim thread, through the EXACT manager
@@ -760,6 +645,14 @@ bool DeserializeAICommand(const std::vector<uint8_t>& in, AICommand& out) {
 void StateStreamer::TickAI(int) {
     auto& aiPool = ctx.aiPool;
     auto& sim = ctx.sim;
+
+    // Mid-game arrivals first (PLAN-metalstorm-ai.md §10 task 4(b)): a
+    // caretaker declared by synced Lua on the frame a side emptied is seated
+    // here, so it takes part in THIS tick's snapshot rather than idling for
+    // one. Both halves run on the sim thread; this is the single, fixed drain
+    // point that makes the seating deterministic under replay.
+    ServiceAISpawns(ctx);
+
     aiPool.Tick(sim.GetFrameNum());
 
     auto aiCmds = aiPool.DrainCommands();
@@ -825,7 +718,8 @@ void StateStreamer::TickAI(int) {
     for (const auto& cmd : aiCmds) {
         const std::vector<uint8_t> aiBlob = SerializeAICommand(cmd);
         syncedinput::Journal().RecordAICommand(
-            cmd.playerId, aiBlob.data(), aiBlob.size());
+            cmd.playerId, static_cast<uint8_t>(cmd.kind),
+            aiBlob.data(), aiBlob.size());
     }
 
     ApplyAICommands(aiCmds);
@@ -859,6 +753,12 @@ void StateStreamer::ApplyAICommands(const std::vector<AICommand>& aiCmds) {
     // target area quantised to the region lookup cell for an area-scoped one
     // (its "group" analogue) — so distinct regions still each get a directive.
     std::unordered_set<uint64_t> directiveKeys;
+
+    // I1/SG1 E6 clamp: ≤ kAILuaMsgPerDrain LuaMsg deliveries per AI player per
+    // batch. Counted per batch (not per frame) because a batch IS what a
+    // replay re-feeds — the live run and the replay drop the same commands.
+    AILuaMsgDrainBudget luaMsgBudget;
+    int luaMsgDropped = 0;
 
     for (const auto& cmd : aiCmds) {
         switch (cmd.kind) {
@@ -924,12 +824,12 @@ void StateStreamer::ApplyAICommands(const std::vector<AICommand>& aiCmds) {
                         cmd.directiveType, cmd.requestedStrength))
                     continue;
 
-                StandingOrderConditions conds;
-                conds.idleOnly = true;
-                if (cmd.withinRadius > 0.0f) {
-                    conds.withinCenter = float3(cmd.withinX, 0.0f, cmd.withinZ);
-                    conds.withinRadius = cmd.withinRadius;
-                }
+                // idleOnly=false — an AI directive is its team commander's
+                // explicit order, same rule D56 gave a human. See
+                // AIDirectiveConditions (OrgGroups.h) for the whole argument;
+                // this used to hardcode `true` and was half of D68.
+                const StandingOrderConditions conds = AIDirectiveConditions(
+                    cmd.withinX, cmd.withinZ, cmd.withinRadius);
                 // Same author plumbing as a human's create (objectives §5.1):
                 // an AI slot is a real virtual player with its own pool, so its
                 // directives attribute to it with no special case.
@@ -957,7 +857,34 @@ void StateStreamer::ApplyAICommands(const std::vector<AICommand>& aiCmds) {
                 orgGroups.SetPosture(groupId, cmd.teamId, cmd.text);
                 break;
             }
+            case AICommandKind::LuaMsg: {
+                // I1/SG1: the AI's write into synced game Lua. Same delivery
+                // the SendLuaRulesMsg loopback uses (PumpLuaRulesMsgLoopback),
+                // but reached from here so it is JOURNALED — unlike a synced
+                // gadget's self-send this originates outside the sim.
+                //
+                // Deliberately NO client forward. A human's LuaMsg also fans
+                // out to widget workers ($RecvLuaMsg); the AI's does not — its
+                // observable product is whatever the synced gadget publishes
+                // (rulesParams, already LOS-filtered). Broadcasting raw AI
+                // internals would leak team-private planning on an unfiltered
+                // channel (PLAN-ai-synced-write §2.4).
+                if (!luaMsgBudget.TryConsume(cmd.playerId)) {
+                    ++luaMsgDropped;
+                    continue;
+                }
+                if (luaRules != nullptr)
+                    luaRules->RecvLuaMsg(cmd.text, cmd.playerId);
+                break;
+            }
         }
+    }
+
+    if (luaMsgDropped > 0) {
+        SLOG(SPRING_LOG_WARNING,
+             "[ai] LuaMsg drain clamp: %d message(s) dropped this batch "
+             "(cap %d per AI player)",
+             luaMsgDropped, kAILuaMsgPerDrain);
     }
 }
 
@@ -1428,8 +1355,11 @@ void StateStreamer::BroadcastSendToUnsynced(int) {
 }
 
 // Player/team status changes — PlayerChanged (spec/team change),
-// PlayerRemoved (disconnect), TeamDied. The server fires the matching
-// eventHandler callins into its own synced Lua directly; this batch
+// PlayerAdded (mid-game join), PlayerRemoved (disconnect), TeamDied. The
+// server fires the matching callins into its own synced Lua at the sites
+// that decide them (`FireSyncedPlayerAdded`/`Removed` — NOT through
+// eventHandler, which cannot reach a synced handle for the three player
+// events; see PlayerOnboarding.h); this batch
 // carries them across the network to the unsynced LuaUI worker, which
 // updates its roster and fans out to the widget callins. Reliable,
 // low-frequency, unfiltered (player/team identity + life/death are

@@ -43,7 +43,7 @@ import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
 import type { EntityStateSnapshot } from './entity-state.js';
-import { EntityInterpolator } from './entity-interpolator.js';
+import { EntityInterpolator, type InterpolatedPose } from './entity-interpolator.js';
 import type { PresentationClock } from './presentation-clock.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
@@ -806,6 +806,10 @@ export class EntityRenderer {
      *  engine ask B1). Null until wired by the bootstrap — tick() falls back to
      *  always-Full when unset (identical to pre-B1 behaviour). */
     private impostorRenderer: ImpostorRenderer | null = null;
+    /** PLAN-latency L4.3 — see setLeanProvider. */
+    private leanProvider:
+        ((id: number, x: number, z: number, heading: number)
+            => { dx: number; dz: number; dHeading: number } | null) | null = null;
     /** Model-viewer F8 panel LOD override (force-LOD dropdown). Null = no
      *  override, per-def thresholds decide the tier normally. */
     private forceLodTier: LodTier | null = null;
@@ -841,6 +845,39 @@ export class EntityRenderer {
      *  restore normal distance-based tier selection. */
     setForceLodTier(tier: LodTier | null): void {
         this.forceLodTier = tier;
+    }
+
+    /**
+     * Attach the optimistic motion-lean provider (PLAN-latency L4.3).
+     *
+     * Called once per *drawn* mobile entity per frame with its interpolated
+     * pose; returns a bounded render-space offset to add, or null. Three
+     * properties, all deliberate:
+     *
+     *  - It is applied strictly on the render path, downstream of the L1
+     *    reveal gate, so an entity that is not yet drawn can never be leaned.
+     *  - It never touches `EntityInterpolator`'s sample buffer — the lean is
+     *    added after `getInterpolated` and thrown away each frame.
+     *  - The query APIs (`getEntityPosition`, `getEntityPose`,
+     *    `getPieceWorldPosition`, `getEntityBounds`) read straight through it.
+     *    Turret aim, beam origins and L2.3's target sampling stay on
+     *    authoritative data; only the drawn body and its selection ring lean.
+     */
+    setLeanProvider(
+        provider: ((id: number, x: number, z: number, heading: number)
+            => { dx: number; dz: number; dHeading: number } | null) | null,
+    ): void {
+        this.leanProvider = provider;
+    }
+
+    /** The lean for a drawn entity, or null. Buildings never lean — a factory
+     *  rally point is an ordinary `CMD_MOVE` on the factory itself, and
+     *  sliding a structure a few elmos is the one place this reads as a bug
+     *  rather than as responsiveness. */
+    private leanFor(id: number, defId: number, p: InterpolatedPose)
+        : { dx: number; dz: number; dHeading: number } | null {
+        if (!this.leanProvider || this.defIsBuilding.has(defId)) return null;
+        return this.leanProvider(id, p.x, p.z, p.heading);
     }
 
     /**
@@ -2046,10 +2083,14 @@ export class EntityRenderer {
         for (const id of this.selectedIds) {
             const p = this.interpolator.getInterpolated(id, cursorFrame);
             if (!p) continue;
+            // PLAN-latency L4.3: the ring follows the drawn body, or it
+            // detaches from it for the length of every lean.
+            const meta = this.entityMeta.get(id);
+            const lean = meta ? this.leanFor(id, meta.defId, p) : null;
             const m = Matrix.Compose(
                 new Vector3(1, 1, 1),
                 Quaternion.Identity(),
-                new Vector3(p.x, p.y + 1.0, p.z),
+                new Vector3(p.x + (lean?.dx ?? 0), p.y + 1.0, p.z + (lean?.dz ?? 0)),
             );
             m.copyToArray(tmp, 0);
             for (let j = 0; j < 16; j++) matrices.push(tmp[j]);
@@ -2405,11 +2446,26 @@ export class EntityRenderer {
 
             // Normal / ghost render path: pick the source pose. Ghosts
             // use the captured snapshot; live units use the interpolator.
-            const lerped = ghost
+            const authoritative = ghost
                 ? { x: ghost.x, y: ghost.y, z: ghost.z, heading: ghost.heading,
                     pitch: ghost.pitch, roll: ghost.roll }
                 : this.interpolator.getInterpolated(id, cursorFrame);
-            if (!lerped) continue;
+            if (!authoritative) continue;
+
+            // PLAN-latency L4.3: add the optimistic lean on top of the
+            // interpolated pose. Ghosts are frozen enemy structures — a
+            // remembered pose is the one thing that must never move.
+            const lean = ghost ? null : this.leanFor(id, meta.defId, authoritative);
+            const lerped = lean
+                ? {
+                    x: authoritative.x + lean.dx,
+                    y: authoritative.y,
+                    z: authoritative.z + lean.dz,
+                    heading: ((authoritative.heading + lean.dHeading) % 65536 + 65536) % 65536,
+                    pitch: authoritative.pitch,
+                    roll: authoritative.roll,
+                }
+                : authoritative;
 
             // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: LOD tier
             // decision. Icon tier isn't rendered here at all (strategic map

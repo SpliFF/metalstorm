@@ -259,25 +259,91 @@ describe("Picture.refresh — ledger + intel", function()
         }
     end
 
-    it("buckets own units by region and by class", function()
+    -- ⚠ `unit.health` here is the runtime's own scale: a 0-1 RATIO
+    -- (`AIStateSnapshot.cpp:45` — `health / maxHealth`), not hitpoints. Taken
+    -- from the producer's construction site rather than invented, because a
+    -- fixture that feeds absolute hitpoints tests arithmetic the runtime never
+    -- performs — which is exactly how D68 stayed hidden through 112 green specs.
+    it("buckets own units by region and by class, in the runtime's 0-1 scale", function()
         local Picture = freshPicture()
         local ai = makeAI({
             mapData = { ['regions.json'] = regionsFixtureData() },
             defExport = { ['power.json'] = powerFixture() },
             ownUnits = {
-                { defId = 101, x = 512, z = 512, health = 500 },   -- north_ridge, tanks
-                { defId = 202, x = 600, z = 600, health = 100 },   -- north_ridge, soldiers
-                { defId = 303, x = 600, z = 600, health = 50 },    -- north_ridge, unclassed
+                { defId = 101, x = 512, z = 512, health = 1.0 },   -- north_ridge, tanks, undamaged
+                { defId = 202, x = 600, z = 600, health = 0.5 },   -- north_ridge, soldiers, half dead
+                { defId = 303, x = 600, z = 600, health = 0.25 },  -- north_ridge, unclassed
             },
         })
         local picture = refresh(Picture, ai)
 
         local bucket = picture.ledger.north_ridge
         assert.is_not_nil(bucket)
-        assert.are.equal(650, bucket.strength)
-        assert.are.equal(500, bucket.byClass.tanks)
-        assert.are.equal(100, bucket.byClass.soldiers)
-        assert.are.equal(50, bucket.byClass._unclassed)
+        -- `strength` is a damage-discounted HEAD COUNT: 1 + 0.5 + 0.25.
+        assert.are.equal(1.75, bucket.strength)
+        assert.are.equal(1.0, bucket.byClass.tanks)
+        assert.are.equal(0.5, bucket.byClass.soldiers)
+        assert.are.equal(0.25, bucket.byClass._unclassed)
+    end)
+
+    -- D68: the bucket ALSO carries the engine's scale, because that is the only
+    -- number allowed to become a directive's requestedStrength.
+    it("prices the same force in absolute hitpoints off power.json (D68)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            defExport = { ['power.json'] = powerFixture() },
+            ownUnits = {
+                { defId = 101, x = 512, z = 512, health = 1.0 },   -- 500 hp tank, undamaged
+                { defId = 202, x = 600, z = 600, health = 0.5 },   -- 100 hp soldier, half dead
+            },
+        })
+        local picture = refresh(Picture, ai)
+
+        local bucket = picture.ledger.north_ridge
+        -- 1.0 x 500 + 0.5 x 100. Two units, 550 hitpoints — and it is the 550
+        -- the engine's demand cap is denominated in, not the 1.5.
+        assert.are.equal(550, bucket.health)
+        assert.are.equal(1.5, bucket.strength)
+        -- The two scales are not interchangeable, which is the whole finding.
+        assert.is_true(bucket.health > bucket.strength * 100)
+    end)
+
+    -- A def the power table cannot price still has to contribute force, or a
+    -- package of them would ask the engine for nothing and recruit nobody.
+    it("prices an unpriced def at a nominal hp rather than zero (D68)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            defExport = { ['power.json'] = powerFixture() },
+            ownUnits = {
+                -- 303 is absent from power.json (the unclassed def).
+                { defId = 303, x = 600, z = 600, health = 1.0 },
+            },
+        })
+        local picture = refresh(Picture, ai)
+
+        local bucket = picture.ledger.north_ridge
+        assert.are.equal(1.0, bucket.strength)
+        assert.are.equal(1000, bucket.health)   -- NOMINAL_UNIT_HP, warned once
+    end)
+
+    -- The blind path: no def export at all. Every unit falls to the nominal
+    -- price, so `health` degrades to "hitpoints at 1 000 each" and never to 0.
+    it("still prices force with no def export at all (D68)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            ownUnits = {
+                { defId = 101, x = 512, z = 512, health = 1.0 },
+                { defId = 202, x = 600, z = 600, health = 0.5 },
+            },
+        })
+        local picture = refresh(Picture, ai)
+
+        local bucket = picture.ledger.north_ridge
+        assert.are.equal(1.5, bucket.strength)
+        assert.are.equal(1500, bucket.health)
     end)
 
     it("folds fresh enemy sightings into intel with byClass + full confidence", function()
@@ -388,6 +454,35 @@ describe("Picture.refresh — co-commander live data (task 4)", function()
         local p = refresh(Picture, ai)
         assert.are.equal('bounty', p.board[1].source)
         assert.are.equal(1, p.board[1].suggested)
+    end)
+
+    -- endtoend Q-E1 / D47: the terminal objective was published PUBLIC and the
+    -- AI was the one reader that never asked for it, so the war read as a
+    -- 300-authority control among 110s.
+    it("surfaces the terminal objective flag so the planner can price the war", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = {
+                ['game:objective_count']     = 2,
+                ['game:objective_1_type']    = 'control',
+                ['game:objective_1_scope']   = 'strategic',
+                ['game:objective_1_state']   = 'active',
+                ['game:objective_1_reward']  = 300,
+                ['game:objective_1_team']    = -1,
+                ['game:objective_1_region']  = 'raven_basin',
+                ['game:objective_1_victory'] = 1,
+                -- id 2: a side objective — `victory` is absent, not 0.
+                ['game:objective_2_type']    = 'control',
+                ['game:objective_2_scope']   = 'tactical',
+                ['game:objective_2_state']   = 'active',
+                ['game:objective_2_reward']  = 110,
+                ['game:objective_2_team']    = -1,
+                ['game:objective_2_region']  = 'marrow_watch',
+            },
+        })
+        local p = refresh(Picture, ai)
+        assert.are.equal(1, p.board[1].victory)
+        assert.is_nil(p.board[2].victory)
     end)
 end)
 

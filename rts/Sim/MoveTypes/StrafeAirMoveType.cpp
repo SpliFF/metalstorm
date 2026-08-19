@@ -1412,3 +1412,69 @@ bool CStrafeAirMoveType::SetMemberValue(unsigned int memberHash, void* memberVal
 	return false;
 }
 
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+
+void CStrafeAirMoveType::SnapshotCapture(movetypesnapshot::MoveTypeState& s) const {
+	SnapshotCaptureBase(s.base);
+	SnapshotCaptureAir(s.air);
+
+	auto& f = s.strafe;
+	f.maneuverBlockTime = maneuverBlockTime;
+	f.maneuverState = maneuverState;
+	f.maneuverSubState = maneuverSubState;
+	f.loopbackAttack = loopbackAttack;
+	f.isFighter = isFighter;
+	f.wingDrag = wingDrag;
+	f.wingAngle = wingAngle;
+	f.invDrag = invDrag;
+	f.crashDrag = crashDrag;
+	f.frontToSpeed = frontToSpeed;
+	f.speedToFront = speedToFront;
+	f.myGravity = myGravity;
+	f.maxBank = maxBank;
+	f.maxPitch = maxPitch;
+	f.turnRadius = turnRadius;
+	f.maxAileron = maxAileron;
+	f.maxElevator = maxElevator;
+	f.maxRudder = maxRudder;
+	f.attackSafetyDistance = attackSafetyDistance;
+	f.crashAileron = crashAileron;
+	f.crashElevator = crashElevator;
+	f.crashRudder = crashRudder;
+	f.lastRudderPos0 = lastRudderPos[0]; f.lastRudderPos1 = lastRudderPos[1];
+	f.lastElevatorPos0 = lastElevatorPos[0]; f.lastElevatorPos1 = lastElevatorPos[1];
+	f.lastAileronPos0 = lastAileronPos[0]; f.lastAileronPos1 = lastAileronPos[1];
+}
+
+void CStrafeAirMoveType::SnapshotApply(const movetypesnapshot::MoveTypeState& s) {
+	SnapshotApplyBase(s.base);
+	SnapshotApplyAir(s.air);
+
+	const auto& f = s.strafe;
+	maneuverBlockTime = f.maneuverBlockTime;
+	maneuverState = f.maneuverState;
+	maneuverSubState = f.maneuverSubState;
+	loopbackAttack = f.loopbackAttack;
+	isFighter = f.isFighter;
+	wingDrag = f.wingDrag;
+	wingAngle = f.wingAngle;
+	invDrag = f.invDrag;
+	crashDrag = f.crashDrag;
+	frontToSpeed = f.frontToSpeed;
+	speedToFront = f.speedToFront;
+	myGravity = f.myGravity;
+	maxBank = f.maxBank;
+	maxPitch = f.maxPitch;
+	turnRadius = f.turnRadius;
+	maxAileron = f.maxAileron;
+	maxElevator = f.maxElevator;
+	maxRudder = f.maxRudder;
+	attackSafetyDistance = f.attackSafetyDistance;
+	crashAileron = f.crashAileron;
+	crashElevator = f.crashElevator;
+	crashRudder = f.crashRudder;
+	lastRudderPos[0] = f.lastRudderPos0; lastRudderPos[1] = f.lastRudderPos1;
+	lastElevatorPos[0] = f.lastElevatorPos0; lastElevatorPos[1] = f.lastElevatorPos1;
+	lastAileronPos[0] = f.lastAileronPos0; lastAileronPos[1] = f.lastAileronPos1;
+}

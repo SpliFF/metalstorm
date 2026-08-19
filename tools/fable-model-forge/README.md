@@ -5,7 +5,10 @@ Built in the Cowork cloud sandbox (Claude Fable 5, 2026-07-11) to produce
 
 - **Unit-agnostic, use as-is**: `meshlib.py` (primitives + zone UVs),
   `gltf_export.py` (.gltf/.bin writer + SPRINGRTS_geometry derivation —
-  takes any pieces list), `encode.mjs [stem]`, `validate.py <gltf> [budget]
+  takes any pieces list), `encode.mjs [stem]`, `ktx2_dfd.mjs` (KTX2 DFD
+  conformance — every `encode*.mjs` runs its output through it; also a CLI,
+  `--check`/`--fix`, to audit or repair `.ktx2` already on disk),
+  `validate.py <gltf> [budget]
   [pieces]`, `preview/` (model path is a URL param; yaw/pitch shot no-ops
   without turret/barrel nodes), and paint.py's helper layer (Maps, seams,
   bolts, vents, wear, stencil).

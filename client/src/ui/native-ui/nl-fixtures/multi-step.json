@@ -1,0 +1,327 @@
+{
+  "_comment": "Golden fixtures: one sentence, several actions (PLAN-metalstorm-command-language.md §1 'actions 0..4; multi-step = ordered list'). Order matters — the executor runs them in sequence, and a clarification raised part-way STOPS the rest rather than half-finishing a plan whose premise is in doubt.",
+
+  "fixtures": [
+    {
+      "name": "an order plus the guidance that backs it",
+      "utterance": "Chimera Squad take Fallow Gate, and make it a priority for the AI",
+      "context": "basin",
+      "expected": {
+        "say": "Chimera Squad is taking Fallow Gate, and the AI will prioritise it.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" },
+              "priority": "high"
+            }
+          },
+          {
+            "kind": "guidance",
+            "guidance": { "op": "paint", "value": "priority", "regionRef": "Fallow Gate" }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=fallow_gate&value=priority" }
+        ]
+      }
+    },
+
+    {
+      "name": "two squads, two places",
+      "utterance": "Chimera holds Northgate, Ironback takes Osprey Fen",
+      "context": "basin",
+      "expected": {
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Ironback Platoon" },
+              "target": { "type": "entity-ref", "name": "Osprey Fen" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 5 }
+        ]
+      }
+    },
+
+    {
+      "name": "stance, then a rename, then an order",
+      "utterance": "go aggressive, call Chimera Squad Hammerfall, and send them at Slag Forge",
+      "context": "basin",
+      "note": "Three kinds in one envelope. The rename lands before the order, and the order still resolves by the OLD name — the index only learns 'Hammerfall' on the next org-group snapshot, and pretending otherwise would make the third action fail intermittently.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "aggressive" } },
+          { "kind": "group", "group": { "op": "rename", "groupRef": "Chimera Squad", "name": "Hammerfall" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Slag Forge" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=aggressive" },
+          { "type": "OrgGroup", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 1 }
+        ]
+      }
+    },
+
+    {
+      "name": "a mid-plan ambiguity stops the plan",
+      "utterance": "go defensive, then send Chimera to Northgate",
+      "context": "ambiguous-forces",
+      "note": "Action 1 (stance) lands; action 2 can't resolve 'Chimera' between two squads, so it asks and the run ends there. What already happened is reported; nothing is guessed.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "defensive" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=defensive" }],
+        "clarifies": true
+      }
+    },
+
+    {
+      "name": "a refusal part-way stops the plan and names what was skipped",
+      "utterance": "prioritise Northgate, patrol Slag Forge, and hold Osprey Fen",
+      "context": "basin",
+      "note": "M5 changed this from M1's 'a refusal does not stop the plan'. A multi-step envelope is one sentence split up, and its steps lean on each other — running step 3 on the assumption that step 2 happened is how a plan half-executes into a position nobody asked for. Skipping is recoverable; an order sent on a false premise costs authority and moves an army. The stop line names the step that ran and the one that didn't.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "paint", "value": "priority", "regionRef": "Northgate" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Slag Forge" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Osprey Fen" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=north_gate_ridge&value=priority" }
+        ],
+        "refusals": 1,
+        "ran": ["paint Northgate"],
+        "notRun": ["hold Osprey Fen"],
+        "saysLike": ["not run: hold Osprey Fen"]
+      }
+    },
+
+    {
+      "name": "an order and a panel, in the order they were said",
+      "utterance": "defend Northgate and show me the minimap",
+      "context": "basin",
+      "ports": true,
+      "note": "M5 acceptance 2. Two kinds in one sentence, and the ORDER is the assertion: the directive commits before the panel opens, because that is the order the player said them in and because a panel that opened first would be the visible half of a sentence whose other half then refused.",
+      "expected": {
+        "say": "Defending Northgate, and opening the minimap.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          },
+          { "kind": "ui", "ui": { "op": "open", "panelId": "minimap" } }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "StandingOrder" }],
+        "ui": ["open:minimap"],
+        "ran": ["defend Northgate", "open minimap"],
+        "notRun": []
+      }
+    },
+
+    {
+      "name": "several named forces become several actions, not one merged name",
+      "utterance": "send Chimera and Basilisk to Fallow Gate",
+      "context": "basin",
+      "note": "Prompt rule 6, and the resolver-ambiguity item M5 scoped: `NLCommandIntent.subject` holds ONE subject, so a multi-subject sentence is expressed as multi-step. The alternative — a subject naming 'Chimera and Basilisk' — would be a group that does not exist and could only ever refuse. Note Basilisk is tasked and goes anyway: the player named it, so there is nothing to choose and nothing to ask.",
+      "expected": {
+        "say": "Sending Chimera Squad and Basilisk Squad to Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Basilisk Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 2 }
+        ]
+      }
+    },
+
+    {
+      "name": "more named forces than an envelope can hold is a refusal",
+      "utterance": "send Chimera, Basilisk, Warhound, Kestrel and Ironback to Fallow Gate",
+      "context": "basin",
+      "note": "Five subjects, four actions. Refused rather than silently truncated to four — a sentence that moved four of the five armies you named, without saying which one it left behind, is the worst possible outcome of the multi-subject rule.",
+      "expected": {
+        "actions": [{
+          "kind": "refuse",
+          "reason": "That's five squads in one order — I can take four at a time. Say it in two."
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "notRun": [] }
+    },
+
+    {
+      "name": "the step that fails is named, and the rest is not run",
+      "utterance": "defend the grain silo, then push on to the ridge, then show me the minimap",
+      "context": "basin",
+      "ports": true,
+      "note": "The plan's own example of the M5 report: 'defended the silo; couldn't find the ridge'. 'The ridge' is in no index, so step 2 refuses by name and step 3 never happens — the minimap does NOT open, because a panel opening at the end of a plan that failed in the middle reads as success.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Grain Silo" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "the ridge" }
+            }
+          },
+          { "kind": "ui", "ui": { "op": "open", "panelId": "minimap" } }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "StandingOrder" }],
+        "ui": [],
+        "refusals": 1,
+        "ran": ["defend Grain Silo"],
+        "notRun": ["open minimap"],
+        "saysLike": ["don't know a place called \"the ridge\"", "not run: open minimap"]
+      }
+    },
+
+    {
+      "name": "a first step that fails takes the whole plan with it",
+      "utterance": "take Wolfden, then hold Northgate",
+      "context": "basin",
+      "note": "The boundary case of the same rule: nothing ran, so the summary says so rather than listing an empty 'did:'. And `say` is never printed — an envelope that achieved nothing acknowledges nothing.",
+      "expected": {
+        "say": "Taking Wolfden, then holding Northgate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Wolfden" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "ran": [],
+        "notRun": ["hold Northgate"],
+        "saysLike": ["nothing ran — stopped there; not run: hold Northgate"]
+      }
+    },
+
+    {
+      "name": "the four-action ceiling",
+      "utterance": "lock Chimera, lock Basilisk, cap AI spending at 150, and go defensive",
+      "context": "basin",
+      "note": "MAX_ACTIONS is 4 (plan §1 '0..4'). A longer list is a runaway model, not a plan, and the validator rejects it — so this fixture also pins the boundary as VALID.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "lock", "value": "on", "groupRef": "Chimera Squad" } },
+          { "kind": "guidance", "guidance": { "op": "lock", "value": "on", "groupRef": "Basilisk Squad" } },
+          { "kind": "guidance", "guidance": { "op": "fund", "rateCap": 150 } },
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "defensive" } }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=1&locked=1" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=2&locked=1" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.fund&rateCap=150" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=defensive" }
+        ]
+      }
+    }
+  ]
+}

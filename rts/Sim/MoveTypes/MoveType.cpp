@@ -190,3 +190,44 @@ void AMoveType::Disconnect() {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Sim::registry.remove<GeneralMoveType>(owner->entityReference);
 }
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+
+void AMoveType::SnapshotCaptureBase(movetypesnapshot::BaseState& b) const {
+	b.goalX = goalPos.x; b.goalY = goalPos.y; b.goalZ = goalPos.z;
+	b.oldPosX = oldPos.x; b.oldPosY = oldPos.y; b.oldPosZ = oldPos.z;
+	b.oldSlowUpdatePosX = oldSlowUpdatePos.x;
+	b.oldSlowUpdatePosY = oldSlowUpdatePos.y;
+	b.oldSlowUpdatePosZ = oldSlowUpdatePos.z;
+	b.oldCollisionUpdatePosX = oldCollisionUpdatePos.x;
+	b.oldCollisionUpdatePosY = oldCollisionUpdatePos.y;
+	b.oldCollisionUpdatePosZ = oldCollisionUpdatePos.z;
+	b.progressState = static_cast<int32_t>(progressState);
+	b.maxSpeed = maxSpeed;
+	b.maxSpeedDef = maxSpeedDef;
+	b.maxWantedSpeed = maxWantedSpeed;
+	b.maneuverLeash = maneuverLeash;
+	b.waterline = waterline;
+	b.useHeading = useHeading;
+	b.useWantedSpeed0 = useWantedSpeed[0];
+	b.useWantedSpeed1 = useWantedSpeed[1];
+}
+
+void AMoveType::SnapshotApplyBase(const movetypesnapshot::BaseState& b) {
+	goalPos = float3(b.goalX, b.goalY, b.goalZ);
+	oldPos = float3(b.oldPosX, b.oldPosY, b.oldPosZ);
+	oldSlowUpdatePos = float3(b.oldSlowUpdatePosX, b.oldSlowUpdatePosY, b.oldSlowUpdatePosZ);
+	oldCollisionUpdatePos = float3(b.oldCollisionUpdatePosX, b.oldCollisionUpdatePosY, b.oldCollisionUpdatePosZ);
+	progressState = static_cast<ProgressState>(b.progressState);
+	// The raw members, not SetMaxSpeed()/SetWantedMaxSpeed(): the setters clamp
+	// and CStaticMoveType/CStrafeAirMoveType override them, so a restore driven
+	// through them would not reproduce the value it captured.
+	maxSpeed = b.maxSpeed;
+	maxSpeedDef = b.maxSpeedDef;
+	maxWantedSpeed = b.maxWantedSpeed;
+	maneuverLeash = b.maneuverLeash;
+	waterline = b.waterline;
+	useHeading = b.useHeading;
+	useWantedSpeed[0] = b.useWantedSpeed0;
+	useWantedSpeed[1] = b.useWantedSpeed1;
+}

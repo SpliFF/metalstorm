@@ -191,6 +191,18 @@ export class Squad {
     this._prevUpdateCx = null; this._prevUpdateCz = null; this._prevUpdateHeading = 0;
     this._centroidSpeed = 0;
     this._headingRate = 0;
+
+    // Frame-time governor time-slicing (§12c/§12d, §14 S2). `_lastAppliedCx/
+    // Cz` is "the centroid members are currently positioned consistent
+    // with" — advanced on every real step AND on every path that already
+    // rigid-moves or re-places every member (setPose's teleport shift, spawn,
+    // an icon-tier rebuild, a transport unload), so a following coast() cannot
+    // shift them a second time by the same delta. `coast()` reads the gap
+    // between that baseline and the live centroid. `_lastSteppedAt` lets a
+    // stepped squad integrate the REAL elapsed time since it last actually
+    // stepped (half-rate squads see double dt, so motion speed is preserved).
+    this._lastAppliedCx = 0; this._lastAppliedCz = 0;
+    this._lastSteppedAt = null;
   }
 
   // --- ingest (squad-sync §1: pose and strength are separate clocks) ------
@@ -244,6 +256,10 @@ export class Squad {
       // across the map (pathfinding §9 pitfall — "trail starvation").
       this._trail.length = 0;
       this._trail.push({ x: this.cx, z: this.cz });
+      // The shift above already moved every member to match the new centroid —
+      // advance the governor's coast baseline too (§14 S2), or a later coast()
+      // would read this same jump as an unapplied delta and shift again.
+      this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
     } else {
       this._recordTrail();
     }
@@ -415,6 +431,11 @@ export class Squad {
       if (!m.alive || !m.released) continue;
       this._rebuildMember(m);
     }
+    // Members now sit at slots relative to the CURRENT centroid — re-base the
+    // governor's coast() baseline (§14 S2) or a coast on the next full-tier
+    // frame would re-apply however far the centroid drifted while icon,
+    // double-shifting members `slotToWorld` just placed correctly.
+    this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
   }
 
   // --- spawning / casualties ---------------------------------------------
@@ -436,6 +457,14 @@ export class Squad {
       // Seed at its slot so the squad doesn't fan out from a point on spawn.
       slotToWorld(this.slots[i], this.cx, this.cz, this.heading, _slotW);
       m.x = _slotW.x; m.z = _slotW.z;
+      // ...and FACING the squad's heading, not world +z. Member's default
+      // headingY of 0 meant a squad spawned facing east rendered facing north
+      // until something steered it — visible on any freshly-staged scenario
+      // roster, which is stationary by definition. Found by the S6 parity
+      // suite: `soa-squad.js spawnInitial` seeds `mHeading` from `sq.heading`
+      // and this path did not, so the two engines disagreed by the whole
+      // spawn heading (2.1 rad on that fixture).
+      m.headingY = this.heading;
       if (this.profile.steerer === 'air') {
         // Air never ground-snaps (§6) — seed directly at its cruise-altitude
         // band so it doesn't visibly rise from the ground on first spawn.
@@ -454,6 +483,8 @@ export class Squad {
     }
     this.aliveCount = initialAlive;
     this._spawned = true;
+    // Members are already positioned consistent with the spawn centroid (§14 S2).
+    this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
   }
 
   /** Strength → target alive count, clamped monotonic-down (no resurrection).
@@ -569,7 +600,9 @@ export class Squad {
 
   _staggerInterval() {
     const { staggerIntervalMinSec: lo, staggerIntervalMaxSec: hi } = this.cfg;
-    return lo + Math.random() * (hi - lo);
+    // cfg.random, not Math.random — the §10f seam (see config.js), so the S6
+    // parity suite can seed this engine and the SoA one identically.
+    return lo + this.cfg.random() * (hi - lo);
   }
 
   /** Drain the stagger queue at its own pace, independent of reconcile
@@ -691,6 +724,9 @@ export class Squad {
       m.released = false;
     }
     this._iconAlive = -1;   // un-released everything; re-elect if still `icon`
+    // Members now match the drop-point centroid — same governor-baseline
+    // reasoning as the teleport-guard shift in setPose (§14 S2).
+    this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
   }
 
   /** Per-frame transport driver, called from update() before the normal
@@ -758,11 +794,24 @@ export class Squad {
    *  air ignores it entirely (pathfinding §6).
    *  `bigUnits` (PLAN-metalstorm-flow.md §4, task 3/4) is an array of
    *  BigUnitRepulsor instances (scale-4 super-heavies / footprint-profile
-   *  buildings) to thread around/under; supplied by the manager. */
-  update(dt, nowSec, neighbourQuery, passability, bigUnits = NO_BIG_UNITS) {
+   *  buildings) to thread around/under; supplied by the manager.
+   *
+   *  `ladderLevel` (§12c, §14 S2, default 0) is the frame-time governor's
+   *  degrade level — L1 drops inter-squad separation, L2 drops separation
+   *  entirely, L3 additionally drops the potential field. `forceCentroidStep`
+   *  (L6's "demote farthest third", chosen by the manager — see
+   *  SquadManager.update) runs this step as a cheap centroid park WITHOUT
+   *  touching `lod`, so the release/rebuild GPU churn stays owned by the
+   *  member-budget policy (M20/M23) rather than by frame-time pressure. */
+  update(dt, nowSec, neighbourQuery, passability, bigUnits = NO_BIG_UNITS, ladderLevel = 0, forceCentroidStep = false) {
     this._drainDeathQueue(nowSec);
     if (this._updateTransport(dt)) return; // BOARDING/LOADED: transport owns the frame
     if (this.lod !== 'full') return this._updateCentroid();
+    if (forceCentroidStep) return this._updateCentroid();
+
+    const skipInterSquadSeparation = ladderLevel >= 1;
+    const skipSeparation = ladderLevel >= 2;
+    const skipPotentialField = ladderLevel >= 3;
 
     if (this._prevUpdateCx != null && dt > 1e-6) {
       this._centroidSpeed = Math.hypot(this.cx - this._prevUpdateCx, this.cz - this._prevUpdateCz) / dt;
@@ -850,24 +899,27 @@ export class Squad {
       }
 
       if (navalSteerer) {
-        this._navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery);
+        this._navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery,
+          skipSeparation, skipInterSquadSeparation);
       } else {
         // Big-unit threading (flow §4) lives inside the ground steerer —
         // air members overfly hulls and naval members never share terrain
         // with a land walker (documented divergence from the pre-steerer
         // loop, which applied it to every member unconditionally).
-        this._groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits);
+        this._groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits,
+          skipSeparation, skipInterSquadSeparation, skipPotentialField);
       }
     }
   }
 
   // --- ground steerer (default) -------------------------------------------
 
-  _groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits = NO_BIG_UNITS) {
+  _groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits = NO_BIG_UNITS,
+    skipSeparation = false, skipInterSquadSeparation = false, skipPotentialField = false) {
     if (_pt === 6) for (let r = _pn; r > 0; r--) arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
     arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
 
-    if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
+    if (m.recoveryLevel >= 2 || skipSeparation) { _sep.x = 0; _sep.z = 0; }
     else {
       if (_pt === 7) for (let r = _pn; r > 0; r--) {
         const nbP = neighbourQuery(m);
@@ -882,7 +934,7 @@ export class Squad {
       separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
         this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep, n);
+        this.cfg.separationDeadband, _sep, n, skipInterSquadSeparation);
     }
 
     if (_pt === 8) for (let r = _pn; r > 0; r--) softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
@@ -892,7 +944,7 @@ export class Squad {
     if (_pt === 9 && passability && moveClass) {
       for (let r = _pn; r > 0; r--) this._potentialField(m, passability, _potential);
     }
-    if (passability && moveClass) this._potentialField(m, passability, _potential);
+    if (!skipPotentialField && passability && moveClass) this._potentialField(m, passability, _potential);
 
     // Big-unit threading (PLAN-metalstorm-flow.md §4): hull bow-wave by
     // default; swap to the animated contact-patch repulsor set while
@@ -974,20 +1026,21 @@ export class Squad {
 
   // --- naval steerer -------------------------------------------------------
 
-  _navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery) {
+  _navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery,
+    skipSeparation = false, skipInterSquadSeparation = false) {
     const desired = navalSteer(this, m, dt, {
       profile: this.profile, slotWorld: target, columnTarget: trailPt,
       centroidSpeed: this._centroidSpeed,
     });
 
-    if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
+    if (m.recoveryLevel >= 2 || skipSeparation) { _sep.x = 0; _sep.z = 0; }
     else {
       const nb = neighbourQuery(m);
       const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
       separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
         this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep, n);
+        this.cfg.separationDeadband, _sep, n, skipInterSquadSeparation);
     }
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
@@ -1105,6 +1158,33 @@ export class Squad {
 
   /** LOD fallback: park living members at the centroid (no steering cost).
    *  Released (icon-tier) members have no instance and are skipped. */
+  /** Governor time-slicing (§12c/§12d, §14 S2): this `full`-tier squad's turn
+   *  to skip its real steer step this frame. Rigid-shift every alive+unreleased
+   *  member by the centroid delta accumulated since it last actually stepped
+   *  (or last coasted), preserving formation shape — a coasting squad still
+   *  visibly tracks the battle instead of freezing (§12d: "a frozen squad would
+   *  be instantly visible", which is what would make ½/¼-rate stepping look
+   *  wrong instead of merely cheaper). No matrix writes when the centroid has
+   *  not moved. The death-queue drain still runs here (event-time, squad-sync
+   *  §5 pitfall 3 — casualties must land on every frame, stepped or coasted);
+   *  transport is deliberately NOT handled here, because a non-FREE squad
+   *  bypasses time-slicing entirely and always gets `update()` (see
+   *  SquadManager.update). */
+  coast(nowSec) {
+    this._drainDeathQueue(nowSec);
+    const dx = this.cx - this._lastAppliedCx, dz = this.cz - this._lastAppliedCz;
+    this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
+    if (dx === 0 && dz === 0) return;
+    const air = this.profile.steerer === 'air';
+    for (const m of this.members) {
+      if (!m.alive || m.released) continue;
+      m.x += dx; m.z += dz;
+      // Air never ground-snaps (§6) — same rule as setPose's teleport shift.
+      if (!air) m.y = this.backend.groundHeight(m.x, m.z);
+      this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
+    }
+  }
+
   /** The reduced tier (§5): hold the formation RIGIDLY on the squad centroid.
    *  Every member is written to its own slot offset rotated by the squad
    *  heading, ground-snapped (air replays its snapshotted cruise offset), with
@@ -1151,6 +1231,10 @@ export class Squad {
       if (_pt === 18) for (let r = _pn; r > 0; r--) this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
       this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     }
+    // Every member now sits at its slot around the CURRENT centroid, so a later
+    // coast() has nothing outstanding to apply (§14 S2). Also covers ladder L6's
+    // forced centroid step on an otherwise-`full` squad, which lands here.
+    this._lastAppliedCx = this.cx; this._lastAppliedCz = this.cz;
   }
 
   /** Squad destroyed: cascade-kill remaining members (§7). Aligns to the

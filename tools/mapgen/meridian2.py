@@ -4,21 +4,30 @@
 Replaces meridian.py's plateau-blend look with geologically plausible terrain
 while honouring the SAME 24-region gameplay skeleton (meridian_layout.json):
 region bboxes, ford decks, ridge corridors, civilian districts, convoy
-routes, and start rows keep their contracts, so mapdata/regions.lua and
-mapdata/civilians.lua remain valid and are NOT regenerated here.
+routes, and start rows keep their contracts. mapdata/regions.lua and
+mapdata/civilians.lua are emitted from that same layout (meridian.py's and
+civilians_gen.py's emitters) rather than authored here — layout-only, so the
+bytes do not depend on the seed and a `--id` variant is a complete package.
 
 Pipeline: structural surface (region blend, as before) + wildness-masked
 mountain detail -> stream-power + thermal erosion -> contract re-enforcement
 (ford decks, start pads, river channel) -> roads (districts + convoy spine)
 -> biomes -> full package (SMF/SMT albedo bake, splat textures, mapinfo).
 
+Deterministic: same --seed => byte-identical map, checked by --selftest.
+
 Usage:
     .venv/bin/python meridian2.py [--out DIR] [--fast] [--seed N]
       --fast: quarter-res heightfield (513^2) for iteration; NOT for shipping.
+    .venv/bin/python meridian2.py --id basin_variant --name "Basin Variant" --seed 7
+      a variant package under content/maps/<id> on the same layout contract.
+    .venv/bin/python meridian2.py --selftest [--fast]
+      two cold runs with isolated TMPDIRs, packages compared byte-for-byte.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -32,18 +41,73 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 
 from terragen import biomes as bio
+from terragen import bridges as brg
 from terragen import erosion as ero
 from terragen import hydrology as hyd
 from terragen import noise as tn
 from terragen import package as pkg
+from terragen import passability as pas
+from terragen import reachability as reach
+from terragen import rivers as riv
 from terragen import roads as rd
+from terragen import selftest as stest
+from terragen import smf
+from terragen import yards as yd
 
+import civilians_gen as civ
+import meridian as m1   # the v1 generator, kept for its layout-only emitters
+import ms_defs
+
+GAME_DIR = os.path.join(REPO_ROOT, "data", "games", "metalstorm")
 LAYOUT_PATH = os.path.join(HERE, "meridian_layout.json")
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260727
 
-# Structural targets — copied from meridian.py (the gameplay contract).
-ELEVATION = {
+# The SMF height ceiling this generator has always shipped, and it is not the
+# comfortable margin it looks like (PLAN-maps M9h, audit of M8w FIND 1).
+# `smf.quantize_heightmap` CLIPS, so a summit above this ships as a flat mesa
+# with no error. The shipped package tops at 1305.4 elmos — but the surface
+# that goes INTO erosion stands 1522.6, i.e. already over the ceiling, and
+# only 30 iterations of stream-power + thermal (x0.898) bring it under. The
+# summit is `west_scarp`'s authored 1230 plus a seed-dependent ridged-noise
+# term of amplitude 620x0.58, so the clearance is a property of the seed and
+# of how much erosion runs, neither of which is pinned. `height_ceiling`
+# therefore derives the ceiling per surface and this value is only its FLOOR,
+# so the shipped `meridian_basin` package cannot move (the derived value for
+# 1305.4 is 1400) while a seed that would have clipped lifts it instead.
+MAX_HEIGHT = 1500.0
+MIN_HEIGHT = -120.0
+
+# The row-D river corridor. These six regions carry AUTHORED elevations — the
+# ford decks, the channel bed and the mere are a passability contract (steps
+# 4a/4b re-assert them after erosion), so the datum shift below does not touch
+# them: it re-bases the land AROUND the river, not the river.
+CORRIDOR_KEYS = frozenset({
+    "west_narrows", "west_pass", "meridian_basin",
+    "east_pass", "still_mere", "heron_ait",
+})
+
+# PLAN-maps §2n ruling 2 (user, 2026-08-19): `meridian_basin` is RE-DATUMED to
+# sea level at the generator. The shipped map was 94.4 % land with its entire
+# trunk drainage running dry at a median of 93 elmos, 55 % of it inside closed
+# depressions — a temperate basin with no water in it, which is the one thing
+# that failed the "realistic" directive. The land rows sat ~85-110 elmos above
+# a sea they could never reach; dropping them by this constant puts the
+# drainage network's low end AT y=0, so the deep hollows fill as lakes and the
+# main gullies carry water, with no client work and no water-ribbon mesh
+# (§1.1 phase 2 stays deferred).
+#
+# 85 rather than the 93 that would put the trunk MEDIAN at zero: the response
+# is steep (a 10-elmo change moves land area ~3 points and doubles again by
+# 100) and the shift has to clear the content standing on the land. At 85 the
+# lowest start pad keeps +7 elmos and the lowest civilian district centre +10,
+# while 20 % of trunk cells and 27 % of the pooled area go under. Measured on
+# the shipped heightmap.bin before the change; re-measure after regeneration.
+DATUM_SHIFT = 85.0
+
+# Structural targets — copied from meridian.py (the gameplay contract), as
+# authored BEFORE the re-datum. `ELEVATION` is what the generator uses.
+ELEVATION_PRE_DATUM = {
     "cinder_forge": 140, "northgate": 140, "northwatch": 140,
     "slag_forge": 140, "southgate": 140, "southwatch": 140,
     "ash_habitat": 110, "granary_vale": 110, "north_market": 110,
@@ -58,6 +122,8 @@ ELEVATION = {
     "west_narrows": -34, "west_pass": -6, "meridian_basin": 16,
     "east_pass": -6, "still_mere": -25, "heron_ait": 18,
 }
+ELEVATION = {k: (v if k in CORRIDOR_KEYS else v - DATUM_SHIFT)
+             for k, v in ELEVATION_PRE_DATUM.items()}
 MARGIN = {
     "west_scarp_n": 750.0, "west_scarp_s": 750.0,
     "hollow_overlook_n": 900.0, "gulch_overlook_s": 900.0,
@@ -142,8 +208,21 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
     return h * (1 - w) + target * w
 
 
+# Meridian Basin is armour-SPLIT and that is authored (PLAN-maps.md §2k, user
+# ruling 2026-08-16, restated 2026-08-18). The scarp between `gulch_overlook_s`
+# and `east_bluffs_s` reads 44-75 degrees of side-hill across all 513 planning
+# columns (roads FIND 19), so the two halves are separate armour realms for
+# VEH and HEAVY; the ruling is "accept the terrain", explicitly NOT "soften the
+# scarp". The declaration is per-generator rather than per-`--id` because the
+# scarp comes from `meridian_layout.json`, which every variant carries — a
+# different --seed or --climate cannot connect it.
+DECLARED_REACHABILITY = reach.SPLIT
+
+
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
-             no_package=False):
+             no_package=False, climate="temperate",
+             map_id="meridian_basin", display_name="Meridian Basin",
+             reachability=None, ground_texture=True):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -168,9 +247,16 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     print(f"synth done {time.time()-t_start:.0f}s relief {h.min():.0f}..{h.max():.0f}")
 
     # 3. erosion (cached: E1/packaging iteration shouldn't re-pay ~11 min)
+    # The key carries a digest of the surface going IN. It used to be
+    # (seed, fast) alone, which silently outranks every structural edit above
+    # this line: erosion REPLACES `h` with the cached array, so a change to
+    # ELEVATION/WILDNESS/detail regenerated byte-identical terrain on any
+    # machine with a warm cache and no warning (PLAN-maps §2n ruling 2).
+    surf_key = hashlib.sha1(np.ascontiguousarray(h, dtype=np.float32)
+                            .tobytes()).hexdigest()[:12]
     cache_path = os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
-        f"meridian2_eroded_{seed}_{'fast' if fast else 'full'}.npy")
+        f"meridian2_eroded_{seed}_{'fast' if fast else 'full'}_{surf_key}.npy")
     if os.path.exists(cache_path):
         h = np.load(cache_path)
         print(f"erosion loaded from cache {cache_path}")
@@ -230,7 +316,11 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     for sx, sz in starts:
         m = box_mask(h.shape, cell, sx - 420, sz - 420, sx + 420, sz + 420)
         pad_h = float(np.median(h[m]))
-        h = blend_toward(h, np.clip(pad_h, 90.0, 190.0), m, cell, 500.0)
+        # the clamp is DATUM-relative: it exists to keep a pad off the basin
+        # floor and off a summit, so it moves with the land (§2n ruling 2 —
+        # the pre-datum band was 90..190 against a 110-elmo home row).
+        h = blend_toward(h, np.clip(pad_h, 90.0 - DATUM_SHIFT,
+                                    190.0 - DATUM_SHIFT), m, cell, 500.0)
 
     # 4d. slope-band enforcement: per-region targeted thermal erosion pulls
     # slopes into the tagged band (veh <=32deg, infantry 32-45deg). Blended
@@ -274,51 +364,198 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
 
     print(f"contracts done {time.time()-t_start:.0f}s")
 
-    # 5. hydrology on the final surface (rivers for texture/wetland only)
+    # 5. hydrology on the final surface -> river ribbons (PLAN-maps §2b item 3)
     filled = hyd.fill_depressions(h)
     routing = hyd.resolve_flats(filled)
     recv = hyd.d8_receivers(routing)
     levels = hyd.topo_levels(recv)
     accum = hyd.flow_accumulation(recv, levels)
-    river_thresh = (2500.0 if fast else 40000.0)
-    rivers = hyd.river_network(accum, h.shape, river_thresh)
-    # carve minor stream beds (visual gullies; stays above water level mostly)
-    carve = np.where(rivers, np.minimum(5.0, 1.2 * np.log1p(accum.reshape(h.shape) / river_thresh)), 0.0)
-    h = h - ndimage.gaussian_filter(carve, sigma=1.0)
 
-    # 6. roads: district centres + convoy waypoints + gates
+    # Everything steps 4a-4d pulled to a specified elevation is off limits to
+    # the tributary system: the ford decks and row-D channel are a passability
+    # contract, the start pads are each side's buildable core, and the
+    # slope-band regions were just iterated into E1 compliance. A river through
+    # any of them is a silent breach that no later stage re-checks. The mask is
+    # feathered so the ribbons taper out rather than ending in a step.
+    protect = np.zeros(h.shape)
+    for r in layout["regions"]:
+        if r["key"] in CHANNEL_TARGET or r["key"] in BAND_TALUS:
+            bb = r["bbox"]
+            protect = np.maximum(protect, box_mask(
+                h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"]).astype(float))
+    for sx, sz in starts:
+        protect = np.maximum(protect, box_mask(
+            h.shape, cell, sx - 520, sz - 520, sx + 520, sz + 520).astype(float))
+    protect = np.clip(ndimage.gaussian_filter(
+        protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
+
+    # minor streams: this map's water feature is the authored row-D channel, so
+    # the generated network is a tributary system feeding it, not a rival to it
+    rp_riv = riv.RiverParams(channel_fraction=(0.03 if fast else 0.015),
+                             width_coef=0.045, width_max=70.0,
+                             depth_max=8.0, bank_width=70.0)
+    net = riv.build(h, recv, levels, accum, cell, 0.0, seed, rp_riv, protect)
+    h = net.terrain
+    rivers = net.is_water
+    print(f"rivers done {time.time()-t_start:.0f}s "
+          f"({len(net.polylines)} reaches, "
+          f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
+
+    # 6. roads: district centres + convoy waypoints + gates.
+    #
+    # roads R2 — the endpoints now carry ROLES, and the roles are what build the
+    # hierarchy (roads.plan_network). The reading of this map's own layout:
+    #   * a MARKET district is a major town — a highway destination. The
+    #     habitats are not: making every civilian district a trunk node was the
+    #     first reading and it produced a network that is 90 % highway by length
+    #     and 95 % bitumen by area, i.e. a hierarchy that classifies everything
+    #     into its top tier and therefore says nothing. Four district centres
+    #     plus two gates is six trunk nodes and an MST over six nodes is five
+    #     links — the whole map;
+    #   * a habitat district and a convoy waypoint are villages on the way,
+    #     joined by an ordinary road to wherever the trunk passes them;
+    #   * the two gates are the network's PORTALS. They sit on start pads rather
+    #     than on the map border, and that is the right reading anyway: what a
+    #     portal means to the planner is "the trunk has to reach here", and on a
+    #     two-base map the bases are exactly that. Nothing on this map is a POI
+    #     yet, so there is no track tier — see PLAN-maps §2c.
     sites = []
+    roles = []
     for d in layout["civilian_districts"]:
         r = next(r for r in layout["regions"] if r["key"] == d)
         b = r["bbox"]
         sites.append(((b["x0"] + b["x1"]) / 2.0, (b["z0"] + b["z1"]) / 2.0))
+        roles.append(rd.NODE_TOWN if d.endswith("_market") else rd.NODE_MINOR)
     for route in layout["convoy_routes"]:
         for wp in route["waypoints"]:
             sites.append((wp["x"], wp["z"]))
+            roles.append(rd.NODE_MINOR)
     for sx, sz in (starts[1], starts[5]):  # a gate per side joins the network
         sites.append((sx, sz))
+        roles.append(rd.NODE_EDGE)
+    # see the note at archipelago.py's road step: M9a retired the terrain-slope
+    # wall in favour of a grade block plus a side-hill price
+    # heading_sectors=0 PINS this map to the memoryless graph — see the same
+    # note at archipelago.py's road step. R6 measured the re-ship: at 8 sectors
+    # this map's `highway` deck falls from p95 8.6 / max 22.0 deg to p95 7.6 /
+    # max 15.4 (its limit is 8), i.e. the fix is worth having here too and is
+    # waiting on a human's re-ship call, not on the mechanism.
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                       max_slope_deg=26.0, water_penalty=30.0)
-    polylines = rd.plan_roads(h, 0.0, cell, sites, rp)
-    road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+                       water_penalty=30.0, heading_sectors=0)
+    net = rd.plan_network(h, 0.0, cell, sites, roles, rp)
+    polylines = net.polylines
+    raster = rd.rasterize_network(net, h.shape, cell, rp)
+    road_mask, road_dist = raster.mask, raster.dist
     # worn junction plazas where routes meet (district centres + waypoints;
     # the trailing 2 gate sites sit on start pads — no plaza there)
     plaza_sites = sites[:-2]
     rd.carve_plazas(road_mask, road_dist, plaza_sites, 85.0, cell, rp)
-    h = rd.flatten_under_roads(h, road_dist, cell, rp)
+    # ...and an apron where a lesser way meets the deck it joins, which is a
+    # different place from a plaza: a plaza is authored at a site, a junction is
+    # wherever the planner found the cheapest point on the trunk.
+    rd.carve_junction_aprons(raster, net.junctions, cell, rp)
+    # 6b. roadside yard PADS (roads R4b): prepared ground beside a link for the
+    # scenario layer to stand a depot on. Carved as ordinary deck, and BEFORE the
+    # flatten, because a pad that is not in the raster when the grader runs is a
+    # pad nothing ever levels — see terragen/yards.py.
+    yard_pads, yard_refusals = yd.plan_yard_pads(net, h, raster, cell, 0.0)
+    yd.carve_yard_pads(raster, yard_pads, cell, rp)
+    # ONE flatten pass over the combined field. Per-class passes would grade the
+    # crossing twice — see roads.flatten_network.
+    h = rd.flatten_network(h, raster, cell, rp)
+    # ...and the pads are PLATEAUED after it, not by it: the grader blends toward
+    # a blur, which does nothing to a uniform slope, so a pad it "graded" comes
+    # off a ramp still on the ramp (terragen/yards.py measured 31.2 of 31.5
+    # elmos). A yard is cut into graded ground, in that order.
+    h = yd.level_yard_pads(h, yard_pads, cell)
+    _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
+                     for k, v in sorted(net.length_by_class().items()) if v > 0)
     print(f"roads done {time.time()-t_start:.0f}s "
-          f"({len(polylines)} segments, {len(plaza_sites)} plazas)")
+          f"({len(polylines)} segments, {len(plaza_sites)} plazas, "
+          f"{len(net.junctions)} junctions; length by class: {_mix})")
+    print(f"yard pads: {len(yard_pads)} prepared, "
+          f"{len(yard_refusals)} station(s) refused")
+    yd.report_pad_refusals(yard_refusals)
+    yd.report_pad_relief(h, yard_pads, cell)
+    # ...and the ramp INTO each pad, which the relief report cannot see:
+    # a plateau is flat by construction and can still sit above an
+    # unclimbable verge (roads R4d, yards.pad_ramps).
+    yd.report_pad_ramps(h, yard_pads, cell)
+    # ...and the GATE (roads Call 2, answered 2026-08-18): a pad whose delivered
+    # driveway beats HEAVY's maxslope is not published. Safe to read `h` here —
+    # this generator runs rivers BEFORE roads and nothing below moves the
+    # heightmap, which is why its instruments always agreed with the shipped
+    # bytes where archipelago's did not (roads FIND 32). On this map the gate
+    # refuses nothing: the worst driveway is 22.9 deg of the 24 allowed.
+    yard_pads_all = yard_pads
+    yard_pads, yard_undrivable = yd.refuse_undrivable_pads(h, yard_pads, cell)
+    # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
+    # ford is graded where the deck now stands and not where the planner drew
+    # it. Published in mapdata/roads.lua; nothing is placed here (terragen/
+    # bridges.py explains why a map-authored span sinks to the seabed).
+    cross_params = brg.CrossingParams(
+        pitch=ms_defs.feature_chain_pitch(GAME_DIR))
+    crossings, crossing_refusals = brg.find_crossings(
+        net, h, cell, 0.0, cross_params)
+    _fordable = [r for r in crossing_refusals if r.fordable]
+    print(f"crossings: {len(crossings)} bridgeable "
+          f"({sum(c.spans for c in crossings)} spans), "
+          f"{len(_fordable)} unbridged ford(s), "
+          f"{len(crossing_refusals) - len(_fordable)} wet stretches refused")
+    for r in crossing_refusals:
+        print(f"  crossing {'ford, unbridged' if r.fordable else 'REFUSED'}"
+              f": {r.describe()}")
+    # the grade the DELIVERED deck holds, which is not the grade the planner
+    # costed — the instrument warns when they disagree (roads R2 finding)
+    rd.report_delivered_grades(net, h, cell, rp)
 
     # 7. biomes
     gy, gx = np.gradient(h, cell)
     slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    # base_moisture re-based from the 0.45 default when the orographic model
+    # became mean-preserving (PLAN-maps M8k): the old running-max rain shadow
+    # only ever subtracted, so it was silently drying this map by 0.032 on top
+    # of whatever base_moisture said. Re-basing keeps the authored biome mix
+    # and leaves the model change to be about the shadow's *shape*.
     cp = bio.ClimateParams(seed=seed, lat_axis="z", lat_hot=0.62, lat_cold=0.45,
-                           altitude_lapse=0.52, wind_dir=(1.0, 0.15))
+                           altitude_lapse=0.52, wind_dir=(1.0, 0.15),
+                           base_moisture=0.418)
+    # --climate shifts that baseline; "temperate" is an exact identity. Only
+    # the biomes move: this map's sites, roads and E1 slope bands all come
+    # from meridian_layout.json, not from the climate.
+    cp = bio.apply_climate_preset(cp, climate)
     temp = bio.temperature_field(h, 0.0, cp, cell)
     moist = bio.moisture_field(h, 0.0, cp, cell)
     water_all = (h <= 0.0) | rivers
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
-    print(f"biomes done {time.time()-t_start:.0f}s")
+    print(f"biomes done {time.time()-t_start:.0f}s ({climate}, land): "
+          f"{bio.format_biome_mix(b)}")
+
+    # 7a. road surface classes (roads R1). Classification needs moisture, so it
+    # runs here rather than in step 6 — the polylines and the graded height are
+    # both final by now, and the class raster is grown by the same distance
+    # transform that produced road_dist, so it cannot disagree with road_mask.
+    # R2: sealing now follows the HIERARCHY (a highway is bitumen because it is
+    # a highway), so R1's longest-40 %-by-length budget — which was a proxy for
+    # exactly this — is not consulted.
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell,
+                                 road_classes=net.road_classes)
+    _surf_raster = rd.rasterize_network(net, h.shape, cell, rp, surfaces=road_cls)
+    road_class = _surf_raster.surf
+    rd.carve_plaza_classes(road_class, plaza_sites, 85.0, cell)
+    rd.carve_junction_aprons(_surf_raster, net.junctions, cell, rp)
+    # The pads again, on the class raster this time: both rasters get every
+    # carve, for the reason the apron note gives — a pad that is deck in one and
+    # not in the other is a hole in the typemap exactly where the tarmac is.
+    # `yard_pads_all`: a pad the driveway gate refused keeps its tarmac, because
+    # the graded ground is already in `h` — see refuse_undrivable_pads.
+    yd.carve_yard_pads(_surf_raster, yard_pads_all, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads_all, cell, rp)
+    _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
+    _surf_mix = ", ".join(
+        f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
+        for k in (rd.SURF_BITUMEN, rd.SURF_DIRT, rd.SURF_MUD))
+    print(f"road surfaces ({_deck} deck cells): {_surf_mix}")
 
     # 7b. placement (terragen/placement.py): vegetation + boulder features,
     # scree/sand ground stamps. Stamps always run — the albedo bake and
@@ -338,8 +575,12 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
             bb = r["bbox"]
             excl |= box_mask(h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"])
 
+    # Deck half-width per polyline: a roadside layer offsets from the
+    # centreline, and since R2 that is a per-class distance (roads R4d).
     ctx = pl.PlacementContext(h, slope, b, moist, cell, seed, exclusion=excl,
-                              paths=polylines)
+                              paths=polylines,
+                              path_halfwidths=[rd.class_width(rc, rp) * 0.5
+                                               for rc in net.road_classes])
 
     def sand_suit(c):
         desert = pl.biome_suitability({bio.DESERT: 0.9})(c)
@@ -357,6 +598,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     stamps = stamp_res.stamps
 
     feature_files = None
+    palette = veg.palette_for(climate)
     if with_features:
         def species_layer(sp):
             return pl.Layer(
@@ -375,10 +617,13 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
                 s = np.maximum(s, scree_fld.astype(np.float32) * 0.9)
             return s
 
-        # deadwood accumulates in the forest-edge band; sparse stumps inside
+        # deadwood accumulates in the wooded-edge band; sparse stumps inside.
+        # "Wooded" is the palette's, not FOREST's: an arctic map's trees are
+        # a tundra treeline and the hard-coded id starved this to 0.0000 %
+        # (PLAN-maps M8o)
         def deadwood_suit(c):
-            edge = pl.forest_edge([bio.FOREST])(c) * 0.42
-            interior = pl.biome_suitability({bio.FOREST: 0.09})(c)
+            edge = pl.forest_edge(list(palette.wooded))(c) * 0.42
+            interior = pl.biome_suitability({b: 0.09 for b in palette.wooded})(c)
             return edge + interior
 
         # broken fence runs flank the roads (dry ground only; the exclusion
@@ -401,7 +646,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
             return (hi & ground & (c.slope_deg < 24.0)).astype(np.float32)
 
         res = pl.run(ctx, [
-            *(species_layer(sp) for sp in veg.TEMPERATE_SPECIES),
+            *(species_layer(sp) for sp in palette.species),
             pl.Layer("deadwood",
                      pl.FeatureEmit([("fallen_log", 0.55), ("tree_stump", 0.45)],
                                     (0.9, 1.2)),
@@ -437,6 +682,13 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
                      stratum=2300.0, max_slope_deg=22.0),
         ], progress=print)
         print(f"placement: {len(res.features)} features total")
+        # roads R5: how often a station's own-deck offset pointed into ANOTHER
+        # deck. Printed rather than assumed — a rule that never fires on real
+        # content should say so out loud.
+        for _lname, _st in pl._LAST_PATH_STATS.items():
+            print(f"deck clearance ({_lname}): {_st['stations']} stations, "
+                  f"{_st['flipped']} mirrored off a foreign deck, "
+                  f"{_st['dropped']} given up")
 
         lines = ["-- GENERATED by meridian2.py", "return {", "  objectlist = {"]
         for name, x, z, rot, _sc in res.features:
@@ -463,7 +715,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         from terragen import bake as bk
         os.makedirs(out_dir, exist_ok=True)
         baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                               stamps=stamps)
+                               stamps=stamps, road_class=road_class)
         shade = bk.hillshade(h, cell)
         Image.fromarray(bk.make_minimap(baker, shade)).save(
             os.path.join(out_dir, "preview.png"))
@@ -471,25 +723,61 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         return h, b, slope
 
     scratch = os.environ.get("TMPDIR", "/tmp")
+    top = float(h.max())
+    max_h = smf.height_ceiling(top, floor=MAX_HEIGHT)
+    if max_h > MAX_HEIGHT:
+        print(f"height ceiling {max_h:.0f} (surface tops at {top:.0f}; the "
+              f"{MAX_HEIGHT:.0f} floor would have sheared "
+              f"{int((h > MAX_HEIGHT).sum())} cells "
+              f"({top - MAX_HEIGHT:.0f} elmos off the summit) into a flat top)")
+    if reachability is None:
+        reachability = DECLARED_REACHABILITY
+    reach.check(reachability)
+    print(f"reachability declared \"{reachability}\" for {map_id}:")
+    reach.report(pas.read_all(h, cell, starts), reachability)
+    from terragen import bake as bake_mod
     cfg = pkg.MapPackageConfig(
-        map_id="meridian_basin",
-        display_name="Meridian Basin",
+        map_id=map_id,
+        display_name=display_name,
         description="Two sides of an eroded river basin: ridge corridors, three fords, civilian valleys.",
-        min_height=-120.0, max_height=1500.0,
+        min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
+        # PLAN-maps §2n ruling 1: a generated map ships the map-space ground
+        # albedo instead of relying on the lossy SMT tile dictionary.
+        ground_texture_size=(bake_mod.GROUND_TEXTURE_SIZE_DEFAULT
+                             if ground_texture else 0),
         start_positions=starts,
         seed=seed,
+        reachability=reachability,
     )
+    # The 24-region contract and the civilian data are layout-derived, not
+    # terrain-derived, so they are the same bytes for any seed or id — but a
+    # variant written under a new `--id` got neither until M9h. Absence is
+    # not loud: `mapconverter` copies `mapdata/` through and only validates
+    # it when it is there (it aborts the build on an E1 slope mismatch), so
+    # a variant with no regions.lua converts and installs cleanly and then
+    # `scenariogen.read_regions` rejects it — the fixed 2048-elmo grid, no
+    # named regions. Emitting them here makes the package self-contained;
+    # for `meridian_basin` they reproduce the checked-in files exactly
+    # (pinned in tests/test_meridian2.py).
+    civ_lua, _n_sites, _n_convoys = civ.build_civilians_lua(layout)
+    contract_files = dict(feature_files or {})
+    contract_files["mapdata/civilians.lua"] = civ_lua
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
-        scratch_dir=scratch, feature_files=feature_files, stamps=stamps,
+        scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
+        roads_lua=pkg.emit_roads_lua(net, cell, rp, crossings=crossings,
+                                     yards=yard_pads,
+                                     refusals=crossing_refusals,
+                                     p_cross=cross_params),
+        feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 
     # quick-look preview (albedo * hillshade) for iteration without the client
     from PIL import Image
     from terragen import bake as bk
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                           stamps=stamps)
+                           stamps=stamps, road_class=road_class)
     shade = bk.hillshade(h, cell)
     Image.fromarray(bk.make_minimap(baker, shade)).save(os.path.join(out_dir, "preview.png"))
 
@@ -538,8 +826,30 @@ def selfcheck(layout, h, cell):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=os.path.join(REPO_ROOT, "content", "maps", "meridian_basin"))
+    ap.add_argument("--out", default=None,
+                    help="map package dir (default content/maps/<id>)")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--id", dest="map_id", default="meridian_basin",
+                    help="package id; anything but the default writes a "
+                         "VARIANT under content/maps/<id>. It carries the "
+                         "same 24-region layout contract (regions.lua + "
+                         "civilians.lua are layout-derived and go in the "
+                         "package), so only its terrain differs — vary "
+                         "--seed/--climate")
+    ap.add_argument("--name", dest="display_name", default="Meridian Basin")
+    ap.add_argument("--reachability", default=None, choices=reach.INTENTS,
+                    help="the map's own claim about its armour realms, written "
+                         "into mapinfo.lua and read by "
+                         "`regions_from_map.py --verify`. Defaults to "
+                         "\'split\' for every meridian variant: the severing "
+                         "scarp is in the layout contract (PLAN-maps "
+                         "\u00a72k).")
+    ap.add_argument("--ground-texture", dest="ground_texture",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="ship maps/ground.png — the map-space ground albedo "
+                         "M7f measured and PLAN-maps \u00a72n ruled in. "
+                         "--no-ground-texture leaves the map on the SMT tile "
+                         "dictionary and its 32-elmo seam grid.")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--with-features", action="store_true",
                     help="scatter the full vegetation set into "
@@ -549,9 +859,54 @@ def main():
                     help="skip the package bake; write preview.png only")
     ap.add_argument("--no-package", action="store_true",
                     help="stop after placement + E1 (fast layer-tuning loop)")
+    ap.add_argument("--climate", default="temperate",
+                    choices=sorted(bio.CLIMATE_PRESETS),
+                    help="climate preset shifted on top of this map's own "
+                         "authored climate; 'temperate' is an exact identity "
+                         "(shipped meridian_basin). The 24-region layout "
+                         "contract is unaffected — only the biomes.")
+    ap.add_argument("--selftest", action="store_true",
+                    help="generate twice as independent cold subprocesses "
+                         "(isolated TMPDIR each, so the erosion cache cannot "
+                         "fake it) and assert byte-identical packages; "
+                         "honours --seed/--id/--name/--climate/--fast/"
+                         "--with-features")
     args = ap.parse_args()
-    generate(args.out, args.seed, fast=args.fast, with_features=args.with_features,
-             preview_only=args.preview_only, no_package=args.no_package)
+
+    if args.selftest:
+        if args.preview_only or args.no_package:
+            ap.error("--selftest needs the full package path; drop "
+                     "--preview-only/--no-package")
+        passthrough = ["--seed", str(args.seed), "--climate", args.climate,
+                       "--id", args.map_id, "--name", args.display_name]
+        if args.reachability is not None:
+            passthrough += ["--reachability", args.reachability]
+        if args.fast:
+            passthrough.append("--fast")
+        if args.with_features:
+            passthrough.append("--with-features")
+        sys.exit(stest.run_selftest(
+            os.path.abspath(__file__), passthrough, label="meridian2",
+            cache_globs=("meridian2_eroded_*.npy",)))
+
+    out = args.out or os.path.join(REPO_ROOT, "content", "maps", args.map_id)
+    # `mapconverter` names the installed map after the package DIRECTORY, not
+    # after the id inside mapinfo.lua, so `--out .../foo --id bar` installs as
+    # `data/maps/foo` holding `maps/bar.smf` — which loads, and then every
+    # scenario and every lobby row disagrees with it about the map's name. The
+    # default can't produce that; an explicit --out can, so it is said out loud
+    # (a warn, not an error: an --out to scratch for inspection is legitimate).
+    if os.path.basename(os.path.normpath(out)) != args.map_id:
+        print(f"WARNING: --out directory '{os.path.basename(os.path.normpath(out))}' "
+              f"is not the map id '{args.map_id}' — mapconverter installs a map "
+              f"under its directory name, so this package is only safe to "
+              f"inspect, not to convert", file=sys.stderr)
+    generate(out, args.seed, fast=args.fast, with_features=args.with_features,
+             preview_only=args.preview_only, no_package=args.no_package,
+             climate=args.climate, map_id=args.map_id,
+             reachability=args.reachability,
+             ground_texture=args.ground_texture,
+             display_name=args.display_name)
 
 
 if __name__ == "__main__":

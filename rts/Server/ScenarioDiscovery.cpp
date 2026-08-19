@@ -58,6 +58,69 @@ bool GetBoolField(lua_State* L, int index, const char* key,
     return out;
 }
 
+/// Read a numeric field off the table at `index`. Returns `fallback` when the
+/// field is missing or not a number.
+lua_Number GetNumberField(lua_State* L, int index, const char* key,
+                          lua_Number fallback = 0) {
+    lua_getfield(L, index, key);
+    lua_Number out = fallback;
+    if (lua_isnumber(L, -1))
+        out = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return out;
+}
+
+/// Read the optional `briefing` block — the display-only splash content
+/// (ScenarioDiscovery.h's ScenarioBriefing).
+///
+/// Degrade, never drop: a `briefing` that is not a table (BAR's format uses a
+/// plain string there) is ignored and the scenario is still offered. A
+/// briefing is only reported `present` when it carried reading matter, so an
+/// empty block never mounts an empty splash.
+ScenarioDiscovery::ScenarioBriefing ReadBriefing(lua_State* L, int index) {
+    ScenarioDiscovery::ScenarioBriefing b;
+
+    lua_getfield(L, index, "briefing");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return b;
+    }
+    const int t = lua_gettop(L);
+
+    b.title = GetStringField(L, t, "title");
+    b.subtitle = GetStringField(L, t, "subtitle");
+    b.story = GetStringField(L, t, "story");
+    b.image = GetStringField(L, t, "image");
+
+    // Defense in depth (ContentServer.cpp:49's posture): a traversal-shaped or
+    // absolute image path is dropped here so it is never emitted to a client,
+    // even though it is the client origin, not the lobby, that serves it.
+    if (b.image.find("..") != std::string::npos ||
+        (!b.image.empty() && b.image.front() == '/'))
+        b.image.clear();
+
+    const lua_Number par = GetNumberField(L, t, "parTimeSec", 0);
+    if (par > 0)
+        b.parTimeSec = static_cast<int>(par);
+
+    lua_getfield(L, t, "tips");
+    if (lua_istable(L, -1)) {
+        const int arr = lua_gettop(L);
+        const auto n = static_cast<lua_Integer>(lua_rawlen(L, arr));
+        for (lua_Integer i = 1; i <= n && b.tips.size() < 12; ++i) {
+            lua_rawgeti(L, arr, i);
+            if (lua_isstring(L, -1))
+                b.tips.emplace_back(lua_tostring(L, -1));
+            lua_pop(L, 1);   // non-strings are skipped, not fatal
+        }
+    }
+    lua_pop(L, 1);   // tips
+    lua_pop(L, 1);   // briefing
+
+    b.present = !b.story.empty() || !b.tips.empty();
+    return b;
+}
+
 /// True when the `objectives` array on the table at `index` contains any
 /// entry with `victory = true`.
 ///
@@ -159,6 +222,30 @@ std::vector<ScenarioDiscovery::ScenarioSide> ReadSides(lua_State* L, int index) 
                 if (std::find(it->teams.begin(), it->teams.end(), team) ==
                     it->teams.end())
                     it->teams.push_back(team);
+
+                // Per-side capacity (§6, task 7). Declared on any team entry of
+                // the side — a side is one slot pool however many teams it
+                // spans, so the FIRST declaration wins and later ones are
+                // ignored rather than summed: two entries saying `capacity = 8`
+                // mean a side of 8, not of 16.
+                lua_getfield(L, entry, "capacity");
+                if (!it->hasCapacity) {
+                    if (lua_isnumber(L, -1)) {
+                        const lua_Integer cap = lua_tointeger(L, -1);
+                        // A negative capacity is not "unlimited" — it is a typo,
+                        // and reading it as unlimited would silently uncap a
+                        // side. Dropped, so the seeding rule sizes it instead.
+                        if (cap >= 0) {
+                            it->capacity = static_cast<unsigned>(cap);
+                            it->hasCapacity = true;
+                        }
+                    } else if (lua_isstring(L, -1) &&
+                               std::string(lua_tostring(L, -1)) == "unlimited") {
+                        it->capacity = 0;
+                        it->hasCapacity = true;
+                    }
+                }
+                lua_pop(L, 1);
             }
         }
         lua_pop(L, 1);
@@ -224,8 +311,10 @@ bool LoadOne(const fs::path& file, ScenarioDiscovery::ScenarioInfo& out) {
         if (out.displayName.empty())
             out.displayName = out.id;
         out.tutorial = GetBoolField(L, scn, "tutorial", false);
+        out.retired = GetBoolField(L, scn, "retired", false);
         out.terminal = HasVictoryObjective(L, scn);
         out.sides = ReadSides(L, scn);
+        out.briefing = ReadBriefing(L, scn);
 
         // `world.map` names the map the scenario is authored for. A
         // scenario with no `world` table (or no `map` in it) simply has no
@@ -277,9 +366,10 @@ std::vector<ScenarioInfo> Discover(const std::string& gamePath) {
         SLOG(SPRING_LOG_INFO, "discovered %zu scenario(s) in '%s'", out.size(),
              dir.string().c_str());
         for (const auto& s : out) {
-            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s sides='%s'",
+            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s%s sides='%s'",
                  s.displayName.c_str(), s.id.c_str(), s.mapId.c_str(),
                  s.tutorial ? " tutorial" : "",
+                 s.retired ? " RETIRED-NOT-OFFERED" : "",
                  s.terminal ? " terminal" : " NO-TERMINAL-CONDITION",
                  EncodeWarSides(s).c_str());
             for (const auto& side : s.sides) {
@@ -307,7 +397,7 @@ const ScenarioInfo* DefaultForMap(const std::vector<ScenarioInfo>& scenarios,
 
     const ScenarioInfo* best = nullptr;
     for (const auto& s : scenarios) {
-        if (s.tutorial || !s.terminal || s.mapId != mapId)
+        if (s.tutorial || s.retired || !s.terminal || s.mapId != mapId)
             continue;
         // Lowest id, so the pick is deterministic no matter what order the
         // directory iterator gave us.
@@ -327,12 +417,18 @@ std::vector<ScenarioSide> PlayableSides(const ScenarioInfo& info) {
 }
 
 std::string EncodeWarSides(const ScenarioInfo& info) {
-    std::string out;
+    // The grammar itself lives in WarSides.h beside its own parser, and this
+    // function is now only the scenario-shaped half: pick the playable sides,
+    // say out loud which ones cannot be encoded, and hand the rest to the one
+    // encoder. Two writers of a string three processes parse is exactly the
+    // shape task 2 collapsed for the reader side.
+    WarSides sides;
     for (const auto& s : PlayableSides(info)) {
         // The faction key is authored content, but it lands in a modoption
         // that is split on ',' and ':' downstream — a key containing either
         // would silently reshape the list, so skip it rather than emit a
-        // string no parser can recover.
+        // string no parser can recover. The encoder drops it too; the warning
+        // is what a scenario author needs and the encoder cannot give.
         if (s.faction.find(',') != std::string::npos ||
             s.faction.find(':') != std::string::npos) {
             SLOG(SPRING_LOG_WARNING,
@@ -341,11 +437,23 @@ std::string EncodeWarSides(const ScenarioInfo& info) {
                  info.id.c_str(), s.faction.c_str());
             continue;
         }
-        if (!out.empty())
-            out += ',';
-        out += s.faction;
-        out += ':';
-        out += std::to_string(static_cast<unsigned>(s.team));
+        sides.emplace_back(s.faction, s.team);
+    }
+    return ::EncodeWarSides(sides);
+}
+
+WarSideCapacities AuthoredSideCapacities(const ScenarioInfo& info) {
+    WarSideCapacities out;
+    for (const auto& s : PlayableSides(info)) {
+        if (!s.hasCapacity)
+            continue;
+        // Same separator rule as EncodeWarSides: a faction key that cannot
+        // survive the modoption's own grammar is dropped rather than emitted as
+        // a string no parser can recover.
+        if (s.faction.find(',') != std::string::npos ||
+            s.faction.find(':') != std::string::npos)
+            continue;
+        out.emplace_back(s.faction, s.capacity);
     }
     return out;
 }

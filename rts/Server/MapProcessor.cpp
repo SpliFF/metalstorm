@@ -9,6 +9,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include "System/FileSystem/DetailTexDc.h"
 #include "System/FileSystem/LuaVFSSimple.h"
 #include "System/FileSystem/FileHandler.h"
 
@@ -59,6 +60,14 @@ struct RegionRecord {
     std::string key;
     std::string name;
     std::vector<RegionPoint> polygon;
+    // The point the region publishes as itself (locate ping, "attack
+    // <region>"). Optional in mapdata/regions.lua: a map that ships none keeps
+    // the old behaviour, the polygon's vertex average, which game_regions.lua
+    // computes for itself. A generated region ships one because its polygon is
+    // its component's coastline (M9m) and the vertex average of a coastline is
+    // routinely outside the region.
+    bool hasCentre = false;
+    RegionPoint centre;
     float value = 0;
     std::vector<std::string> tags;
     std::vector<std::string> neighbors;
@@ -287,6 +296,11 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                     meta.decals.splatDetailTex  = getTex("splatdetailtex",  "splatDetailTex");
                     meta.decals.splatDistrTex   = getTex("splatdistrtex",   "splatDistrTex");
                     meta.decals.detailNormalTex = getTex("detailnormaltex", "detailNormalTex");
+                    // DEVIATION (PLAN-maps §2n ruling 1): not a Recoil key.
+                    // A map that declares it delivers its ground albedo as
+                    // one map-space texture instead of through the SMT tile
+                    // dictionary; see MapMetadata::groundTex.
+                    meta.groundTex              = getTex("groundtex",        "groundTex");
                     meta.decals.splatDetailNormalTex[0] = getTex("splatdetailnormaltex1", "splatDetailNormalTex1");
                     meta.decals.splatDetailNormalTex[1] = getTex("splatdetailnormaltex2", "splatDetailNormalTex2");
                     meta.decals.splatDetailNormalTex[2] = getTex("splatdetailnormaltex3", "splatDetailNormalTex3");
@@ -294,6 +308,31 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                     // Some maps typo "platDetailNormalTex3" (seen in pools_of_ilys)
                     if (meta.decals.splatDetailNormalTex[2].empty())
                         meta.decals.splatDetailNormalTex[2] = getTex("platdetailnormaltex3", "platDetailNormalTex3");
+
+                    // SMF_DETAIL_NORMAL_DIFFUSE_ALPHA. Recoil accepts two
+                    // authoring forms (CMapInfo::ReadSMF): the sub-table
+                    // `splatDetailNormalTex = { alpha = true, [1] = ... }`
+                    // wins where it exists, otherwise the flat
+                    // `splatDetailNormalDiffuseAlpha` key beside the
+                    // `splatDetailNormalTexN` entries. Only the flat form is
+                    // used by any map here, but read both so the precedence
+                    // matches. Lua `1`/`true` both count.
+                    lua_getfield(L, -1, "splatdetailnormaltex");
+                    if (!lua_istable(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "splatDetailNormalTex"); }
+                    if (lua_istable(L, -1)) {
+                        lua_getfield(L, -1, "alpha");
+                        meta.decals.splatDetailNormalDiffuseAlpha =
+                            lua_isnumber(L, -1) ? lua_tonumber(L, -1) != 0 : lua_toboolean(L, -1) != 0;
+                        lua_pop(L, 1);
+                        lua_pop(L, 1);
+                    } else {
+                        lua_pop(L, 1);
+                        lua_getfield(L, -1, "splatdetailnormaldiffusealpha");
+                        if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "splatDetailNormalDiffuseAlpha"); }
+                        meta.decals.splatDetailNormalDiffuseAlpha =
+                            lua_isnumber(L, -1) ? lua_tonumber(L, -1) != 0 : lua_toboolean(L, -1) != 0;
+                        lua_pop(L, 1);
+                    }
                 }
                 lua_pop(L, 1); // pop resources
 
@@ -532,7 +571,23 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
     // --mip-levels. WebGL2 cannot runtime-generate mipmaps for a
     // compressed-format texture (gl.generateMipmap() only supports
     // uncompressed formats), so the full chain must ship pre-baked.
-    if (!meta.smtPath.empty()) {
+    // A map that ships a map-space ground albedo does not need the tile
+    // dictionary delivered at all: the client prefers `ground.ktx2` and would
+    // never sample the atlas (PLAN-maps §2n ruling 1). Skipping it is most of
+    // what the ruling buys — on skerry_reach the SMT KTX2 is 8.4 MB against
+    // the ground texture's ~2.8 MB. `tileindex.bin` above is still written:
+    // it is small, it is part of the SMF record, and it keeps a client that
+    // predates this path able to fall back if the texture is missing.
+    if (!meta.smtPath.empty() && !meta.groundTex.empty()) {
+        // Drop any tiles.ktx2 an earlier processing of this map left behind:
+        // it holds THAT version's pixels, and a stale albedo served to a
+        // client that still asks for it is worse than a 404.
+        std::error_code rmEc;
+        std::filesystem::remove(meta.processedDir + "/tiles.ktx2", rmEc);
+        SLOG(SPRING_LOG_INFO,
+            "%s: ships a map-space ground albedo (%s) — not extracting the "
+            "SMT tile dictionary", meta.id.c_str(), meta.groundTex.c_str());
+    } else if (!meta.smtPath.empty()) {
         std::ifstream smt(meta.smtPath, std::ios::binary);
         smt.seekg(16); // skip magic
         int smtVersion, smtNumTiles;
@@ -689,39 +744,118 @@ static std::string resolveTexturePath(const std::string& mapDir, const std::stri
     return {};
 }
 
+/// Pull `textureconverter --signed-dc-report`'s one machine-readable line out
+/// of its captured output. Fills `topMean[3]` (the smallest mip level's
+/// per-channel mean — the constant that survives every viewing distance) and
+/// `baseMean[3]` (level 0 — what the map author actually authored). Returns
+/// false if the tool did not emit the line, which is the normal case for DDS
+/// sources: those are wrapped block-for-block, never decoded, so there is
+/// nothing to measure.
+static bool ParseSignedDcReport(const std::string& out,
+                                double baseMean[3], double topMean[3]) {
+    const size_t at = out.find("signed-dc:");
+    if (at == std::string::npos) return false;
+    int levels = 0, tw = 0, th = 0;
+    const int n = std::sscanf(out.c_str() + at,
+        "signed-dc: levels=%d base=%lf,%lf,%lf top=%dx%d:%lf,%lf,%lf",
+        &levels, &baseMean[0], &baseMean[1], &baseMean[2], &tw, &th,
+        &topMean[0], &topMean[1], &topMean[2]);
+    return n == 9;
+}
+
+/// Resolve one mapinfo-declared texture reference and convert it to a
+/// `<baseName>.ktx2` in the processed dir, rewriting `field` to the output
+/// name (or clearing it when the source cannot be resolved / the converter
+/// fails). Shared by the decal set and by the map-space ground albedo, which
+/// is converted EARLIER than the decals — see ExtractGroundTexture.
+static bool ConvertMapTexture(const MapMetadata& meta, std::string& field,
+                              const char* baseName, bool wantDc,
+                              std::string* toolOutput) {
+    if (field.empty()) return false;
+    std::string src = resolveTexturePath(meta.sourcePath, field);
+    if (src.empty()) {
+        // Declared means the mapper intended it; failing to resolve it is a
+        // content bug, and at DEBUG the whole pipeline reads as wired from
+        // the logs (PLAN-terrain-detailtex.md §1) — that is how the dead
+        // `detailTex` path stayed invisible.
+        SLOG(SPRING_LOG_WARNING, "texture '%s' declared but unresolvable: %s",
+            baseName, field.c_str());
+        field.clear();
+        return false;
+    }
+
+    const std::string dstName = std::string(baseName) + ".ktx2";
+    const std::string dstPath = meta.processedDir + "/" + dstName;
+
+    // --mipmaps: Recoil's near-field detail is signed (tex*2-1), so it
+    // self-fades to nothing as the mip chain averages it towards mid-grey.
+    // That chain IS the distance falloff — there is no fade uniform in
+    // SMFFragProg — so a level-1 decal KTX2 aliases at full strength all
+    // the way to the horizon. DDS sources keep whatever chain they ship
+    // (the flag only reaches the RGBA8 encode path).
+    // --signed-dc-report is only asked of `detailTex`: it is the one
+    // decal the shader adds unmodulated (`baseColor += tex*2-1`, no
+    // distribution map in front of it), so its mean is a flat tint on
+    // the whole map. See DetailTexDc.h.
+    const std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+        " --encoding uastc --mipmaps"
+        + (wantDc ? " --signed-dc-report" : "") +
+        " \"" + src + "\" \"" + dstPath + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) { field.clear(); return false; }
+    char buf[256];
+    std::string out;
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    const int rc = pclose(p);
+    if (rc != 0) {
+        SLOG(SPRING_LOG_WARNING, "textureconverter failed (%d): %s  %s",
+            rc, src.c_str(), out.c_str());
+        field.clear();
+        return false;
+    }
+    if (toolOutput) *toolOutput = out;
+    field = dstName;
+    return true;
+}
+
+/// The map-space ground albedo (PLAN-maps §2n ruling 1). Converted BEFORE the
+/// binary extraction, not with the other textures, because ExtractBinaryData
+/// skips the SMT tile dictionary for a map that ships one — so whether this
+/// texture actually exists has to be known first. A declared-but-broken
+/// ground texture therefore falls back to the tile path instead of leaving
+/// the map with no ground colour at all.
+bool MapProcessor::ExtractGroundTexture(MapMetadata& meta) {
+    if (meta.groundTex.empty()) return true;
+    const std::string declared = meta.groundTex;
+    if (!ConvertMapTexture(meta, meta.groundTex, "ground", false, nullptr)) {
+        SLOG(SPRING_LOG_WARNING,
+            "%s: ground texture '%s' declared but not produced — falling back "
+            "to the SMT tile dictionary", meta.id.c_str(), declared.c_str());
+        return false;
+    }
+    SLOG(SPRING_LOG_INFO, "%s: map-space ground albedo -> %s",
+        meta.id.c_str(), meta.groundTex.c_str());
+    return true;
+}
+
 bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
+    // Filled by the `detailTex` conversion below and judged after every
+    // field is resolved, because whether a non-neutral DC matters at all
+    // depends on which detail branch the map ends up selecting.
+    bool haveDetailDc = false;
+    double detailBaseMean[3] = {0, 0, 0};
+    double detailTopMean[3] = {0, 0, 0};
+
     // For each decal texture: resolve the source, then run textureconverter
     // to produce a `.ktx2` with a stable output name. textureconverter
     // auto-routes DDS-as-blocks vs RGBA-encode internally; we just hand it
     // the source path and the desired output.
     auto convertField = [&](std::string& field, const char* baseName) {
-        if (field.empty()) return;
-        std::string src = resolveTexturePath(meta.sourcePath, field);
-        if (src.empty()) {
-            SLOG(SPRING_LOG_DEBUG, "decal '%s' missing: %s", baseName, field.c_str());
-            field.clear();
-            return;
-        }
-
-        std::string dstName = std::string(baseName) + ".ktx2";
-        std::string dstPath = meta.processedDir + "/" + dstName;
-
-        std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
-            " --encoding uastc"
-            " \"" + src + "\" \"" + dstPath + "\" 2>&1";
-        FILE* p = popen(cmd.c_str(), "r");
-        if (!p) { field.clear(); return; }
-        char buf[256];
+        const bool wantDc = (std::strcmp(baseName, "detail") == 0);
         std::string out;
-        while (fgets(buf, sizeof(buf), p)) out += buf;
-        int rc = pclose(p);
-        if (rc != 0) {
-            SLOG(SPRING_LOG_WARNING, "textureconverter failed (%d): %s  %s",
-                rc, src.c_str(), out.c_str());
-            field.clear();
-            return;
-        }
-        field = dstName;
+        if (!ConvertMapTexture(meta, field, baseName, wantDc, &out)) return;
+        if (wantDc)
+            haveDetailDc = ParseSignedDcReport(out, detailBaseMean, detailTopMean);
     };
 
     convertField(meta.decals.detailTex,       "detail");
@@ -733,6 +867,40 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
     convertField(meta.decals.splatDetailNormalTex[1], "splat_normal_1");
     convertField(meta.decals.splatDetailNormalTex[2], "splat_normal_2");
     convertField(meta.decals.splatDetailNormalTex[3], "splat_normal_3");
+
+    // DC-neutrality of the plain `detailTex`, judged only when that branch is
+    // the one the client will actually take. `attachTerrainDetailFromDecals`
+    // (client/src/core/terrain.ts) reproduces SMFFragProg's `#ifdef` nesting:
+    // splat *normals* wrap the whole detail section and suppress
+    // GetDetailTextureColor entirely, and inside it the splat pair wins over
+    // the plain branch. A tint warning about a texture the shader never
+    // samples is noise, so mirror the precedence here.
+    const bool hasSplatNormals =
+        !meta.decals.splatDistrTex.empty() &&
+        (!meta.decals.splatDetailNormalTex[0].empty() ||
+         !meta.decals.splatDetailNormalTex[1].empty() ||
+         !meta.decals.splatDetailNormalTex[2].empty() ||
+         !meta.decals.splatDetailNormalTex[3].empty());
+    const bool hasSplatPair =
+        !meta.decals.splatDetailTex.empty() && !meta.decals.splatDistrTex.empty();
+    const bool plainDetailIsLive =
+        !meta.decals.detailTex.empty() && !hasSplatNormals && !hasSplatPair;
+
+    if (haveDetailDc && plainDetailIsLive) {
+        static const char* CHAN[3] = {"R", "G", "B"};
+        for (int c = 0; c < 3; ++c) {
+            if (detailtex::IsDcNeutral(detailTopMean[c])) continue;
+            const double levels =
+                detailtex::DcInLevels(detailtex::SignedDcFromMean(detailTopMean[c]));
+            SLOG(SPRING_LOG_WARNING,
+                "%s: detailTex %s mean is %.2f (authored %.2f), not the neutral "
+                "%.1f — the shader adds it as tex*2-1 with no fade, so this is a "
+                "permanent %+.1f-level tint on the whole map at every distance. "
+                "Re-author the texture so its mean lands on %.1f.",
+                meta.id.c_str(), CHAN[c], detailTopMean[c], detailBaseMean[c],
+                detailtex::kNeutralMean, levels, detailtex::kNeutralMean);
+        }
+    }
 
     int found = 0;
     if (!meta.decals.detailTex.empty())         found++;
@@ -865,6 +1033,14 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
                         }
                         lua_pop(L, 1); // polygon
 
+                        lua_getfield(L, -1, "centre");
+                        if (lua_istable(L, -1)) {
+                            r.centre.x = luaGetFloat(L, "x", 0);
+                            r.centre.z = luaGetFloat(L, "z", 0);
+                            r.hasCentre = true;
+                        }
+                        lua_pop(L, 1); // centre
+
                         lua_getfield(L, -1, "tags");
                         if (lua_istable(L, -1)) {
                             const int tn = static_cast<int>(lua_rawlen(L, -1));
@@ -930,6 +1106,10 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
             if (RegionIsSelfIntersecting(r.polygon)) {
                 errors.push_back(r.key + ": self-intersecting polygon");
             }
+            if (r.hasCentre && (r.centre.x < 0 || r.centre.x > mapWidth ||
+                                r.centre.z < 0 || r.centre.z > mapHeight)) {
+                errors.push_back(r.key + ": centre out of map bounds");
+            }
             for (const auto& nb : r.neighbors) {
                 auto it = byKey.find(nb);
                 if (it == byKey.end()) {
@@ -968,6 +1148,7 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
             rj["neighbors"] = r.neighbors;
             rj["polygon"] = nlohmann::json::array();
             for (const auto& pt : r.polygon) rj["polygon"].push_back({{"x", pt.x}, {"z", pt.z}});
+            if (r.hasCentre) rj["centre"] = {{"x", r.centre.x}, {"z", r.centre.z}};
             j["regions"].push_back(std::move(rj));
         }
         SLOG(SPRING_LOG_INFO, "%s: exported regions.json (graph, %zu regions)", meta.id.c_str(), regions.size());
@@ -1277,6 +1458,10 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
         SLOG(SPRING_LOG_ERROR, "failed to read SMF header");
         return false;
     }
+
+    // Before the binary extraction: it skips the SMT tile dictionary for a
+    // map that really does ship a map-space ground albedo (PLAN-maps §2n).
+    ExtractGroundTexture(meta);
 
     if (!ExtractBinaryData(meta)) {
         SLOG(SPRING_LOG_ERROR, "failed to extract binary data");

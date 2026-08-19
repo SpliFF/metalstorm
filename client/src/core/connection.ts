@@ -90,6 +90,8 @@ import { LuaRulesMsg } from '../protocol/spring-web/lua-rules-msg.js';
 import { LuaUIMsg } from '../protocol/spring-web/lua-uimsg.js';
 import { LuaUIMsgRelay } from '../protocol/spring-web/lua-uimsg-relay.js';
 import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
+import { ClientEvalRequest } from '../protocol/spring-web/client-eval-request.js';
+import { ClientEvalResponse } from '../protocol/spring-web/client-eval-response.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
@@ -98,6 +100,7 @@ import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
 import { StandingOrderCreate } from '../protocol/spring-web/standing-order-create.js';
+import { StandingOrderConditions } from '../protocol/spring-web/standing-order-conditions.js';
 import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
 import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
 import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
@@ -124,8 +127,9 @@ import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
 import { recordInbound, recordOutbound } from './net-inspector.js';
+import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
+import { SCHEMA_HASH } from '../protocol/schema-hash.js';
 
-const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
@@ -135,11 +139,8 @@ const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
 const ENVELOPE_HEIGHTMAP = 0x09;
 
-/** Wire-protocol version sent in the Handshake (C1). The game server rejects a
- *  mismatch with AuthStatus.VersionMismatch — bump this in lockstep with
- *  Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h) on any breaking
- *  schema / envelope change. */
-const PROTOCOL_VERSION = 1;
+// PROTOCOL_VERSION + ENVELOPE_FLATBUFFERS live in protocol-version.ts so the
+// scripted wire client shares them rather than copying them (see that file).
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
@@ -732,15 +733,24 @@ export type UnitCommandKindStr = 'issued' | 'done';
 /** One synced command event mirrored from the server. Shape matches
  *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
  *  argument lists so the worker can forward directly. */
+/** Who asked for a command (PLAN-latency L4.2). Recoil acks a *player's* order
+ *  with the unit's `ok` sound in `SelectedUnitsHandler::GiveCommand` and stays
+ *  silent for `Spring.GiveOrderToUnit`, so the audible half of L4.2 needs to
+ *  tell the two apart at the one choke point that sees both. */
+export type CommandSource = 'player' | 'widget';
+
 /** Observer for commands that have just gone on the wire (PLAN-latency L4.1).
  *  Receives one entry per `PlayerCommand`; a `PlayerCommandBatch` arrives as
  *  one call carrying all of its inner commands. */
-export type CommandSink = (commands: ReadonlyArray<{
-    commandId: number;
-    unitIds: readonly number[];
-    params: readonly number[];
-    options: number;
-}>) => void;
+export type CommandSink = (
+    commands: ReadonlyArray<{
+        commandId: number;
+        unitIds: readonly number[];
+        params: readonly number[];
+        options: number;
+    }>,
+    source: CommandSource,
+) => void;
 
 export interface UnitCommandEventMsg {
     kind: UnitCommandKindStr;
@@ -1091,6 +1101,13 @@ export interface ReplayStateInfo {
 
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
+    /** PLAN-test-automation P7: the server asks this client to evaluate
+     *  `code` and answer with `sendClientEvalResponse(requestId, ...)`.
+     *  `target` is one of `worker` | `js` | `widgets` | `test`. The handler
+     *  MUST always answer (success or refusal) — the server's HTTP caller is
+     *  parked on a waiter until it does or 10s elapse. Gate 3 (a DEV build or
+     *  `?allowClientEval=1`) is the handler's responsibility, not the wire's. */
+    onClientEvalRequest?: (requestId: number, target: string, code: string) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
      *  content-addressed key for fetching the game's UnitDefs/WeaponDefs
      *  via HTTP — empty if the lobby (no defs) or a server that didn't
@@ -1099,6 +1116,16 @@ export interface ConnectionEvents {
      *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
     onAuthenticated?: (auth: AuthenticatedInfo) => void;
     onAuthFailed?: (message: string) => void;
+    /** PLAN-protocol-guard task 4: the server refused this client's wire
+     *  schema (`AuthStatus.VersionMismatch` — a stale cached bundle, or a
+     *  handshake with no `schema_hash` at all). Distinct from `onAuthFailed`
+     *  because the remedy is a reload, not a credential; `message` carries
+     *  both hashes. Host-agnostic on purpose (Connection also runs in the
+     *  game-processor worker, which has no `sessionStorage` and no DOM) — the
+     *  reload/loop-guard decision lives in `core/schema-mismatch.ts`, driven
+     *  from main. A host that does not handle it falls back to
+     *  `onAuthFailed`, so no path silently swallows the rejection. */
+    onVersionMismatch?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
@@ -1332,8 +1359,21 @@ export class Connection {
     private controlObserver: ((data: Uint8Array) => void) | null = null;
     onControlMessage(fn: ((data: Uint8Array) => void) | null): void { this.controlObserver = fn; }
 
-    constructor(events: ConnectionEvents = {}) {
+    /**
+     * PLAN-protocol-guard task 4: the browser twin of the wire client's
+     * `--schema-hash <hex>|none`. A guard whose two halves are generated
+     * together can only exercise its passing arm — patching `schema-hash.ts`
+     * is refused by task 2's vite guard before the client even starts — so the
+     * refusal has to be driven from the *value* this client sends, not from
+     * the file. Empty string ⇒ send no `schema_hash` field at all (the
+     * pre-guard bundle). Dev-only at the call site (main.ts reads a URL param
+     * behind `import.meta.env.DEV`); lying here only ever gets you rejected.
+     */
+    private schemaHash: string = SCHEMA_HASH;
+
+    constructor(events: ConnectionEvents = {}, opts: { schemaHash?: string } = {}) {
         this.events = events;
+        if (opts.schemaHash !== undefined) this.schemaHash = opts.schemaHash;
     }
 
     get state(): ConnectionState { return this._state; }
@@ -1494,12 +1534,24 @@ export class Connection {
                     return;
                 }
             }
-            // Token rejected — clear it and try password
-            console.log('[connection] token expired or invalid');
-            this.sessionToken = null;
+            // The token did not validate as an ACCOUNT session. That is not
+            // the same as "the token is bad", and task 8a is what makes the
+            // difference matter: a per-war reconnect token (§7.3) authorises
+            // exactly this room and is unknown to /api/auth/validate by
+            // design, so it 401s here and is still the right credential to
+            // present. The game server knows both kinds; it is the authority.
+            //
+            // So the token is kept and handed to AuthRequest rather than
+            // discarded. Before task 8a this line pre-judged a credential it
+            // could not evaluate, and the only visible symptom was a mid-war
+            // reconnect asking for a password.
+            console.log('[connection] token is not an account session — '
+                + 'presenting it to the game server (per-war token?)');
         }
 
-        // Password login
+        // Password login. Reached only when there is no token at all: with one
+        // in hand, the game server's AuthResponse is the verdict.
+        if (this.sessionToken) return;
         if (!password) {
             throw new Error('no valid token and no password');
         }
@@ -1609,9 +1661,16 @@ export class Connection {
     private sendHandshake(): void {
         const builder = new flatbuffers.Builder(64);
         const clientVerOff = builder.createString(`springweb/${PROTOCOL_VERSION}`);
-        const hs = Handshake.createHandshake(builder, PROTOCOL_VERSION, clientVerOff);
+        // PLAN-protocol-guard task 3: the schema hash is the guard the epoch
+        // integer never was — the server compares it for strict equality and
+        // rejects a stale cached bundle with AuthStatus.VersionMismatch.
+        const schemaHashOff = this.schemaHash
+            ? builder.createString(this.schemaHash) : 0;
+        const hs = Handshake.createHandshake(
+            builder, PROTOCOL_VERSION, clientVerOff, schemaHashOff);
         this.sendClientMessage(builder, ClientPayload.Handshake, hs);
-        console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION})`);
+        console.log(`[connection] sent Handshake (protocol v${PROTOCOL_VERSION},`
+            + ` schema ${this.schemaHash ? this.schemaHash.slice(0, 12) : '<omitted>'})`);
     }
 
     private sendAuthRequest(): void {
@@ -1693,6 +1752,19 @@ export class Connection {
         // requestId=0 — we don't track the response.
         const cc = ConsoleCommand.createConsoleCommand(builder, scopeOff, cmdOff, 0);
         this.sendClientMessage(builder, ClientPayload.ConsoleCommand, cc);
+    }
+
+    /** Answer a ClientEvalRequest (PLAN-test-automation P7). Unlike
+     *  `sendConsoleCommand` this does NOT require `authenticated` — a refusal
+     *  must reach the server's waiter even in an odd session state, and the
+     *  server only ever addresses an already-authenticated admin session. */
+    sendClientEvalResponse(requestId: number, success: boolean, output: string): void {
+        if (!this.transport?.connected) return;
+        const builder = new flatbuffers.Builder(128 + output.length);
+        const outOff = builder.createString(output);
+        const resp = ClientEvalResponse.createClientEvalResponse(
+            builder, requestId, success, outOff);
+        this.sendClientMessage(builder, ClientPayload.ClientEvalResponse, resp);
     }
 
     /** Send the local player's current selection. The server uses this
@@ -1788,6 +1860,10 @@ export class Connection {
         params: number[],
         options: number = 0,
         timeoutFrames: number = 0,
+        /** PLAN-latency L4.2 — 'widget' for `Spring.GiveOrderToUnit` and
+         *  friends, which Recoil does not ack audibly. Defaults to 'player'
+         *  because every other caller is a player gesture. */
+        source: CommandSource = 'player',
     ): void {
         if (!this.authenticated) return;
         const builder = new flatbuffers.Builder(128 + unitIds.length * 4 + params.length * 4);
@@ -1804,7 +1880,7 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
-        this.commandSink?.([{ commandId, unitIds, params, options }]);
+        this.commandSink?.([{ commandId, unitIds, params, options }], source);
     }
 
     /** Install (or clear) the sent-command sink (PLAN-latency L4.1). Wired
@@ -1834,6 +1910,7 @@ export class Connection {
             options?: number;
             timeoutFrames?: number;
         }>,
+        source: CommandSource = 'player',
     ): void {
         if (!this.authenticated) return;
         if (commands.length === 0) return;
@@ -1881,7 +1958,7 @@ export class Connection {
             unitIds: c.unitIds,
             params: c.params,
             options: c.options ?? 0,
-        })));
+        })), source);
     }
 
     // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----
@@ -1932,18 +2009,39 @@ export class Connection {
      *  never fills `conditions` itself for a group-scoped directive).
      *  `shape`/`params` follow the `OrderShape` layout (macro-directives §1):
      *  Point [x,y,z] · Circle [x,y,z,radius] · Polygon [x1,y1,z1,...] (ring) ·
-     *  Polyline [frontage,x1,y1,z1,...] (the front line). */
+     *  Polyline [frontage,x1,y1,z1,...] (the front line).
+     *
+     *  `opts.conditions` is the *ungrouped* case's roster: a directive with
+     *  `groupId = 0` and no conditions matches every idle unit on the team,
+     *  which is why the composer's class subjects used to be decorative
+     *  (PLAN-endtoend.md D56). Only the two fields the composer can express
+     *  are written; the rest keep their schema defaults. */
     sendGroupDirective(
         directiveId: number,
         groupId: number,
         type: number,
         shape: number,
         params: number[],
-        opts: { priority?: number; requestedStrength?: number; active?: boolean } = {},
+        opts: {
+            priority?: number; requestedStrength?: number; active?: boolean;
+            conditions?: { idleOnly?: boolean; squadTypes?: number[] };
+        } = {},
     ): void {
         if (!this.authenticated) return;
-        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const squadTypes = opts.conditions?.squadTypes ?? [];
+        const builder = new flatbuffers.Builder(128 + params.length * 4 + squadTypes.length * 2);
         const paramsOff = GroupDirective.createParamsVector(builder, params);
+        // Nested tables and vectors must be built before the parent starts.
+        let conditionsOff: flatbuffers.Offset | null = null;
+        if (opts.conditions) {
+            const squadTypesOff = squadTypes.length > 0
+                ? StandingOrderConditions.createSquadTypesVector(builder, squadTypes)
+                : null;
+            StandingOrderConditions.startStandingOrderConditions(builder);
+            StandingOrderConditions.addIdleOnly(builder, opts.conditions.idleOnly ?? true);
+            if (squadTypesOff !== null) StandingOrderConditions.addSquadTypes(builder, squadTypesOff);
+            conditionsOff = StandingOrderConditions.endStandingOrderConditions(builder);
+        }
         this.commandSequence++;
         GroupDirective.startGroupDirective(builder);
         GroupDirective.addSequence(builder, this.commandSequence);
@@ -1953,6 +2051,7 @@ export class Connection {
         GroupDirective.addPriority(builder, opts.priority ?? 0);
         GroupDirective.addShape(builder, shape);
         GroupDirective.addParams(builder, paramsOff);
+        if (conditionsOff !== null) GroupDirective.addConditions(builder, conditionsOff);
         GroupDirective.addRequestedStrength(builder, opts.requestedStrength ?? 0);
         GroupDirective.addActive(builder, opts.active ?? true);
         const off = GroupDirective.endGroupDirective(builder);
@@ -2215,7 +2314,17 @@ export class Connection {
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);
-                    this.events.onAuthFailed?.(errMsg);
+                    // PLAN-protocol-guard task 4: a schema/version refusal is
+                    // not a failed login — nothing the player can type fixes
+                    // it, so it takes its own branch (reload remedy) and only
+                    // falls back to the generic path if the host has no
+                    // handler for it.
+                    if (ar.status() === AuthStatus.VersionMismatch
+                        && this.events.onVersionMismatch) {
+                        this.events.onVersionMismatch(errMsg);
+                    } else {
+                        this.events.onAuthFailed?.(errMsg);
+                    }
                     this.disconnect();
                 }
                 break;
@@ -2446,6 +2555,12 @@ export class Connection {
                     });
                 }
                 this.events.onPlayerRoster?.(players);
+                break;
+            }
+            case ServerPayload.ClientEvalRequest: {
+                const ce = msg.payload(new ClientEvalRequest()) as ClientEvalRequest;
+                this.events.onClientEvalRequest?.(
+                    ce.requestId(), ce.target() ?? 'js', ce.code() ?? '');
                 break;
             }
             case ServerPayload.ReplayState: {

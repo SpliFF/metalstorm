@@ -7,6 +7,7 @@
 
 #include "LuaHandle.h"
 #include "LuaRulesParams.h"
+#include "LuaSnapshotState.h"
 #include "System/UnorderedMap.hpp"
 
 struct lua_State;
@@ -131,6 +132,30 @@ class CSyncedLuaHandle : public CLuaHandle
 
 		bool SyncedActionFallback(const std::string& line, int playerID) override;
 
+	public: // snapshot support — not an engine call-in path
+		// PLAN-persistence task 1d (§7.1d). These drive the Recoil `Save`/`Load`
+		// call-ins with a TABLE where upstream passes a savegame zip handle:
+		// a snapshot here is an opaque blob inside GameStateStore's own SQLite
+		// transaction, so there is no file for a gadget to write into. See the
+		// FIDELITY-STANDIN note at the definitions.
+		bool SnapshotSave(luasnapshot::Value& out, std::string& err);
+		bool SnapshotLoad(const luasnapshot::Value& in, std::string& err);
+
+		/// PLAN-def-reconciliation task 4 (§2 step 5): tell the game which defs
+		/// moved under the snapshot it has just been restored from, and which
+		/// objects left the world because of it. Fired AFTER Load, because a
+		/// gadget can only repair state it has already restored.
+		bool DefsReconciled(const luasnapshot::Value& delta, std::string& err);
+
+		/// Ask the live gadget handler which gadgets can be snapshotted.
+		/// `gaps` are the gadgets that implement neither call-in and have not
+		/// declared themselves stateless — the serializer refuses by their
+		/// names, because a constant in C++ cannot know what the game loaded.
+		bool SnapshotCoverage(std::vector<std::string>& covered,
+		                      std::vector<std::string>& stateless,
+		                      std::vector<std::string>& gaps,
+		                      std::string& err);
+
 	protected:
 		CSyncedLuaHandle(CSplitLuaHandle* base, const std::string& name, int order);
 		virtual ~CSyncedLuaHandle();
@@ -200,6 +225,43 @@ class CSplitLuaHandle
 			if (!syncedLuaHandle.IsValid())
 				return false;
 			return syncedLuaHandle.RecvLuaMsg(msg, playerID);
+		}
+
+	public: // snapshot support (PLAN-persistence task 1d)
+		// Forwarders: the synced handle is the only one with gadget state, and
+		// it is protected. A dead synced state (main.lua failed to load) is not
+		// an empty snapshot — it is a refusal, because "no gadgets answered" and
+		// "there are no gadgets" are the two cases a checkpoint must not merge.
+		bool SnapshotSave(luasnapshot::Value& out, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotSave(out, err);
+		}
+		bool SnapshotLoad(const luasnapshot::Value& in, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotLoad(in, err);
+		}
+		bool DefsReconciled(const luasnapshot::Value& delta, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.DefsReconciled(delta, err);
+		}
+		bool SnapshotCoverage(std::vector<std::string>& covered,
+		                      std::vector<std::string>& stateless,
+		                      std::vector<std::string>& gaps,
+		                      std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotCoverage(covered, stateless, gaps, err);
 		}
 
 	public:
@@ -302,6 +364,11 @@ class CSplitLuaHandle
 	public:
 		static void ClearGameParams() { spring::clear_unordered_map(gameParams); }
 		static const LuaRulesParams::Params& GetGameParams() { return gameParams; }
+		/// Snapshot restore (PLAN-persistence task 1d-b): game rules params are
+		/// synced state a gadget authored, so a rollback has to put the whole
+		/// map back — replacing it, never merging, so a key written after the
+		/// captured frame does not survive the restore that undoes it.
+		static void SetGameParams(LuaRulesParams::Params p) { gameParams = std::move(p); }
 
 	private:
 		friend class LuaSyncedCtrl;

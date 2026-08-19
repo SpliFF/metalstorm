@@ -8,6 +8,7 @@ tile set + per-position index (see dxt1.cluster_tiles).
 from __future__ import annotations
 
 import struct
+import sys
 
 import numpy as np
 
@@ -16,10 +17,71 @@ from . import dxt1
 SQUARE_SIZE = 8
 
 
-def quantize_heightmap(hm: np.ndarray, min_h: float, max_h: float) -> bytes:
+def height_ceiling(top: float, floor: float = 0.0) -> float:
+    """`max_height` for a surface whose highest cell is `top` elmos.
+
+    `quantize_heightmap` clips, so a summit above the ceiling ships as a flat
+    mesa rather than overflowing or failing (PLAN-maps M8w FIND 1). 100-elmo
+    steps with 5 % headroom; `floor` pins the value a shipped package already
+    carries, so adopting this rule cannot move its bytes.
+
+    >>> height_ceiling(1212.0)                # the arc's summit
+    1300.0
+    >>> height_ceiling(553.0, floor=1200.0)   # shipped mounds — unchanged
+    1200.0
+    """
+    return max(float(floor), float(np.ceil(top * 1.05 / 100.0) * 100.0))
+
+
+def quantize_levels(hm: np.ndarray, min_h: float, max_h: float) -> np.ndarray:
+    """The uint16 levels the SMF stores, without the clip report.
+
+    Split out of `quantize_heightmap` so a caller that needs the SHIPPED
+    surface rather than the file bytes (see `shipped_heights`) does not raise a
+    second copy of the clip warning for the same map.
+    """
     scale = 65535.0 / (max_h - min_h)
-    q = np.clip((np.clip(hm, min_h, max_h) - min_h) * scale + 0.5, 0, 65535).astype("<u2")
-    return q.tobytes()
+    return np.clip((np.clip(hm, min_h, max_h) - min_h) * scale + 0.5,
+                   0, 65535).astype("<u2")
+
+
+def shipped_heights(hm: np.ndarray, min_h: float, max_h: float) -> np.ndarray:
+    """The heights the SIM will read back, i.e. `hm` through the SMF's uint16.
+
+    A generator that derives anything from its own float surface derives it
+    from a surface no one else ever sees: the map ships quantised, and every
+    consumer (mapconverter's heightmap.bin, regions_from_map.py, the sim) reads
+    the quantised values back. The step is small — ~0.02 elmos on a 1320-elmo
+    range — but "small" is not "zero" for a slope threshold, and a region graph
+    that disagrees with the one the same tool derives from the shipped bytes
+    would rename regions on a reprocess. Derive from this, not from `hm`.
+    """
+    q = quantize_levels(hm, min_h, max_h).astype(np.float64)
+    return min_h + (max_h - min_h) / 65535.0 * q
+
+
+def quantize_heightmap(hm: np.ndarray, min_h: float, max_h: float) -> bytes:
+    """Quantize float elmos to uint16 over [min_h, max_h].
+
+    The clip is silent by construction — a surface that runs past either end
+    ships as a flat mesa (or a flat seabed) with no error — so it is reported
+    here, where it happens, rather than left to each generator to remember
+    (PLAN-maps M8w FIND 1 found it on a summit 12 elmos over the ceiling).
+    """
+    over = int((hm > max_h).sum())
+    under = int((hm < min_h).sum())
+    if over or under:
+        parts = []
+        if over:
+            parts.append(f"{over} cells ship as a flat top "
+                         f"({float(hm.max()) - max_h:.1f} elmos off the summit)")
+        if under:
+            parts.append(f"{under} cells ship as a flat floor "
+                         f"({min_h - float(hm.min()):.1f} elmos off the deepest)")
+        print(f"WARNING: SMF height clip against "
+              f"[{min_h:.0f}, {max_h:.0f}] — " + ", ".join(parts),
+              file=sys.stderr)
+    return quantize_levels(hm, min_h, max_h).tobytes()
 
 
 def encode_minimap_dxt1(minimap_rgb: np.ndarray) -> bytes:

@@ -47,15 +47,13 @@ def format_lua_table(data, indent=0):
     else:
         return str(data)
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate civilians.lua from meridian_layout.json")
-    parser.add_argument("--out", default=DEFAULT_OUT, help="Output path (default: %(default)s)")
-    args = parser.parse_args()
+def build_civilians_lua(layout):
+    """Civilian sites + convoys as Lua text, and the count line's numbers.
 
-    # Read the layout JSON
-    with open(LAYOUT_PATH, "r") as f:
-        layout = json.load(f)
-
+    Layout-only, like the region contract — no seed and no terrain — so
+    `meridian2.py` emits the same bytes into a variant package
+    (PLAN-maps M9h). Returns `(lua_text, n_sites, n_convoys)`.
+    """
     # Extract civilian districts and convoy routes
     civilian_district_keys = layout.get("civilian_districts", [])
     convoy_routes = layout.get("convoy_routes", [])
@@ -119,6 +117,19 @@ def main():
 
 return {format_lua_table(civilians_data)}
 """
+    return lua_code, len(sites), len(convoys)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate civilians.lua from meridian_layout.json")
+    parser.add_argument("--out", default=DEFAULT_OUT, help="Output path (default: %(default)s)")
+    args = parser.parse_args()
+
+    # Read the layout JSON
+    with open(LAYOUT_PATH, "r") as f:
+        layout = json.load(f)
+
+    lua_code, n_sites, n_convoys = build_civilians_lua(layout)
 
     # Write to output file
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
@@ -126,8 +137,8 @@ return {format_lua_table(civilians_data)}
         f.write(lua_code)
 
     print(f"Generated {args.out}")
-    print(f"  {len(sites)} civilian sites (districts)")
-    print(f"  {len(convoys)} convoy routes")
+    print(f"  {n_sites} civilian sites (districts)")
+    print(f"  {n_convoys} convoy routes")
 
 if __name__ == "__main__":
     main()

@@ -411,6 +411,11 @@ function gadgetHandler:FinalizeGadget(gadget, filename, basename)
     gi.author    = info.author  or ""
     gi.license   = info.license or ""
     gi.enabled   = info.enabled or false
+    -- Snapshot coverage declaration (PLAN-persistence §7.1d). `snapshot` is
+    -- 'stateless' or absent; `snapshotWhy` is the reason, kept next to the
+    -- claim so the ledger can be audited from the gadget file.
+    gi.snapshot    = info.snapshot
+    gi.snapshotWhy = info.snapshotWhy
   end
 
   gadget.ghInfo = {}  --  a proxy table
@@ -2187,17 +2192,93 @@ end
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 
-function gadgetHandler:Save(zip)
+-- FIDELITY-STANDIN: spring-web passes a TABLE here, not a savegame zip handle.
+-- Upstream Recoil hands the LuaZipFileWriter/Reader userdatum straight through
+-- to every gadget; this fork's snapshots (PLAN-persistence task 1d) are one
+-- opaque blob inside the snapshot store's own SQLite transaction, so there is
+-- no file to write into. Two consequences, both deliberate:
+--
+--   * each gadget gets its OWN subtable, keyed by its gadget name, created here
+--     rather than by the gadget. A zip has a filename namespace inside it; a
+--     shared flat table does not, so two gadgets picking the same key would
+--     overwrite each other on capture and cross-load on restore.
+--   * Load is called for EVERY gadget in the LoadList, with an empty table when
+--     the payload has no entry for it. A gadget that is skipped keeps its live
+--     state, which on a rollback is precisely the stale bookkeeping the restore
+--     was supposed to undo. `present` says which case it is, for gadgets that
+--     want to treat "restored from a build that did not have me" differently.
+--
+-- The engine side is CSyncedLuaHandle::SnapshotSave/SnapshotLoad.
+function gadgetHandler:Save(state)
   for _,g in r_ipairs(self.SaveList) do
-    g:Save(zip)
+    local sub = {}
+    g:Save(sub)
+    state[g.ghInfo.name] = sub
   end
 end
 
 
-function gadgetHandler:Load(zip)
+function gadgetHandler:Load(state)
   for _,g in r_ipairs(self.LoadList) do
-    g:Load(zip)
+    local name = g.ghInfo.name
+    local sub = state[name]
+    g:Load(sub or {}, sub ~= nil)
   end
+end
+
+
+-- PLAN-def-reconciliation task 4 (§2 step 5). Fired ONCE, after Load, and only
+-- when the game's defs moved between the snapshot being restored and this def
+-- load — never on an ordinary resume.
+--
+-- `delta` is shared by every gadget rather than split per gadget the way Save's
+-- subtables are, and that is deliberate: it describes the WORLD's change, not
+-- one gadget's state, and the interesting handlers all read the same two lists
+-- (`delta.droppedUnits`, `delta.units.removed`). Read-only by contract — a
+-- gadget that mutates it corrupts what the gadgets after it are told, and the
+-- iteration order here is layer order.
+--
+-- The engine side is CSyncedLuaHandle::DefsReconciled.
+function gadgetHandler:DefsReconciled(delta)
+  for _,g in r_ipairs(self.DefsReconciledList) do
+    g:DefsReconciled(delta)
+  end
+end
+
+
+--  The snapshot coverage ledger (PLAN-persistence §7.1d decision 3).
+--
+--  Three states per loaded gadget, and the list comes from the live handler
+--  rather than from a constant in the engine: a table of names in C++ cannot
+--  report a gadget nobody thought of, which is the same hole the section table
+--  had for map features.
+--
+--    covered   — implements BOTH Save and Load
+--    stateless — declares `snapshot = 'stateless'` in GetInfo() (with
+--                `snapshotWhy` saying what makes it so) and implements neither
+--    gaps      — everything else, INCLUDING a gadget with only one of the two:
+--                a Save without a Load captures bytes nothing restores, which
+--                is worse than an honest gap because it looks covered.
+--
+--  simsnapshot::SyncedLuaCoverageGaps() refuses a checkpoint by these names.
+function gadgetHandler:SnapshotCoverage()
+  local covered, stateless, gaps = {}, {}, {}
+
+  for _,g in ipairs(self.gadgets) do
+    local name = g.ghInfo.name
+    local hasSave = (type(g.Save) == 'function')
+    local hasLoad = (type(g.Load) == 'function')
+
+    if (hasSave and hasLoad) then
+      covered[#covered + 1] = name
+    elseif ((not hasSave) and (not hasLoad) and g.ghInfo.snapshot == 'stateless') then
+      stateless[#stateless + 1] = name
+    else
+      gaps[#gaps + 1] = name
+    end
+  end
+
+  return { covered = covered, stateless = stateless, gaps = gaps }
 end
 
 --------------------------------------------------------------------------------

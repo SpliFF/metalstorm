@@ -5,8 +5,8 @@
 -- with a `reason` (a string), which this module classifies into one of three
 -- accounting classes:
 --   mint: objective_reward | bounty_escrow_payout | join_grant | stipend | admin_grant
---   burn: order | directive | build | posture | proposal_fee
---   move: stake_escrow | leaver_merge | player_fallback
+--   burn: micro | directive | build | posture | proposal_fee | standing
+--   move: stake_escrow | leaver_merge | player_fallback | tribute
 --
 -- Accumulated per-team counters (published as teamRulesParam `econ_<class>` every
 -- publish cadence) feed the gm-tools dashboard metrics (velocity, pool ratio, dead-team
@@ -26,21 +26,54 @@ local REASON_CLASS = {
     objective_reward = 'mint',
     stake_refund     = 'mint',   -- from SettleEscrow('expired'/'failed')
     join_grant       = 'mint',
+    -- PLAN-metalstorm-lobby.md §2.5 (task 4): the grant a player gets on
+    -- returning to a war after an absence long enough that their saved pool
+    -- is stale. Minted like join_grant, and separate from it so the two are
+    -- distinguishable in the ledger — a war full of rejoin_stipend and no
+    -- join_grant is a war whose population is churning, not growing.
+    rejoin_stipend   = 'mint',
     stipend          = 'mint',
     admin_grant      = 'mint',   -- GM compensation (PLAN-gm-tools.md)
 
     -- burn
-    order            = 'burn',
     directive        = 'burn',
     build            = 'burn',
     posture          = 'burn',
+    -- game_parley.lua's §1 spam-guard fee. LIVE since D62: the fee is charged
+    -- through GG.Authority.ChargeOrder, which had no `reason` parameter, so it
+    -- borrowed the COST-table key and filed under an order class — leaving this
+    -- entry dead while the thing it names was being emitted under another name.
     proposal_fee     = 'burn',
     standing         = 'burn',   -- GG.Authority.ChargeStandingOrder
+    -- endtoend D43 census: this is the reason the ORDINARY per-unit order path
+    -- actually emits, and it was unmapped. `GG.Authority.ChargeOrder` tags with
+    -- `Classify.orderClass(cmdID)`, whose default branch returns 'micro'.
+    -- ⚠️ 'micro' IS the canonical name for an ordinary order charge — the
+    -- documented 'order' spelling was removed by D62 after a census of every
+    -- Award/Charge call site found nothing emitting it. Two spellings for one
+    -- class is what produced D13, D43 and D62 in turn; a reason that nothing
+    -- emits must not sit in this table looking authoritative.
+    micro            = 'burn',
 
     -- move (net-zero)
     stake_escrow     = 'move',
     leaver_merge     = 'move',
+    -- The exact inverse of leaver_merge (task 4): authority moved back OUT of
+    -- the team pool into a returning player's own. Net zero by construction —
+    -- GG.Authority.RestorePool hands back at most what the team still holds
+    -- and mints nothing.
+    rejoin_restore   = 'move',
     player_fallback  = 'move',
+    -- endtoend D43 census: game_parley.lua's tribute payout (three call sites —
+    -- one-shot pre-escrowed, one-shot direct, and the recurring `active` tick).
+    -- `move`, not `mint`, for the same reason as leaver_merge: the payee team
+    -- gains authority that an existing pool lost, so nothing is created. Note
+    -- The payer half of the same transaction now balances it: D62 gave
+    -- ChargeOrder a `reason` parameter and game_parley.lua passes 'tribute'
+    -- through it, so the payer team books a `move` out and the payee team a
+    -- `move` in. The counters are PER TEAM, so that is one movement recorded
+    -- once on each side of it, not a double count.
+    tribute          = 'move',
     -- AI funding (PLAN-metalstorm-ai.md §5.2): a human's one-shot gift into a
     -- co-commander's own pool, and the standing per-minute allowance drawn from
     -- the team pool. Both are GG.Authority.Transfer — pool-to-pool, net zero,
@@ -111,7 +144,7 @@ function M.tagAward(state, teamID, amount, reason)
     team[cls] = (team[cls] or 0) + math.floor(amount)
 end
 
---- Tag a charge: same as tagAward but the reason is typically 'order'/'directive'/etc.
+--- Tag a charge: same as tagAward but the reason is typically 'micro'/'directive'/etc.
 function M.tagCharge(state, teamID, amount, reason)
     M.tagAward(state, teamID, amount, reason)
 end

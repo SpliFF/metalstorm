@@ -22,6 +22,16 @@
  * WHEN chip menu instead (exactly the "unrecognised words are ignored"
  * contract).
  *
+ * Its dictionary is not written here. Verbs/priorities/conditions come from
+ * `compile-table.ts`'s closed vocabularies; unit classes come from the SHIPPED
+ * `class-vocabulary.json` handed in as a parameter (`class-vocabulary.ts`) —
+ * one table, matched longest-phrase-first, canonicalised to the sim's own
+ * `customparams.ms_class`. The hand-kept `IDLE_CLASSES` array this file used
+ * to carry had already drifted from the taxonomy (`statics` for a class really
+ * called `staticdefense`, invented `armour`/`infantry` classes, no
+ * `buildings`/`civilians`/`civvehicles`), which is exactly the failure the
+ * data file plus its consistency test now prevent.
+ *
  * Positional heuristic: the mental model (§2) is
  * `[SUBJECT] [VERB] [TARGET] · priority · [WHEN]?` — so once the verb
  * keyword is located, an unclaimed run of words BEFORE it is tried against
@@ -34,6 +44,7 @@
 
 import type { CommandVerb, CommandSubject, CommandTarget, WhenCondition } from './compile-table.js';
 import type { NamedEntity, EntityType } from './named-entity-index.js';
+import type { ClassVocabulary, VocabularyMatch } from './class-vocabulary.js';
 
 const VERB_WORDS: CommandVerb[] = [
     'attack', 'secure', 'defend', 'hold', 'patrol',
@@ -49,14 +60,6 @@ const PRIORITY_WORDS: Record<string, number> = {
     high: 75,
     urgent: 100,
 };
-
-/** Closed vocabulary for the idle-filter subject ("idle <class>") — the
- *  11 Metalstorm unit classes (PLAN-metalstorm.md) plus the two aliases
- *  the composer's own subject prompt already uses as examples. */
-const IDLE_CLASSES = [
-    'engineers', 'soldiers', 'mechs', 'tanks', 'artillery', 'fighters',
-    'bombers', 'ships', 'subs', 'statics', 'radar', 'armour', 'infantry',
-];
 
 const SUBJECT_ENTITY_TYPES: EntityType[] = ['group', 'platoon', 'army'];
 const TARGET_ENTITY_TYPES: EntityType[] = ['region', 'district', 'city', 'objective', 'landmark', 'enemy-force'];
@@ -80,6 +83,29 @@ export interface AcceleratorResult {
     /** Words the accelerator never claimed — shown as a transparency hint,
      *  never an error (§3 "unrecognised words are ignored"). */
     unmatched: string[];
+    /**
+     * `ms_scale` the idle-filter phrase named ("idle heavy tanks" → 3), or
+     * null. PARSE-ONLY: `CommandSubject` has no scale slot, so nothing
+     * downstream of here consumes it yet — it is surfaced so the console can
+     * echo what it heard instead of quietly widening "heavy tanks" to "tanks",
+     * and so the M1 envelope (which does carry scale) has it ready.
+     */
+    subjectScale: number | null;
+    /**
+     * The words the player actually used for the subject / target, as handed to
+     * the index — NOT the name of whatever the index returned.
+     *
+     * The M1 envelope adapter (`nl-client.ts`) emits these, and the difference is
+     * load-bearing. This slot-filler takes the top-scoring hit; the resolver
+     * refuses to when two candidates are comparable. If the adapter emitted the
+     * MATCHED name, a sentence saying "Chimera" where both "Chimera Squad" and
+     * "Chimera Reserve" exist would leave here as the exact name of whichever one
+     * happened to sort first — laundering the guess into a certainty and moving
+     * possibly the wrong army. Emitting the player's own words instead lets the
+     * resolver see the same ambiguity the player created, and ask.
+     */
+    subjectQuery: string | null;
+    targetQuery: string | null;
 }
 
 interface Token {
@@ -100,30 +126,110 @@ function tokenize(text: string): Token[] {
         }));
 }
 
-/** Join a contiguous, non-stopword slice of tokens back into a search
- *  query. Returns '' if nothing but stopwords remain in the slice. */
-function sliceToQuery(tokens: Token[], start: number, end: number): string {
-    return tokens
-        .slice(start, end)
-        .filter((t) => !t.consumed && t.word && !STOPWORDS.has(t.word))
-        .map((t) => t.original)
-        .join(' ')
-        .trim();
-}
-
 function markConsumed(tokens: Token[], start: number, end: number): void {
     for (let i = start; i < end; i++) tokens[i].consumed = true;
 }
 
 /**
- * Parse free text into slot values (task 7). Pure function — takes the
- * live named-entity index as a parameter so it has no module state and no
- * side effects (matches this file's "proposes, never sends" contract).
+ * Find the named entity a run of words refers to, and consume the words that
+ * named it.
+ *
+ * The run is first tried whole; if the index has no match for it, progressively
+ * shorter contiguous spans are tried, longest first. That is what lets
+ * "defend Northgate quickly" resolve Northgate and report "quickly" as
+ * unmatched, instead of failing the whole slot because one filler word rode
+ * along — the index matches by substring (`named-entity-index.ts`), so a query
+ * with any extra word in it matches nothing at all.
+ *
+ * Longest-span-first keeps it specific rather than greedy: "North Basin" is
+ * tried before "North" alone, so a longer name always wins over a shorter one
+ * it contains. Stopwords are skipped when building spans ("the north basin" ⇒
+ * "north basin") but stay in the sentence, so they are never reported as
+ * unrecognised.
+ *
+ * Only the words that appear in the matched entity's own name are consumed —
+ * everything else stays unclaimed and ends up in `unmatched`, which is the
+ * transparency contract this module is built on.
+ *
+ * Returns the matched entity AND the query span that matched it. The caller needs
+ * the span, not just the entity: see `AcceleratorResult.subjectQuery`.
  */
-export function acceleratorFill(text: string, index: AcceleratorSearchIndex): AcceleratorResult {
+function claimEntityInRun(
+    tokens: Token[],
+    from: number,
+    to: number,
+    types: EntityType[],
+    index: AcceleratorSearchIndex,
+): { entity: NamedEntity; query: string } | null {
+    const candidates: number[] = [];
+    for (let i = from; i < to; i++) {
+        if (!tokens[i].consumed && tokens[i].word && !STOPWORDS.has(tokens[i].word)) candidates.push(i);
+    }
+
+    for (let span = candidates.length; span >= 1; span--) {
+        for (let start = 0; start + span <= candidates.length; start++) {
+            const window = candidates.slice(start, start + span);
+            const query = window.map((i) => tokens[i].original).join(' ').trim();
+            if (query.length < 2) continue;
+
+            const match = index.search(query, types, 1)[0];
+            if (!match) continue;
+
+            const matchWords = new Set(match.name.toLowerCase().split(/\s+/).map((w) => w.replace(/[^\w%]/g, '')));
+            for (const i of window) {
+                if (matchWords.has(tokens[i].word)) tokens[i].consumed = true;
+            }
+            return { entity: match, query };
+        }
+    }
+    return null;
+}
+
+/**
+ * Reduce a vocabulary match to the single `ms_class` (+ optional scale) that
+ * `CommandSubject.filterClass` can carry, or null when it can't be reduced.
+ *
+ * A role spanning two classes ("air defense" = staticdefense s2+ ∪ fighters)
+ * has no single-class form, and picking one branch would be exactly the guess
+ * this module refuses to make — so it stays unresolved, its words stay
+ * unclaimed, and they surface in `unmatched`. The M1 envelope carries roles
+ * properly (`NLCommandIntent.subject`, plan §1).
+ */
+function toSingleClass(match: VocabularyMatch): { className: string; scale: number | null } | null {
+    if (match.kind === 'class') return { className: match.className, scale: match.scale };
+
+    const classes = new Set(match.matches.map((m) => m.class));
+    if (classes.size !== 1) return null;
+    const only = match.matches[0];
+    // One clause with an exact `scale` keeps that scale. A bounded range
+    // (scaleMin/scaleMax) has no single-scale form, so no scale is reported —
+    // the whole class is what the order will actually act on, and that is what
+    // the caller echoes.
+    const scale = match.matches.length === 1 && typeof only.scale === 'number' ? only.scale : null;
+    return { className: only.class, scale };
+}
+
+/**
+ * Parse free text into slot values (task 7). Pure function — takes the live
+ * named-entity index AND the loaded class vocabulary as parameters so it has
+ * no module state and no side effects (matches this file's "proposes, never
+ * sends" contract).
+ *
+ * `vocabulary` is the shipped `class-vocabulary.json`
+ * (`class-vocabulary.ts`), not a list kept here: an empty vocabulary simply
+ * means no `idle <class>` phrase resolves and those words are reported
+ * unmatched. There is deliberately no built-in fallback list — the built-in
+ * list is what drifted.
+ */
+export function acceleratorFill(
+    text: string,
+    index: AcceleratorSearchIndex,
+    vocabulary: ClassVocabulary,
+): AcceleratorResult {
     const tokens = tokenize(text);
     const result: AcceleratorResult = {
-        verb: null, subject: null, target: null, priority: null, when: null, unmatched: [],
+        verb: null, subject: null, target: null, priority: null, when: null,
+        unmatched: [], subjectScale: null, subjectQuery: null, targetQuery: null,
     };
 
     // ── Verb (single word, closed vocabulary) ──
@@ -168,13 +274,24 @@ export function acceleratorFill(text: string, index: AcceleratorSearchIndex): Ac
     }
 
     // ── Subject: "idle <class>" / "ai" (fixed closed-vocab patterns) ──
+    // The class half is the SHIPPED vocabulary, matched longest-phrase-first
+    // so "idle heavy tanks" beats "idle … tanks", and canonicalised to the
+    // real `ms_class` — "idle statics" fills `staticdefense`, the name the
+    // sim actually uses.
+    const words = tokens.map((t) => t.word);
     for (let i = 0; i < tokens.length - 1; i++) {
-        if (!tokens[i].consumed && !tokens[i + 1].consumed &&
-            tokens[i].word === 'idle' && IDLE_CLASSES.includes(tokens[i + 1].word)) {
-            result.subject = { type: 'idle-filter', filterClass: tokens[i + 1].word };
-            markConsumed(tokens, i, i + 2);
-            break;
-        }
+        if (tokens[i].consumed || tokens[i].word !== 'idle') continue;
+        const hit = vocabulary.matchAt(words, i + 1);
+        if (!hit) continue;
+        // Nothing in the run may already be claimed (a priority/when keyword
+        // sitting inside it means this isn't the class phrase we think it is).
+        if (tokens.slice(i + 1, i + 1 + hit.words).some((t) => t.consumed)) continue;
+        const single = toSingleClass(hit);
+        if (!single) continue;   // multi-class role — leave the words unclaimed
+        result.subject = { type: 'idle-filter', filterClass: single.className };
+        result.subjectScale = single.scale;
+        markConsumed(tokens, i, i + 1 + hit.words);
+        break;
     }
     if (!result.subject) {
         for (const t of tokens) {
@@ -189,35 +306,25 @@ export function acceleratorFill(text: string, index: AcceleratorSearchIndex): Ac
     // Subject: named group/platoon/army, searched in the unclaimed run
     // BEFORE the verb (positional heuristic — see file header).
     if (!result.subject && verbIndex >= 0) {
-        const query = sliceToQuery(tokens, 0, verbIndex);
-        if (query.length >= 2) {
-            const match = index.search(query, SUBJECT_ENTITY_TYPES, 1)[0];
-            if (match) {
-                result.subject = { type: 'group', groupId: typeof match.id === 'number' ? match.id : Number(match.id) };
-                markConsumed(tokens, 0, verbIndex);
-            }
+        const hit = claimEntityInRun(tokens, 0, verbIndex, SUBJECT_ENTITY_TYPES, index);
+        if (hit) {
+            const id = hit.entity.id;
+            result.subject = { type: 'group', groupId: typeof id === 'number' ? id : Number(id) };
+            result.subjectQuery = hit.query;
         }
     }
 
     // Target: named entity, searched in the unclaimed run AFTER the verb
     // (or the whole remainder if no verb was recognised).
     const targetStart = verbIndex >= 0 ? verbIndex + 1 : 0;
-    const query = sliceToQuery(tokens, targetStart, tokens.length);
-    if (query.length >= 2) {
-        const match = index.search(query, TARGET_ENTITY_TYPES, 1)[0];
-        if (match) {
-            result.target = { shape: 'entity', entity: match };
-            // Consume only the words the index actually matched, so a
-            // trailing word after the entity name (already-consumed
-            // when/priority keywords aside) doesn't get silently claimed too.
-            const matchWords = new Set(match.name.toLowerCase().split(/\s+/));
-            for (let i = targetStart; i < tokens.length; i++) {
-                if (!tokens[i].consumed && matchWords.has(tokens[i].word)) tokens[i].consumed = true;
-            }
-        }
+    const hit = claimEntityInRun(tokens, targetStart, tokens.length, TARGET_ENTITY_TYPES, index);
+    if (hit) {
+        result.target = { shape: 'entity', entity: hit.entity };
+        result.targetQuery = hit.query;
     }
 
-    if (contestedRequested && result.target?.entity && REGION_LIKE_TYPES.includes(result.target.entity.type)) {
+    if (contestedRequested && result.target?.entity
+        && REGION_LIKE_TYPES.includes(result.target.entity.type)) {
         result.when = { type: 'region-contested', regionId: String(result.target.entity.id) };
     }
 

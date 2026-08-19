@@ -23,6 +23,10 @@ public:
 
 	bool Update() override { return false; }
 	void SlowUpdate() override;
+
+	// Adds no members of its own, so the inherited AMoveType capture/apply is
+	// the whole of it; only the discriminant has to be declared.
+	movetypesnapshot::Kind SnapshotKind() const override { return movetypesnapshot::Kind::Static; }
 };
 
 #endif // STATICMOVETYPE_H

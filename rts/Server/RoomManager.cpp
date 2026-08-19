@@ -1,14 +1,25 @@
 // RoomManager — game room lifecycle management.
 
 #include "RoomManager.h"
+#include "Chat.h"
+#include "WarPlayerBindings.h"
+#include "WarSlotReservation.h"
+#include "GameEventsDb.h"
+#include "GameServersDb.h"
+#include "AuthTokens.h"
+#include "RuntimeAIRoster.h"
+#include "WarResume.h"
+#include "SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "lobby"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <set>
 #include <sqlite3.h>
+#include <thread>
 
 // ============================================================
 // SQLite schema + write-through persistence
@@ -64,6 +75,38 @@ void RoomManager::EnsureTables(sqlite3* db) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
         }
     }
+    {
+        // Third probe, same pattern: `rooms` grew a `session_kind` column
+        // (PLAN-metalstorm-lobby.md task 1) after the `persistent` probe
+        // above had already shipped, so a tree whose rooms table predates
+        // the session-kind split is not caught by either probe.
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT session_kind FROM rooms LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
+        }
+    }
+    {
+        // Fourth probe, same pattern: `room_members` grew a `spectate_only`
+        // column (PLAN-metalstorm-lobby.md §3, task 6) — the watch intent the
+        // game server reads on auth. It is the first probe on THIS table, so
+        // no earlier one covers it.
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT spectate_only FROM room_members LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
+        }
+    }
     sqlite3_exec(db, R"(
         CREATE TABLE IF NOT EXISTS rooms (
             id INTEGER PRIMARY KEY,
@@ -76,6 +119,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             state INTEGER NOT NULL DEFAULT 1,
             game_server_port INTEGER NOT NULL DEFAULT 0,
             persistent INTEGER NOT NULL DEFAULT 0,
+            session_kind TEXT NOT NULL DEFAULT 'skirmish',
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
@@ -90,6 +134,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             ready INTEGER NOT NULL DEFAULT 0,
             is_spectator INTEGER NOT NULL DEFAULT 0,
             is_host INTEGER NOT NULL DEFAULT 0,
+            spectate_only INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (room_id, player_id)
         );
     )", nullptr, nullptr, nullptr);
@@ -121,22 +166,47 @@ static void BindText(sqlite3_stmt* s, int idx, const std::string& v) {
     sqlite3_bind_text(s, idx, v.c_str(), -1, SQLITE_TRANSIENT);
 }
 
+bool RoomManager::WriteTransactionLocked(const char* what,
+                                         const std::function<int()>& body) {
+    // The policy itself now lives in SqliteThreading.h, because RoomManager is
+    // no longer the only writer on this handle: WarDirector and
+    // WarSlotReservations write `mapDb` from the other thread, and a
+    // transaction is a property of the CONNECTION, not of the thread. Keeping
+    // the discipline here made it invisible to them — see the RULE there.
+    return SqliteWriteTransaction(db, what, body);
+}
+
 void RoomManager::PersistRoomLocked(const GameRoom& room) {
     if (!db) return;
+    // One room = one transaction. The row and the three child tables that
+    // describe it land together or not at all; see WriteTransactionLocked.
+    WriteTransactionLocked("PersistRoom", [&] {
+        const int rc = PersistRoomRowLocked(room);
+        if (rc != SQLITE_OK) return rc;
+        PersistMembersLocked(room);
+        PersistAISlotsLocked(room);
+        PersistModOptionsLocked(room);
+        return SQLITE_OK;
+    });
+}
+
+int RoomManager::PersistRoomRowLocked(const GameRoom& room) {
     static const char* kSql =
         "INSERT INTO rooms (id, name, host_player_id, map_id, game_id, "
-        "  max_players, password, state, game_server_port, persistent, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now')) "
+        "  max_players, password, state, game_server_port, persistent, "
+        "  session_kind, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "  name=excluded.name, host_player_id=excluded.host_player_id, "
         "  map_id=excluded.map_id, game_id=excluded.game_id, "
         "  max_players=excluded.max_players, password=excluded.password, "
         "  state=excluded.state, game_server_port=excluded.game_server_port, "
-        "  persistent=excluded.persistent, updated_at=strftime('%s','now')";
+        "  persistent=excluded.persistent, "
+        "  session_kind=excluded.session_kind, updated_at=strftime('%s','now')";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) != SQLITE_OK) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom prepare failed: %s", sqlite3_errmsg(db));
-        return;
+        return sqlite3_errcode(db);
     }
     sqlite3_bind_int(s, 1, static_cast<int>(room.id));
     BindText(s, 2, room.name);
@@ -148,22 +218,26 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     sqlite3_bind_int(s, 8, static_cast<int>(room.state));
     sqlite3_bind_int(s, 9, room.gameServerPort);
     sqlite3_bind_int(s, 10, room.persistent ? 1 : 0);
-    if (sqlite3_step(s) != SQLITE_DONE) {
+    BindText(s, 11, SessionKindToString(room.sessionKind));
+    int rc = sqlite3_step(s);
+    if (rc != SQLITE_DONE) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom step failed: %s", sqlite3_errmsg(db));
+    } else {
+        rc = SQLITE_OK;
     }
     sqlite3_finalize(s);
-    PersistMembersLocked(room);
-    PersistAISlotsLocked(room);
-    PersistModOptionsLocked(room);
+    return rc;
 }
 
-void RoomManager::PersistMembersLocked(const GameRoom& room) {
-    if (!db) return;
+int RoomManager::PersistMembersLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
     // Simplest correct strategy: wipe + reinsert. Rosters are small
     // (≤16 players) and this avoids upsert vs. delete bookkeeping per
-    // player. Wrap in a single transaction so a read-mid-write doesn't
-    // see an empty roster.
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    // player. Wrapped in a transaction so a read-mid-write doesn't see an
+    // empty roster — and when PersistRoomLocked is the caller this joins
+    // that transaction rather than opening a second one (D35).
+    return WriteTransactionLocked("PersistMembers", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -172,8 +246,8 @@ void RoomManager::PersistMembersLocked(const GameRoom& room) {
     }
     static const char* kInsert =
         "INSERT INTO room_members (room_id, player_id, username, team, "
-        "start_pos, ready, is_spectator, is_host) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        "start_pos, ready, is_spectator, is_host, spectate_only) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
         for (const auto& p : room.players) {
@@ -186,19 +260,24 @@ void RoomManager::PersistMembersLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 6, p.ready ? 1 : 0);
             sqlite3_bind_int(s, 7, p.isSpectator ? 1 : 0);
             sqlite3_bind_int(s, 8, p.isHost ? 1 : 0);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            sqlite3_bind_int(s, 9, p.spectateOnly ? 1 : 0);
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistMembers step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
-    if (!db) return;
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+int RoomManager::PersistAISlotsLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
+    return WriteTransactionLocked("PersistAISlots", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -220,19 +299,23 @@ void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 5, slot.team);
             sqlite3_bind_int(s, 6, slot.startPos);
             BindText(s, 7, slot.profile);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistAISlots step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
-    if (!db) return;
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+int RoomManager::PersistModOptionsLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
+    return WriteTransactionLocked("PersistModOptions", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -248,14 +331,53 @@ void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 1, static_cast<int>(room.id));
             BindText(s, 2, kv.first);
             BindText(s, 3, kv.second);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistModOptions step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
+}
+
+int RoomManager::PurgeOrphanedWarRows() {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!db) return 0;
+    // Every table `DeleteRoomFromDb` clears, asked the same question: which
+    // room ids do you hold that `rooms` does not have? A room living only in
+    // memory cannot be the answer — persistence is write-through, so a room
+    // that exists has its row before it has anything else.
+    static const char* kTables[] = {
+        "war_player_bindings", "game_events", "game_snapshots",
+        "war_reconnect_tokens", "game_servers", "game_status", "war_summary",
+    };
+    std::set<uint32_t> orphans;
+    for (const char* table : kTables) {
+        char sql[192];
+        snprintf(sql, sizeof(sql),
+                 "SELECT DISTINCT room_id FROM %s"
+                 " WHERE room_id NOT IN (SELECT id FROM rooms)", table);
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) {
+            // A table this deployment has never created. Nothing to inherit.
+            sqlite3_finalize(st);
+            continue;
+        }
+        while (sqlite3_step(st) == SQLITE_ROW)
+            orphans.insert(static_cast<uint32_t>(sqlite3_column_int(st, 0)));
+        sqlite3_finalize(st);
+    }
+    for (uint32_t roomId : orphans) {
+        SLOG(SPRING_LOG_NOTICE,
+            "room %u: purged war rows left by a deleted room "
+            "(room ids are reused)", roomId);
+        DeleteRoomFromDb(roomId);
+    }
+    return static_cast<int>(orphans.size());
 }
 
 void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
@@ -269,6 +391,63 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     snprintf(sql, sizeof(sql), "DELETE FROM room_mod_options WHERE room_id=%u", roomId);
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    // --- The war's durable story goes with the room (PLAN-persistence 4e) ---
+    //
+    // Room ids are reused across lobby lifetimes — `rooms.id` is assigned from
+    // a counter (`nextRoomId = MAX(id)+1` at load, so a deleted top id is
+    // handed straight back out after a restart), not an AUTOINCREMENT — so
+    // leaving a war's rows behind is worse than a leak: the next war on that
+    // number INHERITS them. This is the durable half of the rule
+    // `WarStateEvents`' `Forget`/`Retain` keeps in memory, and each table below
+    // is inherited in a different, individually wrong way.
+    //
+    // One chokepoint, because there are two ways a room dies and only one of
+    // them goes through the lobby's game-server bookkeeping: `DeleteRoom` (an
+    // abandon, a replay playing out, a recycle) and `ReapStaleRooms`, which at
+    // STARTUP runs before any of that bookkeeping exists.
+    //
+    // A roster of accounts that never fought here, complete with their pools
+    // (PLAN-metalstorm-lobby task 4).
+    WarPlayerBindings::DeleteForRoom(db, roomId);
+    // Seats held for joins that will now never land. Inherited, these are
+    // worse than a leak in the specific way this chokepoint is about: the next
+    // war on this id would boot with its sides already partly reserved by
+    // accounts that never asked to fight in it (PLAN-metalstorm-wars §4).
+    WarSlotReservations::DeleteForRoom(db, roomId);
+    // A story: the war log the rejoin digest reads back to a player.
+    GameEventsDb::DeleteForRoom(db, roomId);
+    // A WORLD. `warresume::LatestSnapshot` partitions on (game_id, room_id) and
+    // is what decides a war comes back on its stored world — a surviving blob
+    // under a recycled id is a world swap, not a stale row.
+    warresume::DeleteSnapshotsForRoom(db, roomId);
+    // A BRAIN, and its synced identity. `room_runtime_ai` holds the sim
+    // playerNum of every AI this war seated at runtime, so the next war on this
+    // number would resume with a caretaker nobody added — seated at a playerNum
+    // that war's own state means something else by (PLAN-metalstorm-ai task
+    // 4(b), RuntimeAIRoster.h).
+    RuntimeAIRoster::DeleteForRoom(db, roomId);
+    // A seat. `ValidateWarReconnect` scopes a token by room and nothing else,
+    // so an un-deleted token seats its holder in the NEXT war on this number.
+    AuthTokens::DeleteWarReconnectForRoom(db, roomId);
+    // A readiness flag and a digest — the three rows keyed on room_id alone.
+    GameServersDb::DeleteForRoom(db, roomId);
+    // A CONVERSATION. §3.3 says a room's channels are deleted with the room,
+    // and the reused-id rule above is why it is not merely tidiness: the next
+    // war on this number would open with the previous one's chat already in
+    // its scrollback, addressed to players who were never in it. Takes the
+    // ally and spectator channels with it (Chat::DeleteRoom).
+    Chat::DeleteRoom(db, roomId);
+    //
+    // Deliberately NOT deleted here, and named so each is a decision rather
+    // than an omission — these are the rest of the room-keyed census:
+    //   `game_metrics` — per-room tick-time history. Diagnostic, pruned by the
+    //     game server on its own cadence, and the one table whose rows a reused
+    //     id merely MINGLES rather than misrepresents: a perf series is read as
+    //     a time series, not as "this war's". Its writer is not linked into the
+    //     lobby either, so including it would mean a new link dependency or raw
+    //     SQL against a table this file does not own.
+    //   `debug_logs` — a different database file (data/debug.db), which this
+    //     handle cannot reach at all. Same reasoning as game_metrics anyway.
 }
 
 void RoomManager::LoadFromDatabase() {
@@ -280,7 +459,8 @@ void RoomManager::LoadFromDatabase() {
     {
         const char* kSql =
             "SELECT id, name, host_player_id, map_id, game_id, max_players, "
-            "password, state, game_server_port, persistent FROM rooms";
+            "password, state, game_server_port, persistent, session_kind "
+            "FROM rooms";
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
             while (sqlite3_step(s) == SQLITE_ROW) {
@@ -299,6 +479,21 @@ void RoomManager::LoadFromDatabase() {
                 r.state = static_cast<ERoomState>(sqlite3_column_int(s, 7));
                 r.gameServerPort = static_cast<uint16_t>(sqlite3_column_int(s, 8));
                 r.persistent = (sqlite3_column_int(s, 9) != 0);
+                const unsigned char* sk = sqlite3_column_text(s, 10);
+                // An unreadable spelling falls back to Skirmish HERE, unlike
+                // the API decoder which rejects: this row is already in the
+                // database and dropping the room would lose it. The kind is
+                // re-logged so an operator sees the downgrade.
+                if (sk) {
+                    const std::string skStr = reinterpret_cast<const char*>(sk);
+                    if (auto kind = SessionKindFromString(skStr)) {
+                        r.sessionKind = *kind;
+                    } else {
+                        SLOG(SPRING_LOG_WARNING,
+                            "room %u: unknown session_kind '%s' in db, "
+                            "loading as skirmish", r.id, skStr.c_str());
+                    }
+                }
                 rooms[r.id] = std::move(r);
             }
             sqlite3_finalize(s);
@@ -309,7 +504,7 @@ void RoomManager::LoadFromDatabase() {
     {
         const char* kSql =
             "SELECT room_id, player_id, username, team, start_pos, "
-            "ready, is_spectator, is_host FROM room_members";
+            "ready, is_spectator, is_host, spectate_only FROM room_members";
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
             while (sqlite3_step(s) == SQLITE_ROW) {
@@ -326,6 +521,7 @@ void RoomManager::LoadFromDatabase() {
                 p.ready = (sqlite3_column_int(s, 5) != 0);
                 p.isSpectator = (sqlite3_column_int(s, 6) != 0);
                 p.isHost = (sqlite3_column_int(s, 7) != 0);
+                p.spectateOnly = (sqlite3_column_int(s, 8) != 0);
                 it->second.players.push_back(std::move(p));
             }
             sqlite3_finalize(s);
@@ -404,7 +600,8 @@ uint32_t RoomManager::CreateRoom(
     const std::string& password,
     uint32_t hostPlayerId, ClientID hostClientId,
     const std::string& hostUsername,
-    bool persistent)
+    bool persistent, const std::string& hostFactionId,
+    SessionKind sessionKind)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
@@ -417,14 +614,24 @@ uint32_t RoomManager::CreateRoom(
     room.maxPlayers = maxPlayers;
     room.password = password;
     room.hostPlayerId = hostPlayerId;
-    room.persistent = persistent;
+    room.sessionKind = sessionKind;
+    // PersistentWar ⇒ persistent, enforced here rather than trusted from the
+    // caller: a war that the reaper can delete when its last human leaves is
+    // not a persistent war, and every entry point would otherwise have to
+    // remember to pass both flags. The implication is one-way — a skirmish may
+    // still be persistent (AI-testing rooms are).
+    room.persistent = persistent || sessionKind == SessionKind::PersistentWar;
     room.state = ERoomState::Filling;
 
     RoomPlayer host;
     host.playerId = hostPlayerId;
     host.clientId = hostClientId;
     host.username = hostUsername;
+    // Team 0 is provisional: the room has no `war_sides` yet (the caller
+    // applies the scenario after this returns), so the host's side is settled
+    // afterwards by the lobby's seatHostOnSide, which reads this faction.
     host.team = 0;
+    host.factionId = hostFactionId;
     host.isHost = true;
     room.players.push_back(host);
 
@@ -437,7 +644,7 @@ uint32_t RoomManager::CreateRoom(
 bool RoomManager::JoinRoom(
     uint32_t roomId, uint32_t playerId, ClientID clientId,
     const std::string& username, const std::string& password,
-    bool asSpectator)
+    bool asSpectator, const std::string& factionId)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
@@ -457,6 +664,20 @@ bool RoomManager::JoinRoom(
     auto* existing = room.FindPlayer(playerId);
     if (existing) {
         existing->clientId = clientId;
+        // A war's watch intent may be changed by re-joining it the other way
+        // — that is §3's "spectator → player conversion" and its reverse, and
+        // it is the ONLY conversion path that exists today: the seat itself
+        // is taken by the game server on auth, so the change lands on the
+        // next connect rather than in the running sim (§3 asks for it without
+        // one, which needs a role-change message the protocol does not have).
+        if (room.sessionKind == SessionKind::PersistentWar &&
+            existing->spectateOnly != asSpectator) {
+            existing->spectateOnly = asSpectator;
+            SLOG(SPRING_LOG_NOTICE,
+                "player '%s' will %s war %u on next connect",
+                username.c_str(), asSpectator ? "WATCH" : "FIGHT in", roomId);
+            PersistMembersLocked(room);
+        }
         SLOG(SPRING_LOG_INFO, "player '%s' reconnected to room %u (updated clientId)",
             username.c_str(), roomId);
         return true;
@@ -466,6 +687,13 @@ bool RoomManager::JoinRoom(
     player.playerId = playerId;
     player.clientId = clientId;
     player.username = username;
+    player.factionId = factionId;
+    // The watch intent is a war concept only (§3). On a skirmish `asSpectator`
+    // already means what it says — the lobby seats that room itself — and
+    // recording a second copy of it here would give the game server a flag to
+    // honour that the room row has already honoured.
+    player.spectateOnly =
+        (room.sessionKind == SessionKind::PersistentWar) && asSpectator;
 
     if (isActive) {
         // Check if this player was in the original roster (reconnecting)
@@ -487,25 +715,50 @@ bool RoomManager::JoinRoom(
         player.isSpectator = asSpectator;
         if (!asSpectator) {
             if (room.IsFull()) return false;
-            // Seat the joiner on the least-occupied of the room's slot
-            // teams, in offer order. This used to hardcode 0-vs-1, which on
-            // a scenario whose sides are teams 0 and 4 dropped every joiner
-            // onto team 1 — a team the scenario stages no army for
-            // (endtoend D19, PLAN-metalstorm-wars.md §7.4). On a legacy
-            // two-team room SlotTeams() is {0,1} and this is the same
-            // round-robin it always was.
-            const std::vector<uint8_t> slotTeams = room.SlotTeams();
-            player.team = slotTeams.front();
-            size_t best = static_cast<size_t>(-1);
-            for (const uint8_t t : slotTeams) {
-                size_t occupants = 0;
-                for (const auto& p : room.players)
-                    if (!p.isSpectator && p.team == t) occupants++;
-                for (const auto& a : room.aiSlots)
-                    if (a.team == t) occupants++;
-                if (occupants < best) {
-                    best = occupants;
-                    player.team = t;
+            // A player's faction outranks the balancer. `faction_id` is a
+            // permanent, immutable allegiance chosen at sign-up, so seating a
+            // union account on compact because compact happened to be emptier
+            // is not "balancing", it is overruling the one choice the account
+            // model calls permanent (endtoend D40 — measured live twice: two
+            // accounts registered `union` and were both seated on compact).
+            // Deliberately unconditional on occupancy: a lopsided war is a
+            // content/AI problem, a player fighting for the wrong side is a
+            // broken promise.
+            const std::optional<uint8_t> sideTeam =
+                room.TeamForFaction(factionId);
+            if (sideTeam) {
+                player.team = *sideTeam;
+                SLOG(SPRING_LOG_INFO,
+                    "player '%s' seated on team %u — faction '%s'",
+                    username.c_str(), static_cast<unsigned>(*sideTeam),
+                    factionId.c_str());
+            } else {
+                // No side for this account's faction (or no faction at all):
+                // seat on the least-occupied of the room's slot teams, in
+                // offer order. This used to hardcode 0-vs-1, which on a
+                // scenario whose sides are teams 0 and 4 dropped every joiner
+                // onto team 1 — a team the scenario stages no army for
+                // (endtoend D19, PLAN-metalstorm-wars.md §7.4). On a legacy
+                // two-team room SlotTeams() is {0,1} and this is the same
+                // round-robin it always was.
+                if (!factionId.empty())
+                    SLOG(SPRING_LOG_NOTICE,
+                        "room %u declares no side for '%s' faction '%s' — "
+                        "seating by balance instead",
+                        roomId, username.c_str(), factionId.c_str());
+                const std::vector<uint8_t> slotTeams = room.SlotTeams();
+                player.team = slotTeams.front();
+                size_t best = static_cast<size_t>(-1);
+                for (const uint8_t t : slotTeams) {
+                    size_t occupants = 0;
+                    for (const auto& p : room.players)
+                        if (!p.isSpectator && p.team == t) occupants++;
+                    for (const auto& a : room.aiSlots)
+                        if (a.team == t) occupants++;
+                    if (occupants < best) {
+                        best = occupants;
+                        player.team = t;
+                    }
                 }
             }
         }
@@ -611,34 +864,50 @@ bool RoomManager::EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t te
 
     // Auto-assign team if 255
     if (team == 255) {
-        // Find the next available team (simple round-robin)
-        std::set<uint8_t> usedTeams;
-        for (const auto& p : it->second.players) {
-            if (!p.isSpectator) {
-                usedTeams.insert(p.team);
+        // Faction first, exactly as in JoinRoom (D40) — an "auto" seat is
+        // still a seat chosen for the player, and a spectator who enlists
+        // must land on their own side. The faction was captured at join
+        // time on RoomPlayer, so this needs no new parameter and no DB read.
+        // An explicit team (anything but 255) is the host or the player
+        // choosing on purpose and is left alone; `war_sides` is an offer,
+        // not a whitelist.
+        const auto sideTeam = it->second.TeamForFaction(player->factionId);
+        if (sideTeam) {
+            team = *sideTeam;
+            SLOG(SPRING_LOG_INFO,
+                "player '%s' enlisting on team %u — faction '%s'",
+                player->username.c_str(), static_cast<unsigned>(team),
+                player->factionId.c_str());
+        } else {
+            // Find the next available team (simple round-robin)
+            std::set<uint8_t> usedTeams;
+            for (const auto& p : it->second.players) {
+                if (!p.isSpectator) {
+                    usedTeams.insert(p.team);
+                }
             }
-        }
-        for (const auto& ai : it->second.aiSlots) {
-            usedTeams.insert(ai.team);
-        }
+            for (const auto& ai : it->second.aiSlots) {
+                usedTeams.insert(ai.team);
+            }
 
-        // Assign to the first unoccupied slot team, or the first one if
-        // every side is taken. Walks the room's offered teams rather than
-        // 0..maxPlayers, so an enlisting spectator lands on a side the
-        // scenario actually stages an army for (§7.4).
-        //
-        // Deliberate behaviour change for a legacy room with maxPlayers > 2:
-        // this used to be the ONE path that could seat somebody on team 2 or
-        // 3, while JoinRoom above only ever produced 0 or 1 and the room
-        // screen only ever offered two. Enlist was the outlier — it could put
-        // a player on a team the rest of the room could not represent — and
-        // it now agrees with them. On a 2-slot room this is identical.
-        const std::vector<uint8_t> slotTeams = it->second.SlotTeams();
-        team = slotTeams.front();
-        for (const uint8_t t : slotTeams) {
-            if (usedTeams.find(t) == usedTeams.end()) {
-                team = t;
-                break;
+            // Assign to the first unoccupied slot team, or the first one if
+            // every side is taken. Walks the room's offered teams rather than
+            // 0..maxPlayers, so an enlisting spectator lands on a side the
+            // scenario actually stages an army for (§7.4).
+            //
+            // Deliberate behaviour change for a legacy room with maxPlayers > 2:
+            // this used to be the ONE path that could seat somebody on team 2 or
+            // 3, while JoinRoom above only ever produced 0 or 1 and the room
+            // screen only ever offered two. Enlist was the outlier — it could put
+            // a player on a team the rest of the room could not represent — and
+            // it now agrees with them. On a 2-slot room this is identical.
+            const std::vector<uint8_t> slotTeams = it->second.SlotTeams();
+            team = slotTeams.front();
+            for (const uint8_t t : slotTeams) {
+                if (usedTeams.find(t) == usedTeams.end()) {
+                    team = t;
+                    break;
+                }
             }
         }
     }

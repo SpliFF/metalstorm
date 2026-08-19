@@ -1,0 +1,191 @@
+{
+ "atlases": {
+  "bush_scrub": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 10.653850808739662,
+   "diffuse": "bush_scrub_impostor.ktx2",
+   "frames": 1,
+   "height": 44.61117821935565,
+   "impostorDistance": 814.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 44.61117821935565,
+   "yawBins": 8
+  },
+  "fallen_log": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 2.717416524887085,
+   "diffuse": "fallen_log_impostor.ktx2",
+   "frames": 1,
+   "height": 40.650134852804406,
+   "impostorDistance": 742.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 40.650134852804406,
+   "yawBins": 8
+  },
+  "log_fence": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 3.4000000953674316,
+   "diffuse": "log_fence_impostor.ktx2",
+   "frames": 1,
+   "height": 19.7614844219201,
+   "impostorDistance": 361.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 19.7614844219201,
+   "yawBins": 8
+  },
+  "rock_boulder": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 11.885405540466309,
+   "diffuse": "rock_boulder_impostor.ktx2",
+   "frames": 1,
+   "height": 66.4178634125127,
+   "impostorDistance": 1212.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 66.4178634125127,
+   "yawBins": 8
+  },
+  "rock_boulder_large": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 19.695693969726562,
+   "diffuse": "rock_boulder_large_impostor.ktx2",
+   "frames": 1,
+   "height": 113.02781905633714,
+   "impostorDistance": 2062.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 113.02781905633714,
+   "yawBins": 8
+  },
+  "ruin_pillar": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 12.155306816101074,
+   "diffuse": "ruin_pillar_impostor.ktx2",
+   "frames": 1,
+   "height": 30.574930306869856,
+   "impostorDistance": 558.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 30.574930306869856,
+   "yawBins": 8
+  },
+  "ruin_wall": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 6.03095006942749,
+   "diffuse": "ruin_wall_impostor.ktx2",
+   "frames": 1,
+   "height": 32.559825173038114,
+   "impostorDistance": 594.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 32.559825173038114,
+   "yawBins": 8
+  },
+  "standing_stone": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 16.5,
+   "diffuse": "standing_stone_impostor.ktx2",
+   "frames": 1,
+   "height": 38.85100703687977,
+   "impostorDistance": 709.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 38.85100703687977,
+   "yawBins": 8
+  },
+  "tree_broadleaf": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 46.658973693847656,
+   "diffuse": "tree_broadleaf_impostor.ktx2",
+   "frames": 1,
+   "height": 136.34089263863657,
+   "impostorDistance": 2488.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 136.34089263863657,
+   "yawBins": 8
+  },
+  "tree_conifer": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 52.310001373291016,
+   "diffuse": "tree_conifer_impostor.ktx2",
+   "frames": 1,
+   "height": 137.26844268594445,
+   "impostorDistance": 2505.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 137.26844268594445,
+   "yawBins": 8
+  },
+  "tree_stump": {
+   "azimuthPhaseDegrees": 0.0,
+   "centreY": 6.077023029327393,
+   "diffuse": "tree_stump_impostor.ktx2",
+   "frames": 1,
+   "height": 19.062297210928126,
+   "impostorDistance": 348.0,
+   "pitchBins": 3,
+   "pitches": [
+    18.0,
+    42.0,
+    68.0
+   ],
+   "topDown": true,
+   "width": 19.062297210928126,
+   "yawBins": 8
+  }
+ }
+}

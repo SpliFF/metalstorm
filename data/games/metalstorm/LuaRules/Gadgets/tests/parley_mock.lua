@@ -61,14 +61,24 @@ function M.new(gadgetFile)
         end,
         GetGameFrame = function() return world.frame end,
         GetModOptions = function() return {} end,
-        GetPlayerInfo = function(playerID)
+        GetPlayerInfo = function(playerID, getOpts)
             local p = world.players[playerID]
             if not p then return nil end
             -- teamID as a FLOAT, mirroring the engine (same note as
             -- spring_mock.lua): a rulesParam key built as `'guidance_' .. teamID`
             -- from this value becomes 'guidance_10.0_', which no reader asks
             -- for. Returning an integer here is what let that ship.
-            return 'player' .. playerID, true, false, p.team and (p.team + 0.0) or p.team
+            local team = p.team and (p.team + 0.0) or p.team
+            if getOpts then
+                -- Mirror LuaSyncedRead.cpp (and spring_mock.lua): the 11th
+                -- return is the player-options table, carrying isAI="1" only
+                -- for a virtual AI player. This is the ONLY way isAI is
+                -- observable, so a mock without it makes every AI look human.
+                local opts = p.isAI and { isAI = '1' } or {}
+                return 'player' .. playerID, true, false, team,
+                       team, 0, 0, '', 0, false, opts, false
+            end
+            return 'player' .. playerID, true, false, team
         end,
         GetGaiaTeamID = function() return 99 end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
@@ -138,9 +148,13 @@ function M.new(gadgetFile)
     }
 
     _G.GG.Authority = {
-        ChargeOrder = function(unitID, unitTeam, playerID, cost)
+        -- `reason` is the D62 parameter: parley is the caller that proved
+        -- ChargeOrder is a generic pool debit and not only an order charge, so
+        -- the mock records what it was told to file the charge as.
+        ChargeOrder = function(unitID, unitTeam, playerID, cost, cmdID, reason)
             if not cost or cost <= 0 then return true end
-            world.chargeLog[#world.chargeLog + 1] = { unitTeam = unitTeam, playerID = playerID, cost = cost }
+            world.chargeLog[#world.chargeLog + 1] = {
+                unitTeam = unitTeam, playerID = playerID, cost = cost, reason = reason }
             local playerPool = playerID and (world.playerPools[playerID] or 0) or 0
             local teamPool = world.authorityPools[unitTeam] or 0
             if playerPool >= cost then

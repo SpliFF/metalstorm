@@ -52,6 +52,17 @@ describe('previewDirectiveCost', () => {
         expect(preview).toEqual({ cost: 40, affordable: false, shortfall: 25 });
     });
 
+    it('rounds a fractional shortfall UP to whole authority (D49)', () => {
+        // The pools are float32 rulesParam reads, so their sum is fractional and
+        // carries float32 debris: this printed `short by 12.449996948242188` in
+        // three player-facing strings. Ceil, not round: the number is displayed
+        // as what you still need, and 27.55 short means 28 covers it while 27
+        // leaves the order refused.
+        const model = fakeModel({ directive: 1.0 });
+        const preview = previewDirectiveCost('GroupDirective', group, model, 12.550003051757812, 0);
+        expect(preview).toEqual({ cost: 40, affordable: false, shortfall: 28 });
+    });
+
     it('charges a flat base=1 standing fee for a condition-scoped GroupDirective (no group)', () => {
         const model = fakeModel({ standing: 1.2 });
         const preview = previewDirectiveCost('GroupDirective', null, model, 100, 100);
