@@ -483,6 +483,11 @@ set(LOBBY_SERVER_SOURCES
     # same reason again: the tick reads world_pois/world_factions and writes
     # only world-scoped rows, never a war table.
     rts/Server/WorldEconomy.cpp
+    # PLAN-worldsim.md W10: battle staging — the world-layer object a
+    # commitment opens and the sweep materialises into a war. Lobby-only for
+    # the same reason as the rest: a staging row is world-scoped and the war
+    # it becomes is created by the EXISTING lobby machinery at the call site.
+    rts/Server/WorldStaging.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -663,6 +668,10 @@ if(TEST_SOURCES)
         # drives the pure pricing functions with no db and the store/Tick
         # against the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldEconomy.cpp
+        # PLAN-worldsim.md W10: battle staging — test_world_staging.cpp drives
+        # the pure instigation rule and window sizing with no db at all, and
+        # the store/sweep against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldStaging.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

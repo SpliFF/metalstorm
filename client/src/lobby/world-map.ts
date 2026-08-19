@@ -65,8 +65,36 @@ export interface WorldPoi {
     /// factions` so that a faction recolouring itself repaints every POI it
     /// holds without the map having to reconcile two copies of the value.
     owner: string | null;
+    /// PLAN-worldsim.md W10: the forces gathering against this place, newest
+    /// window last. Empty on a quiet POI and on a lobby built before W10 —
+    /// which is why `battleStatus` stays the thing the marker branches on: the
+    /// server has already upgraded it to "staging" for any POI with an entry
+    /// here, so a client that ignores this array still draws the right ring.
+    staging: WorldStagingEntry[];
     tags: string[];
     config: Record<string, unknown>;
+}
+
+/// One force gathering against a POI, as `GET /api/world/pois` carries it
+/// (WorldStaging::StagingJson, PLAN-worldsim.md W10). Only OPEN windows are
+/// ever sent — a materialised or cancelled row is history the map does not
+/// draw.
+export interface WorldStagingEntry {
+    stagingId: number;
+    /// The world faction that committed the force. An id; the name and colour
+    /// come from `WorldGraph.factions`, for the same reason `WorldPoi.owner`
+    /// is an id.
+    attackerFaction: string;
+    originPoiId: string | null;
+    transports: number;
+    squads: number;
+    /// WORLD milliseconds left before the window closes and this becomes a
+    /// battle. Served rather than computed from `endsAtWorldMs` locally: the
+    /// client ticks its own copy of the world clock between fetches, and two
+    /// clocks disagreeing about "3 hours left" is the one confusion a warning
+    /// mechanic cannot afford.
+    remainingWorldMs: number;
+    endsAtWorldMs: number;
 }
 
 /// One world faction's map identity, as `GET /api/world/pois` carries it
@@ -235,6 +263,36 @@ export function wheelZoomFactor(deltaY: number): number {
 /// somewhere arbitrary on the canvas and be indistinguishable from a real
 /// place, which is worse than not drawing it; an edge whose endpoints are not
 /// both present has nothing to draw between.
+/// W10's `staging` array, defensively. A malformed entry is DROPPED rather
+/// than defaulted: a commitment drawn with the wrong force count is a lie
+/// about how big the incoming attack is, and the panel is better showing one
+/// fewer stack than a wrong one.
+function parseStagingEntries(raw: unknown): WorldStagingEntry[] {
+    if (!Array.isArray(raw)) return [];
+    const out: WorldStagingEntry[] = [];
+    for (const item of raw as Record<string, unknown>[]) {
+        if (!item || typeof item !== 'object') continue;
+        if (typeof item.attackerFaction !== 'string' || !item.attackerFaction) continue;
+        const id = Number(item.stagingId);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const remaining = Number(item.remainingWorldMs);
+        out.push({
+            stagingId: id,
+            attackerFaction: item.attackerFaction,
+            originPoiId: typeof item.originPoiId === 'string' && item.originPoiId
+                ? item.originPoiId : null,
+            transports: Number.isFinite(Number(item.transports)) ? Number(item.transports) : 0,
+            squads: Number.isFinite(Number(item.squads)) ? Number(item.squads) : 0,
+            // Never negative: an overdue window is materialising, i.e. zero
+            // left, and a negative countdown would render as a battle that
+            // started in the past and never happened.
+            remainingWorldMs: Number.isFinite(remaining) ? Math.max(0, remaining) : 0,
+            endsAtWorldMs: Number.isFinite(Number(item.endsAtWorldMs)) ? Number(item.endsAtWorldMs) : 0,
+        });
+    }
+    return out;
+}
+
 export function parseWorldGraph(json: unknown): WorldGraph | null {
     if (!json || typeof json !== 'object') return null;
     const raw = json as Record<string, unknown>;
@@ -260,6 +318,7 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
             warRoomId: typeof item.warRoomId === 'number' && Number.isFinite(item.warRoomId)
                 ? item.warRoomId : null,
             owner: typeof item.owner === 'string' && item.owner ? item.owner : null,
+            staging: parseStagingEntries(item.staging),
             tags: Array.isArray(item.tags) ? item.tags.filter(t => typeof t === 'string') as string[] : [],
             config: (item.config && typeof item.config === 'object')
                 ? item.config as Record<string, unknown> : {},

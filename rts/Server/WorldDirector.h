@@ -147,6 +147,16 @@ struct WorldDefaults {
     double treasuryDecayPerWorldDay  = 0.01;
     double treasuryFloor             = 0.0;
 
+    // ── W10: battle staging (Capture 28 + transports §7.1/§7.2) ────────────
+    // Mirrored by `WorldStagingRules` (WorldStaging.h), which documents what
+    // each one means. Q16's "minimum/maximum staging durations (config,
+    // pillar 7)" is these two clamps and nothing else.
+    double stagingWindowDefaultWorldMs   = 12.0 * 3600.0 * 1000.0;
+    double stagingWindowPerTransitMs     = 1.0;
+    double stagingWindowMinWorldMs       = 1.0 * 3600.0 * 1000.0;
+    double stagingWindowMaxWorldMs       = 72.0 * 3600.0 * 1000.0;
+    int    stagingMaterialiseMaxAttempts = 5;
+
     nlohmann::json ToJson() const;
 };
 

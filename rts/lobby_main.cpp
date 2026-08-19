@@ -24,6 +24,7 @@
 #include "Server/WorldEconomy.h"
 #include "Server/WorldFactions.h"
 #include "Server/WorldStats.h"
+#include "Server/WorldStaging.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WarPlayerBindings.h"
@@ -1239,6 +1240,12 @@ int main(int argc, char *argv[]) {
   // capacity columns added to W7's per-account row. After WorldFactions' for
   // the same reason — the ALTER TABLE it runs needs that table to exist.
   WorldStats::EnsureTables(mapDb);
+  // PLAN-worldsim.md W10: `world_staging` — the gathering battles. After
+  // WorldFactions' because a staging row names an attacking faction, and
+  // world-scoped like everything else in this layer: the war it eventually
+  // becomes is created by the machinery further down this file, and the
+  // `room_id` this table keeps is a LABEL, exactly as W6's ledger keeps one.
+  WorldStaging::EnsureTables(mapDb);
   // Seed Earth on first boot, so a fresh lobby has a world to serve rather
   // than a 404 the client has to special-case. Idempotent, and guarded on "no
   // world exists at all": a lobby that already has a world never gets a second
@@ -4681,6 +4688,21 @@ int main(int argc, char *argv[]) {
                        AttachBattleStatus(
                            WorldDirector::WorldPoisJson(mapDb, worldId), battles),
                        mapDb, worldId);
+                   //
+                   // PLAN-worldsim.md W10: and the gathering forces last, so
+                   // that a POI which is `quiet` by W5's reckoning — no war
+                   // exists yet, because none has been created — still shows
+                   // as `staging` when the world says a force is inbound.
+                   // Last, and upgrade-only, because W5's `active` is the more
+                   // urgent of two INDEPENDENT facts: a battle can be under
+                   // way at a POI while the next force is already marching on
+                   // it. The world clock, not wall time, because a march is
+                   // measured on the clock its window was priced against.
+                   const auto reading =
+                       WorldDirector::ClockFor(mapDb, worldId, WorldNowRealMs());
+                   body = WorldStaging::AttachStaging(
+                       std::move(body), mapDb, worldId,
+                       reading ? reading->worldMs : 0);
                    return HttpAuth::JsonResponse(200, body.dump());
                  });
 
@@ -5025,6 +5047,145 @@ int main(int argc, char *argv[]) {
         // Not an error: leaving a faction you are not in is a no-op, reported
         // as one, same convention as the pause route's `changed`.
         out["left"] = left;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // ─────── PLAN-worldsim.md W10: battle triggers from the map ───────
+  //
+  // Capture 28 read literally: a battle exists as a WORLD EVENT before it
+  // starts. These two routes are the whole player-facing half of that — commit
+  // force at a place you do not hold, or withdraw it before contact. Neither
+  // one creates a war: the window's end does, from the sweep at the bottom of
+  // this file, through the ONE room-creation path this program has.
+  //
+  /// The staging rates for a world, resolved per key off its row — a separate
+  /// resolver for the same reason `worldStatRules` is separate from
+  /// `worldFactionRules`: the warning length is the async-fairness lever and
+  /// whoever tunes it is not whoever tunes the founding gate.
+  auto worldStagingRules = [mapDb](const std::string &worldId) {
+    const auto w = WorldDirector::Load(mapDb, worldId);
+    return WorldStagingRules::FromWorldConfig(
+        w ? w->config : nlohmann::json::object());
+  };
+
+  // POST /api/world/staging/commit — §7.1's instigation, as a click.
+  // Body: {"poi":…, "transports"?:int, "squads"?:int, "origin"?:…}.
+  //
+  // The attacking faction is NOT taken from the body, for exactly the reason
+  // the founding route refuses a body-supplied side key: a commitment is an
+  // act attributed to a faction, and letting the client name which one is a
+  // way to start a war in somebody else's name. It is read from this
+  // account's membership in this world.
+  net.AddHttpPost(
+      "/api/world/staging/commit", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery, worldStagingRules, worldNowWorldMs](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        const auto membership = WorldFactions::MembershipFor(mapDb, worldId, uid);
+        if (!membership)
+          return HttpAuth::JsonResponse(403, R"({"error":"not_in_a_faction"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+
+        WorldStagingCommitRequest req;
+        req.worldId           = worldId;
+        req.poiId             = j.value("poi", std::string());
+        req.attackerFactionId = membership->factionId;
+        req.originPoiId       = j.value("origin", std::string());
+        // One transport carrying one squad is the minimum the rule names, so
+        // it is also the default: a client that sends only a POI has made the
+        // smallest commitment the design recognises, not a malformed one.
+        req.transports = j.value("transports", 1);
+        req.squads     = j.value("squads", 1);
+        req.accountId  = uid;
+
+        const auto result = WorldStaging::Commit(
+            mapDb, worldStagingRules(worldId), req, worldNowWorldMs(worldId),
+            WorldNowRealMs());
+        if (!result.ok) {
+          // 409 for "the world is not in a state where this means anything"
+          // (you hold it already), 400 for an ask that is wrong on its face,
+          // 404 for a place that is not there — the same three-way split the
+          // founding route makes, for the same reason.
+          const int status = result.error == "already_held"     ? 409
+                             : result.error == "no_poi"         ? 404
+                             : result.error == "no_world"       ? 404
+                             : result.error == "no_faction"     ? 404
+                             : result.error == "db_error"       ? 500
+                                                                : 400;
+          nlohmann::json err;
+          err["ok"]    = false;
+          err["error"] = result.error;
+          return HttpAuth::JsonResponse(status, err.dump());
+        }
+
+        nlohmann::json out;
+        out["ok"]      = true;
+        out["joined"]  = result.joined;
+        out["staging"] = WorldStaging::StagingJson(result.staging,
+                                                   worldNowWorldMs(worldId));
+        SLOG(SPRING_LOG_NOTICE,
+             "world staging: faction '%s' committed %d transport(s)/%d squad(s) "
+             "at POI '%s' (%s, window %lld world-ms)",
+             req.attackerFactionId.c_str(), result.staging.transports,
+             result.staging.squads, req.poiId.c_str(),
+             result.joined ? "joined an open window" : "opened a window",
+             static_cast<long long>(result.staging.endsAtWorldMs -
+                                    result.staging.openedAtWorldMs));
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/world/staging/cancel — §7.2's withdrawal before contact.
+  // Body: {"stagingId":int}.
+  //
+  // Authorised against the committing faction, not the committing account: a
+  // commitment is the faction's, so any of its members may call it off. An
+  // account that is not in that faction gets a 403 rather than a 404 — the row
+  // is public map information (it is on everyone's map), so pretending it does
+  // not exist would be a lie the map already contradicts.
+  net.AddHttpPost(
+      "/api/world/staging/cancel", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+        const int64_t stagingId = j.value("stagingId", static_cast<int64_t>(0));
+
+        const auto row = WorldStaging::Load(mapDb, stagingId);
+        if (!row || row->worldId != worldId)
+          return HttpAuth::JsonResponse(404, R"({"error":"no_staging"})");
+        const auto membership = WorldFactions::MembershipFor(mapDb, worldId, uid);
+        if (!membership || membership->factionId != row->attackerFactionId)
+          return HttpAuth::JsonResponse(403, R"({"error":"not_your_commitment"})");
+
+        const bool cancelled = WorldStaging::Cancel(mapDb, stagingId, WorldNowRealMs());
+        nlohmann::json out;
+        out["ok"] = true;
+        // Not an error: cancelling a window that already closed is a no-op
+        // reported as one, the same convention the pause and leave routes use.
+        out["cancelled"] = cancelled;
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
@@ -5975,6 +6136,163 @@ int main(int argc, char *argv[]) {
          booted.name.c_str(), result.roomId, booted.theatre.c_str(),
          booted.scenario.c_str(), faction.c_str(), booted.sides.size(),
          booted.TotalSlotCap(), spawnedSlotCap);
+    return true;
+  };
+
+  // ── PLAN-worldsim.md W10: a staging window closes into a war ────────────
+  //
+  // The join between the world tables and the war machinery, at the call site
+  // — the W6 precedent, and for the same reason: this is the one place in the
+  // program that holds both a world handle and the room-creation machinery,
+  // and neither layer may reach into the other's tables to get it.
+  //
+  // What makes this NOT a second room-creation path: it is the same composed
+  // call `demandSeedWar` above makes — `PlanWarSeed` decides, then
+  // `BuildWarBootManifest` emits, then `runDirectStart` creates. Exactly one
+  // thing differs, and it is the whole point of W10: the theatre is not
+  // chosen, it is GIVEN. A staging row names a POI, a POI names its battle
+  // map (`world_pois.map_id`), and the battle is fought there or not at all —
+  // "battle maps are based around POIs" (Capture 10) is a constraint on where
+  // a war may appear, not a preference to be balanced against map rotation.
+  //
+  // The two sides are the world's, not the Director's: the attacker is the
+  // committing faction's `side_key` and the defender is the POI owner's. A
+  // POI nobody holds is defended by whichever OTHER side the scenario fields
+  // — an unclaimed place is still contested ground, and a war with one side
+  // cannot end.
+  //
+  // Every failure here is reported to the ROW (`MarkAttemptFailed`) rather
+  // than logged and dropped, because a staging row that quietly never becomes
+  // a battle is the one outcome a warning mechanic cannot survive: the
+  // defender was told a force was coming.
+  auto materialiseStaging = [&](const WorldStagingRecord &row,
+                                uint32_t &seededRoom,
+                                std::string &err) -> bool {
+    const auto poi = WorldDirector::LoadPoi(mapDb, row.worldId, row.poiId);
+    if (!poi || !poi->HasBattleMap()) {
+      err = "the POI has no battle map";
+      return false;
+    }
+    const auto attacker = WorldFactions::Load(mapDb, row.worldId,
+                                              row.attackerFactionId);
+    if (!attacker) {
+      err = "the attacking faction no longer exists";
+      return false;
+    }
+    // A world faction fields a sidedata side; without one there is nothing for
+    // the scenario to stage. This is the `users.faction_id` seam (W7) and it
+    // is a SIDE key, never a world faction id.
+    if (attacker->sideKey.empty()) {
+      err = "the attacking faction fields no side";
+      return false;
+    }
+    std::string defenderSide;
+    if (!poi->ownerFactionId.empty()) {
+      if (const auto owner = WorldFactions::Load(mapDb, row.worldId,
+                                                 poi->ownerFactionId))
+        defenderSide = owner->sideKey;
+    }
+
+    const GameDiscovery::GameInfo *game =
+        GameDiscovery::DefaultPlayable(availableGames);
+    if (game == nullptr) {
+      err = "no playable game is installed";
+      return false;
+    }
+
+    // The authored scenario on THIS map that fields the attacker, and the
+    // defender too when the POI is held. `terminal` is required for the same
+    // reason `demandSeedWar` requires it: the one thing this must not do is
+    // create a war that cannot end.
+    const ScenarioDiscovery::ScenarioInfo *chosen = nullptr;
+    std::vector<std::string> chosenSides;
+    for (const auto &info : scenariosFor(game->id)) {
+      if (info.tutorial || info.retired || !info.terminal) continue;
+      if (info.mapId != poi->mapId) continue;
+      std::vector<std::string> sides;
+      for (const auto &s : ScenarioDiscovery::PlayableSides(info))
+        sides.push_back(s.faction);
+      if (std::find(sides.begin(), sides.end(), attacker->sideKey) == sides.end())
+        continue;
+      if (!defenderSide.empty() &&
+          std::find(sides.begin(), sides.end(), defenderSide) == sides.end())
+        continue;
+      if (sides.size() < 2) continue;
+      chosen      = &info;
+      chosenSides = std::move(sides);
+      break;
+    }
+    if (chosen == nullptr) {
+      err = "no authored scenario on '" + poi->mapId + "' fields side '" +
+            attacker->sideKey + "'";
+      return false;
+    }
+
+    // Sides in the SCENARIO's declaration order (order fixes team numbers and
+    // start boxes — see WarSeedRequest), filtered to the two the world names.
+    // An unheld POI takes the first other side the scenario declares.
+    std::string defender = defenderSide;
+    if (defender.empty()) {
+      for (const auto &s : chosenSides)
+        if (s != attacker->sideKey) { defender = s; break; }
+    }
+    if (defender.empty() || defender == attacker->sideKey) {
+      err = "the scenario fields only the attacking side";
+      return false;
+    }
+
+    MapMetadataDb mdb;
+    WarSeedRequest req;
+    req.theatre       = poi->mapId;
+    req.gameId        = game->id;
+    req.scenario      = chosen->id;
+    req.origin        = WarOrigin::Scenario;
+    req.startBoxCount = static_cast<unsigned>(
+        mdb.GetMap(mapDb, poi->mapId).startPositions.size());
+    for (const auto &s : chosenSides)
+      if (s == attacker->sideKey || s == defender) req.factions.push_back(s);
+    // Unique by construction, like the demand seed's: `runDirectStart`
+    // REPLACES a standing room of the same name, so a name derived only from
+    // the POI would make the second battle there kill the first. The staging
+    // id is the row's own identity and never repeats.
+    req.name = poi->name.empty() ? poi->poiId : poi->name;
+    req.name += " · staging " + std::to_string(row.stagingId);
+
+    WarSeedPopulation pop;
+    pop.registered = db.CountAccountsByFaction();
+    for (const auto &f : req.factions)
+      pop.warsFielding[f] = WarDirector::WarsFielding(mapDb, f);
+    const WarSeedPlan plan = PlanWarSeed(req, pop);
+    if (!plan.ok) {
+      err = plan.error;
+      return false;
+    }
+
+    nlohmann::json manifest = nlohmann::json::parse(
+        BuildWarBootManifest(plan), nullptr, /*allow_exceptions=*/false);
+    if (manifest.is_discarded()) {
+      err = "could not build the boot manifest";
+      return false;
+    }
+    auto result = runDirectStart(manifest);
+    if (!result.ok) {
+      err = result.error.empty() ? "boot failed" : result.error;
+      return false;
+    }
+    seededRoom = result.roomId;
+
+    // Record what actually booted, exactly as the demand seed does — the
+    // scenario, not the plan, is the authority on which team a side sits on.
+    WarSeedPlan booted = plan;
+    unsigned spawnedSlotCap = 0;
+    if (const GameRoom *room = rooms.GetRoom(result.roomId)) {
+      booted = ReconcileSeededSides(plan, room->SideTeams(), room->SideCapacities());
+      spawnedSlotCap = warPlayerSlotCap(*room);
+    }
+    const int64_t nowSec = WorldNowRealMs() / 1000;
+    WarDirector::Register(mapDb, result.roomId, booted, nowSec);
+    WarDirector::SetState(mapDb, result.roomId, WarState::Open, nowSec);
+    WarDirector::RecordSpawnedSlotCap(mapDb, result.roomId, spawnedSlotCap);
     return true;
   };
 
@@ -7995,6 +8313,14 @@ int main(int argc, char *argv[]) {
   // freshness, never correctness — a lobby that only fires this once an hour
   // still prices the whole gap in one call.
   int worldEconomyTick = 0;
+  // PLAN-worldsim.md W10: the staging sweep's driver — ~every 10 s at 10 Hz.
+  // Faster than the economic tick and for the opposite reason: the economy is
+  // a closed-form function of elapsed world time, so a late tick prices the
+  // whole gap correctly, whereas a staging window that has closed is a battle
+  // the defender was PROMISED and is now waiting for. Lateness here is felt.
+  // 10 s against a window measured in world hours is well inside the noise of
+  // the warning itself.
+  int worldStagingTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -8143,6 +8469,49 @@ int main(int argc, char *argv[]) {
         // loop having to know pause is even a state.
         const auto rules = WorldEconomyRules::FromWorldConfig(w.config);
         WorldEconomy::Tick(mapDb, w.worldId, rules, reading->worldMs, nowReal);
+      }
+    }
+
+    // PLAN-worldsim.md W10: drain every world's closed staging windows into
+    // real wars (~every 10 s at 10 Hz — see the counter's declaration).
+    //
+    // `DueStagings` is a READ, and materialisation is guarded on the row still
+    // being `staging`, so this loop is safe to be interrupted anywhere: a
+    // lobby that dies mid-drain sees the same rows next time and cannot
+    // create a second war for a row that already became one.
+    //
+    // A paused world does not materialise anything, and gets that for free:
+    // its `worldMs` has stopped, so no window ever reaches its end while the
+    // pause ledger is open — the sweep does not have to know pause is a state.
+    if (++worldStagingTick >= 100) {
+      worldStagingTick = 0;
+      const int64_t nowReal = WorldNowRealMs();
+      for (const auto& w : WorldDirector::ListWorlds(mapDb)) {
+        const auto reading = WorldDirector::ClockFor(mapDb, w.worldId, nowReal);
+        if (!reading) continue;
+        const auto rules = WorldStagingRules::FromWorldConfig(w.config);
+        for (const auto& row :
+             WorldStaging::DueStagings(mapDb, w.worldId, rules, reading->worldMs)) {
+          uint32_t roomId = 0;
+          std::string err;
+          if (materialiseStaging(row, roomId, err)) {
+            // The room id is a LABEL on the world row, never a join key back
+            // into a `war*` table (hard boundary 1) — the same thing W6's
+            // settlement ledger keeps for the same reason.
+            WorldStaging::MarkMaterialised(mapDb, row.stagingId, roomId, nowReal);
+            SLOG(SPRING_LOG_NOTICE,
+                 "world staging %lld at POI '%s' materialised as room %u",
+                 static_cast<long long>(row.stagingId), row.poiId.c_str(), roomId);
+          } else {
+            WorldStaging::MarkAttemptFailed(mapDb, row.stagingId, err, rules,
+                                            nowReal);
+            SLOG(SPRING_LOG_WARNING,
+                 "world staging %lld at POI '%s' could not materialise "
+                 "(attempt %d/%d): %s",
+                 static_cast<long long>(row.stagingId), row.poiId.c_str(),
+                 row.attempts + 1, rules.materialiseMaxAttempts, err.c_str());
+          }
+        }
       }
     }
 

@@ -144,6 +144,11 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["poiIncomePerWorldDay"]      = poiIncomePerWorldDay;
     j["treasuryDecayPerWorldDay"]  = treasuryDecayPerWorldDay;
     j["treasuryFloor"]             = treasuryFloor;
+    j["stagingWindowDefaultWorldMs"]   = stagingWindowDefaultWorldMs;
+    j["stagingWindowPerTransitMs"]     = stagingWindowPerTransitMs;
+    j["stagingWindowMinWorldMs"]       = stagingWindowMinWorldMs;
+    j["stagingWindowMaxWorldMs"]       = stagingWindowMaxWorldMs;
+    j["stagingMaterialiseMaxAttempts"] = stagingMaterialiseMaxAttempts;
     return j;
 }
 
