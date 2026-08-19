@@ -458,6 +458,12 @@ set(LOBBY_SERVER_SOURCES
     # is the point: it decides which wars exist and never touches sim state,
     # so the game server has no reason to link it.
     rts/Server/WarDirector.cpp
+    # PLAN-worldsim.md W1: the World Director — the `worlds` / `world_pois` /
+    # `world_poi_edges` / `world_pause_ledger` tables, the world clock and the
+    # two read-only world routes. LOBBY ONLY for the same reason WarDirector is:
+    # the world layer never touches sim state. It is the layer ABOVE a war, and
+    # nothing in it is keyed by room_id.
+    rts/Server/WorldDirector.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -619,6 +625,11 @@ if(TEST_SOURCES)
         # DB rows and one JSON boot call, so test_war_director.cpp drives the
         # real store against an in-memory db — no lobby, no sim, no server.
         ${CMAKE_SOURCE_DIR}/rts/Server/WarDirector.cpp
+        # PLAN-worldsim.md W1: the World Director. Like the War Director its
+        # whole output is DB rows and JSON, so test_world_director.cpp drives
+        # the real store against an in-memory db — and the clock beside it
+        # (WorldClock.h) is a pure header driven with no db at all.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldDirector.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

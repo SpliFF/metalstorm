@@ -20,6 +20,7 @@
 #include "Server/RoomManager.h"
 #include "Server/RuntimeAIRoster.h"
 #include "Server/WarDirector.h"
+#include "Server/WorldDirector.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1216,6 +1217,28 @@ int main(int argc, char *argv[]) {
   // and migrated additively rather than dropped for the same reason as the
   // bindings above: a row here is the only copy of the thing.
   WarDirector::EnsureTables(mapDb);
+
+  // worlds / world_pois / world_poi_edges / world_pause_ledger — the WORLD
+  // layer (PLAN-worldsim.md W1, WorldDirector.h). The layer ABOVE the war
+  // tables above, and strictly separate from them: everything here is keyed by
+  // `world_id`, nothing by `room_id`, because a war is one battle and a world
+  // is the persistent thing battles happen inside. Additively migrated for the
+  // same reason as the bindings above — a row here is the only copy of the
+  // world, and its epoch is what the world clock is computed from.
+  WorldDirector::EnsureTables(mapDb);
+  // Seed Earth on first boot, so a fresh lobby has a world to serve rather
+  // than a 404 the client has to special-case. Idempotent, and guarded on "no
+  // world exists at all": a lobby that already has a world never gets a second
+  // one, and an existing world's epoch is never rewritten (that would move the
+  // world clock for everyone who has ever looked at it).
+  if (mapDb) {
+    const std::string seededWorld =
+        WorldDirector::SeedDefaultWorld(mapDb, WorldNowRealMs());
+    if (seededWorld.empty())
+      SLOG(SPRING_LOG_ERROR,
+           "world layer: no world could be seeded or loaded — /api/world will "
+           "answer 404 until a world row exists");
+  }
 
   // war_slot_reservations — the last seat on a side, held for the join that is
   // on its way (PLAN-metalstorm-wars.md §4, task 2). Created here rather than
@@ -4553,6 +4576,83 @@ int main(int argc, char *argv[]) {
                    json += "]";
                    return HttpAuth::JsonResponse(200, json);
                  });
+
+  // ── The world layer, read-only (PLAN-worldsim.md W1) ────────────────────
+  // Both bodies are built by WorldDirector so they are testable without a
+  // socket (tests/test_world_director.cpp); these two handlers are the
+  // transport and nothing else. Public, like /api/rooms and /api/maps: the
+  // world map is the game's shop window, and nothing here is per-account.
+  //
+  // `?world=<id>` selects a world; without it the lobby answers for its
+  // primary (oldest active) world.
+  const auto worldIdFromQuery = [mapDb](const std::string &url) -> std::string {
+    // The query string is per-request thread-local state on NetworkServer, so
+    // it is read here rather than passed in.
+    const std::string qs = NetworkServer::CurrentQueryString();
+    const std::string key = "world=";
+    const size_t at = qs.find(key);
+    if (at != std::string::npos) {
+      const size_t from = at + key.size();
+      const size_t to = qs.find('&', from);
+      std::string id = qs.substr(from, to == std::string::npos ? to : to - from);
+      if (!id.empty())
+        return id;
+    }
+    (void)url;
+    return WorldDirector::PrimaryWorldId(mapDb);
+  };
+
+  // GET /api/world — the world clock + meta.
+  net.AddHttpGet("/api/world", RouteAuth::Public,
+                 [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+                   if (!mapDb) {
+                     // D33: never answer a faulted handle with a plausible
+                     // empty world — a client that believed it would show a
+                     // stopped clock and blame the world, not the database.
+                     return HttpAuth::JsonResponse(
+                         503, R"({"error":"world_database_unavailable"})");
+                   }
+                   const std::string worldId = worldIdFromQuery(url);
+                   if (worldId.empty())
+                     return HttpAuth::JsonResponse(
+                         404, R"({"error":"no_world"})");
+                   const nlohmann::json body = WorldDirector::WorldStatusJson(
+                       mapDb, worldId, WorldNowRealMs());
+                   const int status = body.contains("error") ? 404 : 200;
+                   return HttpAuth::JsonResponse(status, body.dump());
+                 });
+
+  // GET /api/world/pois — the POI graph (nodes + edges) for one world.
+  net.AddHttpGet("/api/world/pois", RouteAuth::Public,
+                 [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+                   if (!mapDb)
+                     return HttpAuth::JsonResponse(
+                         503, R"({"error":"world_database_unavailable"})");
+                   const std::string worldId = worldIdFromQuery(url);
+                   if (worldId.empty())
+                     return HttpAuth::JsonResponse(
+                         404, R"({"error":"no_world"})");
+                   // An existing world with no POIs answers 200 with empty
+                   // arrays: a young world genuinely has none until the W3
+                   // seeder runs, and the map UI must draw an empty Earth
+                   // rather than an error.
+                   return HttpAuth::JsonResponse(
+                       200, WorldDirector::WorldPoisJson(mapDb, worldId).dump());
+                 });
+
+  // POST /api/world/pause — Capture 11's admin global pause. STUBBED at 501
+  // for W1 by the plan's own instruction. The durable half already exists
+  // (WorldDirector::OpenPause/ClosePause and the ledger the clock reads), so
+  // what W4 adds here is the route body and the battle-orchestration half —
+  // a global pause must pause every running game server too, and doing the
+  // world half alone would desynchronise the two clocks rather than stop them.
+  net.AddHttpPost("/api/world/pause", RouteAuth::AdminOnly,
+                  [](const std::string &, const std::string &,
+                     const HttpRequestHeaders &) -> HttpResponse {
+                    return HttpAuth::JsonResponse(
+                        501,
+                        R"({"error":"not_implemented","detail":"world pause lands with W4 (PLAN-worldsim.md); the ledger and clock arithmetic already exist"})");
+                  });
 
   // GET /api/games — list available games
   net.AddHttpGet(
