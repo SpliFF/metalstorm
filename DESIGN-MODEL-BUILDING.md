@@ -90,8 +90,15 @@ retired (objects3d/README.md). `ModelConfigLoader::LoadInto` reads:
   s3 12 m, s4 26 m. Footprint metres = footprintx × 2; overhang is fine.
   That rule encodes the metre→elmo constant: `SPRING_FOOTPRINT_SCALE = 2` and
   `SQUARE_SIZE = 8` make one `footprintx` unit **16 elmos**, so 16 elmos = 2 m
-  ⇒ **8 elmos = 1 metre**. See §12 — the constant is measured, but nothing in
-  the import or render path applies it yet.
+  ⇒ **8 elmos = 1 metre**. The constant is **applied at the write site**
+  (§12, decided 2026-08-27): authoring stays 1 unit = 1 m, and the forge's
+  `gltf_export.py` (`ELMOS_PER_METRE`, default `units='m'`) — or
+  `modelimporter --metres` for foreign metre-authored sources
+  (`GeometryExtractor.h kElmosPerMetre`) — converts geometry, piece offsets,
+  translation animation channels and every `SPRINGRTS_geometry` extent to
+  **elmos** on export. Emitted files carry `units: "elmos"`. Elmo-authored
+  sources (S3O/BAR, the map-feature corpus) pass through unscaled
+  (`units='elmo'` / no flag).
 
 ### 5. Piece naming — the turret-rotation contract
 
@@ -335,35 +342,47 @@ the mesh generator and the painter:
     Advisory for the code session: applying the bump before half-Lambert
     compression (or widening the sun term) would let subtler bakes read.
 
-### 12. Scale flag — MEASURED 2026-08-14, decision still open
+### 12. World scale — DECIDED 2026-08-27: 8 elmos = 1 metre, applied at import
 
-Models author at 1 unit = 1 m (§4), but no ×8 metre→elmo scale exists
-anywhere in the render path (`entity-renderer.ts` applies none) while the
-sim world is elmos (`ELMOS_TO_METERS = 1/8`). So all metalstorm-native
-models currently render ~8× smaller than their footprints imply.
-**Keep authoring at 1 u = 1 m** — that half was never in doubt.
+**The contract (PLAN-world-scale.md §5, Option A, USER-DECIDED
+2026-08-27):** authoring stays **1 glTF unit = 1 metre** (§4 — that half
+was never in doubt); the **write site converts to elmos** so the sim and
+renderer only ever see elmos. Executed 2026-08-27:
 
-Measured 2026-08-14, and the flag's own "or world-units-as-metres is
-intended" branch is **closed — it is not intended**:
+- **The constant is 8 elmos = 1 m** — from §4's footprint rule via
+  `SPRING_FOOTPRINT_SCALE = 2` × `SQUARE_SIZE = 8`, corroborated by the
+  buildings (`ms_habitat` 24 m footprint vs 25.5 m model), the elmo-native
+  feature corpus (`tree_conifer` 104.62 = 13.1 m) and the gameplay tables
+  (PLAN-world-scale.md §2). It is named at every write site:
+  `ELMOS_PER_METRE` in `tools/fable-model-forge/gltf_export.py` (forge
+  exports scale unless called with `units='elmo'`), `kElmosPerMetre` in
+  `tools/modelimporter/GeometryExtractor.h` (applied by
+  `modelimporter --metres`), and `ELMOS_TO_METERS` in
+  `Sim/Misc/GlobalConstants.h` is its documented inverse.
+- **The shipped corpus was re-scaled ×8 in place** (all 110 unit/building
+  models: vertices, node translations, animation translation channels and
+  every `SPRINGRTS_geometry` extent) by
+  `tools/scripts/rescale_models_to_elmos.py` — exact in float32 (×8 only
+  shifts the exponent) and idempotent via the `units: "elmos"` marker every
+  converted file now carries. The **71-model map-feature corpus is
+  untouched** (already elmos — a blanket scale over it is a defect).
+- **The scale is sim-real, not render-only**: `ModelConfigLoader.cpp` feeds
+  model `radius`/`height` into the def and `Unit.cpp` builds the collision
+  and selection volumes from them — which is exactly why it landed at
+  import, never in `entity-renderer.ts`.
+- **The impostor constants moved with it** (all four infantry classes:
+  `impostor_size`/`impostor_centre_y`/`impostor_distance` ×8 — the sheets
+  themselves are unchanged since the baker frames on the model bbox, and
+  distance ×8 preserves the subtended angle, keeping the ≲20 px swap rule).
+- **Checked, not eyeballed**: `tools/scripts/check_model_scale.py` asserts
+  units ×8 against the pre-scale baseline
+  (`world_scale_baseline.json`), features ×1, bin-geometry⇄metadata
+  agreement, and the impostor swap/framing rules. Run it after any corpus
+  or def-scale change.
 
-- `ELMOS_TO_METERS` is declared at `Sim/Misc/GlobalConstants.h:45` and
-  referenced **nowhere else in the tree** (whole-repo grep: 1 hit, its own
-  declaration). A conversion constant nothing converts with.
-- The constant is **8 elmos = 1 m**, from §4's footprint rule via
-  `SPRING_FOOTPRINT_SCALE = 2` × `SQUARE_SIZE = 8`. `ms_habitat`'s 12×12
-  footprint is 24 m against a 25.5 m model; at any other constant the
-  buildings stop fitting and the vehicles stop overhanging.
-- The **map feature corpus is already on the engine's scale** (1 unit =
-  1 elmo): `tree_conifer` is 104.62 tall = 13.1 m, `tree_stump` 12.15 =
-  1.5 m. Only the unit/building models are off. A blanket scale applied to
-  every model would break the features.
-- The scale **cannot be render-only**: `ModelConfigLoader.cpp:113` feeds
-  model `radius`/`height` into the def and `Unit.cpp:237` builds the
-  collision and selection volumes from them. It belongs at import.
-
-What remains is the cost decision — 102 models re-imported, plus every
-impostor constant that was measured off pixels on the broken scale. That
-call and its options live in PLAN-world-scale.md §5 (blocked on the owner).
+Still open after the decision: the by-eye constants tuned against the old
+scale (squad formation spacing, LOD ladders, camera/zoom limits) and the
+live browser A/B verify on the player path (PLAN-world-scale.md §6 step 4).
 
 ---
 
@@ -520,7 +539,7 @@ philosophy as squad fan-out). ~150–250 LOC + tests.
    - Playback `speed` = clamp(unitSpeed / nominalSpeed, 0.6, 1.6) — the
      `ClipPlayOpts.speed` knob exists. nominalSpeed is one modeled stride
      (~1.1 m for fable_mech) per cycle (1.2 s), converted per the
-     world-scale convention — until §12 is resolved, a tuned constant
+     world-scale convention (§12, decided: ×8 — 8.8 elmos per 1.2 s cycle)
      (or `customparams.walk_speed_ref`).
    - Manual override: a unit driven by the harness `playClip` verb is
      flagged; the auto policy skips it until `stopClip` — F8 buttons keep

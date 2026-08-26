@@ -57,6 +57,15 @@ agents share $FORGE concurrently — read-only makes that safe.
 **Frame**: RH, −Z forward, +Y up, ground plane Y=0, 1 unit = 1 m.
 Deterministic: RNG seed 90210 everywhere (`np.random.default_rng(90210)`).
 
+**World scale (decided 2026-08-27 — DESIGN-MODEL-BUILDING.md §12)**: keep
+authoring in metres exactly as above; `gltf_export.export()` converts to
+**elmos** (×`ELMOS_PER_METRE` = 8) at write time, so the emitted .gltf/.bin
+and every `SPRINGRTS_geometry` extent are 8× the layout numbers and carry
+`units: "elmos"`. Preview/validate/bake tooling frames on the model bbox and
+is scale-agnostic. Never pre-multiply layout dims by 8, and never pass
+`units='elmo'` for a unit/building (that bypass exists only for map-feature
+generators that author directly in elmos).
+
 **Layout module** (`<stem>_layout.py`): ALL dimensions as constants; first
 lines set the atlas: `import meshlib; meshlib.ATLAS = 1024` (or 2048 when the
 dominant dimension ≥ 15 m). Define texture zones here.
