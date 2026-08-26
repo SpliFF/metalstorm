@@ -760,6 +760,16 @@ function gadget:DefsReconciled(delta)
     publishCostSpecVersion()
 end
 
+-- Mirror the effective cost scale as a PUBLIC game rulesParam. The modoption
+-- is public knowledge (both the client's cost preview and the strategos AI's
+-- cost predictor rerun the §1 formula), but a modoption is only readable at
+-- gadget Initialize — neither mirror can read it live. Publishing it closes
+-- the picture.lua readEconomy gap: everyone predicts with the scale the
+-- charge callins actually apply.
+local function publishCostScale()
+    Spring.SetGameRulesParam('authority_cost_scale', costScale)
+end
+
 function gadget:Initialize()
     publishCostSpecVersion()
     -- Read modoptions here too (not just GameStart): Initialize always runs
@@ -770,6 +780,7 @@ function gadget:Initialize()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
+    publishCostScale()
 
     -- E1 load-time assert (§5): ceiling must be ≥ 2× the priciest single decision
     local econ  = CostSpec.economy
@@ -792,6 +803,7 @@ function gadget:GameStart()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
+    publishCostScale()
 
     local gaia  = Spring.GetGaiaTeamID()
     for _, teamID in ipairs(Spring.GetTeamList()) do

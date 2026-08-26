@@ -69,8 +69,8 @@ few directives/minute at 0.2 Hz).
 ## Engine asks (what unblocks each stub)
 
 The AI runtime is real but incomplete (`rts/Server/AI/*`, ARCHITECTURE.md Phase
-4 ⏳). The VM exposes reads (`AI.getOwnUnits / getVisibleEnemies / getFrame /
-getMapSize / getTeamId / getRulesParam / getMapData / getDefExport`) and the
+4 ⏳). The VM exposes reads (`AI.getOwnUnits / getVisibleEnemies / getRadarBlips /
+getFrame / getMapSize / getTeamId / getRulesParam / getMapData / getDefExport`) and the
 AI2 directive-shaped writes (`AI.createGroup / issueDirective / setPosture`)
 plus the I1 message verb (`AI.sendMessage`); it
 opens only `base/table/string/math/utf8`. Each ask below flips a feature-detect
@@ -93,12 +93,16 @@ rulesParams, and reads the region-graph/power-table JSON exports. The Picture
 builder (plan task 3) is now wired end-to-end against real data: regions
 (geometry + live owner/contested), board (objectives), economy (team pool),
 `Picture.regionOf` (lookup-grid + point-in-polygon, mirrors
-`ui/lib/regions.js`), and byClass force bucketing off the power table. Three
-data gaps remain, each documented at its call site rather than guessed at:
-bounty-vs-natural-reward is unpublished (`readBoard` in `picture.lua`), the
-`authority_cost_scale` modoption has no rulesParam mirror (`readEconomy`), and
-there is no radar-blip or idle-factory surface on the AI VM yet
-(`updateIntel` / `slate.lua`'s `compositionGap`).
+`ui/lib/regions.js`), and byClass force bucketing off the power table.
+
+Two of the three long-documented data gaps are now closed:
+`AI.getRadarBlips()` (position-only radar contacts, folded into intel as
+low-confidence `_blip` entries at `Config.BLIP_CONFIDENCE`/`BLIP_STRENGTH`),
+and the `authority_cost_scale` modoption is mirrored as a public game
+rulesParam by `game_authority.lua` (read in `readEconomy`, threaded into the
+planner's cost predictions). Still open, documented at its call site: the
+idle-factory / counters-table dependency of `slate.lua`'s `compositionGap`
+(needs game data that does not exist yet, not a Picture-shape problem).
 
 ## Integration risks worth a human decision
 

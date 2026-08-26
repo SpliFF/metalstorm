@@ -91,6 +91,7 @@ private:
     // Lua C API callbacks
     static int l_getOwnUnits(lua_State* L);
     static int l_getVisibleEnemies(lua_State* L);
+    static int l_getRadarBlips(lua_State* L);  // radar-only contacts (position + id, no type)
     static int l_issueCommand(lua_State* L);
     static int l_getFrame(lua_State* L);
     static int l_getMapSize(lua_State* L);

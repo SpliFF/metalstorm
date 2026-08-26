@@ -23,6 +23,17 @@ struct AISquadInfo {
     bool hasCommands = false;
 };
 
+/// A radar-only contact (in radar coverage but NOT in LOS). Fog-honest:
+/// position and a tracking id only — no defId, no health, no team detail.
+/// The id lets the AI notice the same contact persisting across ticks; it is
+/// the engine unit id (the same id the client's radar-dot wire uses), which
+/// leaks no more than the client already sees.
+struct AIRadarBlip {
+    uint32_t unitId = 0;
+    float x = 0.0f;
+    float z = 0.0f;
+};
+
 /// One rulesParam value visible to the AI (AI1). Mirrors the wire producer's
 /// bool→number coercion (StateStreamer::ParamToWire): a param is either a
 /// number or a string.
@@ -52,6 +63,9 @@ struct AIStateSnapshot {
 
     // Enemy units visible in LOS (filtered)
     std::vector<AISquadInfo> visibleEnemies;
+
+    // Enemy contacts in radar coverage but NOT in LOS (position-only).
+    std::vector<AIRadarBlip> radarBlips;
 
     // Economy
     float metal = 0.0f;

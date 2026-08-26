@@ -31,6 +31,7 @@ local function caps()
         lod         = type(AI) == 'table' and type(AI.getLODLevel)   == 'function',
         ownUnits    = type(AI) == 'table' and type(AI.getOwnUnits)   == 'function', -- exists today
         enemyUnits  = type(AI) == 'table' and type(AI.getVisibleEnemies) == 'function',
+        radarBlips  = type(AI) == 'table' and type(AI.getRadarBlips) == 'function', -- position-only contacts
     }
 end
 
@@ -219,12 +220,12 @@ local function readEconomy(c, role)
     return {
         ownPool = ownPool,
         teamPool = teamPool,
-        -- GAP: authority_cost_scale is an Initialize()-time modoption read
-        -- straight into a local in game_authority.lua — never republished as
-        -- a rulesParam mirror, so there is no AI- (or client-) readable
-        -- source for it today. Default to 1.0 (no scaling) rather than
-        -- guessing at an engine surface that doesn't exist.
-        costScale = 1.0,
+        -- authority_cost_scale (the Initialize()-time modoption) is mirrored
+        -- as a PUBLIC game rulesParam by game_authority.lua (publishCostScale) so
+        -- the AI predicts directive costs with the same scale the charge
+        -- callins actually apply. Absent mirror (older gadget) → 1.0.
+        costScale = tonumber(AI.getRulesParam('game', 'authority_cost_scale'))
+                    or 1.0,
         teamFallback = role.teamAuthorityFallback or false,
         humans = humans,   -- nil = coordinator absent / unknown
     }
@@ -504,17 +505,37 @@ local function updateIntel(c, regions, memory, frame, config, power)
         end
     end
 
-    -- 2. Fold in fresh sightings (raw enemies today; enemy squads under AI2).
+    -- 2. Retract last tick's blip contribution before re-folding. Blips are a
+    -- per-tick OBSERVATION (the contact is either on radar now or it isn't),
+    -- not accumulating memory — without this, a contact parked on radar for
+    -- ten ticks would read as ten contacts.
+    for _, mem in pairs(intel) do
+        if mem.blipStrength then
+            mem.strength = math.max(0, (mem.strength or 0) - mem.blipStrength)
+            if mem.byClass then mem.byClass._blip = nil end
+            mem.blipStrength = nil
+        end
+    end
+
+    -- 3. Fold in fresh sightings (raw enemies today; enemy squads under AI2).
     local list
     if c.enemySquads then
         list = AI.getVisibleEnemySquads()
     elseif c.enemyUnits then
         list = AI.getVisibleEnemies()
     end
+    local resighted = {}
     for _, e in ipairs(list or {}) do
         local key = Picture.regionOf(e.x, e.z, regions) or '_all'
         local mem = intel[key] or { strength = 0, byClass = {} }
-        mem.byClass = mem.byClass or {}
+        -- A full-detail resight REPLACES the remembered strength (the header
+        -- contract: "fresh sightings overwrite") — reset once per region per
+        -- tick, then accumulate this tick's sightings. Without the reset a
+        -- region kept in view compounds its remembered strength every tick.
+        if not resighted[key] then
+            mem.strength, mem.byClass = 0, {}
+            resighted[key] = true
+        end
         local health = e.health or 0
         mem.strength      = (mem.strength or 0) + health
         local class = classOf(power, e.defId) or '_unclassed'
@@ -524,12 +545,32 @@ local function updateIntel(c, regions, memory, frame, config, power)
         intel[key] = mem
     end
 
-    -- GAP: radar blips (position-only, no unit type) would fold in here as
-    -- low-confidence entries — AIScriptContext exposes no such surface today
-    -- (only getOwnUnits/getVisibleEnemies, both full sightings; see
-    -- rts/Server/AI/AIScriptContext.h). No `l_getRadarBlips`-shaped callin
-    -- exists to feature-detect against, unlike every other §2 source. Needs
-    -- an engine ask before this can be anything but a documented gap.
+    -- 4. Radar blips (position-only, no unit type) fold in as LOW-confidence
+    -- entries. A blip contributes BLIP_STRENGTH of unknown-class threat; a
+    -- blip-only region's confidence is held at (at most) BLIP_CONFIDENCE by
+    -- re-dating lastSeenFrame so the age-based decay in step 1 reproduces it —
+    -- decay above the blip floor continues, but persistent blips stop a
+    -- region from being forgotten while something is still on radar.
+    if c.radarBlips then
+        for _, b in ipairs(AI.getRadarBlips() or {}) do
+            local key = Picture.regionOf(b.x, b.z, regions) or '_all'
+            local mem = intel[key] or { strength = 0, byClass = {} }
+            mem.byClass = mem.byClass or {}
+            mem.strength     = (mem.strength or 0) + config.BLIP_STRENGTH
+            mem.blipStrength = (mem.blipStrength or 0) + config.BLIP_STRENGTH
+            mem.byClass._blip = (mem.byClass._blip or 0) + config.BLIP_STRENGTH
+            if mem.lastSeenFrame ~= frame then
+                -- Not freshly LOS-seen this tick: hold confidence at the
+                -- blip floor (never lower an as-yet-higher decayed memory).
+                local conf = math.max(mem.confidence or 0, config.BLIP_CONFIDENCE)
+                mem.confidence = conf
+                mem.lastSeenFrame = frame
+                    - math.floor((1 - conf) * config.INTEL_DECAY_FRAMES)
+            end
+            intel[key] = mem
+        end
+    end
+
     return intel
 end
 
