@@ -19,21 +19,13 @@ return mk{
                 -- raider speed 93 e/s — the builder's 78 e/s was MBT speed.
                 maxdamage = 2400, maxvelocity = 3.1,
                 acceleration = 0.35, brakerate = 0.3,
-                -- wz_wheeled (units/wz_baseline.lua): the Viper light
-                -- wheeled hull + cannon turret — the closest shipped model
-                -- to a tankette, and visually distinct from the s2 tracked
-                -- MBT beside it. Without an override this def claimed a
-                -- nonexistent `ms_tanks_s1.gltf` and every member rendered
-                -- as a proxy capsule (the Basin Reavers' whole armour
-                -- contingent in scenarios/meridian_basin.lua).
-                --
-                -- Team colour: wz_wheeled/wz_tank now carry a TCMASK wired to
-                -- `SPRINGRTS_team_color`, so they tint like any other unit.
-                -- The hull/turret mask is AUTHORED (tools/wz2100-baseline/
-                -- make_tcmask.py) — upstream ships none that covers these
-                -- hulls — and the wheels/tracks use the stock WZ page-16 mask.
-                override = { objectname = 'wz_wheeled',
-                             transportbyenemy = false } },
+                -- ms_tanks_s1 (tools/forge, 2026-08-27): native wheeled
+                -- tankette — 4.5 m lofted hull, spinnable axle_f/axle_r,
+                -- turret/barrel/muzzle autocannon chain. Replaces the
+                -- WZ2100 `wz_wheeled` placeholder this def borrowed while
+                -- no `ms_tanks_s1.gltf` existed; the builder's default
+                -- objectname (= def name) now resolves, so no override.
+                override = { transportbyenemy = false } },
         [2] = { weapons = { [1] = { name = 'MS_AC_S3' } },
                 description = 'Main battle tank troop',
                 -- Line tier: 4 × 1800hp members (BAR stumpy anchor),
@@ -52,10 +44,14 @@ return mk{
                 maxdamage = 13000, mass = 3600,
                 maxvelocity = 1.5, acceleration = 0.15, brakerate = 0.15,
                 turnrate = 200, sightdistance = 560,
-                -- wz_tank (units/wz_baseline.lua): the heavier tracked WZ
-                -- hull, one step up from the s1 Viper. Same reason as s1 —
-                -- no `ms_tanks_s3.gltf` exists.
-                override = { movementclass = 'HEAVY', objectname = 'wz_tank',
+                -- ms_tanks_s3 (tools/forge, 2026-08-27): native heavy
+                -- tracked tank — 12 m hull, tracks_l/tracks_r pods, railgun
+                -- turret/barrel/muzzle + MG turret2/barrel2/muzzle2 (the
+                -- scriptless slot-N piece-name convention, Weapon.cpp
+                -- ResolveFallbackWeaponPieces). Replaces the WZ2100
+                -- `wz_tank` placeholder; builder default objectname
+                -- (= def name) now resolves, so no override.
+                override = { movementclass = 'HEAVY',
                              transportbyenemy = false } },
         [4] = { weapons = { [1] = { name = 'MS_RAILGUN_S4' },
                             [2] = { name = 'MS_HOWITZER_S2' },
