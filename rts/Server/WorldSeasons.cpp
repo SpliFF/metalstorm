@@ -123,6 +123,40 @@ std::optional<WorldSeasonRecord> WorldSeasons::CurrentSeason(sqlite3* db,
     return out;
 }
 
+std::optional<WorldSeasonRecord> WorldSeasons::SeasonByNumber(sqlite3* db,
+                                                               const std::string& worldId,
+                                                               int seasonNumber) {
+    if (!db || worldId.empty()) return std::nullopt;
+    static const char* kSql =
+        "SELECT world_id, season_number, state, started_world_ms, ended_world_ms, "
+        "settlement_cursor_start, created_at FROM world_seasons "
+        "WHERE world_id=? AND season_number=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+    BindText(stmt, 1, worldId);
+    sqlite3_bind_int64(stmt, 2, seasonNumber);
+    std::optional<WorldSeasonRecord> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW) out = ReadSeasonRow(stmt);
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<WorldSeasonRecord> WorldSeasons::SeasonsFor(sqlite3* db,
+                                                         const std::string& worldId) {
+    std::vector<WorldSeasonRecord> out;
+    if (!db || worldId.empty()) return out;
+    static const char* kSql =
+        "SELECT world_id, season_number, state, started_world_ms, ended_world_ms, "
+        "settlement_cursor_start, created_at FROM world_seasons "
+        "WHERE world_id=? ORDER BY season_number DESC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    BindText(stmt, 1, worldId);
+    while (sqlite3_step(stmt) == SQLITE_ROW) out.push_back(ReadSeasonRow(stmt));
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 std::vector<WorldSeasonDigestRecord> WorldSeasons::DigestsFor(sqlite3* db,
                                                                const std::string& worldId,
                                                                int seasonNumber) {
@@ -361,6 +395,67 @@ nlohmann::json WorldSeasons::AttachSeasonStatus(nlohmann::json worldStatusJson, 
     }
     worldStatusJson["season"] = std::move(season);
     return worldStatusJson;
+}
+
+namespace {
+
+nlohmann::json SeasonRowJson(const WorldSeasonRecord& s) {
+    nlohmann::json j;
+    j["number"]         = s.seasonNumber;
+    j["state"]          = s.state;
+    j["seasonId"]       = WorldSeasonIdFor(s.worldId, s.seasonNumber);
+    j["startedWorldMs"] = s.startedWorldMs;
+    // 0 while active — the row's own truth, not a projection: `endsWorldMs`
+    // (the projected boundary) already lives on `/api/world`'s season attach,
+    // where the rules are in hand. The archive reports what HAPPENED.
+    j["endedWorldMs"]   = s.endedWorldMs;
+    return j;
+}
+
+}  // namespace
+
+nlohmann::json WorldSeasons::SeasonsIndexJson(sqlite3* db, const std::string& worldId) {
+    nlohmann::json body;
+    body["worldId"] = worldId;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& s : SeasonsFor(db, worldId)) arr.push_back(SeasonRowJson(s));
+    body["seasons"] = std::move(arr);
+    return body;
+}
+
+nlohmann::json WorldSeasons::SeasonArchiveJson(sqlite3* db, const std::string& worldId,
+                                               int seasonNumber) {
+    const auto season = SeasonByNumber(db, worldId, seasonNumber);
+    if (!season) {
+        nlohmann::json err;
+        err["error"] = "no_such_season";
+        return err;
+    }
+    nlohmann::json body;
+    body["worldId"] = worldId;
+    body["season"]  = SeasonRowJson(*season);
+    nlohmann::json digests = nlohmann::json::array();
+    for (const auto& d : DigestsFor(db, worldId, seasonNumber)) {
+        nlohmann::json j;
+        // Empty faction id = the unclaimed bucket; serialised as null so a
+        // client cannot mistake it for a faction whose id is "".
+        j["factionId"]          = d.factionId.empty()
+                                      ? nlohmann::json(nullptr)
+                                      : nlohmann::json(d.factionId);
+        j["settlementsWon"]     = d.settlementsWon;
+        j["poiIncomeTotal"]     = d.poiIncomeTotal;
+        j["decayTotal"]         = d.decayTotal;
+        j["treasuryAtRollover"] = d.treasuryAtRollover;
+        digests.push_back(std::move(j));
+    }
+    body["digests"] = std::move(digests);
+    return body;
+}
+
+std::string WorldSeasonIdFor(const std::string& worldId, int seasonNumber) {
+    std::ostringstream os;
+    os << worldId << "/season-" << seasonNumber;
+    return os.str();
 }
 
 std::string WorldSeasonHeadline(int endedSeasonNumber, int newSeasonNumber) {

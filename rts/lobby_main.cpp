@@ -29,6 +29,8 @@
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WorldSeasons.h"
+#include "Server/WorldOfflineChannels.h"
+#include "Server/WebPushCrypto.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1255,6 +1257,9 @@ int main(int argc, char *argv[]) {
   // (WorldEconomy, ensured by WorldStats::EnsureTables above) — it needs both
   // to already exist, though it writes only its own two tables.
   WorldSeasons::EnsureTables(mapDb);
+  // Worldsim phase 3 item 3: `world_push_subscriptions` — per-account browser
+  // push subscriptions, world-scoped like everything else in this layer.
+  WebPushSubscriptions::EnsureTables(mapDb);
   // Seed Earth on first boot, so a fresh lobby has a world to serve rather
   // than a 404 the client has to special-case. Idempotent, and guarded on "no
   // world exists at all": a lobby that already has a world never gets a second
@@ -1831,6 +1836,36 @@ int main(int argc, char *argv[]) {
         if (recipients.empty()) return;
         net.SendSSETo(chatStreamChannel, recipients,
                       WorldNotificationToJson(ev).dump(), "world-staging");
+      });
+
+  // Worldsim phase 3 item 3: the OFFLINE channels — the second sink W11's
+  // header promised. Everything network-shaped is assembled here (pure CPU
+  // plus a couple of indexed reads on the caller's thread, where the sqlite
+  // handle already lives) and handed to the dispatcher's worker thread, so a
+  // dead webhook or a slow push service never blocks the NetworkServer
+  // thread or the lobby sweep loop — see WorldOfflineChannels.h. Both
+  // channels are per-world config-gated and default OFF; an unconfigured
+  // world pays one Load per event and sends nothing.
+  static WorldOfflineDispatcher gOfflineDispatcher(CurlSender());
+  gWorldNotifications.Subscribe(
+      [mapDb](const WorldNotificationEvent &ev) {
+        if (!mapDb) return;
+        const auto world = WorldDirector::Load(mapDb, ev.worldId);
+        if (!world) return;
+        const auto rules = WorldOfflineChannelRules::FromWorldConfig(world->config);
+        if (auto post = BuildDiscordPost(rules.discord, ev))
+          gOfflineDispatcher.Enqueue(std::move(*post));
+        if (rules.webPush.enabled) {
+          const auto recipients = WorldNotificationRecipients(
+              mapDb, ev.worldId, ev.attackerFactionId, ev.defenderFactionId,
+              ev.poiId);
+          const int64_t nowUnix = static_cast<int64_t>(std::time(nullptr));
+          for (const auto &sub : WebPushSubscriptions::ListForAccounts(
+                   mapDb, ev.worldId, recipients)) {
+            if (auto post = BuildWebPushPost(sub, rules.webPush, ev, nowUnix))
+              gOfflineDispatcher.Enqueue(std::move(*post));
+          }
+        }
       });
 
   // Maps endpoint — full metadata from SQLite
@@ -4750,6 +4785,53 @@ int main(int argc, char *argv[]) {
                    return HttpAuth::JsonResponse(200, body.dump());
                  });
 
+  // GET /api/world/seasons — worldsim phase 3 item 2: the season archive
+  // index (every season row, newest first). Read-only transport over
+  // `WorldSeasons::SeasonsIndexJson`; never calls `Tick`, so reading the
+  // archive can never itself cause a rollover.
+  net.AddHttpGet("/api/world/seasons", RouteAuth::Public,
+                 [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+                   if (!mapDb)
+                     return HttpAuth::JsonResponse(
+                         503, R"({"error":"world_database_unavailable"})");
+                   const std::string worldId = worldIdFromQuery(url);
+                   if (worldId.empty())
+                     return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+                   return HttpAuth::JsonResponse(
+                       200, WorldSeasons::SeasonsIndexJson(mapDb, worldId).dump());
+                 });
+
+  // GET /api/world/seasons/{n} — one season plus its archived digest rows.
+  // An ACTIVE season answers 200 with an empty `digests` array (it has not
+  // been archived yet); a number that names no row is a 404.
+  net.AddHttpGet(
+      "/api/world/seasons/*", RouteAuth::Public,
+      [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery(url);
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        // The trailing path segment is the season number. Strictly digits —
+        // "/api/world/seasons/latest" is not a route this build answers, and
+        // refusing it loudly beats atoi() quietly reading it as season 0.
+        std::string tail = url.substr(url.find_last_of('/') + 1);
+        if (tail.empty() ||
+            tail.find_first_not_of("0123456789") != std::string::npos)
+          return HttpAuth::JsonResponse(404, R"({"error":"no_such_season"})");
+        int seasonNumber = 0;
+        try {
+          seasonNumber = std::stoi(tail);
+        } catch (...) {
+          return HttpAuth::JsonResponse(404, R"({"error":"no_such_season"})");
+        }
+        const nlohmann::json body =
+            WorldSeasons::SeasonArchiveJson(mapDb, worldId, seasonNumber);
+        const int status = body.contains("error") ? 404 : 200;
+        return HttpAuth::JsonResponse(status, body.dump());
+      });
+
   // POST /api/world/pause — Capture 11's admin global pause (PLAN-worldsim.md
   // W4). This writes ONLY the world-clock's pause ledger (the durable half
   // that already existed: WorldDirector::OpenPause/ClosePause). Battle
@@ -5111,6 +5193,102 @@ int main(int argc, char *argv[]) {
     return WorldStagingRules::FromWorldConfig(
         w ? w->config : nlohmann::json::object());
   };
+
+  // GET /api/world/push/key — worldsim phase 3 item 3: whether the world
+  // offers Web Push, and the VAPID public key a browser hands
+  // `pushManager.subscribe` as `applicationServerKey`. Public: the key IS
+  // public, and a logged-out lobby needs to know whether to render the
+  // opt-in at all.
+  net.AddHttpGet(
+      "/api/world/push/key", RouteAuth::Public,
+      [mapDb, worldIdFromQuery](const std::string &url) -> HttpResponse {
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery(url);
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const auto world = WorldDirector::Load(mapDb, worldId);
+        if (!world)
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        const auto rules = WorldOfflineChannelRules::FromWorldConfig(world->config);
+        nlohmann::json body;
+        body["worldId"] = worldId;
+        const bool offered =
+            rules.webPush.enabled && !rules.webPush.vapidPublicKey.empty();
+        body["enabled"] = offered;
+        body["publicKey"] = offered ? nlohmann::json(rules.webPush.vapidPublicKey)
+                                    : nlohmann::json(nullptr);
+        return HttpAuth::JsonResponse(200, body.dump());
+      });
+
+  // POST /api/world/push/subscribe — store this account's browser push
+  // subscription for one world. Body is the PushSubscription.toJSON() shape:
+  // {"endpoint":…, "keys":{"p256dh":…, "auth":…}}. Insert-or-replace on
+  // (world, account, endpoint): a re-subscribing browser rotates its keys
+  // and the newest must win.
+  net.AddHttpPost(
+      "/api/world/push/subscribe", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+        WebPushSubscriptionRecord sub;
+        sub.worldId   = worldId;
+        sub.accountId = uid;
+        sub.endpoint  = j.value("endpoint", std::string());
+        if (j.contains("keys") && j["keys"].is_object()) {
+          sub.p256dh = j["keys"].value("p256dh", std::string());
+          sub.auth   = j["keys"].value("auth", std::string());
+        }
+        sub.createdAt = static_cast<int64_t>(std::time(nullptr));
+        // Refuse malformed keys HERE, loudly, rather than discovering them
+        // as a per-event encrypt failure that silently sends nothing: the
+        // p256dh must decode to a 65-byte uncompressed point and the auth
+        // secret to 16 bytes.
+        if (sub.endpoint.rfind("https://", 0) != 0 ||
+            WebPush::Base64UrlDecode(sub.p256dh).size() != 65 ||
+            WebPush::Base64UrlDecode(sub.auth).size() != 16)
+          return HttpAuth::JsonResponse(400, R"({"error":"bad_subscription"})");
+        if (!WebPushSubscriptions::Upsert(mapDb, sub))
+          return HttpAuth::JsonResponse(500, R"({"error":"store_failed"})");
+        return HttpAuth::JsonResponse(201, R"({"ok":true})");
+      });
+
+  // POST /api/world/push/unsubscribe — body {"endpoint":…}. Scoped to the
+  // acting account: nobody can drop another account's subscription.
+  net.AddHttpPost(
+      "/api/world/push/unsubscribe", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+        const std::string endpoint = j.value("endpoint", std::string());
+        if (endpoint.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad_subscription"})");
+        WebPushSubscriptions::Remove(mapDb, worldId, uid, endpoint);
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
 
   // POST /api/world/staging/commit — §7.1's instigation, as a click.
   // Body: {"poi":…, "transports"?:int, "squads"?:int, "origin"?:…}.
@@ -6332,6 +6510,14 @@ int main(int argc, char *argv[]) {
     // id is the row's own identity and never repeats.
     req.name = poi->name.empty() ? poi->poiId : poi->name;
     req.name += " · staging " + std::to_string(row.stagingId);
+    // Worldsim phase 3 item 1: stamp the war with the season it is born
+    // into, so the lifecycle sweep's season-boundary rule
+    // (WarTermination.h) has a `warSeasonId` to compare against the current
+    // one. A world W12's tick has not opened a season on yet stamps
+    // nothing — an unseasoned war never ends on a season boundary, by the
+    // rule's own "both empty never ends a war".
+    if (const auto season = WorldSeasons::CurrentSeason(mapDb, row.worldId))
+      req.seasonId = WorldSeasonIdFor(row.worldId, season->seasonNumber);
 
     WarSeedPopulation pop;
     pop.registered = db.CountAccountsByFaction();
@@ -8489,13 +8675,28 @@ int main(int argc, char *argv[]) {
           }
         }
         facts.warSeasonId = war.seasonId;
+        // Worldsim phase 3 item 1: the current season, resolved room → POI →
+        // world exactly the way W6's settlement hook below does. A war whose
+        // room is not any world's POI (a world-only scenario, or a theatre
+        // seeded before the world layer) resolves nothing and keeps an empty
+        // `currentSeasonId` — which the rule reads as "no seasons
+        // configured", never as an ending. Same for a world W12's tick has
+        // not yet opened a season on. The id format is
+        // `WorldSeasonIdFor`'s, the SAME single builder that stamped
+        // `wars.season_id` at materialisation, so the comparison in
+        // `EvaluateWarTermination` can never be a format mismatch.
+        if (const GameRoom* room = rooms.GetRoom(war.roomId)) {
+          if (const auto poi = WorldDirector::PoiForMap(mapDb, room->mapId)) {
+            if (const auto season = WorldSeasons::CurrentSeason(mapDb, poi->worldId))
+              facts.currentSeasonId =
+                  WorldSeasonIdFor(poi->worldId, season->seasonNumber);
+          }
+        }
         // NOT WIRED YET, and deliberately visible as such rather than
         // silently absent: `operatorRetire` needs a live-ops verb (a GmVerbs
-        // entry) and `currentSeasonId` needs a season the lobby is
-        // configured with. Neither exists, so both stay empty/false — which
-        // the rule reads as "no seasons configured, nobody pressed retire",
-        // the correct answer for this deployment rather than a default
-        // standing in for a missing one.
+        // entry). It stays false — which the rule reads as "nobody pressed
+        // retire", the correct answer for this deployment rather than a
+        // default standing in for a missing one.
 
         const auto step =
             AdvanceWarLifecycle(mapDb, war.roomId, facts, hasLiveHumans, now);

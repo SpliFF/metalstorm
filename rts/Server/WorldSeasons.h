@@ -134,6 +134,31 @@ public:
                                                             const std::string& worldId,
                                                             int seasonNumber);
 
+    /// One season row by number, any state — the archive route's loader.
+    /// `CurrentSeason` deliberately answers only the active row; a digest
+    /// reader wants ended seasons too.
+    static std::optional<WorldSeasonRecord> SeasonByNumber(sqlite3* db,
+                                                            const std::string& worldId,
+                                                            int seasonNumber);
+
+    /// Every season row for one world, newest first — the archive index.
+    static std::vector<WorldSeasonRecord> SeasonsFor(sqlite3* db,
+                                                      const std::string& worldId);
+
+    /// `GET /api/world/seasons` — the archive index: every season row
+    /// (number, state, world-ms bounds), newest first. Read-only transport
+    /// body, same "director builds the body, handler is transport only"
+    /// split every other /api/world/* route follows.
+    static nlohmann::json SeasonsIndexJson(sqlite3* db, const std::string& worldId);
+
+    /// `GET /api/world/seasons/{n}` — one season plus its archived digest
+    /// rows. `{"error":"no_such_season"}` when the number names no row —
+    /// the route maps that to a 404. An ACTIVE season answers with its row
+    /// and an empty `digests` array (it has not been archived yet), which is
+    /// the truthful reading rather than an error.
+    static nlohmann::json SeasonArchiveJson(sqlite3* db, const std::string& worldId,
+                                            int seasonNumber);
+
     /// What one `Tick` call did.
     struct TickResult {
         bool rolledOver = false;
@@ -168,3 +193,12 @@ public:
 /// built once, here, so they cannot drift, same discipline
 /// `WorldNotificationHeadline`/`WarTerminalReasonHeadline` use.
 std::string WorldSeasonHeadline(int endedSeasonNumber, int newSeasonNumber);
+
+/// The canonical season identity STRING — the value `wars.season_id`
+/// (`WarSeedRequest::seasonId` / `WarTerminationFacts::warSeasonId` /
+/// `currentSeasonId`) carries. Built in exactly one place so the stamp a war
+/// is seeded with and the comparison the termination sweep makes can never
+/// drift in format. Scoped by world deliberately: two worlds both in their
+/// "season 3" are NOT in the same season, and a bare number would say they
+/// were.
+std::string WorldSeasonIdFor(const std::string& worldId, int seasonNumber);
