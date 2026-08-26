@@ -21,6 +21,7 @@
 #include "Server/EngineIdentity.h"
 #include "Server/GameStateStore.h"
 #include "Server/Hibernation.h"
+#include "Server/ResumeVerify.h"
 #include "Server/SimSnapshot.h"
 #include "Server/SnapshotRoundTrip.h"
 #include "Server/DevBuildGate.h"
@@ -283,6 +284,11 @@ int main(int argc, char* argv[])
     // (gameId, roomId) is already `--game` + `--room`; see Hibernation.h for
     // why §3's `--resume <gameId>` sketch is not what landed.
     bool resumeRequested = false;
+    // `--resume-verify`: after the resume applies, re-capture the world and
+    // byte-compare with the payload just applied, print the verdict and EXIT
+    // — the fresh-process idempotence bar (ResumeVerify.h). Requires
+    // `--resume`; driven by tools/scripts/hibernate-resume-recapture.sh.
+    bool resumeVerifyRequested = false;
     /// Set once a resume has actually APPLIED a stored world, which is a
     /// stricter fact than `resumeRequested` and the only one the runtime-AI
     /// restore may act on: re-seating a caretaker over a freshly staged world
@@ -517,6 +523,8 @@ int main(int argc, char* argv[])
             postGameExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--resume") {
             resumeRequested = true;
+        } else if (arg == "--resume-verify") {
+            resumeVerifyRequested = true;
         } else if (arg == "--no-hibernate") {
             hibernationEnabled = false;
         } else if (arg == "--hibernate-idle-seconds" && i + 1 < argc) {
@@ -781,6 +789,12 @@ int main(int argc, char* argv[])
             "--resume is mutually exclusive with --replay and "
             "--snapshot-roundtrip: each of them supplies the world, and this "
             "invocation asks for two");
+        return 1;
+    }
+    if (resumeVerifyRequested && !resumeRequested) {
+        SLOG(SPRING_LOG_ERROR,
+            "--resume-verify requires --resume: it verifies the world a "
+            "resume just applied, and this boot is not resuming one");
         return 1;
     }
 
@@ -2121,6 +2135,10 @@ int main(int argc, char* argv[])
             }
         } resumeSrc;
         resumeSrc.store = &gmSnapshotStore;
+        // `--resume-verify` needs the exact bytes the restore applies, so ask
+        // the store to keep them before it runs (GameStateStore.h).
+        if (resumeVerifyRequested)
+            gmSnapshotStore.RetainRestoredPayload(true);
 
         hibernate::ResumeRequest rq;
         rq.requested = true;
@@ -2142,6 +2160,36 @@ int main(int argc, char* argv[])
         // The world is back. Its AI seats are not — see the restore call below,
         // which has to wait for ctx.aiSpawnEnv (the plugin roots) to be filled.
         resumedWorld = true;
+
+        // --- `--resume-verify` (PLAN-persistence §8, ResumeVerify.h) ---
+        // Re-capture the world exactly as the resume left it — before the
+        // first tick, before AI seats respawn, before any client can connect
+        // — and byte-compare with the payload the resume applied. The verdict
+        // is this boot's whole product: serving on would let the harness's
+        // own SIGTERM write a checkpoint over the row it just verified, so
+        // the process exits either way. The LOG LINE is the harness's gate,
+        // not the exit code — a debug build aborts in static destructors on
+        // every exit (PLAN-replay T5-c).
+        if (resumeVerifyRequested) {
+            std::vector<uint8_t> recap;
+            std::string verr;
+            gamestate::ISimSerializer* ser = gmSnapshotStore.Serializer();
+            if (ser == nullptr || !ser->Serialize(recap, verr)) {
+                SLOG(SPRING_LOG_ERROR,
+                     "resume verify: re-capture FAILED — %s",
+                     verr.empty() ? "no serializer attached" : verr.c_str());
+                return 1;
+            }
+            const resumeverify::Verdict v = resumeverify::Compare(
+                gmSnapshotStore.LastRestoredPayload(), recap);
+            const std::string line = resumeverify::Format(v, ro.frame);
+            if (v.identical) {
+                SLOG(SPRING_LOG_NOTICE, "%s", line.c_str());
+                return 0;
+            }
+            SLOG(SPRING_LOG_ERROR, "%s", line.c_str());
+            return 1;
+        }
     }
 
     // --- AI slot resolution ---

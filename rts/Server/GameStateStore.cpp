@@ -706,6 +706,11 @@ DecodeStatus GameStateStore::ApplyBlob(const std::vector<uint8_t>& blob,
     }
     frameOut = meta.frame;
 
+    // `--resume-verify` compares a fresh re-capture against exactly these
+    // bytes (ResumeVerify.h). Retained only on request — see the setter.
+    if (retainRestoredPayload)
+        lastRestoredPayload = std::move(payload);
+
     // The journal must see the discontinuity or a replay would re-apply the
     // post-restore cause stream against the wrong state (SyncedInputJournal.h,
     // InputKind::SnapshotRestore).
