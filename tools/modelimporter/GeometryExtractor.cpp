@@ -723,6 +723,13 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
 
     json doc;
     doc["configVersion"] = GeometryExtractor::kCurrentSchemaVersion;
+    // Additive field (older readers ignore it): the emitted extents are in
+    // ELMOS — the world-scale contract (kElmosPerMetre in the header).
+    // Metre-authored sources must have been pre-scaled by the caller
+    // (modelimporter --metres) before this runs; elmo-authored sources
+    // (S3O/BAR, map features) pass through unscaled. The marker lets
+    // tools/scripts/rescale_models_to_elmos.py refuse to double-scale.
+    doc["units"] = "elmos";
     doc["radius"] = JsonFloat(overrides.radius.value_or(radius));
     doc["height"] = JsonFloat(overrides.height.value_or(height));
     doc["midpos"] = JsonVec3(outMidpos[0], outMidpos[1], outMidpos[2]);

@@ -13,6 +13,14 @@ Two reductions, both for isolating the in-game thin-instance render bug:
 To add a piece back, delete it from DROP and re-run.
 
     python3 strip_model.py
+
+NOTE (world scale, 2026-08-27): the backup source is METRE-scale (pre
+world-scale contract). The shipped corpus is in ELMOS (8 elmos = 1 m,
+DESIGN-MODEL-BUILDING.md §12). After running this tool, convert the
+emitted model before shipping it:
+
+    python3 tools/scripts/rescale_models_to_elmos.py \
+        data/games/metalstorm/models/fable_colossus.gltf
 """
 import json
 import os

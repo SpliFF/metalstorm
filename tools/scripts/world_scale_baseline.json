@@ -1,0 +1,580 @@
+{
+ "comment": "Pre-world-scale baseline (captured 2026-08-27, PLAN-world-scale.md section 5 Option A): SPRINGRTS_geometry radius/height for every metalstorm unit/building model (authored in METRES, 1 glTF unit = 1 m) and every map-feature model (authored in ELMOS, 1 unit = 1 elmo). check_model_scale.py asserts the shipped unit corpus is exactly elmos_per_metre x this and the feature corpus is exactly 1x this.",
+ "elmos_per_metre": 8.0,
+ "units": {
+  "fable_airship.gltf": {
+   "radius": 35.543,
+   "height": 17.9
+  },
+  "fable_battleship.gltf": {
+   "radius": 41.7122,
+   "height": 19.65
+  },
+  "fable_bomber.gltf": {
+   "radius": 8.4444,
+   "height": 2.95
+  },
+  "fable_carrier.gltf": {
+   "radius": 54.9601,
+   "height": 20.45
+  },
+  "fable_colossus.gltf": {
+   "radius": 9.6581,
+   "height": 15.08
+  },
+  "fable_factory.gltf": {
+   "radius": 21.2993,
+   "height": 17.8
+  },
+  "fable_fighter.gltf": {
+   "radius": 10.4279,
+   "height": 3.85
+  },
+  "fable_heavy.gltf": {
+   "radius": 11.2869,
+   "height": 5.28
+  },
+  "fable_mech.gltf": {
+   "radius": 2.1477,
+   "height": 3.18
+  },
+  "fable_tank.gltf": {
+   "radius": 5.7692,
+   "height": 3.18
+  },
+  "fable_train_cargo.gltf": {
+   "radius": 9.5145,
+   "height": 4.775
+  },
+  "fable_train_engine.gltf": {
+   "radius": 12.4917,
+   "height": 6.6
+  },
+  "fable_train_gun.gltf": {
+   "radius": 9.5599,
+   "height": 5.125
+  },
+  "fable_train_troop.gltf": {
+   "radius": 9.5734,
+   "height": 5.225
+  },
+  "ms_anc_aqueduct.gltf": {
+   "radius": 21.7837,
+   "height": 30.0
+  },
+  "ms_anc_archive.gltf": {
+   "radius": 18.7385,
+   "height": 24.251
+  },
+  "ms_anc_barge.gltf": {
+   "radius": 16.8918,
+   "height": 9.215
+  },
+  "ms_anc_beacon.gltf": {
+   "radius": 16.6006,
+   "height": 26.0
+  },
+  "ms_anc_bridge_span.gltf": {
+   "radius": 20.2689,
+   "height": 13.45
+  },
+  "ms_anc_custodian.gltf": {
+   "radius": 2.9805,
+   "height": 2.8176
+  },
+  "ms_anc_foundry.gltf": {
+   "radius": 42.6671,
+   "height": 40.0
+  },
+  "ms_anc_gate.gltf": {
+   "radius": 24.2567,
+   "height": 30.0
+  },
+  "ms_anc_harvester.gltf": {
+   "radius": 10.0542,
+   "height": 5.05
+  },
+  "ms_anc_interdictor.gltf": {
+   "radius": 19.7029,
+   "height": 24.0
+  },
+  "ms_anc_lance_battery.gltf": {
+   "radius": 14.0593,
+   "height": 13.7506
+  },
+  "ms_anc_obelisk_field.gltf": {
+   "radius": 13.7774,
+   "height": 8.9473
+  },
+  "ms_anc_reactor.gltf": {
+   "radius": 21.5267,
+   "height": 25.0
+  },
+  "ms_anc_sentinel.gltf": {
+   "radius": 2.5556,
+   "height": 1.0136
+  },
+  "ms_anc_shield_pylon.gltf": {
+   "radius": 11.8356,
+   "height": 17.98
+  },
+  "ms_anc_siege_platform.gltf": {
+   "radius": 16.3197,
+   "height": 9.8659
+  },
+  "ms_anc_storm_caster.gltf": {
+   "radius": 12.7399,
+   "height": 10.55
+  },
+  "ms_anc_titan.gltf": {
+   "radius": 18.3864,
+   "height": 21.4
+  },
+  "ms_anc_vault_complex.gltf": {
+   "radius": 27.5504,
+   "height": 17.0
+  },
+  "ms_anc_warden.gltf": {
+   "radius": 7.8562,
+   "height": 12.15
+  },
+  "ms_ancient_hulk.gltf": {
+   "radius": 54.3701,
+   "height": 16.5164
+  },
+  "ms_arsenal_barge.gltf": {
+   "radius": 28.5123,
+   "height": 8.4
+  },
+  "ms_artillery_s2.gltf": {
+   "radius": 4.7534,
+   "height": 3.51
+  },
+  "ms_barricade_set.gltf": {
+   "radius": 13.0833,
+   "height": 3.62
+  },
+  "ms_cargo_tramp.gltf": {
+   "radius": 28.0986,
+   "height": 12.4
+  },
+  "ms_civbus.gltf": {
+   "radius": 5.7922,
+   "height": 3.61
+  },
+  "ms_civilians.gltf": {
+   "radius": 0.9563,
+   "height": 1.8
+  },
+  "ms_civtruck.gltf": {
+   "radius": 4.182,
+   "height": 3.4
+  },
+  "ms_colossus_wreck.gltf": {
+   "radius": 11.3287,
+   "height": 6.6413
+  },
+  "ms_command_nexus.gltf": {
+   "radius": 21.3426,
+   "height": 23.52
+  },
+  "ms_command_post.gltf": {
+   "radius": 8.2209,
+   "height": 7.74
+  },
+  "ms_command_s2.gltf": {
+   "radius": 4.6529,
+   "height": 4.145
+  },
+  "ms_comms_relay.gltf": {
+   "radius": 4.6175,
+   "height": 5.94
+  },
+  "ms_courier_car.gltf": {
+   "radius": 3.4072,
+   "height": 2.4001
+  },
+  "ms_depot.gltf": {
+   "radius": 16.3138,
+   "height": 9.4
+  },
+  "ms_dig_site.gltf": {
+   "radius": 8.6615,
+   "height": 3.4766
+  },
+  "ms_dreadnought.gltf": {
+   "radius": 42.2902,
+   "height": 16.2029
+  },
+  "ms_dress_anarchic.gltf": {
+   "radius": 9.0773,
+   "height": 2.7258
+  },
+  "ms_dress_dynasty.gltf": {
+   "radius": 6.9418,
+   "height": 2.78
+  },
+  "ms_dress_order.gltf": {
+   "radius": 5.6771,
+   "height": 2.72
+  },
+  "ms_dress_resistance.gltf": {
+   "radius": 9.9919,
+   "height": 2.6
+  },
+  "ms_engineers_s1.gltf": {
+   "radius": 0.9799,
+   "height": 1.835
+  },
+  "ms_engineers_s2.gltf": {
+   "radius": 0.9835,
+   "height": 1.84
+  },
+  "ms_engineers_s3.gltf": {
+   "radius": 1.0368,
+   "height": 1.8897
+  },
+  "ms_expedition_rig.gltf": {
+   "radius": 4.9573,
+   "height": 6.12
+  },
+  "ms_ferry.gltf": {
+   "radius": 17.0694,
+   "height": 8.1
+  },
+  "ms_field_workshop.gltf": {
+   "radius": 9.6241,
+   "height": 5.9
+  },
+  "ms_fishing_trawler.gltf": {
+   "radius": 9.8497,
+   "height": 6.6
+  },
+  "ms_fuel_tanker.gltf": {
+   "radius": 4.2289,
+   "height": 3.1
+  },
+  "ms_garrison.gltf": {
+   "radius": 15.5885,
+   "height": 10.3311
+  },
+  "ms_grain_silo.gltf": {
+   "radius": 17.5089,
+   "height": 15.0
+  },
+  "ms_habitat.gltf": {
+   "radius": 21.2006,
+   "height": 23.5
+  },
+  "ms_landing_ship.gltf": {
+   "radius": 18.2269,
+   "height": 8.7
+  },
+  "ms_lighthouse.gltf": {
+   "radius": 12.4161,
+   "height": 21.65
+  },
+  "ms_market_stalls.gltf": {
+   "radius": 5.8485,
+   "height": 2.97
+  },
+  "ms_meeting_hall.gltf": {
+   "radius": 12.6338,
+   "height": 10.15
+  },
+  "ms_metal_pit.gltf": {
+   "radius": 12.1171,
+   "height": 15.1608
+  },
+  "ms_militia.gltf": {
+   "radius": 1.0034,
+   "height": 1.815
+  },
+  "ms_monolith_spire.gltf": {
+   "radius": 11.6317,
+   "height": 20.0017
+  },
+  "ms_mooring_mast.gltf": {
+   "radius": 12.5825,
+   "height": 20.0
+  },
+  "ms_obs_balloon.gltf": {
+   "radius": 14.0984,
+   "height": 26.4
+  },
+  "ms_oil_derrick.gltf": {
+   "radius": 12.6444,
+   "height": 18.0
+  },
+  "ms_patrol_boat.gltf": {
+   "radius": 10.6168,
+   "height": 5.45
+  },
+  "ms_pontoon_wharf.gltf": {
+   "radius": 20.4894,
+   "height": 6.0157
+  },
+  "ms_port_crane.gltf": {
+   "radius": 15.455,
+   "height": 20.16
+  },
+  "ms_radar_s1.gltf": {
+   "radius": 3.3663,
+   "height": 4.0556
+  },
+  "ms_rail_bridge.gltf": {
+   "radius": 12.415,
+   "height": 4.15
+  },
+  "ms_rail_platform.gltf": {
+   "radius": 13.8726,
+   "height": 6.2354
+  },
+  "ms_river_monitor.gltf": {
+   "radius": 17.9591,
+   "height": 6.93
+  },
+  "ms_road_bridge.gltf": {
+   "radius": 13.0,
+   "height": 4.52
+  },
+  "ms_salvage_crane_ship.gltf": {
+   "radius": 28.4639,
+   "height": 14.275
+  },
+  "ms_scout_buggy.gltf": {
+   "radius": 2.9457,
+   "height": 2.55
+  },
+  "ms_shanty_block.gltf": {
+   "radius": 12.1109,
+   "height": 8.455
+  },
+  "ms_soldiers_s1.gltf": {
+   "radius": 1.0149,
+   "height": 1.845
+  },
+  "ms_soldiers_s2.gltf": {
+   "radius": 1.0453,
+   "height": 1.85
+  },
+  "ms_soldiers_s3.gltf": {
+   "radius": 1.1067,
+   "height": 1.9
+  },
+  "ms_soldiers_s4.gltf": {
+   "radius": 1.2316,
+   "height": 2.0986
+  },
+  "ms_staticdefense_s1.gltf": {
+   "radius": 4.2829,
+   "height": 2.68
+  },
+  "ms_staticdefense_s2.gltf": {
+   "radius": 4.5709,
+   "height": 4.5
+  },
+  "ms_staticdefense_s3.gltf": {
+   "radius": 5.5767,
+   "height": 6.0
+  },
+  "ms_staticdefense_s4.gltf": {
+   "radius": 6.8415,
+   "height": 8.0
+  },
+  "ms_supply_dump.gltf": {
+   "radius": 6.9734,
+   "height": 1.56
+  },
+  "ms_supply_truck.gltf": {
+   "radius": 4.2301,
+   "height": 4.05
+  },
+  "ms_tank_farm.gltf": {
+   "radius": 18.6914,
+   "height": 8.05
+  },
+  "ms_tank_wreck.gltf": {
+   "radius": 7.1066,
+   "height": 2.7794
+  },
+  "ms_technical.gltf": {
+   "radius": 3.1463,
+   "height": 2.49
+  },
+  "ms_timber_yard.gltf": {
+   "radius": 8.6607,
+   "height": 4.6422
+  },
+  "ms_train_wreck.gltf": {
+   "radius": 12.6133,
+   "height": 6.6405
+  },
+  "ms_transit_hub.gltf": {
+   "radius": 19.4744,
+   "height": 11.2
+  },
+  "ms_vault_door.gltf": {
+   "radius": 13.2,
+   "height": 6.4
+  },
+  "ms_watchtower.gltf": {
+   "radius": 5.9892,
+   "height": 10.0579
+  },
+  "ms_water_works.gltf": {
+   "radius": 16.0212,
+   "height": 16.0
+  },
+  "wz_building.gltf": {
+   "radius": 16.272,
+   "height": 21.128
+  },
+  "wz_cyborg.gltf": {
+   "radius": 2.089,
+   "height": 2.4
+  },
+  "wz_tank.gltf": {
+   "radius": 5.6415,
+   "height": 3.351
+  },
+  "wz_wheeled.gltf": {
+   "radius": 4.0622,
+   "height": 1.8857
+  }
+ },
+ "map_features": {
+  "content/maps/meridian_basin/objects3d/bush_scrub.gltf": {
+   "radius": 21.9633,
+   "height": 20.9052
+  },
+  "content/maps/meridian_basin/objects3d/fallen_log.gltf": {
+   "radius": 19.8359,
+   "height": 6.4673
+  },
+  "content/maps/meridian_basin/objects3d/log_fence.gltf": {
+   "radius": 9.687,
+   "height": 6.8
+  },
+  "content/maps/meridian_basin/objects3d/rock_boulder.gltf": {
+   "radius": 32.5578,
+   "height": 23.7708
+  },
+  "content/maps/meridian_basin/objects3d/rock_boulder_large.gltf": {
+   "radius": 55.4058,
+   "height": 39.3914
+  },
+  "content/maps/meridian_basin/objects3d/ruin_pillar.gltf": {
+   "radius": 14.9877,
+   "height": 24.3106
+  },
+  "content/maps/meridian_basin/objects3d/ruin_wall.gltf": {
+   "radius": 15.9607,
+   "height": 12.0619
+  },
+  "content/maps/meridian_basin/objects3d/standing_stone.gltf": {
+   "radius": 19.0446,
+   "height": 33.0
+  },
+  "content/maps/meridian_basin/objects3d/tree_broadleaf.gltf": {
+   "radius": 66.8338,
+   "height": 93.3179
+  },
+  "content/maps/meridian_basin/objects3d/tree_conifer.gltf": {
+   "radius": 67.2885,
+   "height": 104.62
+  },
+  "content/maps/meridian_basin/objects3d/tree_stump.gltf": {
+   "radius": 9.3443,
+   "height": 12.154
+  },
+  "content/maps/skerry_reach/objects3d/bush_scrub.gltf": {
+   "radius": 21.9633,
+   "height": 20.9052
+  },
+  "content/maps/skerry_reach/objects3d/fallen_log.gltf": {
+   "radius": 19.8359,
+   "height": 6.4673
+  },
+  "content/maps/skerry_reach/objects3d/log_fence.gltf": {
+   "radius": 9.687,
+   "height": 6.8
+  },
+  "content/maps/skerry_reach/objects3d/rock_boulder.gltf": {
+   "radius": 32.5578,
+   "height": 23.7708
+  },
+  "content/maps/skerry_reach/objects3d/rock_boulder_large.gltf": {
+   "radius": 55.4058,
+   "height": 39.3914
+  },
+  "content/maps/skerry_reach/objects3d/ruin_pillar.gltf": {
+   "radius": 14.9877,
+   "height": 24.3106
+  },
+  "content/maps/skerry_reach/objects3d/ruin_wall.gltf": {
+   "radius": 15.9607,
+   "height": 12.0619
+  },
+  "content/maps/skerry_reach/objects3d/standing_stone.gltf": {
+   "radius": 19.0446,
+   "height": 33.0
+  },
+  "content/maps/skerry_reach/objects3d/tree_broadleaf.gltf": {
+   "radius": 66.8338,
+   "height": 93.3179
+  },
+  "content/maps/skerry_reach/objects3d/tree_conifer.gltf": {
+   "radius": 67.2885,
+   "height": 104.62
+  },
+  "content/maps/skerry_reach/objects3d/tree_stump.gltf": {
+   "radius": 9.3443,
+   "height": 12.154
+  },
+  "content/maps/sundered_arc/objects3d/bush_scrub.gltf": {
+   "radius": 21.9633,
+   "height": 20.9052
+  },
+  "content/maps/sundered_arc/objects3d/fallen_log.gltf": {
+   "radius": 19.8359,
+   "height": 6.4673
+  },
+  "content/maps/sundered_arc/objects3d/log_fence.gltf": {
+   "radius": 9.687,
+   "height": 6.8
+  },
+  "content/maps/sundered_arc/objects3d/rock_boulder.gltf": {
+   "radius": 32.5578,
+   "height": 23.7708
+  },
+  "content/maps/sundered_arc/objects3d/rock_boulder_large.gltf": {
+   "radius": 55.4058,
+   "height": 39.3914
+  },
+  "content/maps/sundered_arc/objects3d/ruin_pillar.gltf": {
+   "radius": 14.9877,
+   "height": 24.3106
+  },
+  "content/maps/sundered_arc/objects3d/ruin_wall.gltf": {
+   "radius": 15.9607,
+   "height": 12.0619
+  },
+  "content/maps/sundered_arc/objects3d/standing_stone.gltf": {
+   "radius": 19.0446,
+   "height": 33.0
+  },
+  "content/maps/sundered_arc/objects3d/tree_broadleaf.gltf": {
+   "radius": 66.8338,
+   "height": 93.3179
+  },
+  "content/maps/sundered_arc/objects3d/tree_conifer.gltf": {
+   "radius": 67.2885,
+   "height": 104.62
+  },
+  "content/maps/sundered_arc/objects3d/tree_stump.gltf": {
+   "radius": 9.3443,
+   "height": 12.154
+  }
+ }
+}

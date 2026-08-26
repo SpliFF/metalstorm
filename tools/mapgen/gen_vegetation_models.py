@@ -765,8 +765,11 @@ def main() -> None:
             continue
         pieces = [dict(name=part.name, parent=-1, offset=(0.0, 0.0, 0.0),
                        part=part)]
+        # units='elmo': vegetation authors directly on the engine's scale
+        # (1 unit = 1 elmo) — the metre→elmo world-scale conversion
+        # (gltf_export.ELMOS_PER_METRE) must NOT apply here.
         gltf_export.export(pieces, name, texmode="ktx2", outdir=out_dir,
-                           texture_maps=("diffuse", "orm"))
+                           texture_maps=("diffuse", "orm"), units="elmo")
 
         # Textures: one atlas per species (identical content, but each glTF
         # references its own stem — the forge convention, and it keeps a

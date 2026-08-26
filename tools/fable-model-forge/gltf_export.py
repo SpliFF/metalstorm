@@ -11,6 +11,23 @@ from __future__ import annotations
 import json
 import numpy as np
 
+# ── World-scale contract ────────────────────────────────────────────────
+# 8 elmos = 1 metre (PLAN-world-scale.md §5 Option A, USER-DECIDED
+# 2026-08-27; DESIGN-MODEL-BUILDING.md §4/§12). Forge layouts keep
+# authoring at 1 unit = 1 METRE — that half was never in doubt — and this
+# writer converts to ELMOS at export, because the sim consumes every
+# SPRINGRTS_geometry quantity (radius/height/midpos/mins/maxs/piece
+# offsets) as elmos and builds the collision AND selection volumes from
+# them (ModelConfigLoader.cpp → Unit.cpp), so the scale cannot be
+# render-only. Positions, offsets and animation *translation* channels
+# scale; normals, UVs, rotations and times are dimensionless.
+# Sources already authored in elmos (the map-feature corpus,
+# tools/mapgen/gen_vegetation_models.py) pass units='elmo' and are NOT
+# scaled — a blanket scale over them is a defect.
+# The same constant lives in tools/modelimporter/GeometryExtractor.h
+# (kElmosPerMetre) and tools/scripts/rescale_models_to_elmos.py.
+ELMOS_PER_METRE = 8.0
+
 
 def f3(v):
     return [round(float(x), 5) for x in v]
@@ -41,8 +58,17 @@ DEFAULT_TEXTURE_MAPS = ('diffuse', 'orm', 'emissive', 'team')
 
 
 def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
-           normal_map=False, texture_maps=DEFAULT_TEXTURE_MAPS):
-    """texture_maps: which of the PBR set this model actually ships.
+           normal_map=False, texture_maps=DEFAULT_TEXTURE_MAPS,
+           units='m'):
+    """units: what the caller's `pieces` (and clips) are authored in.
+    'm' (the default, DESIGN-MODEL-BUILDING.md §4 — every unit/building
+    layout) converts by ELMOS_PER_METRE at write time so the emitted
+    .gltf/.bin and SPRINGRTS_geometry land in ELMOS, the unit the sim
+    consumes. 'elmo' passes through unscaled (the map-feature corpus,
+    already on the engine's scale). The output always records
+    SPRINGRTS_geometry.units = 'elmos'.
+
+    texture_maps: which of the PBR set this model actually ships.
     Units use the full four (`DEFAULT_TEXTURE_MAPS`); map props such as
     the vegetation set (tools/mapgen/gen_vegetation_models.py) ship only
     ('diffuse', 'orm') — no emissive, and no team colour, since features
@@ -61,6 +87,12 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
     (never `matrix`) so animation channels are spec-legal."""
     import os
     os.makedirs(outdir, exist_ok=True)
+
+    if units not in ('m', 'elmo'):
+        raise ValueError(f"units must be 'm' or 'elmo', got {units!r}")
+    # metre→elmo world-scale (see ELMOS_PER_METRE above). Exact in
+    # float32: ×8 only shifts the exponent.
+    scale = ELMOS_PER_METRE if units == 'm' else 1.0
 
     # ── binary buffer ──
     blob = bytearray()
@@ -84,7 +116,8 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
         part = pc['part']
         if part is None or not part.pos:
             continue
-        pos = np.array(part.pos, dtype=np.float32)
+        # positions carry the world scale; normals are dimensionless
+        pos = np.array(part.pos, dtype=np.float32) * np.float32(scale)
         nrm = np.array(part.nrm, dtype=np.float32)
         uv = np.array(part.uv, dtype=np.float32)
         idx = np.array(part.idx, dtype=np.uint32)
@@ -136,7 +169,7 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
         if pi in piece_mesh_index:
             nd['mesh'] = piece_mesh_index[pi]
         if any(abs(o) > 1e-9 for o in pc['offset']):
-            nd['translation'] = [float(o) for o in pc['offset']]
+            nd['translation'] = [float(o) * scale for o in pc['offset']]
 
     # ── animations ──
     piece_index_by_name = {pc['name']: i for i, pc in enumerate(pieces)}
@@ -152,6 +185,9 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
             vals = np.array([k[1] for k in keys], dtype=np.float32)
             gpath = {'rotation': 'rotation', 'translation': 'translation',
                      'scale': 'scale'}[path]
+            if gpath == 'translation':
+                # absolute node translations are lengths → world scale
+                vals = vals * np.float32(scale)
             vtype = 'VEC4' if gpath == 'rotation' else 'VEC3'
             vt_in = add_view(times.tobytes(), None)
             vt_out = add_view(vals.tobytes(), None)
@@ -184,22 +220,28 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
         part = pc['part']
         if part is not None and part.pos:
             mn, mx = part.bounds()
+            mn = tuple(v * scale for v in mn)
+            mx = tuple(v * scale for v in mx)
         else:
             mn = mx = (0.0, 0.0, 0.0)
         geo_pieces.append(dict(name=pc['name'], parent=pc['parent'],
-                               offset=f3(pc['offset']),
+                               offset=f3(np.asarray(pc['offset'], dtype=float) * scale),
                                mins=f3(mn), maxs=f3(mx)))
         if part is not None and part.pos:
-            woff = world_offset(pieces, pi)
+            woff = world_offset(pieces, pi) * scale
             gmin = np.minimum(gmin, np.asarray(mn) + woff)
             gmax = np.maximum(gmax, np.asarray(mx) + woff)
     height = float(gmax[1])
     midpos = np.array([(gmin[0] + gmax[0]) / 2, height / 2,
                        (gmin[2] + gmax[2]) / 2])
     radius = float(np.linalg.norm(gmax - midpos))
+    # `units` is an additive field (older readers ignore it): records that
+    # the emitted extents are in elmos, and lets one-shot rescale tooling
+    # (tools/scripts/rescale_models_to_elmos.py) refuse to double-scale.
     springrts = dict(configVersion=8, height=round(height, 4),
                      midpos=f3(midpos), mins=f3(gmin), maxs=f3(gmax),
-                     radius=round(radius, 4), pieces=geo_pieces)
+                     radius=round(radius, 4), pieces=geo_pieces,
+                     units='elmos')
 
     # ── materials / textures ──
     ext = 'png' if texmode == 'png' else 'ktx2'
@@ -268,7 +310,8 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
 
     tris = sum(pc['part'].tri_count() for pc in pieces if pc['part'])
     print(f'[gen] {stem}{suffix}.gltf: {tris} tris, '
-          f'{len(blob)} bin bytes, height {height:.2f} m, radius {radius:.2f} m')
+          f'{len(blob)} bin bytes, height {height:.2f} elmos '
+          f'({height / ELMOS_PER_METRE:.2f} m), radius {radius:.2f} elmos')
     print(f'[gen] bounds {f3(gmin)} .. {f3(gmax)}')
     for pc in pieces:
         t = pc['part'].tri_count() if pc['part'] else 0
