@@ -796,3 +796,83 @@ describe("what a live war found", function()
         assert.are.equal(2, GG.Transports.SlotCost('ms_soldiers_s1'))
     end)
 end)
+
+-- ============================================================
+describe("world_commit modoption (the world↔battle escrow seam)", function()
+
+    -- The lobby's staging sweep hands the war the escrowed force as
+    -- `world_commit = "<sideKey>:<transports>:<squads>:<stagingId>"`
+    -- (WorldEscrow's EncodeWorldCommitModOption). These specs pin the battle
+    -- half of that contract: the string schedules real arrivals through the
+    -- same validated path, and the committing side becomes expeditionary
+    -- (§7.1) whatever the reused scenario says about it.
+
+    local function homeScenario()
+        -- The reused authored scenario does NOT mark union expeditionary —
+        -- that is exactly the case the modoption must repair.
+        local scn = scenario()
+        scn.sides[2].expeditionary = nil
+        scn.sides[2].departure = nil
+        return scn
+    end
+
+    it("schedules the committed wave and marks the side expeditionary", function()
+        local world, g = mock.new(homeScenario())
+        world.modOptions.world_commit = 'union:2:3:41'
+        world.startPos[1] = { x = 9000, z = 9000 }
+        g:GameStart()
+
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+        assert.is_true(GG.Transports.IsExpeditionary(1))
+        assert.is_false(GG.Transports.IsExpeditionary(0))
+        -- The committed census folds the world's squads in with the staged
+        -- force: 4 staged + 3 inbound.
+        assert.are.equal(7, GG.Transports.Committed(1))
+
+        -- Both transports fly and the squads spread over them (2 seats per
+        -- airship at the engine's slot arithmetic: 2+1).
+        world.run(g, 200)
+        local airships, soldiers = 0, 0
+        for _, u in pairs(world.units) do
+            if u.team == 1 and u.defID == mock.AIRSHIP then airships = airships + 1 end
+            if u.team == 1 and u.defID == mock.SOLDIERS_S1 then soldiers = soldiers + 1 end
+        end
+        assert.are.equal(2, airships)
+        assert.are.equal(3, soldiers)
+    end)
+
+    it("is loud when the committed squads exceed the wave's seats", function()
+        local world, g = mock.new(homeScenario())
+        world.modOptions.world_commit = 'union:1:5:41'
+        world.startPos[1] = { x = 9000, z = 9000 }
+        g:GameStart()
+        -- One airship seats two s1 squads; three had no seat.
+        assert.is_true(world.echoed('had no seat'))
+        assert.are.equal(4 + 2, GG.Transports.Committed(1))
+    end)
+
+    it("drops a side the scenario does not field, loudly", function()
+        local world, g = mock.new(homeScenario())
+        world.modOptions.world_commit = 'freehold:2:3:41'
+        g:GameStart()
+        assert.is_true(world.echoed('fields no team'))
+        assert.are.equal(4, GG.Transports.Committed(1))
+        assert.is_false(GG.Transports.IsExpeditionary(1))
+    end)
+
+    it("drops a malformed string, loudly, and schedules nothing", function()
+        local world, g = mock.new(homeScenario())
+        world.modOptions.world_commit = 'union:lots:of:nonsense'
+        g:GameStart()
+        assert.is_true(world.echoed('world_commit'))
+        assert.are.equal(4, GG.Transports.Committed(1))
+    end)
+
+    it("does nothing at all when the modoption is absent", function()
+        local world, g = mock.new(homeScenario())
+        g:GameStart()
+        assert.are.equal(4, GG.Transports.Committed(1))
+        assert.is_false(GG.Transports.IsExpeditionary(1))
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+    end)
+end)

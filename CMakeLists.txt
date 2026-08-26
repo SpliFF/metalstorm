@@ -488,6 +488,12 @@ set(LOBBY_SERVER_SOURCES
     # the same reason as the rest: a staging row is world-scoped and the war
     # it becomes is created by the EXISTING lobby machinery at the call site.
     rts/Server/WorldStaging.cpp
+    # The world↔battle escrow seam (transports §7.3/§7.5): force committed at
+    # staging is escrowed, engaged when the war materialises, and settled ONCE
+    # at war end via append-only force/treasury ledger rows. Lobby-only, same
+    # reason as the rest: everything here is world-scoped rows plus one
+    # gadget-visible modoption string; no war table is touched.
+    rts/Server/WorldEscrow.cpp
     # PLAN-worldsim.md W11: staging alerts — the notification vocabulary, the
     # recipient computation (attacker/defender faction members ∪ commanders
     # garrisoned at the POI) and the in-process pub/sub seam a later
@@ -685,6 +691,11 @@ if(TEST_SOURCES)
         # the pure instigation rule and window sizing with no db at all, and
         # the store/sweep against the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldStaging.cpp
+        # The world↔battle escrow seam — test_world_escrow.cpp drives the pure
+        # §7.5 classification/payout with no db at all, and the escrow state
+        # machine + exactly-once settlement (including a two-war sequence
+        # replayed) against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldEscrow.cpp
         # PLAN-worldsim.md W11: staging alerts — test_world_notifications.cpp
         # drives the headline/JSON shape, the recipient union and the bus
         # against the same in-memory-db pattern (WorldFactions/WorldStats
