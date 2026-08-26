@@ -237,9 +237,48 @@ async function serveFile(
     return;
   }
 
-  res.statusCode = 200;
+  // Single-range requests (RFC 9110 §14): the terrain page streamer
+  // (PLAN-maps §1.2.1) fetches one 135 200-byte page at a time out of
+  // `ground_pages.bin`, and production static servers (nginx/CDN) answer
+  // ranges natively — dev must match or every page request pulls the whole
+  // file. Only `bytes=a-b` on an identity-encoded body is honoured;
+  // multi-range and suffix forms fall through to the plain 200 (the client
+  // slices locally in that case, same bytes either way). A syntactically
+  // valid but unsatisfiable range gets the 416 the RFC requires.
+  const rangeHeader = req.headers["range"];
+  let range: { start: number; end: number } | null = null;
+  if (
+    typeof rangeHeader === "string" &&
+    contentEncoding === null &&
+    req.method !== "HEAD"
+  ) {
+    const m = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader.trim());
+    if (m) {
+      const start = Number(m[1]);
+      const end = Math.min(Number(m[2]), stat.size - 1);
+      if (start >= stat.size || start > end) {
+        res.statusCode = 416;
+        res.setHeader("Content-Range", `bytes */${stat.size}`);
+        res.end();
+        return;
+      }
+      range = { start, end };
+    }
+  }
+
+  res.statusCode = range ? 206 : 200;
   res.setHeader("Content-Type", contentType);
-  res.setHeader("Content-Length", String(stat.size));
+  res.setHeader(
+    "Content-Length",
+    String(range ? range.end - range.start + 1 : stat.size),
+  );
+  if (range) {
+    res.setHeader(
+      "Content-Range",
+      `bytes ${range.start}-${range.end}/${stat.size}`,
+    );
+  }
+  res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Last-Modified", lastModified);
   res.setHeader("ETag", etag);
   res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
@@ -250,6 +289,18 @@ async function serveFile(
 
   if (req.method === "HEAD") {
     res.end();
+    return;
+  }
+
+  if (range) {
+    const fh = await fs.open(resolved, "r");
+    try {
+      const buf = Buffer.alloc(range.end - range.start + 1);
+      await fh.read(buf, 0, buf.length, range.start);
+      res.end(buf);
+    } finally {
+      await fh.close();
+    }
     return;
   }
 

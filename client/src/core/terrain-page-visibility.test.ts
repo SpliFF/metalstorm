@@ -152,6 +152,27 @@ describe('computeVisiblePages', () => {
         expect(mean(small)).toBeGreaterThan(mean(big));
     });
 
+    it('minLevel floors the descent at the produced pyramid (§1.2.1 v19)', () => {
+        // The real producer ships only levels the source covers — a 2048²
+        // source on this 16 k map means finestLevel 3. Nothing finer may be
+        // desired, ever, or the cache would request pages that do not exist.
+        const view = camera(8192, 8192, 400);  // low camera: wants fine pages
+        const free = computeVisiblePages(grid, heights, view, OPTS);
+        expect(free.some((p) => p.id.level < 3)).toBe(true);
+        const floored = computeVisiblePages(
+            grid, heights, view, { ...OPTS, minLevel: 3 });
+        expect(floored.length).toBeGreaterThan(0);
+        for (const p of floored) expect(p.id.level).toBeGreaterThanOrEqual(3);
+        // Coverage is not lost, just coarsened: the floored set still spans
+        // the same ground the free set's fine pages covered.
+        expect(floored.some((p) => p.id.level === 3)).toBe(true);
+        // A degenerate floor past the root clamps rather than emptying.
+        const rooted = computeVisiblePages(
+            grid, heights, view, { ...OPTS, minLevel: 99 });
+        expect(rooted.length).toBe(1);
+        expect(rooted[0].id.level).toBe(grid.rootLevel);
+    });
+
     it('adds a predicted ring that never outranks the visible set', () => {
         const view = camera(8192, 8192, 1500);
         const plain = computeVisiblePages(grid, heights, view, OPTS);
