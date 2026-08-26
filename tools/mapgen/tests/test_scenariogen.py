@@ -278,7 +278,10 @@ class TestUnitDefFacts(unittest.TestCase):
         # UnitDef.cpp derives `speed` as maxVelocity * GAME_SPEED, and
         # game_scenario.lua's contestability check divides by speed/30. Getting
         # this factor wrong silently changes every notBefore the generator emits.
-        self.assertAlmostEqual(self.facts["ms_tanks_s1"].speed, 2.6 * 30, places=3)
+        # 3.1 is tanks.lua's authored maxvelocity (unit-props ballpark pass,
+        # e04ae45d19 2026-08-20 — was 2.6); the subject here is the *30, not
+        # the def value.
+        self.assertAlmostEqual(self.facts["ms_tanks_s1"].speed, 3.1 * 30, places=3)
 
 
 class TestGeneratorOnSyntheticMaps(unittest.TestCase):
