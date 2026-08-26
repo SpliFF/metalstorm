@@ -1,761 +1,762 @@
 {
-  "accessors": [
-    {
-      "bufferView": 0,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 72,
-      "max": [
-        1.552884578704834,
-        2.860576868057251,
-        3.841346025466919
-      ],
-      "min": [
-        -1.552884578704834,
-        2.2250738585072014e-308,
-        -3.841346025466919
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 1,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 72,
-      "max": [
-        0.9762566089630127,
-        1.0,
-        0.9863939881324768
-      ],
-      "min": [
-        -0.9673275351524353,
-        -0.9980129599571228,
-        -0.7310553193092346
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 2,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 72,
-      "max": [
-        0.9921875,
-        0.546875
-      ],
-      "min": [
-        0.0,
-        2.2250738585072014e-308
-      ],
-      "type": "VEC2"
-    },
-    {
-      "bufferView": 3,
-      "byteOffset": 0,
-      "componentType": 5125,
-      "count": 72,
-      "max": [
-        71
-      ],
-      "min": [
-        0
-      ],
-      "type": "SCALAR"
-    },
-    {
-      "bufferView": 4,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        3.350961446762085,
-        2.125,
-        3.514423131942749
-      ],
-      "min": [
-        2.2250738585072014e-308,
-        0.0,
-        -3.432692289352417
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 5,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        1.0,
-        1.0,
-        1.0
-      ],
-      "min": [
-        -1.0,
-        -1.0,
-        -1.0
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 6,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        0.3671875,
-        0.7265625
-      ],
-      "min": [
-        0.0,
-        2.2250738585072014e-308
-      ],
-      "type": "VEC2"
-    },
-    {
-      "bufferView": 7,
-      "byteOffset": 0,
-      "componentType": 5125,
-      "count": 132,
-      "max": [
-        131
-      ],
-      "min": [
-        0
-      ],
-      "type": "SCALAR"
-    },
-    {
-      "bufferView": 8,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        -1.634615421295166,
-        2.125,
-        3.514423131942749
-      ],
-      "min": [
-        -3.269230842590332,
-        0.0,
-        -3.432692289352417
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 9,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        1.0,
-        1.0,
-        1.0
-      ],
-      "min": [
-        -1.0,
-        -1.0,
-        -1.0
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 10,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 132,
-      "max": [
-        0.3671875,
-        0.7265625
-      ],
-      "min": [
-        2.2250738585072014e-308,
-        2.2250738585072014e-308
-      ],
-      "type": "VEC2"
-    },
-    {
-      "bufferView": 11,
-      "byteOffset": 0,
-      "componentType": 5125,
-      "count": 132,
-      "max": [
-        131
-      ],
-      "min": [
-        0
-      ],
-      "type": "SCALAR"
-    },
-    {
-      "bufferView": 12,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 36,
-      "max": [
-        1.634615421295166,
-        1.4711538553237915,
-        1.879807710647583
-      ],
-      "min": [
-        -1.879807710647583,
-        0.0,
-        -1.798076868057251
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 13,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 36,
-      "max": [
-        0.874174952507019,
-        0.9953500628471375,
-        0.8064050674438477
-      ],
-      "min": [
-        -0.8563880324363708,
-        -1.0,
-        -0.986393928527832
-      ],
-      "type": "VEC3"
-    },
-    {
-      "bufferView": 14,
-      "byteOffset": 0,
-      "componentType": 5126,
-      "count": 36,
-      "max": [
-        0.09765625,
-        0.18359375
-      ],
-      "min": [
-        0.0,
-        0.0
-      ],
-      "type": "VEC2"
-    },
-    {
-      "bufferView": 15,
-      "byteOffset": 0,
-      "componentType": 5125,
-      "count": 36,
-      "max": [
-        35
-      ],
-      "min": [
-        0
-      ],
-      "type": "SCALAR"
-    }
-  ],
-  "asset": {
-    "generator": "Open Asset Import Library (assimp v6.0.e0b52347)",
-    "version": "2.0"
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "max": [
+    12.423076629638672,
+    22.884614944458008,
+    30.73076820373535
+   ],
+   "min": [
+    -12.423076629638672,
+    0.0,
+    -30.73076820373535
+   ],
+   "type": "VEC3"
   },
-  "bufferViews": [
-    {
-      "buffer": 0,
-      "byteLength": 864,
-      "byteOffset": 0,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 864,
-      "byteOffset": 864,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 576,
-      "byteOffset": 1728,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 288,
-      "byteOffset": 2304,
-      "target": 34963
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1584,
-      "byteOffset": 2592,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1584,
-      "byteOffset": 4176,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1056,
-      "byteOffset": 5760,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 528,
-      "byteOffset": 6816,
-      "target": 34963
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1584,
-      "byteOffset": 7344,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1584,
-      "byteOffset": 8928,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 1056,
-      "byteOffset": 10512,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 528,
-      "byteOffset": 11568,
-      "target": 34963
-    },
-    {
-      "buffer": 0,
-      "byteLength": 432,
-      "byteOffset": 12096,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 432,
-      "byteOffset": 12528,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 288,
-      "byteOffset": 12960,
-      "target": 34962
-    },
-    {
-      "buffer": 0,
-      "byteLength": 144,
-      "byteOffset": 13248,
-      "target": 34963
-    }
-  ],
-  "buffers": [
-    {
-      "byteLength": 13392,
-      "uri": "wz_tank.bin"
-    }
-  ],
-  "extensions": {
-    "SPRINGRTS_geometry": {
-      "configVersion": 8,
-      "height": 3.351,
-      "maxs": [
-        3.351,
-        3.351,
-        3.8413
-      ],
-      "midpos": [
-        0.040865,
-        1.6755,
-        -0.40865
-      ],
-      "mins": [
-        -3.2692,
-        0,
-        -4.6587
-      ],
-      "pieces": [
-        {
-          "maxs": [
-            1.5529,
-            2.8606,
-            3.8413
-          ],
-          "mins": [
-            -1.5529,
-            0.73558,
-            -3.8413
-          ],
-          "name": "body",
-          "offset": [
-            0,
-            0,
-            0
-          ],
-          "parent": -1
-        },
-        {
-          "maxs": [
-            3.351,
-            2.125,
-            3.5144
-          ],
-          "mins": [
-            1.7163,
-            0,
-            -3.4327
-          ],
-          "name": "tracks_l",
-          "offset": [
-            0,
-            0,
-            0
-          ],
-          "parent": 0
-        },
-        {
-          "maxs": [
-            -1.6346,
-            2.125,
-            3.5144
-          ],
-          "mins": [
-            -3.2692,
-            0,
-            -3.4327
-          ],
-          "name": "tracks_r",
-          "offset": [
-            0,
-            0,
-            0
-          ],
-          "parent": 0
-        },
-        {
-          "maxs": [
-            1.6346,
-            1.4712,
-            1.8798
-          ],
-          "mins": [
-            -1.8798,
-            0,
-            -1.7981
-          ],
-          "name": "turret",
-          "offset": [
-            0,
-            1.8798,
-            -2.8606
-          ],
-          "parent": 0
-        },
-        {
-          "maxs": [
-            0,
-            0,
-            0
-          ],
-          "mins": [
-            0,
-            0,
-            0
-          ],
-          "name": "muzzle",
-          "offset": [
-            0,
-            0.73558,
-            -1.7981
-          ],
-          "parent": 3
-        }
-      ],
-      "radius": 5.6415
-    }
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "max": [
+    0.9762566089630127,
+    1.0,
+    0.9863939881324768
+   ],
+   "min": [
+    -0.9673275351524353,
+    -0.9980129599571228,
+    -0.7310553193092346
+   ],
+   "type": "VEC3"
   },
-  "extensionsRequired": [
-    "KHR_texture_basisu"
-  ],
-  "extensionsUsed": [
-    "KHR_texture_basisu",
-    "SPRINGRTS_geometry",
-    "SPRINGRTS_team_color"
-  ],
-  "images": [
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "max": [
+    0.9921875,
+    0.546875
+   ],
+   "min": [
+    0.0,
+    2.2250738585072014e-308
+   ],
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 72,
+   "max": [
+    71
+   ],
+   "min": [
+    0
+   ],
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    26.80769157409668,
+    17.0,
+    28.115385055541992
+   ],
+   "min": [
+    0.0,
+    0.0,
+    -27.461538314819336
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "min": [
+    -1.0,
+    -1.0,
+    -1.0
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    0.3671875,
+    0.7265625
+   ],
+   "min": [
+    0.0,
+    2.2250738585072014e-308
+   ],
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 132,
+   "max": [
+    131
+   ],
+   "min": [
+    0
+   ],
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    -13.076923370361328,
+    17.0,
+    28.115385055541992
+   ],
+   "min": [
+    -26.153846740722656,
+    0.0,
+    -27.461538314819336
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "min": [
+    -1.0,
+    -1.0,
+    -1.0
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 132,
+   "max": [
+    0.3671875,
+    0.7265625
+   ],
+   "min": [
+    2.2250738585072014e-308,
+    2.2250738585072014e-308
+   ],
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 132,
+   "max": [
+    131
+   ],
+   "min": [
+    0
+   ],
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 36,
+   "max": [
+    13.076923370361328,
+    11.769230842590332,
+    15.038461685180664
+   ],
+   "min": [
+    -15.038461685180664,
+    0.0,
+    -14.384614944458008
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 36,
+   "max": [
+    0.874174952507019,
+    0.9953500628471375,
+    0.8064050674438477
+   ],
+   "min": [
+    -0.8563880324363708,
+    -1.0,
+    -0.986393928527832
+   ],
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 14,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 36,
+   "max": [
+    0.09765625,
+    0.18359375
+   ],
+   "min": [
+    0.0,
+    0.0
+   ],
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 15,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 36,
+   "max": [
+    35
+   ],
+   "min": [
+    0
+   ],
+   "type": "SCALAR"
+  }
+ ],
+ "asset": {
+  "generator": "Open Asset Import Library (assimp v6.0.e0b52347)",
+  "version": "2.0"
+ },
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteLength": 864,
+   "byteOffset": 0,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 864,
+   "byteOffset": 864,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 576,
+   "byteOffset": 1728,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 288,
+   "byteOffset": 2304,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1584,
+   "byteOffset": 2592,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1584,
+   "byteOffset": 4176,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1056,
+   "byteOffset": 5760,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 528,
+   "byteOffset": 6816,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1584,
+   "byteOffset": 7344,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1584,
+   "byteOffset": 8928,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 1056,
+   "byteOffset": 10512,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 528,
+   "byteOffset": 11568,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteLength": 432,
+   "byteOffset": 12096,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 432,
+   "byteOffset": 12528,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 288,
+   "byteOffset": 12960,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteLength": 144,
+   "byteOffset": 13248,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 13392,
+   "uri": "wz_tank.bin"
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 26.808,
+   "maxs": [
+    26.808,
+    26.808,
+    30.7304
+   ],
+   "midpos": [
+    0.32692,
+    13.404,
+    -3.2692
+   ],
+   "mins": [
+    -26.1536,
+    0.0,
+    -37.2696
+   ],
+   "pieces": [
     {
-      "mimeType": "image/ktx2",
-      "uri": "page-14-droid-hubs.ktx2"
+     "maxs": [
+      12.4232,
+      22.8848,
+      30.7304
+     ],
+     "mins": [
+      -12.4232,
+      5.88464,
+      -30.7304
+     ],
+     "name": "body",
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "parent": -1
     },
     {
-      "mimeType": "image/ktx2",
-      "uri": "page-14-droid-hubs_ms_tcmask.ktx2"
+     "maxs": [
+      26.808,
+      17.0,
+      28.1152
+     ],
+     "mins": [
+      13.7304,
+      0.0,
+      -27.4616
+     ],
+     "name": "tracks_l",
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "parent": 0
     },
     {
-      "mimeType": "image/ktx2",
-      "uri": "page-16-droid-drives.ktx2"
+     "maxs": [
+      -13.0768,
+      17.0,
+      28.1152
+     ],
+     "mins": [
+      -26.1536,
+      0.0,
+      -27.4616
+     ],
+     "name": "tracks_r",
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "parent": 0
     },
     {
-      "mimeType": "image/ktx2",
-      "uri": "page-16_tcmask.ktx2"
+     "maxs": [
+      13.0768,
+      11.7696,
+      15.0384
+     ],
+     "mins": [
+      -15.0384,
+      0.0,
+      -14.3848
+     ],
+     "name": "turret",
+     "offset": [
+      0.0,
+      15.0384,
+      -22.8848
+     ],
+     "parent": 0
     },
     {
-      "mimeType": "image/ktx2",
-      "uri": "page-17-droid-weapons.ktx2"
-    },
-    {
-      "mimeType": "image/ktx2",
-      "uri": "page-17-droid-weapons_ms_tcmask.ktx2"
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "name": "muzzle",
+     "offset": [
+      0.0,
+      5.88464,
+      -14.3848
+     ],
+     "parent": 3
     }
-  ],
-  "materials": [
-    {
-      "doubleSided": true,
-      "extensions": {
-        "SPRINGRTS_team_color": {
-          "maskTexture": {
-            "index": 1
-          }
-        }
-      },
-      "name": "page-14-droid-hubs",
-      "pbrMetallicRoughness": {
-        "baseColorTexture": {
-          "index": 0
-        },
-        "metallicFactor": 0.0
-      }
-    },
-    {
-      "doubleSided": true,
-      "extensions": {
-        "SPRINGRTS_team_color": {
-          "maskTexture": {
-            "index": 3
-          }
-        }
-      },
-      "name": "page-16-droid-drives",
-      "pbrMetallicRoughness": {
-        "baseColorTexture": {
-          "index": 2
-        },
-        "metallicFactor": 0.0
-      }
-    },
-    {
-      "doubleSided": true,
-      "extensions": {
-        "SPRINGRTS_team_color": {
-          "maskTexture": {
-            "index": 5
-          }
-        }
-      },
-      "name": "page-17-droid-weapons",
-      "pbrMetallicRoughness": {
-        "baseColorTexture": {
-          "index": 4
-        },
-        "metallicFactor": 0.0
-      }
+   ],
+   "radius": 45.132,
+   "units": "elmos"
+  }
+ },
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ],
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-14-droid-hubs.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-14-droid-hubs_ms_tcmask.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-16-droid-drives.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-16_tcmask.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-17-droid-weapons.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "page-17-droid-weapons_ms_tcmask.ktx2"
+  }
+ ],
+ "materials": [
+  {
+   "doubleSided": true,
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 1
+     }
     }
-  ],
-  "meshes": [
-    {
-      "primitives": [
-        {
-          "attributes": {
-            "NORMAL": 1,
-            "POSITION": 0,
-            "TEXCOORD_0": 2
-          },
-          "indices": 3,
-          "material": 0,
-          "mode": 4
-        }
-      ]
+   },
+   "name": "page-14-droid-hubs",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
     },
-    {
-      "primitives": [
-        {
-          "attributes": {
-            "NORMAL": 5,
-            "POSITION": 4,
-            "TEXCOORD_0": 6
-          },
-          "indices": 7,
-          "material": 1,
-          "mode": 4
-        }
-      ]
-    },
-    {
-      "primitives": [
-        {
-          "attributes": {
-            "NORMAL": 9,
-            "POSITION": 8,
-            "TEXCOORD_0": 10
-          },
-          "indices": 11,
-          "material": 1,
-          "mode": 4
-        }
-      ]
-    },
-    {
-      "primitives": [
-        {
-          "attributes": {
-            "NORMAL": 13,
-            "POSITION": 12,
-            "TEXCOORD_0": 14
-          },
-          "indices": 15,
-          "material": 2,
-          "mode": 4
-        }
-      ]
+    "metallicFactor": 0.0
+   }
+  },
+  {
+   "doubleSided": true,
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
     }
-  ],
-  "nodes": [
-    {
-      "children": [
-        1
-      ],
-      "name": "PIE_wz_tank"
+   },
+   "name": "page-16-droid-drives",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 2
     },
-    {
-      "children": [
-        2,
-        3,
-        4
-      ],
-      "mesh": 0,
-      "name": "body"
-    },
-    {
-      "mesh": 1,
-      "name": "tracks_l"
-    },
-    {
-      "mesh": 2,
-      "name": "tracks_r"
-    },
-    {
-      "children": [
-        5
-      ],
-      "matrix": [
-        1.0,
-        0.0,
-        -0.0,
-        0.0,
-        0.0,
-        1.0,
-        -0.0,
-        0.0,
-        -0.0,
-        -0.0,
-        1.0,
-        -0.0,
-        0.0,
-        1.879807710647583,
-        -2.860576868057251,
-        1.0
-      ],
-      "mesh": 3,
-      "name": "turret"
-    },
-    {
-      "matrix": [
-        1.0,
-        0.0,
-        -0.0,
-        0.0,
-        0.0,
-        1.0,
-        -0.0,
-        0.0,
-        -0.0,
-        -0.0,
-        1.0,
-        -0.0,
-        0.0,
-        0.7355769276618958,
-        -1.798076868057251,
-        1.0
-      ],
-      "name": "muzzle"
+    "metallicFactor": 0.0
+   }
+  },
+  {
+   "doubleSided": true,
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 5
+     }
     }
-  ],
-  "samplers": [
-    {},
-    {},
-    {},
-    {},
-    {},
-    {}
-  ],
-  "scene": 0,
-  "scenes": [
+   },
+   "name": "page-17-droid-weapons",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 4
+    },
+    "metallicFactor": 0.0
+   }
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
     {
-      "nodes": [
-        0
-      ]
+     "attributes": {
+      "NORMAL": 1,
+      "POSITION": 0,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
     }
-  ],
-  "textures": [
+   ]
+  },
+  {
+   "primitives": [
     {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 0
-        }
-      },
-      "sampler": 0
-    },
-    {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 1
-        }
-      },
-      "sampler": 1
-    },
-    {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 2
-        }
-      },
-      "sampler": 2
-    },
-    {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 3
-        }
-      },
-      "sampler": 3
-    },
-    {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 4
-        }
-      },
-      "sampler": 4
-    },
-    {
-      "extensions": {
-        "KHR_texture_basisu": {
-          "source": 5
-        }
-      },
-      "sampler": 5
+     "attributes": {
+      "NORMAL": 5,
+      "POSITION": 4,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 1,
+     "mode": 4
     }
-  ]
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "NORMAL": 9,
+      "POSITION": 8,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 1,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "NORMAL": 13,
+      "POSITION": 12,
+      "TEXCOORD_0": 14
+     },
+     "indices": 15,
+     "material": 2,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "children": [
+    1
+   ],
+   "name": "PIE_wz_tank"
+  },
+  {
+   "children": [
+    2,
+    3,
+    4
+   ],
+   "mesh": 0,
+   "name": "body"
+  },
+  {
+   "mesh": 1,
+   "name": "tracks_l"
+  },
+  {
+   "mesh": 2,
+   "name": "tracks_r"
+  },
+  {
+   "children": [
+    5
+   ],
+   "matrix": [
+    1.0,
+    0.0,
+    -0.0,
+    0.0,
+    0.0,
+    1.0,
+    -0.0,
+    0.0,
+    -0.0,
+    -0.0,
+    1.0,
+    -0.0,
+    0.0,
+    15.038461685180664,
+    -22.884614944458008,
+    1.0
+   ],
+   "mesh": 3,
+   "name": "turret"
+  },
+  {
+   "matrix": [
+    1.0,
+    0.0,
+    -0.0,
+    0.0,
+    0.0,
+    1.0,
+    -0.0,
+    0.0,
+    -0.0,
+    -0.0,
+    1.0,
+    -0.0,
+    0.0,
+    5.884615421295166,
+    -14.384614944458008,
+    1.0
+   ],
+   "name": "muzzle"
+  }
+ ],
+ "samplers": [
+  {},
+  {},
+  {},
+  {},
+  {},
+  {}
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "textures": [
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   },
+   "sampler": 0
+  },
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   },
+   "sampler": 1
+  },
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   },
+   "sampler": 2
+  },
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   },
+   "sampler": 3
+  },
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   },
+   "sampler": 4
+  },
+  {
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 5
+    }
+   },
+   "sampler": 5
+  }
+ ]
 }

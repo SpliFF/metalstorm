@@ -19,8 +19,12 @@ return mk{
                 -- and for what the old 12 / 4.0109 pair got wrong.
                 -- centreY CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9175 ->
                 -- 0.7759: measured hover 0.1416 elmos (20 deg / 45 deg).
-                impostorDistance = 260, impostorSize = 2.3056,
-                impostorCentreY = 0.7759,
+                -- WORLD-SCALE ×8 2026-08-27 (PLAN-world-scale.md §5 Option A):
+                -- size 2.3056→18.4448, centreY 0.7759→6.2072, distance
+                -- 260→2080 — see soldiers.lua; verified numerically by
+                -- tools/scripts/check_model_scale.py.
+                impostorDistance = 2080, impostorSize = 18.4448,
+                impostorCentreY = 6.2072,
                 impostorTeamMask = true },
         [2] = { override = { workertime = 120 } },
         [3] = { override = { workertime = 300,

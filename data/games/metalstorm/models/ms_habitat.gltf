@@ -1,1 +1,269 @@
-{"asset":{"version":"2.0","generator":"fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"MS_ms_habitat","children":[1]},{"name":"body","mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0,"mode":4}]}],"accessors":[{"bufferView":0,"byteOffset":0,"componentType":5126,"count":1488,"type":"VEC3","min":[-13.0,0.0,-13.4],"max":[12.5,23.5,11.0]},{"bufferView":1,"byteOffset":0,"componentType":5126,"count":1488,"type":"VEC3"},{"bufferView":2,"byteOffset":0,"componentType":5126,"count":1488,"type":"VEC2"},{"bufferView":3,"byteOffset":0,"componentType":5125,"count":2052,"type":"SCALAR"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":17856,"target":34962},{"buffer":0,"byteOffset":17856,"byteLength":17856,"target":34962},{"buffer":0,"byteOffset":35712,"byteLength":11904,"target":34962},{"buffer":0,"byteOffset":47616,"byteLength":8208,"target":34963}],"buffers":[{"byteLength":55824,"uri":"ms_habitat.bin"}],"samplers":[{}],"images":[{"mimeType":"image/ktx2","uri":"fable_civkit_diffuse.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_orm.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_emissive.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_team.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_normals.ktx2"}],"textures":[{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":0}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":1}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":2}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":3}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":4}}}],"materials":[{"name":"ms_habitat","pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicRoughnessTexture":{"index":1},"metallicFactor":1.0,"roughnessFactor":1.0},"occlusionTexture":{"index":1},"emissiveTexture":{"index":2},"emissiveFactor":[1.0,1.0,1.0],"extensions":{"SPRINGRTS_team_color":{"maskTexture":{"index":3}}},"normalTexture":{"index":4}}],"extensions":{"SPRINGRTS_geometry":{"configVersion":8,"height":23.5,"midpos":[-0.25,11.75,-1.2],"mins":[-13.0,0.0,-13.4],"maxs":[12.5,23.5,11.0],"radius":21.2006,"pieces":[{"name":"body","parent":-1,"offset":[0.0,0.0,0.0],"mins":[-13.0,0.0,-13.4],"maxs":[12.5,23.5,11.0]}]}},"extensionsUsed":["KHR_texture_basisu","SPRINGRTS_geometry","SPRINGRTS_team_color"],"extensionsRequired":["KHR_texture_basisu"]}
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_habitat",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1488,
+   "type": "VEC3",
+   "min": [
+    -104.0,
+    0.0,
+    -107.19999694824219
+   ],
+   "max": [
+    100.0,
+    188.0,
+    88.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1488,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1488,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 2052,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 17856,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 17856,
+   "byteLength": 17856,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 35712,
+   "byteLength": 11904,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 47616,
+   "byteLength": 8208,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 55824,
+   "uri": "ms_habitat.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_habitat",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicRoughnessTexture": {
+     "index": 1
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 188.0,
+   "midpos": [
+    -2.0,
+    94.0,
+    -9.6
+   ],
+   "mins": [
+    -104.0,
+    0.0,
+    -107.2
+   ],
+   "maxs": [
+    100.0,
+    188.0,
+    88.0
+   ],
+   "radius": 169.6048,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -104.0,
+      0.0,
+      -107.2
+     ],
+     "maxs": [
+      100.0,
+      188.0,
+      88.0
+     ]
+    }
+   ],
+   "units": "elmos"
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

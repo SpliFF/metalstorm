@@ -1,1 +1,269 @@
-{"asset":{"version":"2.0","generator":"fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"MS_ms_depot","children":[1]},{"name":"body","mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0,"mode":4}]}],"accessors":[{"bufferView":0,"byteOffset":0,"componentType":5126,"count":1434,"type":"VEC3","min":[-10.35,0.0,-10.3],"max":[12.03201,9.4,11.5]},{"bufferView":1,"byteOffset":0,"componentType":5126,"count":1434,"type":"VEC3"},{"bufferView":2,"byteOffset":0,"componentType":5126,"count":1434,"type":"VEC2"},{"bufferView":3,"byteOffset":0,"componentType":5125,"count":1992,"type":"SCALAR"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":17208,"target":34962},{"buffer":0,"byteOffset":17208,"byteLength":17208,"target":34962},{"buffer":0,"byteOffset":34416,"byteLength":11472,"target":34962},{"buffer":0,"byteOffset":45888,"byteLength":7968,"target":34963}],"buffers":[{"byteLength":53856,"uri":"ms_depot.bin"}],"samplers":[{}],"images":[{"mimeType":"image/ktx2","uri":"fable_civkit_diffuse.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_orm.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_emissive.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_team.ktx2"},{"mimeType":"image/ktx2","uri":"fable_civkit_normals.ktx2"}],"textures":[{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":0}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":1}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":2}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":3}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":4}}}],"materials":[{"name":"ms_depot","pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicRoughnessTexture":{"index":1},"metallicFactor":1.0,"roughnessFactor":1.0},"occlusionTexture":{"index":1},"emissiveTexture":{"index":2},"emissiveFactor":[1.0,1.0,1.0],"extensions":{"SPRINGRTS_team_color":{"maskTexture":{"index":3}}},"normalTexture":{"index":4}}],"extensions":{"SPRINGRTS_geometry":{"configVersion":8,"height":9.4,"midpos":[0.84101,4.7,0.6],"mins":[-10.35,0.0,-10.3],"maxs":[12.03201,9.4,11.5],"radius":16.3138,"pieces":[{"name":"body","parent":-1,"offset":[0.0,0.0,0.0],"mins":[-10.35,0.0,-10.3],"maxs":[12.03201,9.4,11.5]}]}},"extensionsUsed":["KHR_texture_basisu","SPRINGRTS_geometry","SPRINGRTS_team_color"],"extensionsRequired":["KHR_texture_basisu"]}
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_depot",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1434,
+   "type": "VEC3",
+   "min": [
+    -82.80000305175781,
+    0.0,
+    -82.4000015258789
+   ],
+   "max": [
+    96.2560806274414,
+    75.19999694824219,
+    92.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1434,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1434,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1992,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 17208,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 17208,
+   "byteLength": 17208,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 34416,
+   "byteLength": 11472,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 45888,
+   "byteLength": 7968,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 53856,
+   "uri": "ms_depot.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_civkit_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_depot",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicRoughnessTexture": {
+     "index": 1
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 75.2,
+   "midpos": [
+    6.72808,
+    37.6,
+    4.8
+   ],
+   "mins": [
+    -82.8,
+    0.0,
+    -82.4
+   ],
+   "maxs": [
+    96.25608,
+    75.2,
+    92.0
+   ],
+   "radius": 130.5104,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -82.8,
+      0.0,
+      -82.4
+     ],
+     "maxs": [
+      96.25608,
+      75.2,
+      92.0
+     ]
+    }
+   ],
+   "units": "elmos"
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

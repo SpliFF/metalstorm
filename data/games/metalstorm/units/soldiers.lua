@@ -28,8 +28,17 @@ return mk{
                 -- camera pitches (20 deg, 45 deg), which agree to 0.0003; then
                 -- confirmed by re-measuring the residual after the edit landed.
                 -- See _builder.lua for the method and its two traps.
-                impostorDistance = 260, impostorSize = 2.3615,
-                impostorCentreY = 0.7650,
+                -- WORLD-SCALE ×8 2026-08-27 (PLAN-world-scale.md §5 Option A):
+                -- the model corpus was re-scaled 8 elmos = 1 m at import, so
+                -- all three constants scale linearly with the model: size
+                -- 2.3615→18.892, centreY 0.7650→6.1200 (the sheets themselves
+                -- are unchanged — the baker frames on the model bbox, so a
+                -- uniformly scaled model bakes identical pixels), and distance
+                -- 260→2080 keeps the swap at the same subtended angle (~9 px
+                -- at the reference camera, still ≲20 px — verified numerically
+                -- by tools/scripts/check_model_scale.py).
+                impostorDistance = 2080, impostorSize = 18.8920,
+                impostorCentreY = 6.1200,
                 impostorTeamMask = true },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },
