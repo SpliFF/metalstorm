@@ -29,6 +29,7 @@
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
 #include "Server/WorldSeasons.h"
+#include "Server/WorldConquest.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1248,6 +1249,11 @@ int main(int argc, char *argv[]) {
   // becomes is created by the machinery further down this file, and the
   // `room_id` this table keeps is a LABEL, exactly as W6's ledger keeps one.
   WorldStaging::EnsureTables(mapDb);
+  // Conquest (PLAN-worldsim.md phase 3 §5): `world_poi_claims` — the explicit
+  // claim act ownership transfers through at war end. After WorldFactions'
+  // because a claim names a claiming faction and charges an account's
+  // `world_authority` row.
+  WorldConquest::EnsureTables(mapDb);
   // PLAN-worldsim.md W12: `world_seasons` / `world_season_digests` — per-world
   // season rows and their archived digests. After WorldDirector's/WorldStats'/
   // WorldEconomy's for the same reason as the rest: a rollover reads
@@ -1830,7 +1836,8 @@ int main(int argc, char *argv[]) {
             ev.poiId);
         if (recipients.empty()) return;
         net.SendSSETo(chatStreamChannel, recipients,
-                      WorldNotificationToJson(ev).dump(), "world-staging");
+                      WorldNotificationToJson(ev).dump(),
+                      WorldNotificationSseEvent(ev.kind));
       });
 
   // Maps endpoint — full metadata from SQLite
@@ -5264,6 +5271,150 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
+  // ─────── Conquest: the explicit claim act (WorldConquest.h) ───────
+  //
+  // USER-DECIDED 2026-08-27 (PLAN-worldsim.md phase 3 §5): POI ownership
+  // changes at war end only through an explicit, paid claim. The routes here
+  // are the filing half; the settlement half runs in the lifecycle sweep
+  // below, at the same chokepoint as W6's ledger write.
+
+  auto worldConquestRules = [mapDb](const std::string &worldId) {
+    const auto w = WorldDirector::Load(mapDb, worldId);
+    return WorldConquestRules::FromWorldConfig(
+        w ? w->config : nlohmann::json::object());
+  };
+
+  // GET /api/world/claims — every claim in the world plus the rates in
+  // force. Public, like the staging rows: a filed claim is strategic map
+  // information (it is a declared intention every rival can price), and the
+  // filing cost is what keeps it from being free intelligence spam.
+  net.AddHttpGet(
+      "/api/world/claims", RouteAuth::Public,
+      [mapDb, worldIdFromQuery, worldConquestRules](
+          const std::string &url) -> HttpResponse {
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery(url);
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+        return HttpAuth::JsonResponse(
+            200, WorldConquest::ClaimsJson(mapDb, worldId,
+                                           worldConquestRules(worldId))
+                     .dump());
+      });
+
+  // POST /api/world/claims/file — file a claim on a POI. Body: {"poi":…}.
+  //
+  // The claiming faction is NOT taken from the body, for the same reason the
+  // staging commit refuses one: a claim is a faction's act and letting the
+  // client name whose would let anyone spend a rival's standing. It is the
+  // caller's own membership; the CHARGE is the caller's own authority.
+  net.AddHttpPost(
+      "/api/world/claims/file", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery, worldConquestRules, worldFactionRules,
+       worldNowWorldMs](const std::string &, const std::string &body,
+                        const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        const auto membership = WorldFactions::MembershipFor(mapDb, worldId, uid);
+        if (!membership)
+          return HttpAuth::JsonResponse(403, R"({"error":"not_in_a_faction"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+
+        WorldClaimFileRequest req;
+        req.worldId   = worldId;
+        req.poiId     = j.value("poi", std::string());
+        req.factionId = membership->factionId;
+        req.accountId = uid;
+
+        const auto result = WorldConquest::FileClaim(
+            mapDb, worldConquestRules(worldId), worldFactionRules(worldId),
+            req, worldNowWorldMs(worldId), WorldNowRealMs());
+        if (!result.ok) {
+          // The staging commit's three-way split, for the same reason: 409
+          // for "the world is not in a state where this means anything", 404
+          // for a place that is not there, 400 for the rest.
+          const int status = result.error == "already_owner"          ? 409
+                             : result.error == "already_claimed"      ? 409
+                             : result.error == "no_poi"               ? 404
+                             : result.error == "no_faction"           ? 404
+                             : result.error == "db_error"             ? 500
+                                                                      : 400;
+          nlohmann::json err;
+          err["ok"]    = false;
+          err["error"] = result.error;
+          if (result.error == "insufficient_authority") {
+            err["have"] = result.have;
+            err["need"] = result.need;
+          }
+          return HttpAuth::JsonResponse(status, err.dump());
+        }
+
+        SLOG(SPRING_LOG_NOTICE,
+             "world claim %lld: faction '%s' claimed POI '%s' (cost %.1f "
+             "authority, account %lld)",
+             static_cast<long long>(result.claim->claimId),
+             req.factionId.c_str(), req.poiId.c_str(), result.claim->cost,
+             static_cast<long long>(uid));
+        nlohmann::json out;
+        out["ok"]    = true;
+        out["claim"] = WorldConquest::ClaimJson(*result.claim);
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/world/claims/withdraw — call an open claim off. Body:
+  // {"claimId":int}. Authorised against the claiming FACTION, exactly as the
+  // staging cancel is: the claim is the faction's, so any member may withdraw
+  // it (the refund still returns to the account that paid — see
+  // WorldConquest.h rule 7).
+  net.AddHttpPost(
+      "/api/world/claims/withdraw", RouteAuth::TokenRequired,
+      [mapDb, &db, worldIdFromQuery, worldConquestRules](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        const int64_t uid = HttpAuth::ValidateToken(db, headers.authorization);
+        if (uid <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (!mapDb)
+          return HttpAuth::JsonResponse(
+              503, R"({"error":"world_database_unavailable"})");
+        const std::string worldId = worldIdFromQuery("");
+        if (worldId.empty())
+          return HttpAuth::JsonResponse(404, R"({"error":"no_world"})");
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+        const int64_t claimId = j.value("claimId", static_cast<int64_t>(0));
+
+        const auto claim = WorldConquest::Load(mapDb, claimId);
+        if (!claim || claim->worldId != worldId)
+          return HttpAuth::JsonResponse(404, R"({"error":"no_claim"})");
+        const auto membership = WorldFactions::MembershipFor(mapDb, worldId, uid);
+        if (!membership || membership->factionId != claim->factionId)
+          return HttpAuth::JsonResponse(403, R"({"error":"not_your_claim"})");
+
+        const bool withdrawn = WorldConquest::Withdraw(
+            mapDb, worldConquestRules(worldId), worldId, claimId,
+            WorldNowRealMs());
+        nlohmann::json out;
+        out["ok"] = true;
+        // Not an error: withdrawing a claim a settlement already resolved is
+        // a no-op reported as one, same convention as the staging cancel.
+        out["withdrawn"] = withdrawn;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
   // ─────── PLAN-worldsim.md W8: the stat ledgers, read-only ───────
   //
   // GET /api/world/stats — the rates in force, every commander's Authority,
@@ -8526,7 +8677,45 @@ int main(int argc, char *argv[]) {
               if (const auto outcome = WarOutcomeDb::Load(mapDb, war.roomId))
                 rec.factions = outcome->winnerFactions;
               rec.recordedAt = now;
-              WorldDirector::RecordSettlement(mapDb, rec);
+              rec.settlementId = WorldDirector::RecordSettlement(mapDb, rec);
+
+              // Conquest (WorldConquest.h, USER-DECIDED 2026-08-27): apply
+              // the claim rule to the settlement just recorded — the same
+              // once-per-archival chokepoint, so the map changes hands in
+              // the same sweep pass that wrote the ledger row it cites.
+              // `winnerFactions` names SIDE keys shared by many world
+              // factions, which is exactly why the transfer needs the claim
+              // and not the outcome row alone.
+              if (rec.settlementId > 0) {
+                const auto world = WorldDirector::Load(mapDb, poi->worldId);
+                const auto reading = WorldDirector::ClockFor(
+                    mapDb, poi->worldId, WorldNowRealMs());
+                const auto conquest = WorldConquest::SettleWar(
+                    mapDb, rec,
+                    WorldConquestRules::FromWorldConfig(
+                        world ? world->config : nlohmann::json::object()),
+                    reading ? reading->worldMs : 0, WorldNowRealMs());
+                if (conquest.ownershipChanged) {
+                  SLOG(SPRING_LOG_NOTICE,
+                       "world conquest: POI '%s' (%s) transferred '%s' -> "
+                       "'%s' via claim %lld (settlement %lld)",
+                       poi->poiId.c_str(), poi->worldId.c_str(),
+                       conquest.previousOwnerFactionId.c_str(),
+                       conquest.newOwnerFactionId.c_str(),
+                       static_cast<long long>(conquest.winningClaimId),
+                       static_cast<long long>(rec.settlementId));
+                  WorldNotificationEvent ev;
+                  ev.worldId           = poi->worldId;
+                  ev.poiId             = poi->poiId;
+                  ev.poiName           = poi->name;
+                  ev.kind              = WorldNotificationKind::PoiOwnershipChanged;
+                  ev.attackerFactionId = conquest.newOwnerFactionId;
+                  ev.defenderFactionId = conquest.previousOwnerFactionId;
+                  ev.claimId           = conquest.winningClaimId;
+                  ev.worldMs           = reading ? reading->worldMs : 0;
+                  gWorldNotifications.Publish(ev);
+                }
+              }
             }
           }
         }
@@ -8550,6 +8739,17 @@ int main(int argc, char *argv[]) {
         // loop having to know pause is even a state.
         const auto rules = WorldEconomyRules::FromWorldConfig(w.config);
         WorldEconomy::Tick(mapDb, w.worldId, rules, reading->worldMs, nowReal);
+        // Conquest rule 7 (WorldConquest.h): lapse open claims whose window
+        // has passed on the WORLD clock, refunding per the world's config.
+        // Same cadence as the tick because both are priced against the same
+        // frozen-under-pause clock — a paused world expires nothing.
+        const int lapsed = WorldConquest::ExpireClaims(
+            mapDb, w.worldId,
+            WorldConquestRules::FromWorldConfig(w.config), reading->worldMs,
+            nowReal);
+        if (lapsed > 0)
+          SLOG(SPRING_LOG_NOTICE, "world '%s': %d POI claim(s) expired",
+               w.worldId.c_str(), lapsed);
       }
     }
 

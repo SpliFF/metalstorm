@@ -48,9 +48,20 @@ enum class WorldNotificationKind : uint8_t {
     StagingMaterialised,
     StagingCancelled,
     StagingFailed,
+    /// The conquest rule fired: a POI changed hands at war end
+    /// (WorldConquest.h). `attackerFactionId` is the NEW owner,
+    /// `defenderFactionId` the previous one — the same attacker/defender
+    /// reading every staging event already uses, so the recipient union
+    /// (both factions' members + the garrison) applies unchanged.
+    PoiOwnershipChanged,
 };
 
 const char* WorldNotificationKindToString(WorldNotificationKind k);
+
+/// The SSE event name one kind is delivered under: staging transitions keep
+/// W11's `world-staging`; an ownership change is `world-poi`. Decided here so
+/// the sink in lobby_main.cpp does not grow a switch of its own.
+const char* WorldNotificationSseEvent(WorldNotificationKind k);
 
 /// One staging transition, as data. Deliberately carries both faction ids
 /// rather than a POI id alone — the recipient computation and the client's
@@ -65,6 +76,8 @@ struct WorldNotificationEvent {
     std::string attackerFactionId;
     std::string defenderFactionId;
     int64_t     stagingId = 0;
+    /// The winning claim, for `PoiOwnershipChanged` events; 0 otherwise.
+    int64_t     claimId = 0;
     /// The WORLD clock reading the event fired at — a march is measured on
     /// the world clock, so this is the same unit every other world-layer
     /// timestamp uses, not a wall-clock stamp.
