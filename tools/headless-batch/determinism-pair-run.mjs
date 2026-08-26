@@ -41,20 +41,30 @@ async function runOnce({ serverBin, config, index, outDir, port, maxWallMin, rep
 
     const result = await runHeadless({ serverBin, configPath, port, dbPath, maxWallMin, cwd: repoRoot });
 
-    // NOT gated on the exit code — PLAN-replay T2-b. `spring-server` aborts
-    // during static destruction (CWeaponDefHandler, inside __cxa_finalize,
-    // AFTER main returns and after the completion line is logged) in any run
-    // that exercised weapon defs. This gate never saw it before only because
-    // the fixture had no units and so never loaded a weapon; now that it
-    // stages a real army, the process status is noise. The run's own
-    // completion line, and the dump it wrote, are the evidence.
+    // Gated on BOTH the engine's own completion line AND a clean exit.
+    // History: T2-b (PLAN-replay §7.5) forced this driver to ignore the exit
+    // code — spring-server aborted during static destruction
+    // (CWeaponDefHandler -> ~DynDamageArray refcount assert, inside
+    // __cxa_finalize, AFTER "headless run complete" was logged) in any run
+    // that exercised weapon defs, so exit 134 was a SUCCESSFUL run. That
+    // defect is now fixed (the def handler is placement-new'd into static
+    // storage and never destroyed — WeaponDefHandler.cpp), which makes the
+    // process status meaningful again: a non-zero exit after a completed run
+    // is a genuine new defect and must not be papered over. The completion
+    // line stays load-bearing too — an early death can exit 0.
     const out = `${result.stdout}\n${result.stderr}`;
     const done = out.match(/headless run complete: stop=(\S+) frame=(-?\d+)/);
     if (!done) {
         throw new Error(`run ${index} never reached its stop condition (exit=${result.exitCode} signal=${result.signal}):\n` +
             out.split('\n').slice(-30).join('\n'));
     }
-    console.log(`  run ${index}: ${done[0]}`);
+    if (result.exitCode !== 0) {
+        throw new Error(`run ${index} completed ("${done[0]}") but exited ${result.exitCode}` +
+            `${result.signal ? ` (signal ${result.signal})` : ''} — a completed run must exit 0 ` +
+            `(the T2-b static-destruction abort is supposed to be fixed; this is a regression):\n` +
+            out.split('\n').slice(-15).join('\n'));
+    }
+    console.log(`  run ${index}: ${done[0]} exit=0`);
     return JSON.parse(await readFile(dumpPath, 'utf8'));
 }
 

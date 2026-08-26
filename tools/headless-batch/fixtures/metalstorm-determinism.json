@@ -1,0 +1,14 @@
+{
+  "map": "scorched_crossing_v2.4",
+  "game": "metalstorm",
+  "scenario": "crossing_standoff",
+  "aiSlots": [
+    { "aiId": "strategos", "team": 0, "startPos": 0 },
+    { "aiId": "strategos", "team": 1, "startPos": 1 }
+  ],
+  "headless": {
+    "tickMode": "uncapped",
+    "stopAt": { "frame": 9000 },
+    "stateHashEvery": 300
+  }
+}

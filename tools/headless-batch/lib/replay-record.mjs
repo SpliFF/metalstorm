@@ -72,6 +72,18 @@ export async function recordFixture({
             tail(rec));
     }
     const [, records, hashPoints, endFrame] = recLine;
+    // A closed recording must also come from a cleanly-exited process. The
+    // T2-b static-destruction abort (CWeaponDefHandler/~DynDamageArray, after
+    // main returned) that used to make exit 134 a SUCCESS is fixed
+    // (WeaponDefHandler.cpp placement-new singleton), so a non-zero exit here
+    // is a genuine defect again, not noise to parse around.
+    if (rec.exitCode !== 0) {
+        throw new RecordingError(
+            `the recording pass closed its replay file but exited ${rec.exitCode}`
+            + `${rec.signal ? ` (signal ${rec.signal})` : ''} — a completed run must exit 0 `
+            + '(T2-b is fixed; a non-zero exit is a real defect)',
+            tail(rec));
+    }
     log(`  recorded: ${records} records, ${hashPoints} hash points, end frame ${endFrame}`);
     if (Number(hashPoints) < 2) {
         throw new RecordingError(

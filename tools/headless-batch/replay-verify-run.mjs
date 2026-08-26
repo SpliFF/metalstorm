@@ -18,12 +18,15 @@
 //
 // TWO TRAPS this script exists to navigate, both documented in PLAN-replay:
 //
-//  * T2-b — DO NOT gate on the exit code. `spring-server` aborts during static
-//    destruction (CWeaponDefHandler, inside __cxa_finalize, AFTER main returns
-//    and after "exited cleanly" is logged) in any run that touched weapon
-//    defs. That is a pre-existing defect no plan file owns; it makes the
-//    process status meaningless here. The verdict is the `replay verify:` log
-//    line, which the engine emits before shutdown.
+//  * T2-b — FIXED, and now enforced in the opposite direction. spring-server
+//    used to abort during static destruction (CWeaponDefHandler ->
+//    ~DynDamageArray refcount assert, inside __cxa_finalize, AFTER the verdict
+//    line was logged) in any run that touched weapon defs, so this driver had
+//    to ignore the exit status. The handler is now placement-new'd into static
+//    storage and never destroyed (WeaponDefHandler.cpp), so a completed run
+//    exits 0 and this driver REQUIRES both the `replay verify:` verdict line
+//    AND a zero exit — either alone can lie (an early death can exit 0; a
+//    logged verdict used to be followed by an abort).
 //
 //  * T2-c/T3-d — a replay gate over an empty world is vacuous. The recording
 //    pass writes a stats dump and the run is rejected up front unless it
@@ -86,12 +89,21 @@ async function verifyReplay({ serverBin, replayPath, port, dbPath, maxWallMin, r
              tail(result));
     }
     if (v.verdict === 'fail') fail(`${label}: ${v.line}`, tail(result));
+    // A PASS verdict must also come from a cleanly-exited process. T2-b (the
+    // CWeaponDefHandler static-destruction abort that fired AFTER the verdict
+    // line was logged, making exit 134 a success) is fixed in
+    // WeaponDefHandler.cpp, so a non-zero exit alongside a PASS is a genuine
+    // new defect, not the known noise this driver used to parse around.
+    if (result.exitCode !== 0)
+        fail(`${label}: verdict was PASS but the process exited ${result.exitCode}` +
+             `${result.signal ? ` (signal ${result.signal})` : ''} — a completed verify must exit 0 ` +
+             '(T2-b is fixed; a non-zero exit is a real defect)', tail(result));
     // A verdict that checked nothing is a pass by vacuity — the engine refuses
     // `--verify` with no track at start-up, but a track with one point would
     // slip through, so say the number out loud and require more than one.
     if (v.checked < 2)
         fail(`${label}: PASS over only ${v.checked} reference point(s) — not a determinism gate`, v.line);
-    console.log(`  ${label}: ${v.line}`);
+    console.log(`  ${label}: ${v.line} exit=0`);
     return v;
 }
 
@@ -150,6 +162,9 @@ async function main() {
             serverBin, cwd: repoRoot,
             args: ['--replay', replayPath, '--replay-export', packedPath],
         });
+        if (pack.exitCode !== 0)
+            fail(`--replay-export exited ${pack.exitCode}` +
+                 `${pack.signal ? ` (signal ${pack.signal})` : ''}`, tail(pack));
         let packedSize = 0;
         try {
             packedSize = (await stat(packedPath)).size;

@@ -794,8 +794,30 @@
 ** without modifying the main part of the file.
 */
 
-
-
+/*
+** SPRINGRTS-WEB DETERMINISM (PLAN-replay §4 — found by the Metalstorm
+** determinism pair-run, 2026-08-27): stock Lua 5.4 seeds its string hash
+** from wall time + ASLR addresses (lstate.cpp luai_makeseed), so `pairs()`
+** iteration order over string-keyed tables differs from process to process.
+** In this engine EVERY lua_State participates in the authoritative sim —
+** synced gadget VMs and the server-side AI VMs alike — and content
+** legitimately builds arrays out of `pairs()`, so a per-process hash seed
+** makes two runs of an identical game diverge as soon as any iteration
+** order breaks a tie (measured: two identical crossing_standoff runs
+** diverged at the strategos allocator's first score tie). A FIXED seed
+** restores cross-process determinism, which is a correctness requirement
+** here, not a preference. The hash-flooding DoS the random seed defends
+** against does not apply: this Lua never hashes strings from untrusted
+** network input — wire payloads are FlatBuffers, and scripts are shipped
+** content. (Golden ratio constant; the value itself is arbitrary but must
+** never change casually — it is part of replay compatibility.)
+**
+** NOTE this file is rts/lib/lua/src/luaconf.h — the copy the Lua CORE
+** compiles against (quoted-include resolution picks the sibling over
+** include/luaconf.h). include/luaconf.h carries the same define for
+** external consumers; keep the two in sync.
+*/
+#define luai_makeseed(L)	((unsigned int)0x9E3779B9u)
 
 
 #endif
