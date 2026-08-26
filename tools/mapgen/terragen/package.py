@@ -22,6 +22,11 @@ from PIL import Image
 from . import bake as bk
 from . import dxt1, reachability, smf
 
+# The dataclass below has a field NAMED `reachability`, which shadows the
+# module inside the class body once its default is evaluated — so the scope
+# default is captured here, outside the body.
+_REACH_GATE_CLASSES = reachability.GATE_CLASSES
+
 
 @dataclass
 class MapPackageConfig:
@@ -37,7 +42,10 @@ class MapPackageConfig:
     # size in texels, 0 = do not ship one and leave the client on the SMT tile
     # dictionary. OPT-IN PER MAP, and that is part of the ruling rather than an
     # implementation detail — a real Spring map ships an exactly-deduped SMT
-    # that this path would degrade, so nothing is retrofitted.
+    # that this path would degrade, so nothing is retrofitted. The value is a
+    # REQUEST: write_package rounds it down to the nearest tile-aligned
+    # reduction of the bake (bake.ground_texture_size_for), so an oversized
+    # request on a small map ships lossless rather than erroring.
     ground_texture_size: int = 0
     metal_value: int = 0              # uniform metalmap value (games may ignore)
     start_positions: list[tuple[float, float]] = field(default_factory=list)
@@ -89,6 +97,11 @@ class MapPackageConfig:
     # generator that says nothing declares "connected", which is the
     # strict reading — silence is not consent.
     reachability: str = reachability.DEFAULT_INTENT
+    # The movement classes the intent above speaks for — written into the
+    # mapinfo as `reachability_classes` (PLAN-maps M9o / lane queue item 2).
+    # A class outside the scope may legally measure differently: meridian is
+    # split for VEH/HEAVY and connected for INFANTRY, on purpose.
+    reachability_classes: tuple = _REACH_GATE_CLASSES
     seed: int = 1
 
 
@@ -146,10 +159,18 @@ def write_package(
     # is still written: it is the SMF's own format, the sim reads the file, and
     # a client that never learns about `ground.png` still renders the map.
     if cfg.ground_texture_size > 0:
-        progress(f"ground albedo {cfg.ground_texture_size}^2 (map-space, "
-                 f"{baker.map_w / cfg.ground_texture_size:.0f} elmos/texel)...")
+        # The configured edge is a REQUEST: it is rounded down to the nearest
+        # tile-aligned reduction (and capped at the bake's own resolution), so
+        # a small map with a big default ships lossless instead of erroring.
+        gsize = bk.ground_texture_size_for(cfg.ground_texture_size, tiles_x * 32)
+        if gsize != cfg.ground_texture_size:
+            progress(f"  ground texture size {cfg.ground_texture_size} -> "
+                     f"{gsize} (nearest tile-aligned reduction of the "
+                     f"{tiles_x * 32}-texel bake)")
+        progress(f"ground albedo {gsize}^2 (map-space, "
+                 f"{baker.map_w / gsize:.0f} elmos/texel)...")
         Image.fromarray(bk.ground_texture_from_tiles(
-            tiles, tiles_x, tiles_z, cfg.ground_texture_size)).save(
+            tiles, tiles_x, tiles_z, gsize)).save(
                 os.path.join(maps_dir, "ground.png"))
 
     progress("minimap...")
@@ -233,7 +254,8 @@ def emit_mapinfo(cfg: MapPackageConfig) -> str:
     )
     s = cfg.splat_tex_scales
     m = cfg.splat_tex_mults
-    reach_block = reachability.emit_mapinfo_block(cfg.reachability)
+    reach_block = reachability.emit_mapinfo_block(
+        cfg.reachability, classes=cfg.reachability_classes)
     # DEVIATION (recorded, not silent): `groundtex` is NOT a Recoil mapinfo
     # key. Recoil delivers the ground albedo only through the SMF's tile
     # dictionary; this key names the map-space replacement M7f measured and

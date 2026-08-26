@@ -471,7 +471,42 @@ def make_splat_distr(
 # Derived by BOX-DOWNSAMPLING the same full-resolution tile bake the SMT is
 # clustered from, so the two delivery paths carry the same pixels and the
 # comparison eval_ground_albedo.py makes is the one that ships.
-GROUND_TEXTURE_SIZE_DEFAULT = 2048
+#
+# 4096 since M8 streaming v2's resolution raise (PLAN-maps §1.2.1, lane queue
+# step 4, 2026-08-27): the ruling's 2048² was priced BEFORE page streaming
+# existed, when the whole texture shipped as one ground.ktx2. With the page
+# pyramid landed (`ground_pages.bin`, format v19 — self-describing, so a finer
+# source needs NO format change) the source edge is what caps the producer's
+# `finestLevel`: 2048 on a 16 384-elmo map stops at level 3 (8 elmos/texel,
+# 21 pages / 2.8 MB), 4096 reaches level 2 (4 elmos/texel, 85 pages /
+# ~11.5 MB). The number is config, not code — every generator exposes
+# --ground-texture-size, and a map that wants the old cost can ship 2048.
+GROUND_TEXTURE_SIZE_DEFAULT = 4096
+
+
+def ground_texture_size_for(request: int, full_edge: int) -> int:
+    """The largest edge `ground_texture_from_tiles` accepts that does not
+    exceed `request`, for a `full_edge`-texel bake. Valid edges are
+    full_edge / f for f a divisor of the 32-texel tile, so a request between
+    two of them rounds DOWN (never finer than asked) and a request at or above
+    the bake resolution is served lossless (factor 1). A request below the
+    coarsest expressible edge (full_edge / 32) returns that coarsest edge —
+    the caller asked for *a* ground texture, and 32x is the hardest reduction
+    the tile geometry can express."""
+    if request <= 0:
+        raise ValueError(f"ground texture size request {request} must be > 0")
+    coarsest = None
+    for factor in (1, 2, 4, 8, 16, 32):
+        if full_edge % factor:
+            continue
+        size = full_edge // factor
+        coarsest = size
+        if size <= request:
+            return size
+    if coarsest is None:
+        raise ValueError(f"bake edge {full_edge} admits no tile-aligned "
+                         "reduction at all")
+    return coarsest
 
 
 def ground_texture_from_tiles(

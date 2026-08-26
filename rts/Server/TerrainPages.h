@@ -10,13 +10,16 @@
 // numbers and client/src/core/terrain-page-http.test.ts pins the same ones
 // from the other side.
 //
-// What is PRODUCED is only the levels the source image actually carries
-// (PLAN-maps §2n option A ships a 2048² source, so a 16 384-elmo map gets
-// levels 3..5 — 21 pages, ~2.8 MB). Levels finer than the source would be
-// upsampled blur at 135 KB a page; the client clamps its visible-set descent
-// to `finestLevel` instead (terrain-page-visibility.ts `minLevel`), and the
-// resolution raise is PLAN-maps §1.2.1 lane queue item 3, not a format
-// change: a finer source simply yields a smaller `finestLevel` here.
+// What is PRODUCED is only the levels the source image actually carries.
+// Since the M8 streaming-v2 resolution raise (PLAN-maps §1.2.1 lane queue
+// step 4, 2026-08-27) the generator default is a 4096² source, so a
+// 16 384-elmo map gets levels 2..5 — 85 pages, ~11.5 MB (the pre-raise 2048²
+// shape was levels 3..5 — 21 pages, ~2.8 MB, and older packages still
+// carrying it keep working: the index self-describes). Levels finer than the
+// source would be upsampled blur at 135 KB a page; the client clamps its
+// visible-set descent to `finestLevel` instead (terrain-page-visibility.ts
+// `minLevel`). A resolution change is never a format change: a finer source
+// simply yields a smaller `finestLevel` here.
 //
 // On-disk format (MAP_FORMAT_VERSION 19):
 //   ground_pages.bin   pages back to back, PAGE_BYTES each, levels ascending

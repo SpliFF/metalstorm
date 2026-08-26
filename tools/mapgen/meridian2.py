@@ -40,6 +40,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 
+from terragen import bake as bake_mod
 from terragen import biomes as bio
 from terragen import bridges as brg
 from terragen import erosion as ero
@@ -217,12 +218,20 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
 # scarp comes from `meridian_layout.json`, which every variant carries — a
 # different --seed or --climate cannot connect it.
 DECLARED_REACHABILITY = reach.SPLIT
+# The classes that split claim speaks for (PLAN-maps M9o / lane queue item 2):
+# the severing scarp is 44-75 degrees of side-hill, outside VEH's 32 and
+# HEAVY's 24 but inside INFANTRY's 45 — so INFANTRY measures CONNECTED on this
+# map (all 8 starts in one component, M9o and every regen since) and that is
+# the intended shape, not a stale declaration. Scoping the claim to the armour
+# classes writes that intent into the mapinfo itself.
+DECLARED_REACHABILITY_CLASSES = ("VEH", "HEAVY")
 
 
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
              no_package=False, climate="temperate",
              map_id="meridian_basin", display_name="Meridian Basin",
-             reachability=None, ground_texture=True):
+             reachability=None, ground_texture=True,
+             ground_texture_size=None):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -733,8 +742,10 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     if reachability is None:
         reachability = DECLARED_REACHABILITY
     reach.check(reachability)
-    print(f"reachability declared \"{reachability}\" for {map_id}:")
-    reach.report(pas.read_all(h, cell, starts), reachability)
+    print(f"reachability declared \"{reachability}\" for {map_id} "
+          f"(scope {'/'.join(DECLARED_REACHABILITY_CLASSES)}):")
+    reach.report(pas.read_all(h, cell, starts), reachability,
+                 gate_classes=DECLARED_REACHABILITY_CLASSES)
     from terragen import bake as bake_mod
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
@@ -743,12 +754,15 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
         # PLAN-maps §2n ruling 1: a generated map ships the map-space ground
-        # albedo instead of relying on the lossy SMT tile dictionary.
-        ground_texture_size=(bake_mod.GROUND_TEXTURE_SIZE_DEFAULT
-                             if ground_texture else 0),
+        # albedo instead of relying on the lossy SMT tile dictionary. The edge
+        # is a request write_package rounds to a tile-aligned reduction.
+        ground_texture_size=(0 if not ground_texture else
+                             (ground_texture_size if ground_texture_size
+                              else bake_mod.GROUND_TEXTURE_SIZE_DEFAULT)),
         start_positions=starts,
         seed=seed,
         reachability=reachability,
+        reachability_classes=DECLARED_REACHABILITY_CLASSES,
     )
     # The 24-region contract and the civilian data are layout-derived, not
     # terrain-derived, so they are the same bytes for any seed or id — but a
@@ -850,6 +864,14 @@ def main():
                          "M7f measured and PLAN-maps \u00a72n ruled in. "
                          "--no-ground-texture leaves the map on the SMT tile "
                          "dictionary and its 32-elmo seam grid.")
+    ap.add_argument("--ground-texture-size", dest="ground_texture_size",
+                    type=int, default=None, metavar="TEXELS",
+                    help="edge of maps/ground.png in texels (default "
+                         f"{bake_mod.GROUND_TEXTURE_SIZE_DEFAULT}). Also the "
+                         "source the page pyramid (ground_pages.bin, "
+                         "PLAN-maps §1.2.1) is cut from, so it caps the "
+                         "streamed finestLevel. Rounded down to the nearest "
+                         "tile-aligned reduction of the bake.")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--with-features", action="store_true",
                     help="scatter the full vegetation set into "
@@ -881,6 +903,11 @@ def main():
                        "--id", args.map_id, "--name", args.display_name]
         if args.reachability is not None:
             passthrough += ["--reachability", args.reachability]
+        if args.ground_texture_size is not None:
+            passthrough += ["--ground-texture-size",
+                            str(args.ground_texture_size)]
+        if not args.ground_texture:
+            passthrough.append("--no-ground-texture")
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -906,6 +933,7 @@ def main():
              climate=args.climate, map_id=args.map_id,
              reachability=args.reachability,
              ground_texture=args.ground_texture,
+             ground_texture_size=args.ground_texture_size,
              display_name=args.display_name)
 
 

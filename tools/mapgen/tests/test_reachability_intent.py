@@ -115,7 +115,13 @@ class TheGateClassIsTheVerifiersClass(unittest.TestCase):
                            Reading("HEAVY", {1: [0], 2: [1]})],
                           reach.SPLIT, log=lines.append)
         self.assertTrue(ok, lines)
-        self.assertTrue(any("not judged" in ln for ln in lines), lines)
+        # M9o / lane queue item 2: a class outside the declared scope is
+        # MEASURED, never judged — the old wording called meridian's
+        # connected INFANTRY "stale", which is the confusion the scope key
+        # exists to remove.
+        self.assertTrue(any("outside declared scope" in ln for ln in lines),
+                        lines)
+        self.assertFalse(any("stale" in ln for ln in lines), lines)
 
     def test_the_gate_class_disagreeing_is_reported_loudly(self):
         class Reading:
@@ -188,6 +194,75 @@ class TheIntentIsAuthoredNotMeasured(unittest.TestCase):
             with open(path, "r", encoding="utf-8") as f:
                 self.assertEqual(reach.parse_mapinfo(f.read()), reach.SPLIT,
                                  f"{map_id} lost its §2k declaration")
+
+
+class TheDeclarationNamesItsScope(unittest.TestCase):
+    """`reachability_classes` — M9o's find, executed (lane queue item 2).
+
+    meridian_basin declares "split" and INFANTRY measures connected. That is
+    the documented per-class divergence, but a declaration that does not name
+    its scope cannot say so — a reader had to know the verifier's default to
+    know which classes the claim covered. The scope key writes it down, and a
+    package emitted before the key existed still reads as the old scope.
+    """
+
+    def test_round_trip_scope(self):
+        block = reach.emit_mapinfo_block(reach.SPLIT,
+                                         classes=("VEH", "HEAVY"))
+        text = "local mapinfo = {\n" + block + "}\n"
+        self.assertEqual(reach.parse_mapinfo(text), reach.SPLIT)
+        self.assertEqual(reach.parse_mapinfo_classes(text), ("VEH", "HEAVY"))
+
+    def test_an_old_package_reads_as_the_gate_scope(self):
+        # a mapinfo written before the key existed — no reachability_classes
+        text = ('local mapinfo = {\n metalstorm = { reachability = "split" '
+                '},\n}\n')
+        self.assertEqual(reach.parse_mapinfo_classes(text),
+                         reach.GATE_CLASSES)
+
+    def test_silence_is_the_gate_scope(self):
+        self.assertEqual(
+            reach.parse_mapinfo_classes("local mapinfo = { name = 'x' }"),
+            reach.GATE_CLASSES)
+
+    def test_an_unknown_class_is_an_error_not_a_fallback(self):
+        text = ('local mapinfo = {\n metalstorm = { reachability = "split", '
+                'reachability_classes = "TANKS" },\n}\n')
+        with self.assertRaises(ValueError):
+            reach.parse_mapinfo_classes(text)
+        with self.assertRaises(ValueError):
+            reach.emit_mapinfo_block(reach.SPLIT, classes=())
+
+    def test_known_classes_pin_the_passability_vocabulary(self):
+        """reachability.py is stdlib-only and cannot import passability, so
+        the vocabulary is duplicated and pinned here instead."""
+        from terragen import passability as pas
+        self.assertEqual(tuple(pas.DEFAULT_CLASSES), reach.KNOWN_CLASSES)
+
+    def test_the_real_emitter_carries_the_scope(self):
+        cfg = pkg.MapPackageConfig(map_id="t", display_name="T",
+                                   reachability=reach.SPLIT,
+                                   reachability_classes=("VEH", "HEAVY"),
+                                   start_positions=[(10.0, 10.0)])
+        text = pkg.emit_mapinfo(cfg)
+        self.assertEqual(reach.parse_mapinfo_classes(text), ("VEH", "HEAVY"))
+
+    def test_generators_author_a_true_scope(self):
+        """meridian is split for armour only; a mounds archipelago is split
+        for everything; the arc is split for armour only (M8w/M8x)."""
+        self.assertEqual(meridian2.DECLARED_REACHABILITY_CLASSES,
+                         ("VEH", "HEAVY"))
+        self.assertEqual(
+            archipelago.DECLARED_REACHABILITY_CLASSES["mounds"],
+            ("INFANTRY", "VEH", "HEAVY"))
+        self.assertEqual(
+            archipelago.DECLARED_REACHABILITY_CLASSES["arc"],
+            ("VEH", "HEAVY"))
+        for classes in ([meridian2.DECLARED_REACHABILITY_CLASSES]
+                        + list(archipelago.DECLARED_REACHABILITY_CLASSES
+                               .values())):
+            for c in classes:
+                self.assertIn(c, reach.KNOWN_CLASSES)
 
 
 # --- the verifier's own two checks, over a synthetic mask -------------------
