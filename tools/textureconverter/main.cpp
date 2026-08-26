@@ -32,6 +32,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "Server/TerrainPages.h"
 #include "System/FileSystem/DetailTexDc.h"
 #include "System/FileSystem/Ktx2BytesPlane.h"
 #include "System/FileSystem/Ktx2Orientation.h"
@@ -43,6 +44,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -68,6 +70,16 @@ static std::vector<uint8_t> ReadAllBytes(const std::string& path) {
     if (sz > 0) f.read(reinterpret_cast<char*>(out.data()),
                        static_cast<std::streamsize>(sz));
     return out;
+}
+
+/// Inverse of ReadAllBytes — write a whole buffer, truncating.
+static bool WriteAllBytes(const std::string& path,
+                          const std::vector<uint8_t>& bytes) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    return f.good();
 }
 
 /// Parse a "WxH" string. Returns false on any malformed input.
@@ -1019,6 +1031,49 @@ static int ConvertGeneric(const std::string& inputPath,
     return ok ? 0 : 1;
 }
 
+/// --terrain-pages (PLAN-maps.md §1.2.1 streaming v2): cut a map-space
+/// ground albedo into the client's 520² BC1 page pyramid. Writes
+/// `<output>.bin`'s pages plus the self-describing `ground_pages.json`
+/// index next to it (same stem, `.json`). The address space, the on-disk
+/// order and the BC1 encode all live in Server/TerrainPages.h, shared
+/// with the doctest suite; only the file I/O is here.
+static int BuildTerrainPages(const std::string& inputPath,
+                             const std::string& outputPath,
+                             int mapElmosX, int mapElmosZ) {
+    int w, h, channels;
+    uint8_t* pixels = stbi_load(inputPath.c_str(), &w, &h, &channels, 3);
+    if (!pixels) {
+        SLOG(SPRING_LOG_ERROR, "stb_image failed on %s: %s",
+            inputPath.c_str(), stbi_failure_reason());
+        return 1;
+    }
+    const TerrainPages::Plan plan =
+        TerrainPages::PlanPages(mapElmosX, mapElmosZ, w, h);
+    std::vector<uint8_t> pages;
+    TerrainPages::BuildPages(pixels, plan, pages);
+    stbi_image_free(pixels);
+
+    if (!WriteAllBytes(outputPath, pages)) {
+        SLOG(SPRING_LOG_ERROR, "failed to write %s", outputPath.c_str());
+        return 1;
+    }
+    const std::string jsonPath =
+        fs::path(outputPath).replace_extension(".json").string();
+    const std::string json =
+        TerrainPages::IndexJson(plan, int64_t(time(nullptr)));
+    if (!WriteAllBytes(jsonPath,
+            std::vector<uint8_t>(json.begin(), json.end()))) {
+        SLOG(SPRING_LOG_ERROR, "failed to write %s", jsonPath.c_str());
+        return 1;
+    }
+    SLOG(SPRING_LOG_INFO,
+        "terrain pages: %dx%d elmos, source %dx%d -> levels %d..%d, "
+        "%zu pages (%zu bytes) -> %s",
+        mapElmosX, mapElmosZ, w, h, plan.finestLevel, plan.rootLevel,
+        plan.totalPages, pages.size(), outputPath.c_str());
+    return 0;
+}
+
 /// Emit the DC measurement as one machine-readable line so a calling
 /// converter can apply its own policy without re-decoding the source.
 /// Only the caller knows whether a texture is sampled signed (`tex*2-1`),
@@ -1050,6 +1105,7 @@ static void PrintUsage(const char* argv0) {
         "  %s [options] <input> <output.ktx2>\n"
         "  %s --raw-dxt1 WxH [--mip-levels N] <input> <output.ktx2>\n"
         "  %s --smf-minimap <input.smf> <output.ktx2>\n"
+        "  %s --terrain-pages WxH <ground.png> <ground_pages.bin>\n"
         "\n"
         "DDS sources (BC1/BC3/BC4/BC5) are wrapped as KTX2 without\n"
         "transcoding. RGBA sources (TGA/PNG/JPG/BMP) are encoded via\n"
@@ -1093,8 +1149,14 @@ static void PrintUsage(const char* argv0) {
         "                           the diffuse texture carries Spring's\n"
         "                           canonical cutout alpha (tex2.A), exposed\n"
         "                           to glTF readers via alphaMode: MASK.\n"
-        "  --log-level <level>      debug/info/notice/warning/error\n",
-        argv0, argv0, argv0);
+        "  --log-level <level>      debug/info/notice/warning/error\n"
+        "\n"
+        "The --terrain-pages mode (PLAN-maps.md §1.2.1 streaming v2) cuts a\n"
+        "map-space ground albedo into the client's 520^2 BC1 page pyramid;\n"
+        "WxH is the MAP extent in elmos. Writes the .bin page stream plus a\n"
+        "self-describing .json index at the same stem. Only levels the\n"
+        "source resolution covers without upsampling are produced.\n",
+        argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char* argv[]) {
@@ -1111,6 +1173,8 @@ int main(int argc, char* argv[]) {
     bool zstd = true;
     bool rawDxt1 = false;
     bool smfMinimap = false;
+    bool terrainPages = false;
+    int pagesElmosX = 0, pagesElmosZ = 0;
     int rawW = 0, rawH = 0;
     int rawMipLevels = 1;
     std::string pngFallbackPath;
@@ -1153,6 +1217,13 @@ int main(int argc, char* argv[]) {
             }
         } else if (a == "--smf-minimap") {
             smfMinimap = true;
+        } else if (a == "--terrain-pages" && i + 1 < argc) {
+            terrainPages = true;
+            if (!ParseDims(argv[++i], pagesElmosX, pagesElmosZ)) {
+                SLOG(SPRING_LOG_ERROR, "bad --terrain-pages dims");
+                springlog_shutdown();
+                return 2;
+            }
         } else if (a == "--channel-op" && i + 1 < argc) {
             const std::string v = argv[++i];
             if      (v == "diffuse")  channelOp = ChannelOp::Diffuse;
@@ -1206,7 +1277,9 @@ int main(int argc, char* argv[]) {
     if (!outDir.empty()) fs::create_directories(outDir, ec);
 
     int rc;
-    if (smfMinimap) {
+    if (terrainPages) {
+        rc = BuildTerrainPages(inputPath, outputPath, pagesElmosX, pagesElmosZ);
+    } else if (smfMinimap) {
         rc = ExtractSmfMinimapToKtx2(inputPath, outputPath, zstd) ? 0 : 1;
     } else if (rawDxt1) {
         std::vector<uint8_t> bytes = ReadAllBytes(inputPath);

@@ -15,10 +15,11 @@
  * 4. `TerrainPageTableTexture.sync` — re-upload the 8 KB table only when
  *    `cache.revision` moved, so a still camera uploads nothing.
  *
- * The slice ships with the **synthetic** `PageSource` (one hue per pyramid
- * level, `terrain-page-synthetic.ts`) and is opt-in via the `__terrainPages`
- * debug handle in game-processor — there is no real page producer yet (lane
- * queue item 2), so nothing enables this in normal play.
+ * Sources: the real producer's HTTP `PageSource` (`terrain-page-http.ts`,
+ * for maps that ship `ground_pages.bin` — format v19) or the **synthetic**
+ * one (one hue per pyramid level, `terrain-page-synthetic.ts`) as the
+ * explicit fallback / diagnostic. Which one is the `__terrainPages` debug
+ * handle's choice in game-processor; nothing enables either in normal play.
  */
 
 import { Vector3 } from '@babylonjs/core';
@@ -63,6 +64,10 @@ export interface TerrainPageStreamingOptions {
     maxPages?: number;
     levelBias?: number;
     predictPadFrac?: number;
+    /** Floor on the visible-set descent — the real producer's
+     *  `ground_pages.json.finestLevel` (levels finer than the source do not
+     *  exist on disk). 0 (default) descends the full pyramid. */
+    minLevel?: number;
 }
 
 const LOCAL_RIGHT = new Vector3(1, 0, 0);
@@ -80,6 +85,7 @@ export class TerrainPageStreaming {
     private readonly observer: Observer<Scene>;
     private readonly maxPages: number;
     private readonly levelBias: number;
+    private readonly minLevel: number;
     private readonly predictPadFrac: number;
     private readonly right = new Vector3();
     private readonly up = new Vector3();
@@ -100,6 +106,7 @@ export class TerrainPageStreaming {
         this.maxPages = opts.maxPages ?? 256;
         this.levelBias = opts.levelBias ?? 0;
         this.predictPadFrac = opts.predictPadFrac ?? 0.25;
+        this.minLevel = opts.minLevel ?? 0;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const gl = getEngineGl(scene.getEngine() as any);
@@ -148,6 +155,7 @@ export class TerrainPageStreaming {
             maxPages: this.maxPages,
             levelBias: this.levelBias,
             predictPadFrac: this.predictPadFrac,
+            minLevel: this.minLevel,
         });
         this.cache.update(desired, performance.now());
         this.table.sync();

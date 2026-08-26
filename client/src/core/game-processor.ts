@@ -47,6 +47,11 @@ import {
     type MapDimensions, type FogDarkening, type TerrainMeshGroup,
 } from './terrain.js';
 import { TerrainPageStreaming } from './terrain-page-streaming.js';
+import {
+    HttpPageSource, fetchGroundPagesIndex, validateGroundPagesIndex,
+} from './terrain-page-http.js';
+import { withPageDiskCache } from './terrain-page-cache.js';
+import { planPageGrid } from './terrain-page-grid.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
     loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
@@ -438,9 +443,13 @@ let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
 let gpTerrain: TerrainMeshGroup | null = null;
 /// PLAN-maps.md §1.2.1 streaming v2 vertical slice. Opt-in via the
-/// `__terrainPages` debug handle only — the shipped source is synthetic
-/// (one hue per pyramid level); the real page producer is lane queue item 2.
+/// `__terrainPages` debug handle only — `enable()` streams the map's real
+/// ground pages when it ships them (format v19), `enable({synthetic:true})`
+/// forces the hue-per-level diagnostic source.
 let gpTerrainPages: TerrainPageStreaming | null = null;
+/// Guards the async gap in `__terrainPages.enable()` (the ground_pages.json
+/// fetch) against a double enable.
+let gpTerrainPagesEnabling = false;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
@@ -2662,23 +2671,61 @@ export function gpInit(msg: GpInitToWorker): void {
         combatFxPooled: (on: boolean): boolean =>
             gpCombatFX?.setPooled(on) ?? false,
     };
-    // PLAN-maps.md §1.2.1: streaming v2 vertical slice, synthetic pages (one
-    // hue per pyramid level) — the fallback chain and cross-fade on screen
-    // before any real map bytes exist. Opt-in only; nothing enables this in
-    // normal play. From the main DevTools console:
-    //   window.__gp('__terrainPages.enable()')        // cache + shader up
+    // PLAN-maps.md §1.2.1: streaming v2. `enable()` prefers the REAL page
+    // source when the map ships one (`<mapDataUrl>/ground_pages.json`,
+    // format v19 — the ground albedo cut into the 520² BC1 pyramid, fetched
+    // per page over HTTP Range and disk-cached via the Cache API);
+    // `enable({synthetic:true})` forces the hue-per-level diagnostic source.
+    // Opt-in only; nothing enables this in normal play. From the main
+    // DevTools console:
+    //   window.__gp('__terrainPages.enable()')        // async — real pages
+    //   window.__gp('__terrainPages.enable({synthetic:true})')
     //   window.__gp('__terrainPages.plugin(false)')   // A/B arm: shader off
     //   window.__gp('__terrainPages.stats()')         // residency counters
     //   window.__gp('__terrainPages.disable()')       // full teardown
     (globalThis as Record<string, unknown>).__terrainPages = {
-        enable: (): string => {
+        enable: async (opts?: { synthetic?: boolean }): Promise<string> => {
             if (gpTerrainPages) return 'already enabled';
+            if (gpTerrainPagesEnabling) return 'enable already in flight';
             if (!gpScene || !gpTerrain || !gpMapData) return 'no map loaded';
+            gpTerrainPagesEnabling = true;
             try {
+                let source;
+                let minLevel = 0;
+                let how = 'synthetic pages (forced)';
+                if (!opts?.synthetic) {
+                    const idx = await fetchGroundPagesIndex(gpMapData.mapDataUrl);
+                    if (!idx) {
+                        gpTerrainPagesEnabling = false;
+                        return 'map ships no ground_pages.json — real pages '
+                            + 'unavailable; use enable({synthetic:true}) '
+                            + 'for the diagnostic source';
+                    }
+                    const grid = planPageGrid(
+                        gpMapData.widthElmos, gpMapData.heightElmos);
+                    const bad = validateGroundPagesIndex(idx, grid);
+                    if (bad) {
+                        gpTerrainPagesEnabling = false;
+                        return `ground_pages.json refused: ${bad}`;
+                    }
+                    source = withPageDiskCache(
+                        new HttpPageSource(gpMapData.mapDataUrl, idx));
+                    minLevel = idx.finestLevel;
+                    how = `real pages (levels ${idx.finestLevel}..`
+                        + `${idx.rootLevel}, ${idx.totalPages} pages, `
+                        + `source ${idx.sourceW}x${idx.sourceH})`;
+                }
+                // Re-check: an async gap means the map could have unloaded.
+                if (!gpScene || !gpTerrain || !gpMapData) {
+                    gpTerrainPagesEnabling = false;
+                    return 'map unloaded while enabling';
+                }
                 gpTerrainPages = new TerrainPageStreaming(
-                    gpScene, gpTerrain, gpMapData);
-                return 'enabled';
+                    gpScene, gpTerrain, gpMapData, { source, minLevel });
+                gpTerrainPagesEnabling = false;
+                return `enabled: ${how}`;
             } catch (e) {
+                gpTerrainPagesEnabling = false;
                 return `failed: ${e}`;
             }
         },

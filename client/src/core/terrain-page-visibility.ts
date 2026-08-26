@@ -78,6 +78,14 @@ export interface VisiblePagesOptions {
      * wider each way). 0 skips the second pass entirely.
      */
     predictPadFrac?: number;
+    /**
+     * Coarsest-allowed FLOOR on the descent: no page finer than this level is
+     * ever desired. The real page producer only ships levels the source
+     * resolution covers (PLAN-maps §1.2.1 — `ground_pages.json.finestLevel`),
+     * so descending past it would request pages that do not exist and fill
+     * cache layers with upsampled blur. 0 (the default) is the full pyramid.
+     */
+    minLevel?: number;
     /** Vertical slack (elmos) added to every page box, for terrain the height
      *  pyramid quantises away plus anything standing on the ground. */
     heightMargin?: number;
@@ -139,6 +147,7 @@ export function computeVisiblePages(
 ): DesiredPage[] {
     const maxPages = opts.maxPages ?? DEFAULT_MAX_PAGES;
     const margin = opts.heightMargin ?? DEFAULT_HEIGHT_MARGIN;
+    const minLevel = Math.min(opts.minLevel ?? 0, grid.rootLevel);
     const seen = new Set<number>();
     const out: DesiredPage[] = [];
 
@@ -160,9 +169,9 @@ export function computeVisiblePages(
             if (!hit) continue;
 
             const depth = hit.minDepth;
-            const wantLevel = levelForDepth(
+            const wantLevel = Math.max(minLevel, levelForDepth(
                 grid, depth, frustum.yScale, opts.viewportHeightPx,
-                opts.levelBias ?? 0);
+                opts.levelBias ?? 0));
 
             // Subdivide only while the node is coarser than the screen wants
             // AND the budget allows another four children.

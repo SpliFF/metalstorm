@@ -64,7 +64,14 @@ struct sqlite3;
 ///     option A, user ruling §2n). A map that declares `resources.groundtex`
 ///     ships its whole ground colour as one texture and the SMT tile
 ///     dictionary is not extracted for it at all.
-constexpr int MAP_FORMAT_VERSION = 18;
+/// 19: ground_pages.bin + ground_pages.json (PLAN-maps §1.2.1 streaming v2):
+///     the ground albedo source cut into the client's 520² BC1 page pyramid
+///     (Server/TerrainPages.h). File-convention contract — no new DB column
+///     and no protocol field; the client fetches
+///     `<mapDataUrl>/ground_pages.json` and a 404 means "no pages". Only
+///     produced for maps that declare `resources.groundtex`, and only the
+///     pyramid levels the source resolution covers without upsampling.
+constexpr int MAP_FORMAT_VERSION = 19;
 
 struct MapStartPosition {
     float x = 0, z = 0;

@@ -827,6 +827,9 @@ static bool ConvertMapTexture(const MapMetadata& meta, std::string& field,
 bool MapProcessor::ExtractGroundTexture(MapMetadata& meta) {
     if (meta.groundTex.empty()) return true;
     const std::string declared = meta.groundTex;
+    // Resolved before ConvertMapTexture rewrites the field to "ground.ktx2":
+    // the page pyramid below slices the SOURCE image, not the UASTC output.
+    const std::string src = resolveTexturePath(meta.sourcePath, meta.groundTex);
     if (!ConvertMapTexture(meta, meta.groundTex, "ground", false, nullptr)) {
         SLOG(SPRING_LOG_WARNING,
             "%s: ground texture '%s' declared but not produced — falling back "
@@ -835,6 +838,38 @@ bool MapProcessor::ExtractGroundTexture(MapMetadata& meta) {
     }
     SLOG(SPRING_LOG_INFO, "%s: map-space ground albedo -> %s",
         meta.id.c_str(), meta.groundTex.c_str());
+
+    // PLAN-maps.md §1.2.1 streaming v2 (format v19): the same source, cut
+    // into the client's 520² BC1 page pyramid — ground_pages.bin +
+    // ground_pages.json in the processed dir, served statically and
+    // discovered by the client at `<mapDataUrl>/ground_pages.json` (no DB
+    // column, no protocol field: the .json IS the index). Only the levels
+    // the source resolution covers are produced; the client clamps its
+    // visible-set descent to the index's `finestLevel`. A failure here is
+    // a degradation, not an error — the map still ships ground.ktx2, and
+    // streaming stays unavailable for it exactly like a map with no
+    // ground texture at all.
+    const int elmosX = meta.mapx * 8;  // SMF squares → elmos (SQUARE_SIZE)
+    const int elmosZ = meta.mapy * 8;
+    const std::string pagesPath = meta.processedDir + "/ground_pages.bin";
+    const std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
+        " --terrain-pages " + std::to_string(elmosX) + "x" + std::to_string(elmosZ) +
+        " \"" + src + "\" \"" + pagesPath + "\" 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");
+    std::string out;
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) out += buf;
+    }
+    const int rc = p ? pclose(p) : -1;
+    if (rc != 0) {
+        SLOG(SPRING_LOG_WARNING,
+            "%s: ground page pyramid not produced (%d): %s",
+            meta.id.c_str(), rc, out.c_str());
+    } else {
+        SLOG(SPRING_LOG_INFO, "%s: ground page pyramid -> ground_pages.bin",
+            meta.id.c_str());
+    }
     return true;
 }
 
