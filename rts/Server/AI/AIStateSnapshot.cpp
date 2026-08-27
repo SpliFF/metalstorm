@@ -88,9 +88,17 @@ AIStateSnapshot BuildAISnapshot(int teamId, int allyTeamId, int lodLevel) {
             // Allied unit — full detail
             snap.alliedUnits.push_back(MakeSquadInfo(u));
         } else {
-            // Enemy — only if in LOS
+            // Enemy — full sighting only if in LOS; a radar-covered contact
+            // outside LOS degrades to a position-only blip (fog-honest: the
+            // same distinction the client's radar-dot rendering draws).
             if (losHandler != nullptr && losHandler->InLos(u, allyTeamId)) {
                 snap.visibleEnemies.push_back(MakeSquadInfo(u));
+            } else if (losHandler != nullptr && losHandler->InRadar(u, allyTeamId)) {
+                AIRadarBlip blip;
+                blip.unitId = static_cast<uint32_t>(u->id);
+                blip.x = u->pos.x;
+                blip.z = u->pos.z;
+                snap.radarBlips.push_back(blip);
             }
         }
     }

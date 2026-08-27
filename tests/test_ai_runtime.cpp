@@ -111,6 +111,51 @@ TEST_CASE("AI VM: require loader + getRulesParam + getTeamId end to end") {
     fs::remove_all(dir);
 }
 
+TEST_CASE("AI VM: AI.getRadarBlips exposes position-only radar contacts") {
+    // Radar-only contacts (in radar coverage, NOT in LOS) reach the VM as
+    // position + tracking id only — no defId, no health (fog-honest, the
+    // PLAN-ai.md getRadarBlips contract: "Position only, no type"). The
+    // picture builder folds these into intel as low-confidence entries.
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_blip_plugin";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    { std::ofstream(dir / "main.lua")
+        << "function onUpdate(frame)\n"
+           "  local blips = AI.getRadarBlips()\n"
+           "  local first = blips[1] or {}\n"
+           "  -- fog-honesty: a blip must NOT carry type or health fields\n"
+           "  local clean = (first.defId == nil and first.health == nil) and 1 or 0\n"
+           "  AI.issueCommand(1, 777, #blips, first.id or -1,\n"
+           "                  first.x or -1, first.z or -1, clean)\n"
+           "end\n"; }
+
+    AIScriptContext ctx("ai_blips", /*teamId*/ 1, /*allyTeamId*/ 1, dir.string());
+    REQUIRE(ctx.Init(ReadFile(dir / "main.lua"), "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 1;
+    snap.frame = 60;
+    snap.radarBlips.push_back(AIRadarBlip{ 4242u, 1024.0f, 2048.0f });
+    snap.radarBlips.push_back(AIRadarBlip{ 4243u, 512.0f, 256.0f });
+
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 1);
+    const AICommand& c = cmds[0];
+    CHECK(c.commandId == 777);
+    REQUIRE(c.numParams == 5);
+    CHECK(c.params[0] == doctest::Approx(2));      // two blips crossed the seam
+    CHECK(c.params[1] == doctest::Approx(4242));   // tracking id survives
+    CHECK(c.params[2] == doctest::Approx(1024));   // x
+    CHECK(c.params[3] == doctest::Approx(2048));   // z
+    CHECK(c.params[4] == doctest::Approx(1));      // no defId/health leaked
+
+    fs::remove_all(dir);
+}
+
 TEST_CASE("AI VM: AI.log survives the DEFAULT log threshold (§5.1 observability)") {
     // A headless AI has no chat wire and no HUD: AI.log is its only channel, and
     // main.lua routes the boot line, every per-directive announcement, the

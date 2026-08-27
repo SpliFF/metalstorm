@@ -62,6 +62,9 @@ local function makeAI(opts)
     if opts.enemyUnits ~= nil then
         ai.getVisibleEnemies = function() return opts.enemyUnits end
     end
+    if opts.radarBlips ~= nil then
+        ai.getRadarBlips = function() return opts.radarBlips end
+    end
     if opts.playerId ~= nil then
         ai.getPlayerId = function() return opts.playerId end   -- AI3 virtual playerID
     end
@@ -210,6 +213,18 @@ describe("Picture.refresh — economy", function()
         assert.are.equal(0, picture.economy.ownPool)
         assert.are.equal(0, picture.economy.teamPool)
         assert.is_true(picture.economy.reserveHonoured)
+    end)
+
+    it("reads the authority_cost_scale game mirror (game_authority publishCostScale)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = {
+                ['team:authority_pool'] = 500,
+                ['game:authority_cost_scale'] = 0.5,
+            },
+        })
+        local picture = refresh(Picture, ai)
+        assert.are.equal(0.5, picture.economy.costScale)
     end)
 end)
 
@@ -363,6 +378,88 @@ describe("Picture.refresh — ledger + intel", function()
         assert.are.equal(300, mem.byClass.tanks)
         assert.are.equal(1.0, mem.confidence)
         assert.are.equal(1000, mem.lastSeenFrame)
+    end)
+
+    it("a full-detail resight REPLACES remembered strength (no cross-tick compounding)", function()
+        local Picture = freshPicture()
+        local memory = { intel = {} }
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            defExport = { ['power.json'] = powerFixture() },
+            enemyUnits = { { defId = 101, x = 1536, z = 512, health = 300 } },
+        })
+        refresh(Picture, ai, { frame = 1000, memory = memory })
+        assert.are.equal(300, memory.intel.central_basin.strength)
+
+        -- Same single contact, still in view two strategic ticks later: the
+        -- region must still read as ONE contact's strength, not three.
+        refresh(Picture, ai, { frame = 1150, memory = memory })
+        refresh(Picture, ai, { frame = 1300, memory = memory })
+        assert.are.equal(300, memory.intel.central_basin.strength)
+        assert.are.equal(300, memory.intel.central_basin.byClass.tanks)
+    end)
+
+    it("folds radar blips into intel as low-confidence unknown-class entries", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            radarBlips = {
+                { id = 501, x = 1536, z = 512 },   -- central_basin
+                { id = 502, x = 1600, z = 600 },   -- central_basin
+            },
+        })
+        local picture = refresh(Picture, ai, { frame = 1000 })
+
+        local mem = picture.intel.central_basin
+        assert.is_not_nil(mem)
+        assert.are.equal(2 * Config.BLIP_STRENGTH, mem.strength)
+        assert.are.equal(2 * Config.BLIP_STRENGTH, mem.byClass._blip)
+        -- Confidence is held at the blip floor: below the 0.5 intelStale
+        -- threshold, so a blip-only region still draws SCOUT goals.
+        assert.is_true(math.abs(mem.confidence - Config.BLIP_CONFIDENCE) < 1e-9)
+        assert.is_true(mem.confidence < 0.5)
+    end)
+
+    it("blip contributions are per-tick observations, not accumulating memory", function()
+        local Picture = freshPicture()
+        local memory = { intel = {} }
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            radarBlips = { { id = 501, x = 1536, z = 512 } },
+        })
+        refresh(Picture, ai, { frame = 1000, memory = memory })
+        refresh(Picture, ai, { frame = 1150, memory = memory })
+        refresh(Picture, ai, { frame = 1300, memory = memory })
+        -- One contact on radar for three ticks reads as ONE blip's strength.
+        assert.are.equal(Config.BLIP_STRENGTH, memory.intel.central_basin.strength)
+
+        -- Radar goes dark: the blip contribution is retracted next tick.
+        local aiDark = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            radarBlips = {},
+        })
+        refresh(Picture, aiDark, { frame = 1450, memory = memory })
+        local mem = memory.intel.central_basin
+        assert.is_true(mem == nil or mem.strength == 0)
+    end)
+
+    it("a blip never downgrades a fresh LOS sighting in the same region", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            mapData = { ['regions.json'] = regionsFixtureData() },
+            defExport = { ['power.json'] = powerFixture() },
+            enemyUnits = { { defId = 101, x = 1536, z = 512, health = 300 } },
+            radarBlips = { { id = 501, x = 1600, z = 600 } },  -- same region
+        })
+        local picture = refresh(Picture, ai, { frame = 1000 })
+
+        local mem = picture.intel.central_basin
+        -- Full confidence from the LOS sighting survives; the blip's extra
+        -- (unknown-class) contact still adds its conservative strength.
+        assert.are.equal(1.0, mem.confidence)
+        assert.are.equal(1000, mem.lastSeenFrame)
+        assert.are.equal(300 + Config.BLIP_STRENGTH, mem.strength)
+        assert.are.equal(Config.BLIP_STRENGTH, mem.byClass._blip)
     end)
 
     it("decays unseen intel and forgets it below the confidence floor", function()

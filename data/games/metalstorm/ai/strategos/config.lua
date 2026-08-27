@@ -25,6 +25,16 @@ Config.LOD_TICK_MULT = { [0] = 1, [1] = 1, [2] = 4, [3] = 12 }
 Config.INTEL_DECAY_FRAMES = 5400       -- ~3 min @ 30 Hz
 Config.INTEL_FORGET_BELOW = 0.05       -- drop the entry once confidence < this
 
+-- Radar blips (position-only contacts, AI.getRadarBlips). A blip is a real
+-- contact of unknown type/strength, so it enters intel as a LOW-confidence
+-- entry: BLIP_CONFIDENCE caps what a blip-only region can reach (kept below
+-- the 0.5 intelStale threshold so blips alone still leave a region worth
+-- scouting), and each blip contributes BLIP_STRENGTH to the region's threat
+-- (a conservative half of one healthy unit — the honest prior for "something
+-- is there, type unknown"). Both are tunables, not code.
+Config.BLIP_CONFIDENCE = 0.35
+Config.BLIP_STRENGTH   = 0.5
+
 --=============================================================================
 -- Planner governance (plan §3.2/§3.3)
 --=============================================================================

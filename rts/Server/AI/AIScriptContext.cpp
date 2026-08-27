@@ -319,6 +319,9 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getVisibleEnemies);
     lua_setfield(L, -2, "getVisibleEnemies");
 
+    lua_pushcfunction(L, l_getRadarBlips);
+    lua_setfield(L, -2, "getRadarBlips");
+
     lua_pushcfunction(L, l_issueCommand);
     lua_setfield(L, -2, "issueCommand");
 
@@ -679,6 +682,27 @@ int AIScriptContext::l_getVisibleEnemies(lua_State* L) {
         lua_pushnumber(L, u.position.x); lua_setfield(L, -2, "x");
         lua_pushnumber(L, u.position.z); lua_setfield(L, -2, "z");
         lua_pushnumber(L, u.health);   lua_setfield(L, -2, "health");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+// AI.getRadarBlips() -> { {id, x, z}, ... } — radar-only contacts (in radar
+// coverage but NOT in LOS). Position + tracking id only, deliberately: no
+// defId, no health, no team — the same information a player's radar dots
+// carry (PLAN-ai.md getRadarBlips: "Position only, no type"). The picture
+// builder folds these into intel as LOW-confidence entries.
+int AIScriptContext::l_getRadarBlips(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    const auto& blips = ctx->currentSnapshot.radarBlips;
+
+    lua_createtable(L, blips.size(), 0);
+    for (size_t i = 0; i < blips.size(); i++) {
+        const auto& b = blips[i];
+        lua_createtable(L, 0, 3);
+        lua_pushinteger(L, b.unitId); lua_setfield(L, -2, "id");
+        lua_pushnumber(L, b.x);       lua_setfield(L, -2, "x");
+        lua_pushnumber(L, b.z);       lua_setfield(L, -2, "z");
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
