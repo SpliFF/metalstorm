@@ -84,6 +84,8 @@ function M.new(scenario)
         teamRulesParams = {},
         nextUnitID = 100,
         createFails = {},           -- defName -> true: make CreateUnit return nil
+        modOptions = {},            -- what Spring.GetModOptions answers (world_commit specs)
+        startPos = {},              -- teamID -> { x, z } for GetTeamStartPosition
     }
 
     function world.rp(key) return world.gameRulesParams[key] end
@@ -298,6 +300,13 @@ function M.new(scenario)
         GiveOrderToUnit = function(unitID, cmdID, params, opts)
             world.orders[#world.orders + 1] =
                 { unitID = unitID, cmdID = cmdID, params = params, opts = opts }
+        end,
+
+        GetModOptions = function() return world.modOptions end,
+        GetTeamStartPosition = function(teamID)
+            local p = world.startPos[teamID]
+            if p then return p.x, 0, p.z end
+            return nil
         end,
 
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,

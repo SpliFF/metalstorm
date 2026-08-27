@@ -968,6 +968,113 @@ function GG.Transports.IsStranded(teamID) return stranded[teamID] == true end
 function GG.Transports.Outcome(teamID) return outcomes[teamID] end
 
 -- ============================================================
+-- The `world_commit` modoption (the world↔battle escrow seam)
+-- ============================================================
+-- The lobby's staging sweep hands a materialised war the world's committed
+-- force as ONE gadget-visible string (WorldEscrow's
+-- EncodeWorldCommitModOption, the same modoptions channel `war_sides` rides):
+--
+--     world_commit = "<sideKey>:<transports>:<squads>:<stagingId>"
+--
+-- The world knows no map coordinate — §7.8's projection is the scenario's
+-- job — so geometry is derived HERE: the wave drops at the committing side's
+-- start position and enters from the nearest map edge (you arrive the way
+-- you would leave, §3.4's default in reverse). Every wave goes through the
+-- same ScheduleArrival an authored arrival takes, so validation, the §7.7
+-- slot arithmetic and the §7.5 committed census treat world force and
+-- authored force identically — and the committing side is marked
+-- expeditionary (§7.1) whatever the reused scenario says about it.
+
+local WORLD_COMMIT_CARGO_DEF   = 'ms_soldiers_s1'  -- the world counts squads
+local WORLD_COMMIT_ETA_FIRST   = 90                -- frames: inbound at start
+local WORLD_COMMIT_ETA_SPACING = 90                -- frames between the wave's transports
+
+local function scheduleWorldCommit(scn)
+    local opts = (Spring.GetModOptions and Spring.GetModOptions()) or {}
+    local raw = opts.world_commit
+    if type(raw) ~= 'string' or raw == '' then return end
+    local side, nTransports, nSquads =
+        string.match(raw, '^([^:]+):(%d+):(%d+):%d+$')
+    if side == nil then
+        Spring.Echo('[game_transports] WARNING: world_commit "' .. raw ..
+                    '" is not <side>:<transports>:<squads>:<stagingId> — ' ..
+                    'no world arrivals scheduled')
+        return
+    end
+    nTransports, nSquads = tonumber(nTransports), tonumber(nSquads)
+    if nTransports < 1 then return end
+    local teamID = resolveTeam(scn, side)
+    if teamID == nil then
+        Spring.Echo('[game_transports] WARNING: world_commit side "' ..
+                    tostring(side) ..
+                    '" fields no team in this scenario — no world arrivals')
+        return
+    end
+    -- §7.1: force that ARRIVED here is expeditionary. The escrowed side can
+    -- be stranded, and its withdrawal is what the world settles against.
+    expeditionary[teamID] = true
+
+    local sx, sz
+    if Spring.GetTeamStartPosition then
+        local x, _, z = Spring.GetTeamStartPosition(teamID)
+        sx, sz = x, z
+    end
+    if not sx or sx <= 0 then
+        sx = (Game and Game.mapSizeX or 0) / 2
+        sz = (Game and Game.mapSizeZ or 0) / 2
+    end
+    local entry = nearestEdgePoint(sx, sz)
+
+    -- Seats per carrier, by the SAME arithmetic the validator charges (§7.7):
+    -- never author a wave the validator would then drop.
+    local carrier = defByName[DEFAULT_DEF_BY_KIND.air]
+    local squadDef = knownDefs[WORLD_COMMIT_CARGO_DEF]
+                     and defByName[WORLD_COMMIT_CARGO_DEF] or nil
+    local seats = 0
+    if carrier and squadDef then
+        local cost = slotCost(squadDef)
+        if cost > 0 then seats = math.floor(slotCapacity(carrier) / cost) end
+    end
+
+    local remaining = nSquads
+    for i = 1, nTransports do
+        local aboard = 0
+        if seats > 0 and remaining > 0 then
+            -- Spread the squads over the wave: nobody flies empty while
+            -- cargo waits, nobody overloads past the slot arithmetic.
+            aboard = math.min(seats, math.ceil(remaining / (nTransports - i + 1)))
+            remaining = remaining - aboard
+        end
+        local cargo = {}
+        if aboard > 0 then
+            cargo[1] = { def = WORLD_COMMIT_CARGO_DEF, count = aboard }
+        end
+        GG.Transports.ScheduleArrival({
+            id       = string.format('world_commit_%d', i),
+            team     = teamID,
+            kind     = 'air',
+            eta      = WORLD_COMMIT_ETA_FIRST + (i - 1) * WORLD_COMMIT_ETA_SPACING,
+            entry    = { x = entry.x, z = entry.z },
+            dropZone = { x = sx, z = sz },
+            cargo    = cargo,
+            -- D20 finding 1: cargo nobody orders never moves. The world's
+            -- force arrives fighting, toward the middle of the map.
+            order    = { cmd = 'FIGHT',
+                         x = (Game and Game.mapSizeX or 0) / 2,
+                         z = (Game and Game.mapSizeZ or 0) / 2 },
+        })
+    end
+    if remaining > 0 then
+        -- Loud, not silent (§3.7's discipline): escrowed squads with no seat
+        -- did not enter the battle, and the settlement will look wrong until
+        -- somebody reads this line.
+        Spring.Echo('[game_transports] WARNING: world_commit squads exceed ' ..
+                    'the wave\'s capacity — ' .. remaining ..
+                    ' squad(s) had no seat and were not scheduled')
+    end
+end
+
+-- ============================================================
 -- Callins
 -- ============================================================
 
@@ -978,6 +1085,10 @@ function gadget:GameStart()
     for _, spec in ipairs((scn and scn.arrivals) or {}) do
         GG.Transports.ScheduleArrival(spec)
     end
+    -- The world's committed force, after the authored schedule: the escrow
+    -- seam's arrivals ride the same validated path, and computeCommitted
+    -- below folds them into the §7.5 denominator with everything else.
+    scheduleWorldCommit(scn)
     -- Published unconditionally so a scenario with no bad arrivals reads 0
     -- rather than "absent", which a client cannot tell from "not checked".
     Spring.SetGameRulesParam('war_arrival_invalid', invalidArrivals, PUBLIC_LOS)

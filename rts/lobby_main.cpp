@@ -25,6 +25,7 @@
 #include "Server/WorldFactions.h"
 #include "Server/WorldStats.h"
 #include "Server/WorldStaging.h"
+#include "Server/WorldEscrow.h"
 #include "Server/WorldNotifications.h"
 #include "Server/WorldWarLinkage.h"
 #include "Server/WorldMapSeeder.h"
@@ -1254,6 +1255,11 @@ int main(int argc, char *argv[]) {
   // because a claim names a claiming faction and charges an account's
   // `world_authority` row.
   WorldConquest::EnsureTables(mapDb);
+  // The world↔battle escrow seam (transports §7.3/§7.5): `world_escrow` +
+  // `world_force_ledger`. After WorldStaging's because every escrow row names
+  // a staging window, and after WorldStats' because settlement appends one
+  // `war_spoils` row into `world_economy_events` (ensured there).
+  WorldEscrow::EnsureTables(mapDb);
   // PLAN-worldsim.md W12: `world_seasons` / `world_season_digests` — per-world
   // season rows and their archived digests. After WorldDirector's/WorldStats'/
   // WorldEconomy's for the same reason as the rest: a rollover reads
@@ -5181,6 +5187,16 @@ int main(int argc, char *argv[]) {
           return HttpAuth::JsonResponse(status, err.dump());
         }
 
+        // The escrow seam (transports §7.3): the committed force leaves the
+        // faction's pool the moment it is committed. THIS commit's counts,
+        // not the window's running total — a §7.2 join escrows what it added.
+        if (!WorldEscrow::Open(mapDb, result.staging, req.transports,
+                               req.squads, req.accountId, WorldNowRealMs()))
+          SLOG(SPRING_LOG_WARNING,
+               "world staging %lld: escrow row could not be opened — the "
+               "commitment stands but the force ledger did not debit",
+               static_cast<long long>(result.staging.stagingId));
+
         nlohmann::json out;
         out["ok"]      = true;
         out["joined"]  = result.joined;
@@ -5251,6 +5267,9 @@ int main(int argc, char *argv[]) {
 
         const bool cancelled = WorldStaging::Cancel(mapDb, stagingId, WorldNowRealMs());
         if (cancelled) {
+          // Withdrawal before contact refunds the escrow (§7.2's residual):
+          // the force never fought, so it comes straight back to the pool.
+          WorldEscrow::Release(mapDb, stagingId, "cancelled", WorldNowRealMs());
           const auto poi = WorldDirector::LoadPoi(mapDb, worldId, row->poiId);
           WorldNotificationEvent ev;
           ev.worldId           = worldId;
@@ -6500,6 +6519,16 @@ int main(int argc, char *argv[]) {
       err = "could not build the boot manifest";
       return false;
     }
+    // The arrival manifest (the escrow seam's battle-facing half): the
+    // world's committed force rides into the war as gadget-visible config,
+    // through the same modoptions channel `war_sides` already uses. The
+    // battle side (game_transports.lua) marks the attacker expeditionary and
+    // schedules the arrivals; the world hands only WHO and HOW MUCH — it
+    // knows no map coordinate, deliberately (transports §7.8: geometry is the
+    // scenario projection's problem, not the ledger's).
+    manifest["modoptions"]["world_staging_id"] = std::to_string(row.stagingId);
+    manifest["modoptions"]["world_commit"] = EncodeWorldCommitModOption(
+        attacker->sideKey, row.transports, row.squads, row.stagingId);
     auto result = runDirectStart(manifest);
     if (!result.ok) {
       err = result.error.empty() ? "boot failed" : result.error;
@@ -8656,6 +8685,82 @@ int main(int argc, char *argv[]) {
              WarTerminalReasonToString(step->reason),
              step->archived ? " — archived, digest emitted" : "");
 
+        // The escrow seam's SINGLE settlement (transports §7.3/§7.5): price
+        // every staging whose force is still engaged with this war, exactly
+        // once. Same chokepoint as W6's ledger row below, but the
+        // exactly-once here does NOT lean on `step->archived` firing once —
+        // it is enforced by the escrow rows' own state (`Settle` flips
+        // engaged→settled under a guard and writes nothing on a replay), so
+        // a lobby restarted mid-archive cannot pay a war out twice.
+        //
+        // MERGE SEAM (deliberate): the conquest lane's explicit claim act
+        // lands beside this block against the same war end. This settlement
+        // is additive — it moves materiel and treasury only and decides
+        // nothing about who owns the POI afterwards. It runs BEFORE the W6
+        // settlement/conquest block below on purpose (capture-then-claim,
+        // transports §7.5): the capture victor is whoever held the ground
+        // when the war ended, so the lookup must read `ownerFactionId`
+        // before this same sweep's winning claim can transfer it.
+        if (step->archived) {
+          const auto outcomeRow = WarOutcomeDb::Load(mapDb, war.roomId);
+          for (const int64_t stagingId :
+               WorldEscrow::EngagedStagingsForRoom(mapDb, war.roomId)) {
+            const auto staging = WorldStaging::Load(mapDb, stagingId);
+            if (!staging) continue;
+            const auto world = WorldDirector::Load(mapDb, staging->worldId);
+            const auto escrowRules = WorldEscrowRules::FromWorldConfig(
+                world ? world->config : nlohmann::json::object());
+
+            // The attacker won iff the side its faction fields is among the
+            // sim's winner factions. An ending the sim never saw (operator
+            // retire, season end — no `war_outcome` row) settles as a loss
+            // for the expedition: it did not take the field.
+            bool attackerWon = false;
+            if (outcomeRow && !outcomeRow->winnerFactions.empty()) {
+              const auto att = WorldFactions::Load(mapDb, staging->worldId,
+                                                   staging->attackerFactionId);
+              if (att && !att->sideKey.empty()) {
+                const std::string list = "," + outcomeRow->winnerFactions + ",";
+                attackerWon =
+                    list.find("," + att->sideKey + ",") != std::string::npos;
+              }
+            }
+
+            WorldEscrowSettleFacts facts;
+            // Withdrawal counts are not yet durable across the seam (they
+            // live in perishable rulesParams — WarOutcome.h), so a losing
+            // expedition settles as `annihilated` today; the classifier
+            // already knows `withdrew`/`routed` for when the conduit lands.
+            facts.outcome = ClassifyEscrowOutcome(attackerWon, /*withdrawn=*/0,
+                                                  staging->squads, escrowRules);
+            if (!attackerWon) {
+              // §7.5's capture: the victor is whoever holds the ground — the
+              // POI's owning faction. An unowned POI names no victor and the
+              // captured share is destroyed instead.
+              if (const auto defPoi = WorldDirector::LoadPoi(
+                      mapDb, staging->worldId, staging->poiId))
+                facts.victorFactionId = defPoi->ownerFactionId;
+            }
+
+            int64_t nowWorldMs = 0;
+            if (const auto reading = WorldDirector::ClockFor(
+                    mapDb, staging->worldId, WorldNowRealMs()))
+              nowWorldMs = reading->worldMs;
+
+            const auto settled = WorldEscrow::Settle(
+                mapDb, stagingId, facts, escrowRules, nowWorldMs,
+                WorldNowRealMs());
+            if (settled.settled)
+              SLOG(SPRING_LOG_NOTICE,
+                   "war %u: escrow for staging %lld settled '%s' — "
+                   "returned %d transport(s)/%d squad(s), captured %d/%d",
+                   war.roomId, static_cast<long long>(stagingId),
+                   WorldEscrowOutcomeToString(facts.outcome),
+                   settled.payout.returnTransports, settled.payout.returnSquads,
+                   settled.payout.captureTransports, settled.payout.captureSquads);
+          }
+        }
+
         // PLAN-worldsim.md W6: the settlement write-back stub. Same chokepoint
         // as the war-over digest above (fires exactly once per archival, for
         // the same reason — `AdvanceWarLifecycle` reports `archived` on only
@@ -8719,6 +8824,7 @@ int main(int argc, char *argv[]) {
             }
           }
         }
+
       }
     }
 
@@ -8790,6 +8896,10 @@ int main(int argc, char *argv[]) {
             // into a `war*` table (hard boundary 1) — the same thing W6's
             // settlement ledger keeps for the same reason.
             WorldStaging::MarkMaterialised(mapDb, row.stagingId, roomId, nowReal);
+            // The escrow seam: the committed force is now ENGAGED with this
+            // war (§7.3's second state). Guarded on the rows' own state, so a
+            // replayed sweep moves nothing twice.
+            WorldEscrow::MarkEngaged(mapDb, row.stagingId, roomId, nowReal);
             SLOG(SPRING_LOG_NOTICE,
                  "world staging %lld at POI '%s' materialised as room %u",
                  static_cast<long long>(row.stagingId), row.poiId.c_str(), roomId);
@@ -8816,6 +8926,11 @@ int main(int argc, char *argv[]) {
             // retry would spam the exact players who most need to trust the
             // channel (the ones with a stake in the POI).
             if (row.attempts + 1 >= rules.materialiseMaxAttempts) {
+              // Terminal failure: the war never happened, so the escrowed
+              // force never fought — refund it (the same release Cancel
+              // takes; only the reason differs, and the ledger keeps it).
+              WorldEscrow::Release(mapDb, row.stagingId, "staging_failed",
+                                   nowReal);
               WorldNotificationEvent ev;
               ev.worldId            = w.worldId;
               ev.poiId              = row.poiId;
