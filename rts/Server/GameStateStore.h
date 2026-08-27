@@ -304,6 +304,15 @@ public:
     void SetDefsHash(const std::string& defsKey) { defsHash = DefsDigestOf(defsKey); }
     uint64_t DefsHash() const { return defsHash; }
 
+    /// `--resume-verify` (PLAN-persistence §8, ResumeVerify.h): keep a copy of
+    /// the payload a successful restore APPLIED, so the boot can re-capture
+    /// the world and byte-compare the two. Off by default — a live war has no
+    /// reason to hold a second copy of its own world for its whole uptime.
+    /// Not thread-guarded on purpose: a resume runs once, pre-loop, on the
+    /// boot thread, and that is the only caller of either side.
+    void RetainRestoredPayload(bool on) { retainRestoredPayload = on; }
+    const std::vector<uint8_t>& LastRestoredPayload() const { return lastRestoredPayload; }
+
     // ── ISnapshotStore (the PLAN-gm-tools rollback seam) ──
     bool Available() const override;
     std::vector<SnapshotInfo> List(uint32_t roomId) override;
@@ -389,6 +398,9 @@ private:
     uint8_t     mapDigest[32]{};
     /// 0 until SetDefsHash — see it for why this is not in StoreConfig.
     std::atomic<uint64_t> defsHash{0};
+    /// RetainRestoredPayload — the `--resume-verify` reference copy.
+    bool retainRestoredPayload = false;
+    std::vector<uint8_t> lastRestoredPayload;
 
     mutable std::mutex      dbMtx;        ///< serialises this store's SQLite use
     mutable std::mutex      mtx;          ///< guards queue + stats + lastError

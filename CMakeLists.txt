@@ -753,6 +753,9 @@ if(TEST_SOURCES)
         # HeadlessRun shape — the engine-coupled half is one block in
         # server_main.cpp, so the state machine and the verdict test off-engine.
         ${CMAKE_SOURCE_DIR}/rts/Server/SnapshotRoundTrip.cpp
+        # PLAN-persistence §8, the fresh-process re-capture bar: pure byte
+        # comparison + verdict behind `--resume-verify` (test_resume_verify.cpp).
+        ${CMAKE_SOURCE_DIR}/rts/Server/ResumeVerify.cpp
         # PLAN-persistence task 3a: the hibernate/resume decisions. Pure
         # (std-lib only) — the engine-coupled half is the wiring in
         # server_main.cpp, so both policies test off-engine.

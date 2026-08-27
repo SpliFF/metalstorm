@@ -27,6 +27,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Seeking](#seeking)
   - [What a replay does and does not carry](#what-a-replay-does-and-does-not-carry)
 - [Snapshot round-trip (`--snapshot-roundtrip`)](#snapshot-round-trip---snapshot-roundtrip)
+  - [Fresh-process re-capture (`--resume-verify`)](#fresh-process-re-capture---resume-verify)
   - [Resuming across a balance patch](#resuming-across-a-balance-patch-gamedatamigrationslua)
   - [The two-def-load harness](#the-two-def-load-harness-toolsscriptsdef-reconcile-resumesh)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
@@ -1361,6 +1362,41 @@ Read the **verdict line, not the exit code**: `spring-server` aborts during stat
 destruction in any run that exercised weapon defs (PLAN-replay T2-b), so every
 headless run exits 134 whatever the verdict was. The same constraint applies to
 `--verify`.
+
+### Fresh-process re-capture (`--resume-verify`)
+
+`--snapshot-roundtrip` restores inside **one process**, and that arm structurally
+understates a resume: state the capture misses is *inherited live* by a same-process
+restore, so the re-capture can agree by accident. The wind defect is the worked
+example — the same-process control sat 30 frames apart in the cycle, while a fresh
+resuming process starts the phase at 0. `--resume-verify` closes that gap: a boot
+given `--resume --resume-verify` applies the room's newest snapshot exactly as a real
+resume does (after GameStart, over the staged world, before anything ticks), then
+**re-captures the world and byte-compares** the two payloads, prints one verdict line
+and exits without ever serving:
+
+```
+resume verify: recapture IDENTICAL — 99719 bytes at frame 1553
+resume verify: recapture DIFFERS from the applied snapshot at frame 1553 — … first
+difference at byte 18 (section 'globals' (id 1 v2), byte 4 of 21); disagreeing
+sections: globals, units
+```
+
+The flag requires `--resume` (it verifies the world a resume just applied) and is
+refused without it. The whole cycle — run, SIGTERM exit checkpoint, fresh-process
+verify, resume, tick on, second SIGTERM, verify the resumed process's own checkpoint —
+is scripted:
+
+```bash
+tools/scripts/hibernate-resume-recapture.sh              # both arms
+tools/scripts/hibernate-resume-recapture.sh --arm static # 26 units, nothing moving
+tools/scripts/hibernate-resume-recapture.sh --arm moving # meridian_basin_soak + 3 AIs
+```
+
+The script gates on the sentinel phrases above, never on the exit code (the T2-b/T5-c
+exit abort applies here too). Its arms SIGTERM before the fixture's own stop because a
+headless stop takes **no** exit checkpoint (Hibernation.h: "its world is a fixture,
+not a war") — only the signal path does.
 
 ### Resuming across a balance patch (`gamedata/migrations.lua`)
 
