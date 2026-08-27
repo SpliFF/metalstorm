@@ -53,7 +53,7 @@ TEST_CASE("page format constants match the client's terrain-page-grid.ts") {
     CHECK(PAGE_BYTES == 135200);
 }
 
-TEST_CASE("16k map with a 2048^2 source: levels 3..5, 21 pages — the shipped shape") {
+TEST_CASE("16k map with a 2048^2 source: levels 3..5, 21 pages — the pre-raise shape") {
     const Plan p = PlanPages(16384, 16384, 2048, 2048);
     CHECK(p.rootLevel == 5);          // 32/16/8/4/2/1 pages across
     CHECK(p.finestLevel == 3);        // 2048 texels across = level 3 native
@@ -76,6 +76,36 @@ TEST_CASE("16k map with a 2048^2 source: levels 3..5, 21 pages — the shipped s
     CHECK(PageByteOffset(p, 2, 0, 0) == SIZE_MAX);
     CHECK(PageByteOffset(p, 3, 4, 0) == SIZE_MAX);
     CHECK(PageByteOffset(p, 6, 0, 0) == SIZE_MAX);
+}
+
+TEST_CASE("16k map with a 4096^2 source: levels 2..5, 85 pages — the shipped "
+          "shape since the M8 streaming-v2 resolution raise") {
+    // PLAN-maps §1.2.1 lane queue step 4: the generator default rose
+    // 2048 -> 4096 (tools/mapgen/terragen/bake.py GROUND_TEXTURE_SIZE_DEFAULT),
+    // so the finest produced page is 4 elmos/texel instead of 8. The format
+    // is untouched — the index self-describes, this only moves finestLevel.
+    const Plan p = PlanPages(16384, 16384, 4096, 4096);
+    CHECK(p.rootLevel == 5);
+    CHECK(p.finestLevel == 2);        // 4096 texels across = level 2 native
+    REQUIRE(p.levels.size() == 4);
+    CHECK(p.levels[0].level == 2);
+    CHECK(p.levels[0].pagesX == 8);
+    CHECK(p.levels[0].pagesZ == 8);
+    CHECK(p.levels[0].firstPage == 0);
+    CHECK(p.levels[1].pagesX == 4);
+    CHECK(p.levels[1].firstPage == 64);
+    CHECK(p.levels[2].pagesX == 2);
+    CHECK(p.levels[2].firstPage == 80);
+    CHECK(p.levels[3].pagesX == 1);
+    CHECK(p.levels[3].firstPage == 84);
+    CHECK(p.totalPages == 85);        // 85 * PAGE_BYTES = 11 492 000 on disk
+    CHECK(PageByteOffset(p, 2, 0, 0) == 0);
+    CHECK(PageByteOffset(p, 2, 3, 5) == (5 * 8 + 3) * PAGE_BYTES);
+    CHECK(PageByteOffset(p, 3, 1, 2) == (64 + 2 * 4 + 1) * PAGE_BYTES);
+    CHECK(PageByteOffset(p, 5, 0, 0) == 84 * PAGE_BYTES);
+    // Finer than the source is still refused, exactly as at 2048.
+    CHECK(PageByteOffset(p, 1, 0, 0) == SIZE_MAX);
+    CHECK(PageByteOffset(p, 2, 8, 0) == SIZE_MAX);
 }
 
 TEST_CASE("a source at full 1 texel/elmo residency reaches level 0") {

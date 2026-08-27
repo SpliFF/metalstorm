@@ -104,6 +104,13 @@ def read_mapinfo(map_dir: str) -> dict:
     # traceback and not a silent fall back to the strict reading.
     try:
         out["reachability"] = reach.parse_mapinfo(text)
+        # The movement classes the claim speaks for (PLAN-maps M9o / lane
+        # queue item 2): a class outside this scope may legally measure
+        # differently — meridian_basin is split for VEH and connected for
+        # INFANTRY, on purpose — so --verify judges the declared intent only
+        # for classes inside it. Absent key = reach.GATE_CLASSES, which is
+        # the scope every earlier package was in fact judged on.
+        out["reachability_classes"] = reach.parse_mapinfo_classes(text)
     except ValueError as e:
         raise SystemExit(f"{path}: {e}")
     return out
@@ -1415,12 +1422,23 @@ def main(argv=None):
     else:
         starts = []
 
-    intent = (info["reachability"] if args.expect == "auto" else args.expect)
+    if args.expect != "auto":
+        intent, intent_source = args.expect, "--expect"
+    elif args.mclass in info["reachability_classes"]:
+        intent, intent_source = info["reachability"], "mapinfo"
+    else:
+        # The class being judged is outside the declaration's scope, so the
+        # declared intent does not claim anything about it — fall back to the
+        # strict default rather than failing the map for a claim it never
+        # made (meridian's INFANTRY vs its VEH-scoped "split", M9o).
+        intent = reach.DEFAULT_INTENT
+        intent_source = (
+            f"default — {args.mclass} is outside the declared scope "
+            f"({'/'.join(info['reachability_classes'])})")
     g = derive_graph(hs, W, H, starts, map_id,
                      target_regions=args.target_regions, mclass=args.mclass,
                      intent=intent,
-                     intent_source=("mapinfo" if args.expect == "auto"
-                                    else "--expect"))
+                     intent_source=intent_source)
     passed = g.passed
     doc = g.json
     if not args.dry_run:

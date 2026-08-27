@@ -45,6 +45,7 @@ from scipy import ndimage
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from terragen import bake as bk             # noqa: E402
 from terragen import biomes as bio          # noqa: E402
 from terragen import bridges as brg         # noqa: E402
 from terragen import erosion as ero         # noqa: E402
@@ -699,6 +700,17 @@ SHIPPED_REACHABILITY = {
     "verdant_shoals": reach.SPLIT,
 }
 
+# The classes each terrain's split claim speaks for (PLAN-maps M9o / lane
+# queue item 2 — the scope is part of the declaration). `mounds` maps are
+# water-severed skerry fields: no class wades the sea, so the claim covers all
+# three (skerry measures INFANTRY 6 / VEH 8 / HEAVY 8 components). `arc`
+# shipped with INFANTRY passing and VEH/HEAVY split 3/5 (M8w, M8x) — the same
+# per-class divergence meridian's scarp has, so the claim is scoped to armour.
+DECLARED_REACHABILITY_CLASSES = {
+    "mounds": ("INFANTRY", "VEH", "HEAVY"),
+    "arc": ("VEH", "HEAVY"),
+}
+
 
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
@@ -716,6 +728,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              reachability: "str | None" = None,
              region_graph: bool = True,
              ground_texture: bool = True,
+             ground_texture_size: "int | None" = None,
              target_regions: int = REGION_TARGET_DEFAULT):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
@@ -1494,8 +1507,11 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # The declaration against the surface that ships. Read here, not inside the
     # pad loop: the pads move under rivers and the carve (roads FIND 30), and the
     # declaration is a claim about the packaged bytes.
-    print(f"reachability declared \"{reachability}\" for {map_id}:")
-    reach.report(pas.read_all(h, cell, starts), reachability)
+    reach_classes = DECLARED_REACHABILITY_CLASSES[terrain]
+    print(f"reachability declared \"{reachability}\" for {map_id} "
+          f"(scope {'/'.join(reach_classes)}):")
+    reach.report(pas.read_all(h, cell, starts), reachability,
+                 gate_classes=reach_classes)
 
     # The movement graph the strategic AI drives, derived from the packaged
     # surface (see build_region_graph). `--no-region-graph` leaves the map on
@@ -1531,10 +1547,13 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # PLAN-maps §2n ruling 1: a generated map ships the map-space ground
         # albedo. `--no-ground-texture` leaves it on the SMT tile dictionary,
         # whose 32-elmo seam grid is the defect this replaces.
-        ground_texture_size=(bk.GROUND_TEXTURE_SIZE_DEFAULT if ground_texture else 0),
+        ground_texture_size=(0 if not ground_texture else
+                             (ground_texture_size if ground_texture_size
+                              else bk.GROUND_TEXTURE_SIZE_DEFAULT)),
         start_positions=starts,
         seed=seed,
         reachability=reachability,
+        reachability_classes=reach_classes,
         # sea-dominated map: brighter, more opaque surface so the ocean
         # reads clearly against the islands at strategic zoom
         water_surface_color=(0.40, 0.52, 0.60),
@@ -1712,10 +1731,18 @@ def main():
     ap.add_argument("--ground-texture", dest="ground_texture",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="ship maps/ground.png — the map-space ground albedo "
-                         "M7f measured and PLAN-maps §2n ruled in (2048^2, "
-                         "8 elmos/texel on a 16k map). --no-ground-texture "
+                         "M7f measured and PLAN-maps §2n ruled in. "
+                         "--no-ground-texture "
                          "leaves the map on the SMT tile dictionary, which "
                          "puts a 32-elmo seam grid on smooth ground.")
+    ap.add_argument("--ground-texture-size", dest="ground_texture_size",
+                    type=int, default=None, metavar="TEXELS",
+                    help="edge of maps/ground.png in texels (default "
+                         f"{bk.GROUND_TEXTURE_SIZE_DEFAULT}). Also the source "
+                         "the page pyramid (ground_pages.bin, PLAN-maps "
+                         "§1.2.1) is cut from, so it caps the streamed "
+                         "finestLevel. Rounded down to the nearest "
+                         "tile-aligned reduction of the bake.")
     ap.add_argument("--target-regions", dest="target_regions", type=int,
                     default=REGION_TARGET_DEFAULT,
                     help="size of the region graph's BASE grid; the emitted "
@@ -1773,6 +1800,9 @@ def main():
             passthrough.append("--no-region-graph")
         if not args.ground_texture:
             passthrough.append("--no-ground-texture")
+        if args.ground_texture_size is not None:
+            passthrough += ["--ground-texture-size",
+                            str(args.ground_texture_size)]
         if args.target_regions != REGION_TARGET_DEFAULT:
             passthrough += ["--target-regions", str(args.target_regions)]
         if args.fast:
@@ -1801,6 +1831,7 @@ def main():
              raise_penalty=args.raise_penalty,
              region_graph=args.region_graph,
              ground_texture=args.ground_texture,
+             ground_texture_size=args.ground_texture_size,
              target_regions=args.target_regions)
 
 

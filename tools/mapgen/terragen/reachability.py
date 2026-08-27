@@ -53,12 +53,26 @@ DEFAULT_INTENT = CONNECTED
 # declared-vs-measured verdict, because a whole-map declaration cannot be true
 # of every class at once — see `report()`. Pinned against the verifier in
 # tests/test_reachability_intent.py so the two cannot drift.
+#
+# Since M9o's find (PLAN-maps lane queue item 2, 2026-08-27) the scope is also
+# WRITTEN INTO THE DECLARATION (`reachability_classes`), so a reader of the
+# map's own mapinfo.lua no longer has to know this module's default to know
+# which classes the claim speaks for. meridian_basin is the case that forced
+# it: the map declares "split" and INFANTRY measures connected — which is not
+# staleness, it is the documented per-class divergence (§2k; infantry
+# outclimbs armour), but a declaration that does not name its scope cannot say
+# so. A mapinfo with no `reachability_classes` key (every package emitted
+# before this) still reads as GATE_CLASSES.
 GATE_CLASSES = ("VEH",)
 
 
-def emit_mapinfo_block(intent: str, indent: str = "    ") -> str:
+def emit_mapinfo_block(intent: str, indent: str = "    ",
+                       classes=GATE_CLASSES) -> str:
     """The `metalstorm` block for a generated `mapinfo.lua`."""
     check(intent)
+    if not classes:
+        raise ValueError("reachability declaration needs at least one "
+                         "movement class in scope")
     i = indent
     return (
         f"{i}-- Metalstorm extension block. `CMapInfo` never reads this; it is\n"
@@ -71,8 +85,14 @@ def emit_mapinfo_block(intent: str, indent: str = "    ") -> str:
         f"{i}--                  is a transport problem, not a defect. `--verify`\n"
         f"{i}--                  then fails this map if it comes out CONNECTED,\n"
         f"{i}--                  because the declaration would be stale.\n"
+        f"{i}-- reachability_classes: the movement classes the claim above\n"
+        f"{i}--                  speaks for. A class outside the scope may\n"
+        f"{i}--                  legally read differently (infantry outclimbs\n"
+        f"{i}--                  armour — meridian_basin is split for VEH and\n"
+        f"{i}--                  connected for INFANTRY, on purpose).\n"
         f"{i}metalstorm = {{\n"
         f"{i}    reachability = \"{intent}\",\n"
+        f"{i}    reachability_classes = \"{' '.join(classes)}\",\n"
         f"{i}}},\n"
     )
 
@@ -84,6 +104,13 @@ def emit_mapinfo_block(intent: str, indent: str = "    ") -> str:
 # key that turns up anywhere else in the file cannot answer for it.
 _BLOCK = re.compile(r"\bmetalstorm\s*=\s*\{(.*?)\}", re.DOTALL)
 _KEY = re.compile(r"\breachability\s*=\s*[\"']([a-z]+)[\"']")
+_CLASSES_KEY = re.compile(r"\breachability_classes\s*=\s*[\"']([A-Za-z_, ]+)[\"']")
+
+# The movement-class vocabulary the scope key may use. This module is
+# stdlib-only on purpose, so it cannot import `terragen.passability`;
+# tests/test_reachability_intent.py pins this tuple against
+# `passability.DEFAULT_CLASSES` so the two cannot drift.
+KNOWN_CLASSES = ("INFANTRY", "VEH", "HEAVY")
 
 
 def parse_mapinfo(text: str) -> str:
@@ -100,6 +127,33 @@ def parse_mapinfo(text: str) -> str:
     if not key:
         return DEFAULT_INTENT
     return check(key.group(1))
+
+
+def parse_mapinfo_classes(text: str) -> tuple[str, ...]:
+    """The movement classes the map's reachability claim speaks for.
+
+    A `mapinfo.lua` with no `reachability_classes` key — every package emitted
+    before the key existed — reads as `GATE_CLASSES`, which is the scope those
+    packages were in fact judged on. An unknown class name is an error for
+    `parse_mapinfo`'s reason: a typo'd scope silently widening to the default
+    would re-judge the map on classes it never claimed.
+    """
+    block = _BLOCK.search(_strip_comments(text))
+    if not block:
+        return GATE_CLASSES
+    key = _CLASSES_KEY.search(block.group(1))
+    if not key:
+        return GATE_CLASSES
+    classes = tuple(c for c in re.split(r"[\s,]+", key.group(1)) if c)
+    if not classes:
+        raise ValueError("reachability_classes is declared but names no "
+                         "movement class")
+    for c in classes:
+        if c not in KNOWN_CLASSES:
+            raise ValueError(
+                f"unknown movement class {c!r} in reachability_classes — "
+                f"expected one of {', '.join(KNOWN_CLASSES)}")
+    return classes
 
 
 def _strip_comments(text: str) -> str:
@@ -152,6 +206,19 @@ def verdict(intent: str, groups, stranded) -> tuple[bool, str]:
                    f"components — {parts}")
 
 
+def measured(groups, stranded) -> str:
+    """A plain statement of one class's connectivity reading, with no verdict
+    attached — what `report()` prints for classes outside the declared scope."""
+    n = len(stranded) + sum(len(v) for v in groups.values())
+    if stranded:
+        return f"{n} start(s), on impassable ground: {sorted(stranded)}"
+    if len(groups) <= 1:
+        return f"all {n} start(s) in one component"
+    parts = "; ".join(f"component {c}: starts {sorted(v)}"
+                      for c, v in sorted(groups.items()))
+    return f"{n} starts in {len(groups)} components — {parts}"
+
+
 def report(readings, intent: str, gate_classes=GATE_CLASSES, log=print) -> bool:
     """Print the declared-vs-measured verdict for a generator run.
 
@@ -177,15 +244,21 @@ def report(readings, intent: str, gate_classes=GATE_CLASSES, log=print) -> bool:
     """
     ok = True
     for r in readings:
-        passed, msg = verdict(intent, r.groups, r.stranded)
         gate = r.cls in gate_classes
         if gate:
+            passed, msg = verdict(intent, r.groups, r.stranded)
             ok = ok and passed
             tag = "AGREES" if passed else "DISAGREES"
             log(f"  reachability [{intent}] {r.cls} (gate): {tag} — {msg}")
         else:
-            tag = "agrees" if passed else "differs, not judged"
-            log(f"  reachability [{intent}] {r.cls}: {tag} — {msg}")
+            # A class outside the declared scope is MEASURED, never judged:
+            # the old wording here ran it through verdict() and printed
+            # "the declaration is stale" for meridian's INFANTRY, which is
+            # the per-class divergence the scope key exists to legitimise
+            # (M9o's find, lane queue item 2).
+            log(f"  reachability [{intent}] {r.cls} (outside declared scope "
+                f"{'/'.join(gate_classes)}): "
+                f"{measured(r.groups, r.stranded)}")
     if not ok:
         log(f"  \u26a0 this map declares reachability = \"{intent}\" and its terrain "
             f"does not match for {'/'.join(gate_classes)} — "

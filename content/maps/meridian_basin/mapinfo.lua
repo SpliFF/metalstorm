@@ -18,8 +18,14 @@ local mapinfo = {
     --                  is a transport problem, not a defect. `--verify`
     --                  then fails this map if it comes out CONNECTED,
     --                  because the declaration would be stale.
+    -- reachability_classes: the movement classes the claim above
+    --                  speaks for. A class outside the scope may
+    --                  legally read differently (infantry outclimbs
+    --                  armour — meridian_basin is split for VEH and
+    --                  connected for INFANTRY, on purpose).
     metalstorm = {
         reachability = "split",
+        reachability_classes = "VEH HEAVY",
     },
 
     maxmetal = 0.5,

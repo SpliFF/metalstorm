@@ -172,6 +172,56 @@ class GroundTextureFileEmission(unittest.TestCase):
             self.assertNotIn("groundtex",
                              open(os.path.join(out, "mapinfo.lua")).read())
 
+    def test_oversized_request_ships_lossless_not_an_error(self):
+        """The default request (4096 since the M8 streaming-v2 resolution
+        raise) exceeds this 2048-texel bake: the package must clamp to the
+        bake's own resolution and ship, not die in ground_texture_from_tiles'
+        divisibility gate."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as out:
+            self._write(bk.GROUND_TEXTURE_SIZE_DEFAULT, out)
+            p = os.path.join(out, "maps", "ground.png")
+            self.assertTrue(os.path.exists(p))
+            with Image.open(p) as im:
+                self.assertEqual(im.size, (2048, 2048))   # bake edge, lossless
+
+
+class GroundTextureSizeFor(unittest.TestCase):
+    """`ground_texture_size_for` — the request-to-valid-edge rounding that
+    makes the configured size a REQUEST rather than a constraint the caller
+    has to know the bake geometry to satisfy (M8 streaming v2 step 4: the
+    default rose to 4096, and small maps must keep shipping)."""
+
+    def test_exact_sizes_pass_through(self):
+        for size in (16384, 8192, 4096, 2048, 1024, 512):
+            self.assertEqual(bk.ground_texture_size_for(size, 16384), size)
+
+    def test_between_two_valid_edges_rounds_down(self):
+        # never finer than asked: 3000 on a 16384 bake -> 2048, not 4096
+        self.assertEqual(bk.ground_texture_size_for(3000, 16384), 2048)
+
+    def test_at_or_above_the_bake_is_lossless(self):
+        self.assertEqual(bk.ground_texture_size_for(16384, 16384), 16384)
+        self.assertEqual(bk.ground_texture_size_for(99999, 16384), 16384)
+
+    def test_below_the_coarsest_reduction_returns_the_coarsest(self):
+        # 32x is the hardest reduction the 32-texel tile can express
+        self.assertEqual(bk.ground_texture_size_for(100, 16384), 512)
+
+    def test_nonpositive_request_is_loud(self):
+        with self.assertRaises(ValueError):
+            bk.ground_texture_size_for(0, 16384)
+
+    def test_default_reaches_finer_pages_than_the_ruling_measured(self):
+        """The raise itself, pinned: on a 16 384-elmo map the default source
+        now carries 4 elmos/texel (page pyramid level 2), where the §2n
+        ruling's 2048 stopped at 8 (level 3). A future default change should
+        have to look at this."""
+        self.assertEqual(bk.GROUND_TEXTURE_SIZE_DEFAULT, 4096)
+        self.assertEqual(
+            bk.ground_texture_size_for(bk.GROUND_TEXTURE_SIZE_DEFAULT, 16384),
+            4096)
+
 
 if __name__ == "__main__":
     unittest.main()
