@@ -12,6 +12,14 @@ Batch driver + determinism pair-run for `spring-server --headless-run`
   dumps' `stateHash` sequences. Wired into
   `.github/workflows/headless-determinism.yml` and `make
   test-headless-determinism`.
+- `determinism-gate.sh` — the ONE entry point CI should call
+  (`make determinism-gate`): pair-run + replay-verify over both the
+  PaperTanks fixture and `fixtures/metalstorm-determinism.json`
+  (crossing_standoff, strategos both sides). Every arm gates on the
+  engine's verdict line AND a zero exit code — T2-b (the CWeaponDefHandler
+  static-destruction abort that used to make exit 134 a success) is fixed
+  in `rts/Sim/Weapons/WeaponDefHandler.cpp`, so a non-zero exit from a
+  completed run is a real defect again.
 - `growth-report.mjs` — fit `base + slope×days` to every PLAN-long-uptime §1
   growth surface in a soak ladder's dumps and rule each slope against a
   declared budget. Exits non-zero on an unexplained positive slope.

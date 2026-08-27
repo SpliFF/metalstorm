@@ -40,11 +40,14 @@ export function runHeadless({ serverBin, configPath, port, dbPath, maxWallMin = 
 // but takes its map/game/roster from the replay header rather than a manifest
 // (PLAN-replay §7.4). Same resolve-never-reject contract as runHeadless.
 //
-// Callers of the replay path must NOT gate on `exitCode`: spring-server aborts
-// during static destruction (CWeaponDefHandler, after main returns) in any run
-// that exercised weapon defs, so the process signal says nothing about whether
-// the verification passed. Gate on the `replay verify:` log line (PLAN-replay
-// T2-b).
+// Callers should gate on BOTH the engine's own verdict/completion log line
+// AND `exitCode === 0`. History (PLAN-replay T2-b): spring-server used to
+// abort during static destruction (CWeaponDefHandler, after main returned) in
+// any run that exercised weapon defs, which made the exit status pure noise
+// and forced every driver to parse log lines instead. That defect is fixed
+// (WeaponDefHandler.cpp placement-new singleton), so a non-zero exit from a
+// completed run is a genuine defect again. The log line stays load-bearing:
+// an early death can still exit 0.
 export function runServer({ serverBin, args, cwd }) {
     return new Promise((resolve) => {
         const child = spawn(serverBin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });

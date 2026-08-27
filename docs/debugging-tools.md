@@ -638,18 +638,59 @@ Three passes: record the fixture with `--journal-file` + `--journal-hash-every`,
 re-execute it with `--replay … --verify`, then (with `--pack`) repack via
 `--replay-export` and verify the packed copy too.
 
-> **Gate on the log line, never the exit code.** `spring-server` aborts during static
-> destruction (`CWeaponDefHandler`, inside `__cxa_finalize`, *after* `main` returns and
-> after `exited cleanly` is logged) in any run that exercised weapon defs. That is a
-> pre-existing defect unrelated to replay, and it means the process status is noise
-> here. Both drivers parse the engine's own verdict instead — `replay verify: PASS/FAIL`
-> for the replay gate, `headless run complete:` for the pair-run. A run that produces
-> **no** verdict is its own failure mode (`absent`), never "no FAIL seen".
+> **Gate on the log line AND the exit code** (changed 2026-08-27). `spring-server`
+> used to abort during static destruction (`CWeaponDefHandler` →
+> `~DynDamageArray`'s `assert(refCount == 1)`, inside `__cxa_finalize`, *after*
+> `main` returned and after `exited cleanly` was logged) in any run that exercised
+> weapon defs — PLAN-replay T2-b — which made the process status pure noise and
+> forced both drivers to parse log lines only. That defect is fixed: the weapon-def
+> handler is placement-new'd into static storage and never destroyed
+> (`rts/Sim/Weapons/WeaponDefHandler.cpp`), so a completed run now exits 0 and both
+> drivers require **both** the engine's own verdict (`replay verify: PASS/FAIL` /
+> `headless run complete:`) **and** a zero exit — either alone can lie (an early
+> death can exit 0; a logged verdict used to be followed by an abort). A run that
+> produces **no** verdict is its own failure mode (`absent`), never "no FAIL seen".
 
 Live results on the fixed fixture (debug build): 1799 records / 30 hash points
 recorded, `PASS — 30/30 state hashes matched` on both the raw recording and the packed
 copy (178 887 → 9 350 bytes). Negative control: flipping one bit of the frame-4800
 reference reports `FAIL … firstDivergence=4800`, located exactly.
+
+### The determinism gate (one entry point for CI)
+
+`tools/headless-batch/determinism-gate.sh` (also `make determinism-gate`) runs the
+whole determinism story in one call — the thing a CI job should invoke:
+
+```bash
+make determinism-gate
+# or, against a binary you already built:
+tools/headless-batch/determinism-gate.sh build/debug/spring-server
+```
+
+Four arms, all of which must pass: the pair-run and the replay-verify (`--pack`)
+over the PaperTanks fixture, then the same two over
+`fixtures/metalstorm-determinism.json` — Metalstorm's own content
+(`crossing_standoff` on `scorched_crossing_v2.4`, `strategos` AI on both sides,
+5 game-minutes, `stateHashEvery: 300`). The Metalstorm arms exist because one
+fixture on flat terrain is narrow coverage (PLAN-replay T5-b): the pathfinding,
+economy and AI content the demo actually ships was otherwise untested by the
+determinism gate. Note the Metalstorm arms need `data/maps/scorched_crossing_v2.4`
+present (map packages are not tracked in git).
+
+> **What the Metalstorm arm caught on its first run (2026-08-27): Lua's
+> per-process string-hash seed.** Two runs of the identical fixture diverged
+> (first hash mismatch ~frame 2400; the strategos allocator assigned the same
+> force packages to DIFFERENT goals at its first score tie). Root cause: stock
+> Lua 5.4 seeds its string hash from wall time + ASLR (`luai_makeseed`), so
+> `pairs()` iteration order over string-keyed tables differs per process — and
+> the AI planner builds its goal/package arrays out of `pairs()`, so the rng
+> tie-break values were paired with different candidates in each run.
+> PaperTanks never caught this because its start-unit gadget deliberately
+> avoids `pairs()`-order dependence. Fixed by pinning the seed in
+> `rts/lib/lua/src/luaconf.h` (note: the `src/` copy is the one the Lua core
+> compiles against — `include/luaconf.h` is the external consumers' copy and
+> carries the same define; keep both in sync). With the pin, the Metalstorm
+> pair-run and replay-verify both pass 30/30.
 
 ### Replay spectate CI hook (a client watching a re-execution)
 

@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -75,6 +75,15 @@ test-replay-verify:
 		--server-bin build/debug/spring-server \
 		--out-dir build/replay-verify \
 		--pack
+
+# The one determinism entry point CI should call: pair-run + replay-verify
+# over BOTH fixtures (PaperTanks and Metalstorm's own content). Every arm
+# gates on the engine's verdict line AND a zero exit (T2-b is fixed — see
+# rts/Sim/Weapons/WeaponDefHandler.cpp). Needs data/maps/scorched_crossing_v2.4
+# for the Metalstorm arms (map packages are untracked).
+determinism-gate:
+	cmake --build build/debug --target spring-server
+	tools/headless-batch/determinism-gate.sh build/debug/spring-server
 
 # Replay SPECTATE gate (PLAN-replay.md §7.11 T2-a-1): the same recording
 # re-executed twice — once with a real client attached over the real wire as a

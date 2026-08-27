@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 
 #include "WeaponDefHandler.h"
@@ -15,8 +16,20 @@
 
 #include "System/Misc/TracyDefs.h"
 
-static CWeaponDefHandler gWeaponDefHandler;
-CWeaponDefHandler* weaponDefHandler = &gWeaponDefHandler;
+// PLAN-replay T2-b / §7.9 T5-c: the handler is a process-lifetime singleton —
+// Init() is called once per game load and Kill() is never called — so running
+// its destructor during static destruction (__cxa_finalize, after main
+// returns) is pure downside: any run that exercised weapon defs still holds
+// IncRef'd DynDamageArray references from weapons/projectiles that were never
+// torn down, and ~DynDamageArray's `assert(refCount == 1)` turns a clean exit
+// into a SIGABRT (exit 134) AFTER "exited cleanly" was logged. That abort made
+// spring-server's exit code unusable in CI (the determinism pair-run and the
+// replay-verify gate both had to parse log lines instead). Construct the
+// handler in static storage via placement-new so its destructor never runs;
+// the process exit reclaims the memory. Same lifetime, same address stability,
+// no destruction-order fiasco.
+alignas(CWeaponDefHandler) static unsigned char gWeaponDefHandlerMem[sizeof(CWeaponDefHandler)];
+CWeaponDefHandler* weaponDefHandler = new (gWeaponDefHandlerMem) CWeaponDefHandler();
 
 
 void CWeaponDefHandler::Init(LuaParser* defsParser)
