@@ -513,6 +513,12 @@ set(LOBBY_SERVER_SOURCES
     # read/write only world-scoped rows; the war's ending reaches it as W6's
     # settlement ledger row, never as a war-table read.
     rts/Server/WorldConquest.cpp
+    # Worldsim phase 3 item 3: the offline notification channels behind the
+    # W11 bus seam — Discord webhook + Web Push. Lobby-only like the rest of
+    # the world layer; WebPushCrypto is the pure VAPID/RFC 8291 arithmetic
+    # under it.
+    rts/Server/WorldOfflineChannels.cpp
+    rts/Server/WebPushCrypto.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -633,7 +639,7 @@ target_compile_definitions(spring-lobby PRIVATE
     # CMAKE_SOURCE_DIR rather than a generator expression.
     SCENARIOGEN_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/tools/mapgen/scenariogen.py"
 )
-target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto)
+target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto CURL::libcurl)
 if(UNIX)
     target_link_libraries(spring-lobby PRIVATE pthread dl)
 endif()
@@ -715,6 +721,14 @@ if(TEST_SOURCES)
         # drives the pure tie-break rule with no db at all and the claim
         # store / war-end settlement against the same in-memory-db pattern.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldConquest.cpp
+        # Worldsim phase 3 item 3: the offline channels —
+        # test_world_offline_channels.cpp drives the store against the same
+        # in-memory-db pattern, the crypto against fixed vectors (RFC 8291
+        # Appendix A verbatim + an independently generated second vector), and
+        # the dispatcher against a fake HTTP sink. CURL is linked here already;
+        # the tests never construct the curl sender.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldOfflineChannels.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WebPushCrypto.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.

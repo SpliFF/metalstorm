@@ -340,3 +340,148 @@ TEST_CASE("W12: the season headline names both the ended and the new season numb
     CHECK(headline.find("3") != std::string::npos);
     CHECK(headline.find("4") != std::string::npos);
 }
+
+// ─────────────────────────── phase 3: the season id seam ───────────────────
+//
+// Worldsim phase 3 item 1: `WarTerminationFacts::currentSeasonId` is wired.
+// `WorldSeasonIdFor` is the ONE builder both ends use — the stamp a war is
+// seeded with at staging materialisation (`WarSeedRequest::seasonId`) and the
+// comparison value the lifecycle sweep hands `EvaluateWarTermination` — so
+// the rule in WarTermination.h can never see a format mismatch. These tests
+// drive the real store across a real rollover, exactly the read path the
+// sweep performs.
+
+#include "Server/WarTermination.h"
+
+TEST_CASE("phase 3: the season id is stable within a season and changes only at rollover") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+
+    const auto s1 = WorldSeasons::CurrentSeason(h.db, kW);
+    REQUIRE(s1.has_value());
+    const std::string idAtSeed = WorldSeasonIdFor(kW, s1->seasonNumber);
+    CHECK(!idAtSeed.empty());
+    // The id is world-scoped: two worlds both in "season 1" must not compare
+    // equal, or a war on one world could be ended by another world's clock.
+    CHECK(idAtSeed != WorldSeasonIdFor("mars", s1->seasonNumber));
+
+    // Mid-season, the id has not moved.
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 5 * kDayMs, kNow + 1);
+    const auto still = WorldSeasons::CurrentSeason(h.db, kW);
+    REQUIRE(still.has_value());
+    CHECK(WorldSeasonIdFor(kW, still->seasonNumber) == idAtSeed);
+
+    // Rollover: the id changes.
+    const auto r = WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 2);
+    REQUIRE(r.rolledOver);
+    const auto s2 = WorldSeasons::CurrentSeason(h.db, kW);
+    REQUIRE(s2.has_value());
+    CHECK(WorldSeasonIdFor(kW, s2->seasonNumber) != idAtSeed);
+}
+
+TEST_CASE("phase 3: a war spanning a season rollover meets SeasonEnd, and only after the rollover") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+
+    // The war is seeded mid-season-1 and stamped with season 1's id — the
+    // same stamp materialiseStaging writes into `wars.season_id`.
+    const auto seedSeason = WorldSeasons::CurrentSeason(h.db, kW);
+    REQUIRE(seedSeason.has_value());
+    WarTerminationFacts facts;
+    facts.warSeasonId = WorldSeasonIdFor(kW, seedSeason->seasonNumber);
+
+    // While season 1 is still running, the war does not end.
+    facts.currentSeasonId =
+        WorldSeasonIdFor(kW, WorldSeasons::CurrentSeason(h.db, kW)->seasonNumber);
+    CHECK(EvaluateWarTermination(facts) == WarTerminalReason::None);
+
+    // The season rolls over under the war.
+    const auto r = WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 1);
+    REQUIRE(r.rolledOver);
+    facts.currentSeasonId =
+        WorldSeasonIdFor(kW, WorldSeasons::CurrentSeason(h.db, kW)->seasonNumber);
+    CHECK(EvaluateWarTermination(facts) == WarTerminalReason::SeasonEnd);
+
+    // A war that predates the season system (empty stamp) is untouched by the
+    // same rollover — it does not belong to a finished season.
+    WarTerminationFacts unseasoned;
+    unseasoned.currentSeasonId = facts.currentSeasonId;
+    CHECK(EvaluateWarTermination(unseasoned) == WarTerminalReason::None);
+}
+
+// ─────────────────────────── phase 3: the archive route bodies ─────────────
+
+TEST_CASE("phase 3: SeasonByNumber answers ended seasons too, unlike CurrentSeason") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+    REQUIRE(WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 1).rolledOver);
+
+    const auto ended = WorldSeasons::SeasonByNumber(h.db, kW, 1);
+    REQUIRE(ended.has_value());
+    CHECK(ended->state == "ended");
+    CHECK(ended->endedWorldMs == kWorldNow + 10 * kDayMs);
+    CHECK_FALSE(WorldSeasons::SeasonByNumber(h.db, kW, 99).has_value());
+}
+
+TEST_CASE("phase 3: the archive index lists every season newest first") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 1);
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 20 * kDayMs, kNow + 2);
+
+    const auto body = WorldSeasons::SeasonsIndexJson(h.db, kW);
+    CHECK(body["worldId"].get<std::string>() == kW);
+    REQUIRE(body["seasons"].size() == 3);
+    CHECK(body["seasons"][0]["number"].get<int>() == 3);
+    CHECK(body["seasons"][0]["state"].get<std::string>() == "active");
+    CHECK(body["seasons"][2]["number"].get<int>() == 1);
+    CHECK(body["seasons"][2]["state"].get<std::string>() == "ended");
+    // Every row carries the canonical id, so a client can hand it back to
+    // anything that speaks `wars.season_id`.
+    CHECK(body["seasons"][0]["seasonId"].get<std::string>() == WorldSeasonIdFor(kW, 3));
+}
+
+TEST_CASE("phase 3: the season archive body serves an ended season's digests, an active one's empty set, and refuses an unknown number") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
+    const auto red = h.Found("Red Banner", 101);
+    h.AddPoi("poi-a", red);
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+
+    // One settlement won by red, one unclaimed, both during season 1.
+    h.Settle("poi-a", red, kNow + 10);
+    h.Settle("poi-a", "", kNow + 11);
+    REQUIRE(WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 20).rolledOver);
+
+    const auto archived = WorldSeasons::SeasonArchiveJson(h.db, kW, 1);
+    REQUIRE_FALSE(archived.contains("error"));
+    CHECK(archived["season"]["number"].get<int>() == 1);
+    CHECK(archived["season"]["state"].get<std::string>() == "ended");
+    REQUIRE(archived["digests"].size() == 2);
+    bool sawRed = false, sawUnclaimed = false;
+    for (const auto& d : archived["digests"]) {
+        if (d["factionId"].is_null()) {
+            sawUnclaimed = true;
+            CHECK(d["settlementsWon"].get<int>() == 1);
+        } else if (d["factionId"].get<std::string>() == red) {
+            sawRed = true;
+            CHECK(d["settlementsWon"].get<int>() == 1);
+        }
+    }
+    CHECK(sawRed);
+    CHECK(sawUnclaimed);
+
+    // The ACTIVE season answers truthfully: its row, no digests yet.
+    const auto active = WorldSeasons::SeasonArchiveJson(h.db, kW, 2);
+    REQUIRE_FALSE(active.contains("error"));
+    CHECK(active["season"]["state"].get<std::string>() == "active");
+    CHECK(active["digests"].empty());
+
+    // A number naming no row is an error the route maps to 404.
+    CHECK(WorldSeasons::SeasonArchiveJson(h.db, kW, 7)["error"].get<std::string>() ==
+          "no_such_season");
+}
