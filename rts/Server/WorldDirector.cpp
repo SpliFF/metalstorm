@@ -149,6 +149,9 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["stagingWindowMinWorldMs"]       = stagingWindowMinWorldMs;
     j["stagingWindowMaxWorldMs"]       = stagingWindowMaxWorldMs;
     j["stagingMaterialiseMaxAttempts"] = stagingMaterialiseMaxAttempts;
+    j["claimPoiCost"]                  = claimPoiCost;
+    j["claimRefundFraction"]           = claimRefundFraction;
+    j["claimExpiryWorldMs"]            = claimExpiryWorldMs;
     j["seasonLengthWorldMs"]           = seasonLengthWorldMs;
     return j;
 }
@@ -547,9 +550,10 @@ std::optional<WorldPoiRecord> WorldDirector::PoiForMap(sqlite3* db,
 
 // ── The settlement ledger (W6) ────────────────────────────────────────────
 
-bool WorldDirector::RecordSettlement(sqlite3* db, const WorldSettlementRecord& e) {
-    if (!db || e.worldId.empty() || e.poiId.empty()) return false;
+int64_t WorldDirector::RecordSettlement(sqlite3* db, const WorldSettlementRecord& e) {
+    if (!db || e.worldId.empty() || e.poiId.empty()) return 0;
     bool ok = true;
+    int64_t settlementId = 0;
     const bool committed = SqliteWriteTransaction(db, "WorldRecordSettlement", [&] {
         // Plain INSERT, no ON CONFLICT: this is a ledger, and the whole point
         // of W6 is that two wars settling at the same POI leave two rows, not
@@ -571,9 +575,12 @@ bool WorldDirector::RecordSettlement(sqlite3* db, const WorldSettlementRecord& e
         sqlite3_bind_int64(stmt, 6, e.recordedAt);
         ok = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_finalize(stmt);
+        // Read inside the transaction, where it is unambiguously this INSERT's
+        // rowid — the handle is shared across threads (SqliteThreading.h).
+        if (ok) settlementId = sqlite3_last_insert_rowid(db);
         return ok ? SQLITE_OK : SQLITE_ERROR;
     });
-    return committed && ok;
+    return (committed && ok) ? settlementId : 0;
 }
 
 std::vector<WorldSettlementRecord> WorldDirector::SettlementsFor(

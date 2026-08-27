@@ -13,8 +13,20 @@ const char* WorldNotificationKindToString(WorldNotificationKind k) {
     case WorldNotificationKind::StagingMaterialised: return "materialised";
     case WorldNotificationKind::StagingCancelled:    return "cancelled";
     case WorldNotificationKind::StagingFailed:       return "failed";
+    case WorldNotificationKind::PoiOwnershipChanged: return "ownership";
   }
   return "opened";
+}
+
+const char* WorldNotificationSseEvent(WorldNotificationKind k) {
+  switch (k) {
+    case WorldNotificationKind::StagingOpened:
+    case WorldNotificationKind::StagingMaterialised:
+    case WorldNotificationKind::StagingCancelled:
+    case WorldNotificationKind::StagingFailed:       return "world-staging";
+    case WorldNotificationKind::PoiOwnershipChanged: return "world-poi";
+  }
+  return "world-staging";
 }
 
 std::string WorldNotificationHeadline(WorldNotificationKind kind,
@@ -29,6 +41,8 @@ std::string WorldNotificationHeadline(WorldNotificationKind kind,
       return "Staging at " + name + " was cancelled.";
     case WorldNotificationKind::StagingFailed:
       return "Staging at " + name + " closed without a battle.";
+    case WorldNotificationKind::PoiOwnershipChanged:
+      return "Control of " + name + " has changed hands.";
   }
   return "";
 }
@@ -42,6 +56,7 @@ nlohmann::json WorldNotificationToJson(const WorldNotificationEvent& ev) {
   j["attackerFaction"] = ev.attackerFactionId;
   j["defenderFaction"] = ev.defenderFactionId;
   j["stagingId"]       = ev.stagingId;
+  j["claimId"]         = ev.claimId;
   j["worldMs"]         = ev.worldMs;
   j["headline"]        = ev.headline.empty()
       ? WorldNotificationHeadline(ev.kind, ev.poiName)

@@ -157,6 +157,16 @@ struct WorldDefaults {
     double stagingWindowMaxWorldMs       = 72.0 * 3600.0 * 1000.0;
     int    stagingMaterialiseMaxAttempts = 5;
 
+    // ── Conquest: the explicit claim act (mirrored by WorldConquestRules) ──
+    // USER-DECIDED 2026-08-27 — see WorldConquest.h for the whole rule.
+    /// World authority filing a claim on a POI charges the filing account.
+    double claimPoiCost        = 25.0;
+    /// Fraction of the recorded cost returned on any non-won resolution
+    /// (lost / expired / withdrawn). 0 = forfeit, 1 = full refund.
+    double claimRefundFraction = 0.5;
+    /// WORLD ms after which an unresolved claim expires; <= 0 disables.
+    double claimExpiryWorldMs  = 30.0 * 24.0 * 3600.0 * 1000.0;
+
     // ── W12: seasons (mirrored by WorldSeasonRules) ─────────────────────────
     /// How long a season runs, in WORLD ms. A narrative/archival unit, not a
     /// balance lever — see WorldSeasons.h.
@@ -294,7 +304,11 @@ public:
     // ── The settlement ledger (W6) ──────────────────────────────────────────
 
     /// Append one settlement row. Always an INSERT — see the struct comment.
-    static bool RecordSettlement(sqlite3* db, const WorldSettlementRecord& e);
+    /// Returns the new row's `settlementId` (rowid), or 0 when the write did
+    /// not reach disk — truthy exactly when the old bool was, and the id is
+    /// what the conquest settlement (WorldConquest::SettleWar) labels the
+    /// claims this war resolved with.
+    static int64_t RecordSettlement(sqlite3* db, const WorldSettlementRecord& e);
     static std::vector<WorldSettlementRecord> SettlementsFor(sqlite3* db,
                                                               const std::string& worldId);
 

@@ -501,6 +501,12 @@ set(LOBBY_SERVER_SOURCES
     # world_settlement_ledger/world_economy_events and writes only
     # world-scoped rows.
     rts/Server/WorldSeasons.cpp
+    # PLAN-worldsim.md phase 3 §5 (USER-DECIDED 2026-08-27): conquest — the
+    # explicit claim act POI ownership transfers through at war end.
+    # Lobby-only, same reason as the rest: claims and the settlement writer
+    # read/write only world-scoped rows; the war's ending reaches it as W6's
+    # settlement ledger row, never as a war-table read.
+    rts/Server/WorldConquest.cpp
     # PLAN-metalstorm-wars.md §4, task 2: the atomic TTL slot reservation and
     # the side-sizing / underdog maintenance pass. The reservation table is
     # read by the GAME server's seating path in spirit but written only here —
@@ -694,6 +700,10 @@ if(TEST_SOURCES)
         # store/Tick against the same in-memory-db pattern, reading
         # WorldDirector's settlement ledger and WorldEconomy's events.
         ${CMAKE_SOURCE_DIR}/rts/Server/WorldSeasons.cpp
+        # PLAN-worldsim.md phase 3 §5: conquest — test_world_conquest.cpp
+        # drives the pure tie-break rule with no db at all and the claim
+        # store / war-end settlement against the same in-memory-db pattern.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WorldConquest.cpp
         # task 2: the slot reservation (test_war_slot_reservation.cpp drives
         # the real transaction from N threads against a real file) and the
         # side-sizing / incentive maintenance pass.
