@@ -12,7 +12,7 @@
  * `buildings_*.lua` return literal def tables (no builder) and evaluate
  * the same way.
  */
-import { LuaRuntime, type LuaValue } from './lua-runtime.js';
+import { LuaRuntime, luaTable, type LuaValue } from './lua-runtime.js';
 
 /**
  * Filesystem access is injected (same purity rule as model-validate.ts:
@@ -154,7 +154,11 @@ function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Re
                     // the outer evalStringEx with this message attached.
                     throw new Error(`VFS.Include("${includePath}"): ${inc.error}`);
                 }
-                return inc.value;
+                // VFS.Include returns the chunk's SINGLE return value. A
+                // pure-sequence table reads back as a JS array; left bare it
+                // would be spread into N Lua return values (empty → zero →
+                // nil), so re-wrap as one table.
+                return Array.isArray(inc.value) ? luaTable(...inc.value) : inc.value;
             },
         });
         const { value, error } = rt.evalStringEx(source, filename);

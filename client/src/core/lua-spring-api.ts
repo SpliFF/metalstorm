@@ -1032,16 +1032,32 @@ function applySelection(ls: LiveState, ctx: SpringAPIContext, ids: number[], app
     ctx.setSelection?.(next.slice());
 }
 
-/** Convert a worker-side order queue into the array Spring widgets
- *  expect: each entry is a keyed table with id/params/options/tag/timeout.
- *  `count` optionally caps the number of orders returned (default: all). */
+/** Convert a worker-side order queue into the single array-table Spring
+ *  widgets expect: each entry is a keyed table with
+ *  id/params/options/tag/timeout. `count` optionally caps the number of
+ *  orders returned (default: all).
+ *
+ *  MUST return via luaTable() — a bare JS array is spread into N Lua
+ *  return values by the runtime marshaller (lua-runtime.ts pushValue), so
+ *  `local q = Spring.GetUnitCommands(id, -1)` would capture only the first
+ *  order table, and an EMPTY queue would marshal as *zero* return values →
+ *  `ipairs(q)` on nil. */
 function ordersToLuaArray(orders: UnitOrder[] | undefined, count?: LuaValue): LuaValue {
-    if (!orders) return luaTable();
-    const cap = count != null ? Number(count) : orders.length;
-    const limit = Math.max(0, Math.min(orders.length, cap));
-    const result: Array<Record<string, LuaValue>> = [];
+    const list = orders ?? [];
+    // Recoil count semantics (LuaUtils::PackCommandQueue callers):
+    //   nil or negative (the common `-1`) → the FULL queue as a table;
+    //   0                                → just the queue size, as a number;
+    //   positive N                       → the first N entries as a table.
+    // The old `Math.min(len, -1)` clamp made `GetCommandQueue(uid, -1)`
+    // return an empty table — the exact opposite of the documented form.
+    const n = count != null ? Number(count) : -1;
+    if (n === 0) return list.length;
+    const limit = (!Number.isFinite(n) || n < 0)
+        ? list.length
+        : Math.min(list.length, Math.floor(n));
+    const result: LuaValue[] = [];
     for (let i = 0; i < limit; i++) {
-        const o = orders[i];
+        const o = list[i];
         result.push({
             id: o.cmdId,
             params: [...o.params],
@@ -1050,7 +1066,7 @@ function ordersToLuaArray(orders: UnitOrder[] | undefined, count?: LuaValue): Lu
             timeout: o.timeout,
         });
     }
-    return result;
+    return luaTable(...result);
 }
 
 /** Canonicalise a Spring keyset string for storage / lookup. Accepts
@@ -2086,7 +2102,9 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
             const uid = Number(id);
             if (!ls.units.has(uid)) return null;
             const cargo = ls.transportCargo.get(uid);
-            return luaTable(cargo ?? []);
+            // Spread the ids into luaTable — `luaTable(cargo)` would nest
+            // the whole array as element [1] ({{a,b}} instead of {a,b}).
+            return luaTable(...(cargo ?? []));
         },
         // GetUnitTransporter returns the carrier unit id, or nil if the
         // unit isn't being carried.
@@ -2536,7 +2554,10 @@ export function buildSpringGlobals(ctx: SpringAPIContext, liveState?: LiveState)
                 if (pa !== pb) return pb - pa;
                 return (a.id as number) - (b.id as number);
             });
-            return out;
+            // Single Lua sequence table (luaTable), NOT a bare array —
+            // a bare array spreads into N return values and an empty one
+            // into zero (→ ipairs(nil) in the caller).
+            return luaTable(...out);
         },
         // Spring.GetPathPosition(pathId, idx) — index-based reader used
         // by widgets that don't want to hold the proxy. 1-indexed.
@@ -4337,5 +4358,9 @@ function includeLuaFile(source: string, chunkName: string, ctx: SpringAPIContext
         result = sub.readValue(-1);
     }
     sub.dispose();
-    return result;
+    // VFS.Include returns the chunk's SINGLE return value. A chunk that
+    // returns a pure-sequence table reads back as a JS array here; left
+    // bare it would be spread into N Lua return values (and an empty one
+    // into zero → nil) by the binding marshaller, so re-wrap as one table.
+    return Array.isArray(result) ? luaTable(...result) : result;
 }
