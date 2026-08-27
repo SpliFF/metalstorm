@@ -493,6 +493,15 @@ def _mesh_positions(defname: str) -> list[tuple[float, float, float]]:
     return out
 
 
+def _mesh_units_scale(defname: str) -> float:
+    """8.0 for a mesh stamped elmos (world-scale ×8), 1.0 for authored metres."""
+    import json
+    models = os.path.join(GAME_DIR, "models")
+    g = json.load(open(os.path.join(models, f"{defname}.gltf"), encoding="utf-8"))
+    ext = g.get("extensions", {}).get("SPRINGRTS_geometry", {})
+    return 8.0 if ext.get("units") == "elmos" else 1.0
+
+
 class DeckTopIsTheDefs(unittest.TestCase):
     """The deck gap is a MODEL constant and the map has to be able to read it.
 
@@ -590,10 +599,16 @@ class DeckTopIsTheDefs(unittest.TestCase):
         did. This is its replacement, and it fails just as loudly if a
         re-export ever puts the piers back on y = 0 while the defs still say
         the deck is the origin.
+
+        The floors are authored metres; a mesh stamped
+        SPRINGRTS_geometry.units == "elmos" carries the world-scale ×8
+        (PLAN-world-scale.md §5 Option A), so the expectation scales with
+        the stamp rather than assuming either convention.
         """
         for defname, floor in (("ms_road_bridge", -1.5), ("ms_rail_bridge", -3.8)):
             ys = [p[1] for p in _mesh_positions(defname)]
-            self.assertAlmostEqual(min(ys), floor, places=3, msg=defname)
+            self.assertAlmostEqual(min(ys), floor * _mesh_units_scale(defname),
+                                   places=3, msg=defname)
             self.assertGreater(max(ys), 0.0, msg=defname)
 
     def test_the_declared_deck_is_a_real_surface_in_the_mesh(self):
