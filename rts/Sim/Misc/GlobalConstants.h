@@ -41,6 +41,14 @@ static constexpr int BUILD_SQUARE_SIZE = SQUARE_SIZE * BUILD_GRID_RESOLUTION;
 
 /**
  * conversion factor from elmos to meters
+ *
+ * The world-scale contract: 8 elmos = 1 metre (PLAN-world-scale.md §5
+ * Option A, USER-DECIDED 2026-08-27). The sim never converts — every
+ * model reaches it already in elmos: metre-authored sources are scaled
+ * by the inverse of this constant AT IMPORT (kElmosPerMetre in
+ * tools/modelimporter/GeometryExtractor.h, ELMOS_PER_METRE in
+ * tools/fable-model-forge/gltf_export.py), and elmo-authored sources
+ * (S3O/BAR, map features) pass through unscaled.
  */
 static constexpr float ELMOS_TO_METERS = 1.0f / SQUARE_SIZE;
 

@@ -116,10 +116,13 @@ TEST_SUITE("muzzle emit direction (PLAN-metalstorm-combat-fixes C)") {
         REQUIRE(muzzle != nullptr);
         const float3 pos = muzzle->GetAbsolutePos();
 
-        // turret (0, 1.8, 0.3) + barrel (0, 0.66, -1.15) + muzzle (0, 0, -4.62)
+        // turret (0, 14.4, 2.4) + barrel (0, 5.28, -9.2) + muzzle (0, 0, -36.96)
+        // — the authored metre offsets (1.8/0.3, 0.66/-1.15, 0/-4.62) ×8,
+        // in elmos since the world-scale re-import (PLAN-world-scale.md §5
+        // Option A, 2026-08-27; DESIGN-MODEL-BUILDING.md §12).
         CHECK(pos.x == doctest::Approx(0.0f).epsilon(0.001));
-        CHECK(pos.y == doctest::Approx(2.46f).epsilon(0.001));
-        CHECK(pos.z == doctest::Approx(-5.47f).epsilon(0.001));
+        CHECK(pos.y == doctest::Approx(19.68f).epsilon(0.001));
+        CHECK(pos.z == doctest::Approx(-43.76f).epsilon(0.001));
     }
 
     // The authoring rule, applied to everything that ships. Any model that

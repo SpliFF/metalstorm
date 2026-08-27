@@ -86,9 +86,75 @@ void PrintUsage(const char* argv0) {
         "                        the glTF material.normalTexture. For sources\n"
         "                        whose normal map lives in the unitDef\n"
         "                        (customParams.normaltex), not a sidecar.\n"
+        "  --metres              Source is authored at 1 unit = 1 metre;\n"
+        "                        apply the world-scale contract (8 elmos =\n"
+        "                        1 m, GeometryExtractor::kElmosPerMetre) to\n"
+        "                        the whole scene before extraction/export so\n"
+        "                        geometry AND SPRINGRTS_geometry extents\n"
+        "                        land in elmos. Do NOT pass for sources\n"
+        "                        already in elmos (S3O/BAR, map features).\n"
         "  --log-server <url>    Send logs to a springlog server.\n"
         "  --log-level <level>   Set minimum log level (debug/info/\n"
         "                        notice/warning/error).", argv0);
+}
+
+/// Recursively scale every node's translation by `s` (rotation/scale parts
+/// of the transform are untouched — a uniform world rescale only moves
+/// lengths). Helper for ScaleSceneUniform below.
+void ScaleNodeTranslations(aiNode* node, float s) {
+    if (node == nullptr) return;
+    node->mTransformation.a4 *= s;
+    node->mTransformation.b4 *= s;
+    node->mTransformation.c4 *= s;
+    for (unsigned int c = 0; c < node->mNumChildren; ++c) {
+        ScaleNodeTranslations(node->mChildren[c], s);
+    }
+}
+
+/// Uniformly rescale an imported scene in place: mesh vertices (incl. morph
+/// targets), bone offset-matrix translations, node translations and
+/// animation position keys. Normals, UVs, rotations and times are
+/// dimensionless and untouched. Used by `--metres` to apply the world-scale
+/// contract (GeometryExtractor::kElmosPerMetre — 8 elmos = 1 metre) to
+/// metre-authored sources BEFORE extraction/export, so both the exported
+/// geometry and the SPRINGRTS_geometry extents land in elmos.
+void ScaleSceneUniform(aiScene* scene, float s) {
+    if (scene == nullptr) return;
+    for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+        aiMesh* mesh = scene->mMeshes[m];
+        if (mesh == nullptr) continue;
+        for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+            mesh->mVertices[v] *= s;
+        }
+        mesh->mAABB.mMin *= s;
+        mesh->mAABB.mMax *= s;
+        for (unsigned int a = 0; a < mesh->mNumAnimMeshes; ++a) {
+            aiAnimMesh* am = mesh->mAnimMeshes[a];
+            if (am == nullptr || am->mVertices == nullptr) continue;
+            for (unsigned int v = 0; v < am->mNumVertices; ++v) {
+                am->mVertices[v] *= s;
+            }
+        }
+        for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+            aiBone* bone = mesh->mBones[b];
+            if (bone == nullptr) continue;
+            bone->mOffsetMatrix.a4 *= s;
+            bone->mOffsetMatrix.b4 *= s;
+            bone->mOffsetMatrix.c4 *= s;
+        }
+    }
+    ScaleNodeTranslations(scene->mRootNode, s);
+    for (unsigned int a = 0; a < scene->mNumAnimations; ++a) {
+        const aiAnimation* anim = scene->mAnimations[a];
+        if (anim == nullptr) continue;
+        for (unsigned int c = 0; c < anim->mNumChannels; ++c) {
+            aiNodeAnim* ch = anim->mChannels[c];
+            if (ch == nullptr) continue;
+            for (unsigned int k = 0; k < ch->mNumPositionKeys; ++k) {
+                ch->mPositionKeys[k].mValue *= s;
+            }
+        }
+    }
 }
 
 /// Replace the file extension of `path` with `newExt` (no leading dot needed).
@@ -956,6 +1022,11 @@ int main(int argc, char** argv) {
     // prunes unused extensions. Used to capture minimal reproducers
     // for upstream Assimp bug reports. Not a production code path.
     bool noPostfix = false;
+    // Source is authored in metres (1 glTF unit = 1 m) — apply the
+    // world-scale contract (GeometryExtractor::kElmosPerMetre, 8 elmos =
+    // 1 m) to the whole scene before extraction/export. See the usage
+    // text and PLAN-world-scale.md §5 Option A.
+    bool metresToElmos = false;
 
     // Tiny hand-rolled arg parser — keeps the binary dependency-free.
     for (int i = 1; i < argc; ++i) {
@@ -975,6 +1046,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--no-postfix") {
             noPostfix = true;
+        } else if (a == "--metres" || a == "--meters") {
+            metresToElmos = true;
         } else if (a == "--texture-prefix" && i + 1 < argc) {
             texturePrefix = argv[++i];
         } else if (a == "--normaltex" && i + 1 < argc) {
@@ -1068,6 +1141,18 @@ int main(int argc, char** argv) {
         Assimp::DefaultLogger::kill();
         springlog_shutdown();
         return 3;
+    }
+
+    // Metre-authored source → elmos, BEFORE any extraction or export, so
+    // every downstream consumer (SPRINGRTS_geometry, the exported mesh,
+    // the piece offsets) sees one consistent scale. ×8 is a power of two,
+    // so the float rescale is exact.
+    if (metresToElmos) {
+        ScaleSceneUniform(const_cast<aiScene*>(scene),
+                          GeometryExtractor::kElmosPerMetre);
+        SLOG(SPRING_LOG_INFO,
+            "--metres: scaled scene x%.0f (8 elmos = 1 metre world-scale "
+            "contract)", static_cast<double>(GeometryExtractor::kElmosPerMetre));
     }
 
     // Extract embedded textures from .glb / gltf-embedded sources to

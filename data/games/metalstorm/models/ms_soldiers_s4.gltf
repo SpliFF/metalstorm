@@ -1,1 +1,254 @@
-{"asset":{"version":"2.0","generator":"fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"MS_ms_soldiers_s4","children":[1]},{"name":"body","mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0,"mode":4}]}],"accessors":[{"bufferView":0,"byteOffset":0,"componentType":5126,"count":1700,"type":"VEC3","min":[-0.35367900133132935,0.0,-0.7350000143051147],"max":[0.3518438935279846,2.0986342430114746,0.34439000487327576]},{"bufferView":1,"byteOffset":0,"componentType":5126,"count":1700,"type":"VEC3"},{"bufferView":2,"byteOffset":0,"componentType":5126,"count":1700,"type":"VEC2"},{"bufferView":3,"byteOffset":0,"componentType":5125,"count":2394,"type":"SCALAR"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":20400,"target":34962},{"buffer":0,"byteOffset":20400,"byteLength":20400,"target":34962},{"buffer":0,"byteOffset":40800,"byteLength":13600,"target":34962},{"buffer":0,"byteOffset":54400,"byteLength":9576,"target":34963}],"buffers":[{"byteLength":63976,"uri":"ms_soldiers_s4.bin"}],"samplers":[{}],"images":[{"mimeType":"image/ktx2","uri":"fable_infantry_diffuse.ktx2"},{"mimeType":"image/ktx2","uri":"fable_infantry_orm.ktx2"},{"mimeType":"image/ktx2","uri":"fable_infantry_emissive.ktx2"},{"mimeType":"image/ktx2","uri":"fable_infantry_team.ktx2"}],"textures":[{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":0}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":1}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":2}}},{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":3}}}],"materials":[{"name":"ms_soldiers_s4","pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicFactor":1.0,"roughnessFactor":1.0,"metallicRoughnessTexture":{"index":1}},"occlusionTexture":{"index":1},"emissiveTexture":{"index":2},"emissiveFactor":[1.0,1.0,1.0],"extensions":{"SPRINGRTS_team_color":{"maskTexture":{"index":3}}}}],"extensions":{"SPRINGRTS_geometry":{"configVersion":8,"height":2.0986,"midpos":[-0.00092,1.04932,-0.19531],"mins":[-0.35368,0.0,-0.735],"maxs":[0.35184,2.09863,0.34439],"radius":1.2316,"pieces":[{"name":"body","parent":-1,"offset":[0.0,0.0,0.0],"mins":[-0.35368,0.0,-0.735],"maxs":[0.35184,2.09863,0.34439]}]}},"extensionsUsed":["KHR_texture_basisu","SPRINGRTS_geometry","SPRINGRTS_team_color"],"extensionsRequired":["KHR_texture_basisu"]}
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_soldiers_s4",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1700,
+   "type": "VEC3",
+   "min": [
+    -2.8294320106506348,
+    0.0,
+    -5.880000114440918
+   ],
+   "max": [
+    2.814751148223877,
+    16.789073944091797,
+    2.755120038986206
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1700,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1700,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 2394,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 20400,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 20400,
+   "byteLength": 20400,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 40800,
+   "byteLength": 13600,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 54400,
+   "byteLength": 9576,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 63976,
+   "uri": "ms_soldiers_s4.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_infantry_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_infantry_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_infantry_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "fable_infantry_team.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_soldiers_s4",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 16.7888,
+   "midpos": [
+    -0.00736,
+    8.39456,
+    -1.56248
+   ],
+   "mins": [
+    -2.82944,
+    0.0,
+    -5.88
+   ],
+   "maxs": [
+    2.81472,
+    16.78904,
+    2.75512
+   ],
+   "radius": 9.8528,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -2.82944,
+      0.0,
+      -5.88
+     ],
+     "maxs": [
+      2.81472,
+      16.78904,
+      2.75512
+     ]
+    }
+   ],
+   "units": "elmos"
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

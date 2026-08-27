@@ -41,8 +41,15 @@ return mk{
                 -- relationship lift = (groundRow − cellCentre)/cellPx × quad,
                 -- mean over the 8 pitch-15 cells. Worth an in-game residual
                 -- check (M11 method) next live session.
-                impostorDistance = 260, impostorSize = 2.0704,
-                impostorCentreY = 0.9422,
+                -- WORLD-SCALE ×8 2026-08-27 (PLAN-world-scale.md §5 Option A):
+                -- the model corpus was re-scaled 8 elmos = 1 m at import, so
+                -- all three constants scale linearly with the model: size
+                -- 2.0704→16.5632, centreY 0.9422→7.5376 (the sheets themselves
+                -- are unchanged — the baker frames on the model bbox, so a
+                -- uniformly scaled model bakes identical pixels), and distance
+                -- 260→2080 keeps the swap at the same subtended angle.
+                impostorDistance = 2080, impostorSize = 16.5632,
+                impostorCentreY = 7.5376,
                 impostorTeamMask = true,
                 override = { transportbyenemy = false } },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } },

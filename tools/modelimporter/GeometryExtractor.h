@@ -77,6 +77,24 @@ namespace GeometryExtractor {
 ///     don't need regenerating, and a mixed v8 fleet stays loadable.
 constexpr int kCurrentSchemaVersion = 8;
 
+/// World-scale contract: **8 elmos = 1 metre** (PLAN-world-scale.md §5
+/// Option A, USER-DECIDED 2026-08-27; DESIGN-MODEL-BUILDING.md §4/§12).
+/// The sim consumes every SPRINGRTS_geometry length — radius, height,
+/// midpos, mins/maxs, piece offsets — as ELMOS, and builds the collision
+/// AND selection volumes from them (rts/Sim/Objects/ModelConfigLoader.cpp
+/// → Unit.cpp), so the scale can never be render-only. Sources authored
+/// in metres (1 glTF unit = 1 m — the metalstorm native corpus) must be
+/// multiplied by this constant at import (`modelimporter --metres` scales
+/// the whole aiScene — vertices, node translations, animation position
+/// keys — before extraction/export). Sources already authored in elmos
+/// (Spring S3O/BAR content, the map-feature corpus) must NOT be scaled.
+/// Emitted files carry `units: "elmos"` (additive field — older readers
+/// ignore it). The same constant lives in
+/// tools/fable-model-forge/gltf_export.py (ELMOS_PER_METRE) and
+/// tools/scripts/rescale_models_to_elmos.py; the engine's own
+/// ELMOS_TO_METERS (rts/Sim/Misc/GlobalConstants.h) is its inverse.
+constexpr float kElmosPerMetre = 8.0f;
+
 /// Build the SPRINGRTS_geometry payload from `scene`. Returns a JSON
 /// object suitable for placement at `extensions.SPRINGRTS_geometry`
 /// in the document's root.

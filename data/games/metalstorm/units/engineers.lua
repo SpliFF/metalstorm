@@ -46,8 +46,11 @@ return mk{
                 -- RE-CALIBRATED 2026-08-20 (texture-enrichment rebake) — see
                 -- soldiers.lua for the pixel-derivation; quad from the new
                 -- bake's json, lift from the pitch-15 ground rows.
-                impostorDistance = 260, impostorSize = 1.9990,
-                impostorCentreY = 0.9370,
+                -- WORLD-SCALE ×8 2026-08-27 (PLAN-world-scale.md §5 Option A)
+                -- applied on the re-calibrated values: size 1.9990→15.9920,
+                -- centreY 0.9370→7.4960, distance 260→2080 — see soldiers.lua.
+                impostorDistance = 2080, impostorSize = 15.9920,
+                impostorCentreY = 7.4960,
                 impostorTeamMask = true },
         [2] = { -- footprint 2, not the builder's 3: still a foot squad, and it
                 -- must fit the landing ship's transportsize (3).
