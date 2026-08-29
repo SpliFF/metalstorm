@@ -311,7 +311,7 @@ over viewport **≈9.3% at defaults, ≈20.4% with every panel expanded** — an
 |---|---|---|
 | `#hud-top-bar` (entities, frame) | **already folded** — hidden by default | correct as is |
 | `#hud-speed` | **keep at rung 0** | already drill-down-correct: hidden at 1×/unpaused, visible only when it changes what the player expects |
-| `#hud-selection` — "Selected: unit 42" / "Selected: 3 units" | **DEMOTE** | superseded by the rung-1 focus chip, which says the same thing with a *name*. A raw id readout is the definition of the spreadsheet. **Not removed in U0**: the engine HUD is shared with ZK/BAR and Metalstorm is the only game with a focus HUD, so the fold needs a per-game switch. **Filed for U1.** |
+| `#hud-selection` — "Selected: unit 42" / "Selected: 3 units" | **DEMOTE** | superseded by the rung-1 focus chip, which says the same thing with a *name*. A raw id readout is the definition of the spreadsheet. **Not removed in U0**: the engine HUD is shared with ZK/BAR and Metalstorm is the only game with a focus HUD, so the fold needs a per-game switch. Filed for U1 and **NOT done in U1 either** — U1 spent its removal budget on `objectives-panel`, which was the panel its own content replaced. Still open; the per-game switch is the whole job. |
 | `#hud-minimap` | **keep at rung 0** | spatial, not tabular; it is the one always-on surface that answers "where" |
 | `#detach-minimap-btn` ("Pop out ↗") | **DEMOTE** | a permanent chrome button for a rare action. Should appear on hover over the minimap. Cosmetic; unscheduled. |
 | `#hud-help` — "Left click: select · Right click: move…" | **DEMOTE** | permanent onboarding text that never goes away and is read once. Should be first-session-only (the onboarding lane already gates on `sessions_played`) or live behind the rung-4 access point. **Filed for U3** with the rest of the guidance surfaces. |
@@ -321,7 +321,7 @@ over viewport **≈9.3% at defaults, ≈20.4% with every panel expanded** — an
 | Widget | Now | Verdict |
 |---|---|---|
 | `authority-bar` | top-left pill, always on | **KEEP at rung 0** — already key-numbers-only (YOU / TEAM). Should gain a rung-2 drill (the authority ledger) instead of pushing its event ring at the player as toasts. Unscheduled. |
-| `objectives-panel` | right rail, **expanded by default**, contains a bounty *form* | **DEMOTE to rung 1 + 2.** A resident list with a form beside the viewport. Its content is exactly story 2's. **U1 owns this**, and the brief already says to expect to demote rather than extend. |
+| `objectives-panel` | ~~right rail, **expanded by default**, contains a bounty *form*~~ | **DONE in U1 — demoted to rung 1 + 2.** Off the rail and out of the manifest; the board is now `objective-hud` at top-centre. The widget and `ui/lib/objectives.js` stay on disk, unmounted and annotated, because two of its surfaces are rung-4 content **U3** must re-home: the bounty *form* (never live — `objectives.createBounty` has no wire target) and the 5-entry outcome log (which outlives the sim's 30 s retention window, as the decaying toasts deliberately do not). |
 | `scoreboard-panel` | right rail, collapsed | **FOLD to rung 4** — "statistics". Off the rail entirely. |
 | `parley-panel` | left rail, collapsed | **FOLD to rung 4** — "diplomacy". Off the rail entirely. |
 | `ai-command-panel` | left rail, collapsed, tallest panel in the HUD | **FOLD to rung 4** — "reports"; its change feed is "events". Off the rail entirely. |
@@ -363,13 +363,19 @@ per-frame DOM mutation.
 - **World-anchored floating icons** — need U2's marker layer.
 - **The rung-4 global access point** — designed in §6, built by U3.
 - **Objective / town / enemy-force kinds** — U1, U2, U3 respectively. Each is a
-  `createDrilldown` call, not a new mechanism.
+  `createDrilldown` call, not a new mechanism. **`objective` landed in U1** and
+  was exactly that: one `createDrilldown` call, no new mechanism. `town` and
+  `enemy-force` are still declared-with-no-detail-view, so the §3 rule ("a kind
+  is added only when a rung-2 view exists for it") still has two debts open.
 - **A selection port.** Rung 3 cannot yet offer "select the whole squad" for a
   partial selection: changing the *client* selection needs the worker's
   `selectUnits` op, and the only main-thread channel to it today is
   `CameraPort`'s `workerCall`, whose header explicitly forbids carrying
   non-camera verbs. A small `SelectionPort` alongside `CameraPort` is the right
-  shape. **Filed for U1.**
+  shape. Filed for U1; **U1 did not build it** — no rung-3 action U1 added needs
+  to change the selection ("Go there" moves the camera, `guidance.delegate`
+  goes down the command bridge), so it stayed unbuilt rather than being built
+  speculatively. Still open for whoever first needs it.
 - **Demoting anything in §7.** U0 adds the framework and removes nothing, so
   that the removals land with the replacements that justify them.
 
