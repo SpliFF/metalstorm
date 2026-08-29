@@ -18,6 +18,7 @@
  * replaced was retired post-GW4.
  */
 
+import type { ObjectiveMarker } from './objective-markers.js';
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
 import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg, RosterPlayerInfo } from './connection.js';
 import type { PresentationClockStats } from './presentation-clock.js';
@@ -685,6 +686,18 @@ export type GpMessageToMain =
           map?: { width: number; height: number; baseUrl: string };
           metalSpots?: GpMinimapMetalSpots;
       }
+    /**
+     * battle-clarity U2: the objective marker set, for the minimap.
+     *
+     * The world rings are drawn in the worker's own scene; the minimap has its
+     * own Engine on main and cannot read that scene, so it is fed the same
+     * derived list (`objective-markers.ts`) rather than re-deriving from the
+     * params map main also holds. One derivation, two surfaces — a ring and a
+     * blip that disagree about which objectives exist is worse than either
+     * alone. Posted only when the set actually changes, not on every objectives
+     * evaluation tick.
+     */
+    | { type: 'gp:objectiveMarkers'; markers: ObjectiveMarker[] }
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
      *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect

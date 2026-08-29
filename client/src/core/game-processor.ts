@@ -147,6 +147,8 @@ import { resolveSoundRef, pickUnitDefSound, SoundCategory,
 import { CommandPathRenderer } from './command-path-renderer.js';
 import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './standing-order-renderer.js';
+import { ObjectiveMarkerRenderer } from './objective-marker-renderer.js';
+import { deriveObjectiveMarkers, markersFingerprint, type ObjectiveMarker } from './objective-markers.js';
 import { getEngineGl } from './engine-gl.js';
 import {
     applyPlayerTeamRosterEffect,
@@ -220,6 +222,15 @@ let gpDpr = 1;
 let gpCommandPathRenderer: CommandPathRenderer | null = null;
 let gpWaypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
+/// battle-clarity U2: how often the objective marker layer may re-derive.
+/// The publication re-fires on every objectives evaluation tick (5 s) plus any
+/// progress change, and a snapshot `replace` on join touches every key at once
+/// — so the flag is coalesced rather than acted on the moment it is set.
+const GP_OBJECTIVE_MARKER_INTERVAL_MS = 400;
+let gpObjectiveMarkersCheckedAt = 0;
+/// Last set posted to main, so the minimap message is not re-sent when nothing
+/// about the markers actually moved.
+let gpLastObjectiveMarkerFp = '';
 /// PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
 /// Built in gpInit alongside WorkerSelection; armed by the native BuildMenu via
 /// gp:startBuildPlacement. Pointer handlers route left-clicks here before
@@ -863,6 +874,7 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpCommandPathRenderer?.setMapData(map);
     gpWaypointMarkerRenderer?.setMapData(map);
     gpStandingOrderRenderer?.setMapData(map);
+    gpCtx.objectiveMarkers?.setMapData(map);
 
     // GW4-c5b: hand the interactive camera the map bounds (for fitMap / future
     // edge clamping) and frame it behind-and-above the local player's start.
@@ -1256,6 +1268,9 @@ function gpConnect(msg: GpInitToWorker): void {
             // own/allied filtering works (server already scopes the broadcast;
             // this drives own-vs-allied styling + the show-allies toggle).
             gpStandingOrderRenderer?.setIdentity(team, team);
+            // battle-clarity U2: the marker layer filters on eligibility and
+            // tints by faction, so learning who we are changes what it draws.
+            gpCtx.objectiveMarkersDirty = true;
             // GW4-c4: fetch the game's defs (unit/weapon/CEG/feature) over HTTP
             // from the content-addressed bake the server hands back. The
             // DefCache.onUnitDefs listener pushes them to the entity + plate
@@ -3059,6 +3074,20 @@ export function gpInit(msg: GpInitToWorker): void {
             const focus = camera.getTarget();
             gpDecalOverlay?.tick(dt, focus.x, focus.z,
                 Math.max(1, camera.position.y - focus.y));
+            // battle-clarity U2: the objective markers fade with the SAME
+            // camera-to-look-at delta, so "am I in the fight or above it" is
+            // one measurement rather than two that can disagree. Both reads
+            // are already made here; neither allocates.
+            if (gpCtx.objectiveMarkers) {
+                gpCtx.objectiveMarkers.updateCameraFade(
+                    Vector3.Distance(camera.position, focus));
+                if (gpCtx.objectiveMarkersDirty
+                        && now - gpObjectiveMarkersCheckedAt >= GP_OBJECTIVE_MARKER_INTERVAL_MS) {
+                    gpObjectiveMarkersCheckedAt = now;
+                    gpCtx.objectiveMarkersDirty = false;
+                    gpRefreshObjectiveMarkers();
+                }
+            }
         }
         // Age the FX lights after the emitters ran this frame + before
         // scene.render() consumes the lighting; then push distortion/muzzle
@@ -3129,6 +3158,12 @@ export function gpInit(msg: GpInitToWorker): void {
             saveToStorage('standing-orders-show-allies', String(show)),
     });
     gpStandingOrderRenderer = standingOrderRenderer;
+    // battle-clarity U2: objectives, findable by looking. Same scene, same
+    // rendering group, same rebuild-on-change discipline as the overlay above.
+    const objectiveMarkerRenderer = new ObjectiveMarkerRenderer(scene);
+    gpCtx.objectiveMarkers = objectiveMarkerRenderer;
+    gpCtx.objectiveMarkersDirty = true;
+    (globalThis as Record<string, unknown>).__objectiveMarkers = objectiveMarkerRenderer;
 
     const selection = new WorkerSelection(scene, entityRenderer, gpCtx.connection!, {
         getCamera: (viewId) => (viewId === 0 ? camera : null),
@@ -3572,6 +3607,41 @@ function gpPostSceneState(now: number): void {
     });
 }
 
+/**
+ * battle-clarity U2: re-derive the objective markers and hand them to BOTH
+ * surfaces — the world rings here in the worker's scene, and the minimap on
+ * main (which owns its own Engine and cannot read this scene).
+ *
+ * One derivation, two consumers, on purpose: a ring in the world and a blip on
+ * the minimap that disagree about which objectives exist is worse than either
+ * alone, because the minimap is what a player uses to decide where to look.
+ *
+ * The wire message is only posted when the marker set actually changed. The
+ * objectives gadget republishes on every evaluation tick, and a minimap that
+ * rebuilds its instance buffer 5 times a second for an unchanged board is the
+ * kind of cost that does not show up until a long match.
+ */
+function gpRefreshObjectiveMarkers(): void {
+    const renderer = gpCtx.objectiveMarkers;
+    if (!renderer) return;
+    let markers: ObjectiveMarker[];
+    try {
+        markers = deriveObjectiveMarkers(liveState.gameRulesParams, {
+            teamId: liveState.identity.myTeam >= 0 ? liveState.identity.myTeam : undefined,
+            frame: liveState.gameFrame,
+        });
+    } catch (err) {
+        postLog(4, `[gp] objective markers derive failed: ${err}`);
+        return;
+    }
+    renderer.update(markers);
+
+    const fp = markersFingerprint(markers);
+    if (fp === gpLastObjectiveMarkerFp) return;
+    gpLastObjectiveMarkerFp = fp;
+    postToMain({ type: 'gp:objectiveMarkers', markers });
+}
+
 /// GW4-c5c-3: post the minimap feed to main (~6 Hz). The minimap is a DOM
 /// element with its own Babylon Engine on the main thread (it can't read the
 /// worker's entity renderer), so the worker projects the live entity set down
@@ -3953,6 +4023,11 @@ export function gpShutdown(): void {
     gpWaypointMarkerRenderer = null;
     gpStandingOrderRenderer?.dispose();
     gpStandingOrderRenderer = null;
+    gpCtx.objectiveMarkers?.dispose();
+    gpCtx.objectiveMarkers = null;
+    gpCtx.objectiveMarkersDirty = false;
+    gpLastObjectiveMarkerFp = '';
+    gpObjectiveMarkersCheckedAt = 0;
     gpLastCommandQueues = [];
     gpPendingActions?.clear();
     gpPendingActions = null;

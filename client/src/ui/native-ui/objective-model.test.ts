@@ -151,6 +151,46 @@ describe('resolvePlace', () => {
         expect(resolvePlace({ id: 3, type: 'control', region: 'nowhere' }, resolvers)).toBeNull();
         expect(resolvePlace({ id: 4, type: 'kill' }, resolvers)).toBeNull();
     });
+
+    // ── battle-clarity U2: region and coordinates are no longer exclusive ──
+    //
+    // `game_objectives.lua` now publishes BOTH for a control objective (the key
+    // names the place, `GG.Regions.Area` supplies the circle). Before U2 the
+    // coordinate branch won unconditionally, which would have downgraded
+    // "Raven Basin" to "near Raven Basin" the moment the gadget started
+    // publishing an area — a phrasing regression caused by a data improvement.
+
+    it('takes the NAME from the region and the GEOMETRY from the coordinates', () => {
+        const place = resolvePlace(
+            { id: 1, type: 'control', region: 'raven_basin', x: 4501, z: 4470, r: 900 },
+            resolvers);
+        expect(place).toEqual({
+            name: 'Raven Basin', x: 4501, z: 4470, r: 900, approximate: false,
+        });
+    });
+
+    it('still says "near" when the name came from a nearest-place lookup', () => {
+        // Same coordinates, no region key: the name is a guess about which
+        // place this is, and the phrasing has to admit that.
+        const place = resolvePlace({ id: 2, type: 'protect', x: 993, z: 4694, r: 420 }, resolvers);
+        expect(place).toMatchObject({ name: 'Storm Sound', r: 420, approximate: true });
+    });
+
+    it('falls back to the region centroid when no circle was published', () => {
+        // An older gadget, or a region the partition cannot place. The centre
+        // is real; the radius is NOT invented — a ring at a guessed radius is a
+        // lie about an area.
+        const place = resolvePlace({ id: 3, type: 'control', region: 'raven_basin' }, resolvers);
+        expect(place).toEqual({ name: 'Raven Basin', x: 4480, z: 4480, approximate: false });
+    });
+
+    it('keeps the coordinates when the region key is unresolvable', () => {
+        // The objective is placeable even though we cannot name its region —
+        // returning null here would take away a "Go there" we can honour.
+        const place = resolvePlace(
+            { id: 4, type: 'control', region: 'nowhere', x: 100, z: 200, r: 300 }, resolvers);
+        expect(place).toMatchObject({ name: 'Storm Sound', x: 100, z: 200, r: 300, approximate: true });
+    });
 });
 
 describe('rankObjectives', () => {

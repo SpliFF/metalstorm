@@ -20,6 +20,7 @@ import { FactoryQueuePanel } from './core/factory-queue-panel.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
 import { Minimap } from './core/minimap.js';
+import type { ObjectiveMarker } from './core/objective-markers.js';
 import { LosBitmapStore } from './core/los-bitmap.js';
 import { CommandPathRenderer } from './core/command-path-renderer.js';
 import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
@@ -446,6 +447,11 @@ let minimap: Minimap | null = null;
 /// session teardown.
 let pendingMinimapMap: { width: number; height: number; baseUrl: string } | null = null;
 let pendingMinimapMetalSpots: GpMinimapMetalSpots | null = null;
+/// battle-clarity U2: the last objective marker set the worker posted. NOT
+/// one-shot — the board changes all match — so this is a mirror, not a queue:
+/// it exists so a minimap created (or re-created) after a post comes up with
+/// the markers already on it instead of empty until the next objective moves.
+let pendingMinimapObjectives: ObjectiveMarker[] | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
 let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let standingOrderRenderer: StandingOrderRenderer | null = null;
@@ -598,6 +604,7 @@ function quitToLobby(): void {
     minimap = null;
     pendingMinimapMap = null;
     pendingMinimapMetalSpots = null;
+    pendingMinimapObjectives = null;
     buildMenu?.dispose();
     buildMenu = null;
     economyBar?.dispose();
@@ -1007,6 +1014,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // apply to the new session's minimap (the fresh worker resends its own).
     pendingMinimapMap = null;
     pendingMinimapMetalSpots = null;
+    pendingMinimapObjectives = null;
     if (gameWorker) {
         gameWorker.terminate();
         gameWorker = null;
@@ -1338,8 +1346,31 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     if (pendingMinimapMetalSpots) {
                         minimap.applyMetalSpots(pendingMinimapMetalSpots);
                         pendingMinimapMetalSpots = null;
+    pendingMinimapObjectives = null;
+                    }
+                    // battle-clarity U2: the objective set is LIVE, not
+                    // one-shot, so unlike `map`/`metalSpots` the staged value is
+                    // kept rather than cleared — a minimap rebuilt mid-session
+                    // (startGame disposes and re-creates one per session) must
+                    // come up with the board already on it.
+                    if (pendingMinimapObjectives
+                            && minimap.getObjectiveMarkers().length === 0
+                            && pendingMinimapObjectives.length > 0) {
+                        minimap.applyObjectiveMarkers(pendingMinimapObjectives);
                     }
                     minimap.applyFeed(m.blips);
+                    minimap.render();
+                }
+                break;
+            // battle-clarity U2: objective markers. Same one-shot-vs-live split
+            // as `map` above — the worker posts only when the marker set
+            // changes, which can easily be BEFORE the minimap exists (the
+            // objectives board is published at GameStart), so the last set is
+            // staged and drained on the next feed.
+            case 'gp:objectiveMarkers':
+                pendingMinimapObjectives = m.markers;
+                if (minimap) {
+                    minimap.applyObjectiveMarkers(m.markers);
                     minimap.render();
                 }
                 break;

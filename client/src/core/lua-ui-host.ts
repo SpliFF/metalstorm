@@ -6026,6 +6026,12 @@ export function handleRosterUpdate(msg: Record<string, unknown>): void {
     }
 }
 
+/** Keys the objective marker layer is derived from (`objective-markers.ts`).
+ *  A region's name/centre matters because an objective can be placed by key. */
+function isObjectiveMarkerKey(key: string): boolean {
+    return key.startsWith('objective_') || key.startsWith('region_');
+}
+
 /** Handle the 'rulesParamUpdate' message (game/team/unit/player rules params). */
 export function handleRulesParamUpdate(msg: Record<string, unknown>): void {
     const scope = msg.scope as 'game' | 'team' | 'unit' | 'player';
@@ -6052,6 +6058,16 @@ export function handleRulesParamUpdate(msg: Record<string, unknown>): void {
     for (const [k, v] of Object.entries(params)) {
         if (v === null) targetMap.delete(k);
         else targetMap.set(k, v);
+    }
+
+    // battle-clarity U2: the world/minimap objective markers are derived from
+    // exactly these keys, so this is where they learn they are stale. Only a
+    // FLAG is set — the recompute (and its throttle) belongs to the GP half,
+    // which owns the scene; a `replace` snapshot rebuilds unconditionally
+    // because it can silently drop objectives as well as add them.
+    if (scope === 'game'
+        && (replace || Object.keys(params).some(isObjectiveMarkerKey))) {
+        gpCtx.objectiveMarkersDirty = true;
     }
 
     // Forward rules param updates to main thread for native UI

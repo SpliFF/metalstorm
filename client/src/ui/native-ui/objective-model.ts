@@ -220,25 +220,45 @@ export interface PlaceResolvers {
 /**
  * Where this objective is, named as well as we honestly can.
  *
- * `publish()` writes `region` OR `x`/`z`, never both, so the two branches are
- * exclusive by construction rather than by preference.
+ * The NAME and the GEOMETRY come from different fields and are resolved
+ * separately, because since battle-clarity U2 they are no longer exclusive.
+ * `publish()` used to write `region` OR `x`/`z`, and a `control` objective took
+ * the region branch — which gave it a name and no extent, so "Hold Raven
+ * Basin" could not be drawn on the map. It now publishes BOTH: the key still
+ * names the place, and `GG.Regions.Area` supplies the circle.
+ *
+ * So the order is:
+ *   name      — a resolvable `region` wins (it is the region the objective
+ *               actually names); otherwise the nearest named place to the
+ *               coordinate, which is `approximate` and phrased "near X".
+ *   geometry  — published `x`/`z`/`r` wins (it is the objective's own area);
+ *               otherwise the region centroid, with no radius.
+ *
+ * A region key we cannot resolve AND no coordinates is a real objective we
+ * simply cannot place: null greys "Go there" out with a reason rather than
+ * travelling somewhere wrong.
  */
 export function resolvePlace(
     o: ObjectiveRecord,
     resolvers: PlaceResolvers,
 ): ObjectivePlace | null {
-    if (typeof o.x === 'number' && typeof o.z === 'number') {
-        const near = resolvers.nearest?.({ x: o.x, z: o.z }) ?? null;
-        return { name: near?.name ?? null, x: o.x, z: o.z, r: o.r, approximate: true };
+    const region = typeof o.region === 'string' ? resolvers.region(o.region) ?? null : null;
+    const hasCoords = typeof o.x === 'number' && typeof o.z === 'number';
+
+    if (hasCoords) {
+        // `approximate` is about the NAME, not the position: with a region we
+        // know exactly which place this is, so "near Raven Basin" would be a
+        // needlessly vague sentence about a fact we hold.
+        const named = region ?? resolvers.nearest?.({ x: o.x!, z: o.z! }) ?? null;
+        return {
+            name: named?.name ?? null,
+            x: o.x!,
+            z: o.z!,
+            r: o.r,
+            approximate: region === null,
+        };
     }
-    if (typeof o.region === 'string') {
-        const region = resolvers.region(o.region);
-        if (region) return { name: region.name, x: region.x, z: region.z, approximate: false };
-        // A key with no region entry yet: the objective is real, we simply
-        // cannot place it. Returning null is what greys "Go there" out with a
-        // reason instead of travelling somewhere wrong.
-        return null;
-    }
+    if (region) return { name: region.name, x: region.x, z: region.z, approximate: false };
     return null;
 }
 

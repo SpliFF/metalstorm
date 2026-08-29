@@ -254,6 +254,21 @@ local function buildCtx(frame)
             return GG.Regions and GG.Regions.ControllingTeam(key) or nil
         end,
         regionExists = regionExists,
+        -- battle-clarity U2: the region's extent as a circle, so a `control`
+        -- objective can publish an AREA and not just a name. Guarded because
+        -- the busted specs build fake ctx tables (regions/ is not loaded there).
+        --
+        -- ⚠ The guard is an `if`, NOT `GG.Regions and GG.Regions.Area and
+        -- GG.Regions.Area(key) or nil`. An `and`/`or` chain adjusts its operand
+        -- to ONE value, so that spelling silently returned x and dropped z and
+        -- r — measured on the wire in a live crossing_standoff, where every
+        -- control objective published `objective_<id>_x` and no `_z`/`_r` at
+        -- all. It reads correct, the in-memory table looks correct, and only
+        -- the published params say otherwise.
+        regionArea = function(key)
+            if not (GG.Regions and GG.Regions.Area) then return nil end
+            return GG.Regions.Area(key)
+        end,
         unitsInRegion = function(key) return unitsByRegion[key] or {} end,
         unitAlive = function(unitID)
             return Spring.ValidUnitID(unitID) and Spring.GetUnitHealth(unitID) ~= nil
@@ -308,9 +323,50 @@ end
 -- Publishing v2 (task 7): progress/phase/stage/position hints,
 -- resolve-retention window, objective_count high-water contract.
 -- ============================================================
+--- Smallest circle that covers every live target, as centroid + max spread.
+--- Used by `protect`/`infra`, whose "area" is not authored anywhere — it is
+--- wherever the things being defended happen to stand. A single target yields
+--- the floor radius rather than a zero-radius ring nobody can see.
+---
+--- Not a true minimum enclosing circle (Welzl): centroid + max distance is at
+--- most 15% larger, costs one pass, and this runs inside publish() for every
+--- objective on every change.
+local PROTECT_MIN_RADIUS = 200
+
+local function coverCircle(ids, ctx)
+    local sx, sz, n = 0, 0, 0
+    for _, id in ipairs(ids) do
+        local x, _, z = ctx.unitPos(id)
+        if x then sx, sz, n = sx + x, sz + z, n + 1 end
+    end
+    if n == 0 then return nil end
+    local cx, cz = sx / n, sz / n
+    local far = 0
+    for _, id in ipairs(ids) do
+        local x, _, z = ctx.unitPos(id)
+        if x then
+            local d = math.sqrt((x - cx) ^ 2 + (z - cz) ^ 2)
+            if d > far then far = d end
+        end
+    end
+    return cx, cz, math.max(PROTECT_MIN_RADIUS, far + PROTECT_MIN_RADIUS * 0.5)
+end
+
+--- Where an objective IS, and how big it is.
+---
+--- Returns `x, z, r, region`. Before battle-clarity U2 the region branch
+--- returned a key and NOTHING else, so an objective on a region was a name
+--- with no place — which is why "Hold Raven Basin" could not be drawn on the
+--- map at all. A region now yields its circle too (GG.Regions.Area); the key
+--- still ships alongside because it is the only field that carries the
+--- region's NAME, and "near Raven Basin" is a worse sentence than "Raven
+--- Basin" when we actually know which region it is.
 local function positionHint(o, ctx)
     if o.type == 'control' then
-        return nil, nil, nil, o.params.regionKey
+        local key = o.params.regionKey
+        local x, z, r
+        if ctx.regionArea then x, z, r = ctx.regionArea(key) end
+        return x, z, r, key
     elseif o.type == 'kill' then
         local x, _, z = ctx.unitPos(o.params.targetUnitID)
         return x, z, nil, nil
@@ -324,10 +380,9 @@ local function positionHint(o, ctx)
         return a and a.x, a and a.z, a and a.r, nil
     elseif o.type == 'protect' or o.type == 'infra' then
         local ids = o.params.targetUnitIDs or o.params.buildingUnitIDs
-        local first = ids and ids[1]
-        if not first then return nil end
-        local x, _, z = ctx.unitPos(first)
-        return x, z, nil, nil
+        if not ids or #ids == 0 then return nil end
+        local x, z, r = coverCircle(ids, ctx)
+        return x, z, r, nil
     end
     return nil
 end
@@ -392,10 +447,16 @@ local function publish(o, ctx)
     end
     if o.expiresAtFrame then Spring.SetGameRulesParam(p .. 'expire', o.expiresAtFrame, PUBLIC) end
 
+    -- battle-clarity U2: `region` and `x`/`z`/`r` are no longer exclusive. A
+    -- control objective publishes BOTH — the key names the place, the circle
+    -- is where the marker gets drawn. Clients that only ever read one branch
+    -- are unaffected; `objective-model.ts`'s resolvePlace prefers the region
+    -- for the NAME and the coordinates for the GEOMETRY.
     local x, z, r, region = positionHint(o, ctx)
     if region then
         Spring.SetGameRulesParam(p .. 'region', region, PUBLIC)
-    elseif x then
+    end
+    if x then
         Spring.SetGameRulesParam(p .. 'x', x, PUBLIC)
         Spring.SetGameRulesParam(p .. 'z', z, PUBLIC)
         if r then Spring.SetGameRulesParam(p .. 'r', r, PUBLIC) end
