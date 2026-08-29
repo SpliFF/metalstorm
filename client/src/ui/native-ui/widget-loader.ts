@@ -114,7 +114,12 @@ export interface WidgetContext {
         teamId: number;
         accountId: number;
     };
-    sendCommand?: (cmd: any) => void;        // Command submission API (stub for now)
+    /** Command submission API. Two live call shapes, both routed by
+     *  integration.ts's `createSendCommand`: a typed object
+     *  (`{type:'PlayerCommand', …}`) or a wire verb plus fields
+     *  (`('guidance.delegate', {objectiveId})`). The second argument was
+     *  missing from this type while three widgets already passed it. */
+    sendCommand?: (cmd: any, fields?: Record<string, unknown>) => void;
     strategicMap?: {                         // Strategic map overlay API (stub for now)
         setMarkers?: (markers: any[]) => void;
     };
@@ -155,6 +160,7 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // not game-authored ones, so it cannot be fetched as a standalone
     // game-dir module.
     'focus-hud': () => import('./focus-hud.js'),
+    'objective-hud': () => import('./objective-hud.js'),
 };
 
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */

@@ -1,5 +1,15 @@
 // ui/lib/objectives.js — client mirror of the objective registry.
 //
+// NOTE (U1, battle-clarity): its only consumer, widgets/objectives-panel.js, is
+// UNMOUNTED — the objective board is now a drill-down HUD in the client bundle
+// (client/src/ui/native-ui/objective-model.ts), which parses the same
+// `objective_<id>_*` contract in TypeScript because the drill-down primitives it
+// renders through are engine modules a game-dir widget cannot import. Both
+// readers implement the SAME published contract; if PUBLISHED_FIELDS ever
+// changes, change both. This file stays until U3 re-homes the panel's bounty
+// form and outcome log at rung 4, and its spec (lib/objectives.test.js) stays
+// green in the meantime.
+//
 // Pure logic, no DOM — parses the `objective_<id>_*` rulesParams batch
 // game_objectives.lua publishes (PLAN-metalstorm-objectives.md §1, "Publishing
 // v2") into a per-id record, shared by objectives-panel.js (list/progress/

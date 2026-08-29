@@ -1266,6 +1266,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     selectedUnitIds: m.selectedUnitIds, camera: m.camera,
                     gameFrame: m.gameFrame, atMs: performance.now(),
                 };
+                // Non-notifying clock mirror for the native-UI widgets that
+                // need one (objective countdowns). See UIStore.gameFrame: this
+                // feed is render-rate, so it must never drive a subscription.
+                uiStore.setGameFrame(m.gameFrame);
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
                 // L-pre.3: cache the worker's presentation-clock snapshot and

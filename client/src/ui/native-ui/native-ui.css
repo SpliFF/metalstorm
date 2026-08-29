@@ -773,3 +773,97 @@
 /* "Go there" is the same affordance wherever it appears — chip row, fact row,
    later an objective or a contact ping — so it is styled once, here. */
 .nui-go-there { flex: none; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Objective board (U1, interaction story 2) — DESIGN-DRILLDOWN.md §4/§6
+   ══════════════════════════════════════════════════════════════════════
+   Structurally this is nothing new: every row is a `.nui-dd`, so an objective
+   chip and a selection chip are the same widget and cannot drift apart. What
+   is added here is only what an OBJECTIVE needs that a squad does not — the
+   war-ending marker, the decaying announcement highlight, and the one line
+   that reveals the rest of the board.
+   ────────────────────────────────────────────────────────────────────── */
+
+.nui-objectives {
+    position: relative;              /* the toast stack anchors to this */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    max-width: min(560px, 66vw);
+}
+.nui-objectives[hidden] { display: none; }
+
+.nui-objectives__stack {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+}
+
+/* The one line that admits the board is longer than the three rows above it.
+   Deliberately NOT a chip: it is a list-length control, not a rung — and it is
+   the seam U3 re-points at the rung-4 Objectives tab. */
+.nui-objectives__overflow {
+    align-self: center;
+    padding: 1px 8px;
+    background: none;
+    border: none;
+    color: var(--nui-text-faint);
+    font: var(--nui-font);
+    font-size: 10px;
+    font-style: italic;
+    cursor: pointer;
+}
+.nui-objectives__overflow:hover { color: var(--nui-accent); }
+.nui-objectives__overflow[hidden] { display: none; }
+
+/* The war-ending objective is the one thing on this stack a player must never
+   mistake for another tactical row. A left edge, not a colour wash: the chip
+   still has to read as the same object as its neighbours. */
+.nui-objectives .nui-dd.is-victory > .nui-dd__row > .nui-dd__chip {
+    border-left: 3px solid var(--nui-gold);
+}
+
+/* Something just happened to this one. The highlight DECAYS — objective-hud.ts
+   drops the class after ANNOUNCE_MS — so the stack returns to its resting
+   state on its own and nothing accumulates. */
+.nui-objectives .nui-dd.is-announcing > .nui-dd__row > .nui-dd__chip {
+    border-color: var(--nui-accent);
+    animation: nui-objective-flash 1.1s ease-in-out 3;
+}
+.nui-objectives .nui-dd.is-resolved > .nui-dd__row > .nui-dd__chip {
+    opacity: 0.75;
+}
+
+@keyframes nui-objective-flash {
+    0%, 100% { background: rgba(16, 19, 24, 0.9); }
+    50%      { background: var(--nui-accent-dim); }
+}
+
+/* Toasts hang BELOW the stack rather than above it: this dock is at the top of
+   the screen, so upward is off-screen. Centred and non-interactive — an
+   announcement is read, never clicked. */
+.nui-objectives__toasts {
+    left: 50%;
+    transform: translateX(-50%);
+    align-items: center;
+}
+
+/* Rung 2's one block of prose — the briefing the wire does not carry. Capped
+   in width so it stays a paragraph rather than becoming a document; the panel's
+   own 40vh cap (above) is what stops it growing downward. */
+.nui-dd__prose {
+    margin: 2px 0 4px;
+    max-width: 44ch;
+    color: var(--nui-text-dim);
+    font: var(--nui-font);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nui-objectives .nui-dd.is-announcing > .nui-dd__row > .nui-dd__chip { animation: none; }
+}

@@ -1,5 +1,24 @@
 // objectives-panel.js — Metalstorm native JS widget.
 //
+// ============================================================================
+// UNMOUNTED as of U1 (battle-clarity, DESIGN-DRILLDOWN.md §7 "DEMOTE to rung
+// 1 + 2"). This widget is no longer listed in metalstorm.ui.json and does not
+// load in a battle. It stays on disk because two of its surfaces have no home
+// yet and deleting them would lose the working code with them:
+//
+//   * the bounty form  — a four-field FORM beside the viewport is the literal
+//     shape the design directive rejects. Rung-4 content (the global access
+//     point's Objectives tab), U3's to re-home, and it was never live anyway:
+//     `objectives.createBounty` has no wire target (integration.ts warns).
+//   * the 5-entry outcome log — outlives the sim's 30 s retention window, which
+//     the new HUD's decaying toasts deliberately do not. Also rung 4.
+//
+// Everything else it did is now `client/src/ui/native-ui/objective-hud.ts`:
+// the list, the progress, the reward, the badges, and its one live action
+// ("Assign to AI" -> `guidance.delegate`), which is now a rung-3 action on the
+// objective it is about rather than a button in a rail.
+// ============================================================================
+//
 // Lists active objectives (strategic + tactical) with type/reward/progress/
 // phase, a bounty-post flow, and map markers via the strategic-map hook
 // (PLAN-metalstorm-objectives.md §6, task 8). Reads the rulesParams mirror

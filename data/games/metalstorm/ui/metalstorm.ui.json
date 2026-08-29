@@ -1,6 +1,7 @@
 {
   "_comment": "Metalstorm native JS UI manifest (PLAN-native-ui.md §3). Widgets receive a ui-store read API, a DOM mount inside #ui-root, and the validated command/directive submission API. Panel CHROME (frame, header, collapse toggle, count badge) is built by the loader from the `title`/`collapsible`/`collapsed` fields below — widgets render content only, so every panel looks the same by construction.",
-  "_layout": "Docking keeps the centre and lower-centre of the viewport clear for unit selection and orders: authority pill top-left; the two heavy negotiation/AI panels in the left rail (collapsed by default); objectives + scoreboard in the right rail; the command composer as a compact bar above the bottom help strip. Rails are fixed-width and scroll internally rather than stretching full-height. Bottom-left and bottom-right belong to the engine HUD (selection readout, minimap).",
+  "_retired": "objectives-panel — folded into the top-centre `objective-hud` (U1, DESIGN-DRILLDOWN.md §7). The right rail now carries the scoreboard only, and U3 folds that to rung 4 too.",
+  "_layout": "Docking keeps the centre and lower-centre of the viewport clear for unit selection and orders: authority pill top-left; the two heavy negotiation/AI panels in the left rail (collapsed by default); the scoreboard in the right rail (objectives left it in U1 — they are top-centre summary affordances now); the command composer as a compact bar above the bottom help strip. Rails are fixed-width and scroll internally rather than stretching full-height. Bottom-left and bottom-right belong to the engine HUD (selection readout, minimap).",
   "game": "metalstorm",
   "uiVersion": 1,
   "styles": ["metalstorm.ui.css"],
@@ -23,12 +24,15 @@
       "subscribes": ["selection", "orgGroups"]
     },
     {
-      "id": "objectives-panel",
-      "entry": "widgets/objectives-panel.js",
-      "mount": "right",
-      "title": "Objectives",
-      "nlAliases": ["objectives", "mission", "missions", "objective list"],
-      "subscribes": ["gameRulesParams"]
+      "id": "objective-hud",
+      "entry": "widgets/objective-hud.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/ui/native-ui/objective-hud.ts) via BUILTIN_WIDGETS — it is built on the drill-down framework (focus model + drilldown primitive + camera travel), which are engine modules, so there is no game-dir copy.",
+      "mount": "top-center",
+      "_chrome": "NO title, like focus-hud: interaction story 2 is a stack of rung-1 summary affordances, not a panel that lives in a rail. Nothing is in the DOM while the board is empty.",
+      "_replaces": "objectives-panel, removed from the right rail by the same change (DESIGN-DRILLDOWN.md §7 'DEMOTE to rung 1 + 2'). The panel was a resident list plus a bounty FORM beside the viewport, and it rendered the type tag 'control' where the player needed 'Hold Raven Basin'. Its live 'Assign to AI' action moved onto the objective it is about; its bounty form and 5-entry outcome log are rung-4 content and are U3's to re-home. widgets/objectives-panel.js and ui/lib/objectives.js are kept on disk with that note in their headers, unmounted, until U3 lands the rung-4 Objectives tab.",
+      "nlAliases": ["objectives", "mission", "missions", "objective list", "objective"],
+      "subscribes": ["gameRulesParams", "teamRulesParams"]
     },
     {
       "id": "scoreboard-panel",

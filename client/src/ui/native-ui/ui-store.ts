@@ -110,6 +110,16 @@ export class UIStore {
     private directives = new Map<number, DirectiveSummary>(); // directiveId -> live directive
     private gameEvents: any[] = []; // recent events
     private orgGroups: OrgGroupSummary[] = [];
+    /**
+     * Latest sim frame, mirrored off the scene feed.
+     *
+     * DELIBERATELY NOT A SUBSCRIBABLE PATH. `gp:sceneState` arrives at render
+     * rate, so notifying on it would hand every widget a per-frame redraw —
+     * exactly what PLAN-native-ui.md forbids. This is a POLL source: a widget
+     * that needs the clock (the objective HUD's countdowns) reads it on its own
+     * 1 Hz tick, and a widget that does not is unaffected by it changing.
+     */
+    private gameFrame = 0;
 
     // Subscription management
     private subscribers = new Map<string[], Set<Subscriber>>();
@@ -177,6 +187,17 @@ export class UIStore {
      *  mutate it. */
     getGameRulesParams(): ReadonlyMap<string, number | string> {
         return this.gameRulesParams;
+    }
+
+    /** The sim frame the scene feed last reported, 0 before the first frame.
+     *  See the field's note: this is a poll source, never a notification. */
+    getGameFrame(): number {
+        return this.gameFrame;
+    }
+
+    /** Fed from main.ts's `gp:sceneState` handler. Does not notify. */
+    setGameFrame(frame: number): void {
+        if (Number.isFinite(frame)) this.gameFrame = frame;
     }
 
     /** Get player info */
@@ -410,6 +431,9 @@ export class UIStore {
         this.directives.clear();
         this.gameEvents = [];
         this.orgGroups = [];
+        // A stale frame would make the next match's first countdowns tick from
+        // the last match's clock.
+        this.gameFrame = 0;
         // Don't notify - this is for teardown
     }
 
