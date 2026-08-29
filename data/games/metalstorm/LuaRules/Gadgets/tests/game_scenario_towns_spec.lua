@@ -125,7 +125,7 @@ local function newWorld(opts)
             end,
         }
     end
-    _G.VFS = { Include = function() return world.scenario end }
+    _G.VFS = { Include = function() return world.scenario end, FileExists = function() return true end }
 
     dofile(GADGET)
     return world, _G.gadget

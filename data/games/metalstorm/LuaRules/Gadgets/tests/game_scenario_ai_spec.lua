@@ -124,6 +124,7 @@ local function newWorld(opts)
             if world.scenario then return world.scenario end
             return dofile('scenarios/' .. world.name .. '.lua')
         end,
+        FileExists = function() return true end,
     }
 
     dofile(GADGET)

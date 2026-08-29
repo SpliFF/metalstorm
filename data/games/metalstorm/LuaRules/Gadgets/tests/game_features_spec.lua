@@ -109,6 +109,7 @@ local function freshWorld()
             if scn then return dofile('../../scenarios/' .. scn .. '.lua') end
             error('no such file: ' .. tostring(path))
         end,
+        FileExists = function() return true end,
     }
 
     _G.GG = {

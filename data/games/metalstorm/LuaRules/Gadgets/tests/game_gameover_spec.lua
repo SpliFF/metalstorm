@@ -44,6 +44,9 @@ local function load(sides, victoryCount, teams, unoccupied, startRegions)
 
     _G.Spring = {
         GetGameFrame = function() return world.frame end,
+        -- Returns a table, as the live engine does; specs that stage a
+        -- scenario set world.modOptions.scenario themselves.
+        GetModOptions = function() return world.modOptions or {} end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
         GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
         -- Matches rts/Server/Simulation.cpp:507 — every team is its own
