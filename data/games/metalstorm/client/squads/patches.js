@@ -73,8 +73,16 @@ function isPlanted(phase, gait) {
 
 /**
  * Rotate a local-space patch into world space around a big unit's pose.
- * headingY in radians; +Z is forward (RH, glTF-native — same convention as
- * formation.js's slotToWorld).
+ * headingY in radians; the unit's forward is local −Z (RH, glTF-native —
+ * same convention as formation.js's slotToWorld and the renderer's
+ * writeYawMatrix; see the heading-convention note in steering.js).
+ *
+ * NOTE (2026-08-29): the big-unit PATCH TEMPLATES themselves are still
+ * authored +z-forward and were NOT re-signed with the formation slots — a
+ * separate, unfixed instance of the same convention error. It biases hull
+ * repulsion toward a big unit's rear instead of its bow; cosmetically
+ * invisible, so it is left for a flow-tuning pass that can re-verify the
+ * repulsor behaviour rather than just the geometry.
  */
 export function patchToWorld(patch, cx, cz, headingY, out) {
   const s = Math.sin(headingY), c = Math.cos(headingY);

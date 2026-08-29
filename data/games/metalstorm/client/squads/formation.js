@@ -1,7 +1,24 @@
 // formation.js — local-space slot templates + assignment. Pure functions.
-// Slots are offsets in the squad's LOCAL frame (x = right, z = forward), scaled
-// by formation_radius and rotated to the streamed heading at use time.
+// Slots are offsets in the squad's LOCAL frame, scaled by formation_radius and
+// rotated to the streamed heading at use time.
 // See PLAN-metalstorm-squads.md §9.
+//
+// CONVENTION, and a known defect (2026-08-29). `slotToWorld` applies exactly
+// the rotation `SquadRenderBackend.writeYawMatrix` applies to the mesh, and in
+// that frame the unit's forward is local −Z (glTF-native; see the
+// heading-convention note in steering.js). The templates below, however, were
+// authored against the older +Z-forward reading — the same mistake that made
+// every squad member render 180° reversed (fixed in steering.js/member.js/
+// soa-kernel.js). So `column`'s member 0 and `wedge`'s "lead" currently sit at
+// the REAR of the formation, not the front.
+//
+// NOT fixed here on purpose: re-signing the z offsets moves every member, and
+// the resulting trajectories push `squad-soa-parity.test.js` past its
+// hand-tuned f32 OO-vs-SoA residual bars (0.005 position / 0.001 heading).
+// That is tolerance sensitivity rather than a new divergence — both paths
+// share these templates — but widening a deliberately tuned parity bar to
+// wave through a formation change is not something to do inside a facing fix.
+// Do it as its own change, with the parity harness re-baselined.
 
 /**
  * Generate `count` local slot offsets for a formation type.
@@ -65,8 +82,10 @@ function blob(n, r) {
 }
 
 /**
- * Rotate a local slot into world space around a centroid.
- * headingY in radians; +Z is the unit's forward (RH, glTF-native).
+ * Rotate a local slot into world space around a centroid. This is the SAME
+ * rotation the renderer applies to the mesh, so a slot and the hull drawn on
+ * it always agree. headingY in radians; forward is local −Z (RH, glTF-native)
+ * — see the module header for the templates' known mismatch with that.
  */
 export function slotToWorld(slot, cx, cz, headingY, out) {
   const s = Math.sin(headingY), c = Math.cos(headingY);

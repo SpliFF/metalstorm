@@ -13,7 +13,9 @@
 // slot already rotated to world space (squad.js computes it once per
 // member/frame). Pure math, no allocation beyond the returned literal.
 
-import { capTurnRate, wrapAngle } from './steering.js';
+import {
+  capTurnRate, wrapAngle, headingFromVelocity, velocityFromHeading,
+} from './steering.js';
 
 const TWO_PI = Math.PI * 2;
 
@@ -43,7 +45,8 @@ export function steerMemberInto(squad, member, dt, ctx, out) {
   }
 
   const dx = targetX - member.x, dz = targetZ - member.z;
-  const desiredHeading = Math.hypot(dx, dz) > 1e-4 ? Math.atan2(dx, dz) : member.headingY;
+  const desiredHeading = Math.hypot(dx, dz) > 1e-4
+    ? headingFromVelocity(dx, dz) : member.headingY;
   const prevHeading = member.headingY;
   const newHeading = capTurnRate(prevHeading, desiredHeading, profile.turnRateCap, dt);
 
@@ -61,9 +64,8 @@ export function steerMemberInto(squad, member, dt, ctx, out) {
   const targetY = squad.cy + profile.cruiseAltitude + member.altitudeOffset;
   const vy = (targetY - member.y) * profile.altitudeCatchUpRate;
 
-  out.x = Math.sin(newHeading) * cruiseSpeed;
+  velocityFromHeading(newHeading, cruiseSpeed, out);
   out.y = vy;
-  out.z = Math.cos(newHeading) * cruiseSpeed;
   return out;
 }
 

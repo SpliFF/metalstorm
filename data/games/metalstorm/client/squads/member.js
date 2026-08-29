@@ -1,6 +1,8 @@
 // member.js — one visual squad member. Cosmetic kinematic state only.
 // See PLAN-metalstorm-squads.md §8, §9.
 
+import { headingFromVelocity } from './steering.js';
+
 export class Member {
   constructor(id, visual) {
     this.id = id;
@@ -64,7 +66,7 @@ export class Member {
 
     const speed = Math.hypot(this.vx, this.vz);
     if (speed > 0.05) {
-      this.headingY = Math.atan2(this.vx, this.vz); // face travel (RH, +Z fwd)
+      this.headingY = headingFromVelocity(this.vx, this.vz); // face travel
       this.gait = (this.gait + speed * dt * 0.1) % 1;
     }
   }
@@ -84,7 +86,7 @@ export class Member {
 
     const speed = Math.hypot(vx, vz);
     if (speed > 0.05) {
-      this.headingY = Math.atan2(vx, vz);
+      this.headingY = headingFromVelocity(vx, vz);
       this.gait = (this.gait + speed * dt * 0.1) % 1;
     }
   }

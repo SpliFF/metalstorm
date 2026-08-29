@@ -12,7 +12,9 @@
 // is the breadcrumb trail-ahead point (pathfinding §4), or null if the squad
 // has no trail yet (e.g. just spawned).
 
-import { capTurnRate } from './steering.js';
+import {
+  capTurnRate, headingFromVelocity, velocityFromHeading,
+} from './steering.js';
 
 /** Out-param form (PLAN-metalstorm-squad-performance.md §11b) — see
  *  air-cohesion.js's twin for why: the SoA kernel needs an allocation-free
@@ -33,16 +35,16 @@ export function steerMemberInto(squad, member, dt, ctx, out) {
 
   const dx = targetX - member.x, dz = targetZ - member.z;
   const dist = Math.hypot(dx, dz);
-  const desiredHeading = dist > 1e-4 ? Math.atan2(dx, dz) : member.headingY;
+  const desiredHeading = dist > 1e-4
+    ? headingFromVelocity(dx, dz) : member.headingY;
   const newHeading = capTurnRate(member.headingY, desiredHeading, profile.turnRateCap, dt);
 
   const speed = dist < arrivalRadius ? maxSpeed * (dist / arrivalRadius) : maxSpeed;
 
   if (profile.subDepth != null) member.depth = profile.subDepth; // cosmetic; dive/surface trigger is a future hook (needs sim submerge state, not yet streamed)
 
-  out.x = Math.sin(newHeading) * speed;
+  velocityFromHeading(newHeading, speed, out);
   out.y = 0;
-  out.z = Math.cos(newHeading) * speed;
   return out;
 }
 

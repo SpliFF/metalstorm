@@ -1,6 +1,43 @@
 // steering.js — pure steering math. No state, no allocation (writes into `out`).
 // See PLAN-metalstorm-squads.md §9.
 
+// ── Heading convention ─────────────────────────────────────────────────────
+//
+// A member's `headingY` names the SAME rotation the engine's `heading` names
+// and the renderer draws: model space is glTF-native, so a member at heading
+// θ has its forward (model −Z) pointing at
+//
+//     frontdir = (−sin θ, 0, −cos θ)
+//
+// That is the engine's `GetVectorFromHeading` (rts/System/SpringMath.inl) and
+// exactly what `SquadRenderBackend.writeYawMatrix` draws — model −Z rotated by
+// θ about +Y lands on (−sin θ, −cos θ). It is also the frame `sq.heading`
+// arrives in off the wire, and the one `selectAtlasCell` measures impostor
+// columns against.
+//
+// So the heading that FACES a velocity is `atan2(−vx, −vz)`, not
+// `atan2(vx, vz)`. The plain form is the legacy left-handed (+Z-forward)
+// reading; using it made every velocity-steered squad member render exactly
+// 180° reversed — tanks driving rear-first (measured 2026-08-29: engine
+// velocity·frontdir = +0.9995 while the member's rendered forward was −1×
+// its travel direction). These two helpers are a matched pair — the engine
+// negates symmetrically in `GetHeadingFromVector`/`GetVectorFromHeading` for
+// the same reason — so change them together or not at all.
+
+/** Heading (radians) whose forward faces the velocity/offset (vx, vz). */
+export function headingFromVelocity(vx, vz) {
+  return Math.atan2(-vx, -vz);
+}
+
+/** Inverse of {@link headingFromVelocity}: the velocity of magnitude `speed`
+ *  that a member at `heading` is travelling forward along. Writes x/z into
+ *  `out` and returns it (y is left untouched — air owns its own vy). */
+export function velocityFromHeading(heading, speed, out) {
+  out.x = -Math.sin(heading) * speed;
+  out.z = -Math.cos(heading) * speed;
+  return out;
+}
+
 /**
  * Arrival: accelerate toward target, easing within arrivalRadius.
  * Writes a desired-velocity contribution into out {x,z}.
@@ -100,7 +137,8 @@ export function wrapAngle(a) {
  * Turn `currentHeading` toward `desiredHeading` by at most `maxRate` rad/s,
  * over `dt` seconds (PLAN-metalstorm-squad-cohesion.md §6/§7 — aircraft and
  * ships steer heading under a turn-rate cap rather than snapping velocity).
- * Returns the new heading (radians, atan2(x,z) convention — +Z forward).
+ * Returns the new heading (radians, `headingFromVelocity` convention — model
+ * −Z is forward; see the heading-convention note at the top of this file).
  */
 export function capTurnRate(currentHeading, desiredHeading, maxRate, dt) {
   const delta = wrapAngle(desiredHeading - currentHeading);
