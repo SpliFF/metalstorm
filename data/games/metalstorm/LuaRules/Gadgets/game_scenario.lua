@@ -1383,7 +1383,30 @@ function gadget:GameStart()
         return  -- no scenario declared — game_start.lua's default force applies
     end
 
-    local scn = VFS.Include('scenarios/' .. name .. '.lua')
+    -- Checked by hand before VFS.Include, so a missing file refuses BY NAME
+    -- instead of as Include's raw "[LuaVFS::Include] ... status=0" — which was
+    -- once the only trace, and cost a whole room to decode. The trap that makes
+    -- this reachable from a healthy-looking lobby: the game server resolves
+    -- scenarios through its OWN VFS (data/games/<game>/scenarios/), and the
+    -- lobby's --games-dir is NOT forwarded to it — a file present only in the
+    -- lobby's games dir is fully discovered (listed by /api/games/<id>/
+    -- scenarios, room created, modoption set) and then simply is not here at
+    -- GameStart. The error() below still removes this gadget — with nothing to
+    -- stage that is honest — and game_gameover's frame-60 check reads the
+    -- modoption itself, so the war is reported as BROKEN, not as a skirmish.
+    local path = 'scenarios/' .. name .. '.lua'
+    if not VFS.FileExists(path) then
+        Spring.Echo('[game_scenario] ERROR: the `scenario` modoption asks for "' ..
+                    name .. '" but ' .. path .. ' does not exist in the game ' ..
+                    'server\'s VFS — NOTHING will be staged. If the lobby ' ..
+                    'listed this scenario, the file is only in the lobby\'s ' ..
+                    '--games-dir, which the game server does not read: it must ' ..
+                    'be under the server\'s own data/games/<game>/scenarios/.')
+        error('[game_scenario] ' .. path .. ' not found in the server VFS ' ..
+              '(scenario "' .. name .. '" was asked for and cannot be staged)')
+    end
+
+    local scn = VFS.Include(path)
     if type(scn) ~= 'table' then
         error('[game_scenario] scenarios/' .. name .. '.lua did not return a table')
     end

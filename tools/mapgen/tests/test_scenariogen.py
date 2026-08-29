@@ -191,6 +191,39 @@ def walled_map(root, name="synth_walled"):
     return write_map(root, name, heights, regions)
 
 
+def severed_graph_map(root, name="synth_severed_graph"):
+    """Ground a tank can cross end to end, and a region GRAPH that says it cannot.
+
+    The INVERSE of `walled_map`, and it exists for the inverse reason. That
+    fixture keeps the graph connected while the ground is severed, to prove the
+    mask can refuse what the graph accepts. This one severs the graph while the
+    ground stays open, to prove the reverse mistake: that a `neighbors` list is
+    never allowed to refuse a map on its own.
+
+    It is not a hypothetical shape. Skerry Reach — the only shipped map that
+    publishes a road `crossings` table, and therefore the only one a bridge
+    span can be staged on — has 118 regions in 86 graph components with all 8
+    of its `home` regions isolated, because `build_regions` links neighbours
+    across land and an archipelago's cells touch nothing. Every home pair on it
+    is `hops = None`.
+    """
+    heights = [10.0] * (SAMPLES * SAMPLES)
+    return write_map(root, name, heights, grid_regions(
+        4, 4,
+        # THREE homes, and the third one is what makes the fallback's CHOICE
+        # testable rather than merely non-empty. With two, every possible
+        # picker — farthest apart, first by key, whatever dict order hands over
+        # — returns the same pair, so a test written against a two-home fixture
+        # passes against a fallback that just grabs the first legal pair. (It
+        # did: that neutralisation is why `r0_1` is here.) `r0_1` is adjacent
+        # to `r0_0`, and ("r0_0", "r0_1") sorts FIRST, so the lazy picker and
+        # the correct one now disagree.
+        {(0, 0), (0, 1), (3, 3)},
+        # No cell has a neighbour: 16 regions, 16 components, every home pair
+        # `hops = None`.
+        wall_between=lambda cx, cz, nx, nz: True))
+
+
 RIVER_HALF_WIDTH = 12          # samples of channel either side of the centreline
 RIVER_RAMP = 8                 # samples of bank ramp; sets the bank's slope
 RIVER_DROP = 20.0              # metres from bank crest to riverbed
@@ -710,6 +743,66 @@ class TestInvariant5IsConditionalOnAudience(unittest.TestCase):
         # Only the header prose may differ.
         self.assertEqual(strict[strict.index("return {"):],
                          relaxed[relaxed.index("return {"):])
+
+    def test_a_severed_GRAPH_alone_never_refuses_a_map(self):
+        """The region graph is not the arbiter — in either mode.
+
+        `severed_graph_map` is open ground with every `neighbors` list emptied,
+        so the two homes are `hops = None` apart while a tank could drive
+        between them. Two separate places used to refuse it on that alone — the
+        home-pairing walk and the victory region's hop filter — both of them
+        several statements before the passability mask was consulted. A TEST
+        scenario got the refusal it might also have got from the mask, by luck
+        and with the wrong reason; a PLAYER scenario got one the mask would
+        have overturned outright.
+
+        Asserted in BOTH modes deliberately. Gating the fix on `--player` would
+        have left the graph deciding a refusal whenever nobody passed the flag,
+        which is the same defect with a smaller blast radius.
+        """
+        with SyntheticMap(severed_graph_map, "synth_severed_graph") as d:
+            for test_scenario in (True, False):
+                with self.subTest(test_scenario=test_scenario):
+                    lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                            test_scenario=test_scenario)
+                    self.assertEqual(count_victory_flags(lua), 1)
+                    self.assertIs(meta["mutually_reachable"], test_scenario)
+        # The strict pass is the load-bearing half: it did not merely survive
+        # the graph, it went on to satisfy `gate_reachability(mutual=True)` on
+        # the mask. A fallback that fed the gate two stranded anchors would
+        # have failed there, not here.
+
+    def test_the_fallback_pairs_the_homes_FARTHEST_APART_on_the_ground(self):
+        """The hop walk's intent survives losing the graph.
+
+        "Maximally separated" is why the pairing exists at all — two armies
+        must not land next to each other. With no hops to count, the fallback
+        has to reproduce that from geometry, and a fallback that merely picked
+        the first legal pair would pass a "generates" test while quietly
+        seating both sides in adjacent cells.
+        """
+        with SyntheticMap(severed_graph_map, "synth_severed_graph") as d:
+            _lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR,
+                                     test_scenario=False)
+        # Three homes on offer: r0_0, r0_1 (its neighbour) and r3_3 (the far
+        # corner). The diagonal is the answer; ("r0_0", "r0_1") is what a
+        # picker that stopped at the first legal pair would return, and it
+        # seats both armies in touching cells.
+        self.assertEqual(sorted(meta["side_regions"]), ["r0_0", "r3_3"])
+
+    def test_a_split_MASK_is_still_what_refuses_a_test_scenario(self):
+        """The relaxation above must not have cost the negative control.
+
+        `walled_map`'s graph connects and its ground does not, so it never
+        reaches the fallback — it is the direct check that the refusal moved to
+        the mask rather than disappearing. The message is asserted too: a
+        refusal that no longer names the movement class is one that stopped
+        grading the ground.
+        """
+        with SyntheticMap(walled_map, "synth_walled") as d:
+            with self.assertRaises(sg.Rejected) as cm:
+                sg.generate(d, seed=11, game_dir=GAME_DIR)
+        self.assertRegex(str(cm.exception), r"(HEAVY|VEH|INFANTRY)")
 
     def test_a_point_on_impassable_ground_is_refused_in_BOTH_modes(self):
         """No transport fixes a position nothing can stand on.

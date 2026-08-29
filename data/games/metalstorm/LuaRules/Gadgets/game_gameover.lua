@@ -301,14 +301,43 @@ local function checkWarCanEnd()
     local count = GG.Objectives and GG.Objectives.VictoryObjectiveCount
         and GG.Objectives.VictoryObjectiveCount() or 0
     Spring.SetGameRulesParam('war_can_end', count > 0 and 1 or 0, PUBLIC)
+
+    -- "Nothing staged" is TWO states, and only the modoption can tell them
+    -- apart: unset means nobody asked for a scenario (a legitimate skirmish),
+    -- set-but-unstaged means a scenario was asked for and its loader failed —
+    -- game_scenario errors out of GameStart (missing file, bad version, failed
+    -- validation) and is removed before it can set GG.Scenario.name. This
+    -- check once read only GG.Scenario.name and asserted the first state for
+    -- both, which cost a whole room to diagnose (a scenario file present only
+    -- in the lobby's --games-dir vanishes at the server's VFS — see
+    -- game_scenario.lua's GameStart). Diagnosed before the victory-count
+    -- early-out: a war that asked for a scenario and staged nothing is broken
+    -- regardless of what the systemic generator minted meanwhile.
+    local staged = GG.Scenario and GG.Scenario.name
+    local asked = Spring.GetModOptions().scenario
+    if asked == '' then asked = nil end
+    local failed = (asked ~= nil and staged == nil)
+    Spring.SetGameRulesParam('war_scenario_failed', failed and 1 or 0, PUBLIC)
+    if failed then
+        Spring.Echo('[game_gameover] WARNING: the `scenario` modoption asked ' ..
+                    'for "' .. asked .. '" but NOTHING was staged — the ' ..
+                    'scenario loader failed or was removed before staging. ' ..
+                    'This war is BROKEN, not a scenario-less skirmish: look ' ..
+                    'for the [game_scenario] ERROR or the [LuaVFS::Include] ' ..
+                    'file=scenarios/' .. asked .. '.lua status=0 line earlier ' ..
+                    'in this log.')
+    end
+
     if count > 0 then return end
 
-    local scenario = GG.Scenario and GG.Scenario.name
     Spring.Echo('[game_gameover] WARNING: this war has NO victory objective' ..
-                (scenario
-                    and (' — scenario "' .. scenario .. '" declares none')
-                    or ' — no scenario was staged (the `scenario` modoption ' ..
-                        'is unset)') ..
+                (staged
+                    and (' — scenario "' .. staged .. '" declares none')
+                    or (failed
+                        and (' — scenario "' .. asked .. '" was asked for ' ..
+                             'and failed to stage (see the warning above)')
+                        or ' — no scenario was staged (the `scenario` ' ..
+                           'modoption is unset)')) ..
                 '; it has no terminal condition and cannot end. ' ..
                 'See PLAN-metalstorm-wars.md §7.1.')
 end
