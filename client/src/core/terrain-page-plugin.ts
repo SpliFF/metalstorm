@@ -161,14 +161,23 @@ export class TerrainPageSamplePlugin extends MaterialPluginBase {
 
 /** Attach + configure + enable, asserting the `isEnabled` setter took (the
  *  M8i lesson: `plugin.enabled = true` assigns a dead expando and reads back
- *  as a zero-delta A/B). */
+ *  as a zero-delta A/B).
+ *
+ *  Find-or-rewire: a Babylon material plugin cannot detach once registered,
+ *  so a `disable()` → `enable()` round trip reaches a material still carrying
+ *  the previous (switched-off) plugin whose textures were disposed under it.
+ *  The existing instance is re-pointed at the new textures and re-enabled —
+ *  constructing a second same-name plugin would leave the one compiled into
+ *  the shader dark, the silent bit-identical-to-off no-op of 2026-08-30. */
 export function attachTerrainPageSample(
     material: Material,
     atlas: BaseTexture,
     table: BaseTexture,
     geometry: PageSampleGeometry,
 ): TerrainPageSamplePlugin {
-    const plugin = new TerrainPageSamplePlugin(material);
+    const plugin = material.pluginManager
+        ?.getPlugin<TerrainPageSamplePlugin>('TerrainPageSample')
+        ?? new TerrainPageSamplePlugin(material);
     plugin.atlasTexture = atlas;
     plugin.tableTexture = table;
     plugin.geometry = geometry;

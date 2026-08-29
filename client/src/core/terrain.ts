@@ -1651,14 +1651,18 @@ function reattachTerrainPageSample(
 /** Attach the streaming page-sample plugin (PLAN-maps.md §1.2.1) to every
  *  StandardMaterial the terrain currently carries. Survives later material
  *  swaps via the reattach calls in applyTerrainDiffuseTexture /
- *  applyPagedTextures. Idempotent. */
+ *  applyPagedTextures. Idempotent: a material already carrying the plugin
+ *  (a plugin cannot detach, so a disable()→enable() round trip lands here)
+ *  gets it rewired to the new textures + re-enabled by the attach helper
+ *  rather than skipped — skipping left the compiled-in plugin pointing at
+ *  disposed textures, the 2026-08-30 silent no-op. */
 export function attachTerrainPageSampleToTerrain(
     terrain: TerrainMeshGroup,
     atlas: BaseTexture, table: BaseTexture, geometry: PageSampleGeometry,
 ): boolean {
     let attached = false;
     for (const m of terrain.materials) {
-        if (m instanceof StandardMaterial && !findTerrainPagePlugin(m)) {
+        if (m instanceof StandardMaterial) {
             attachTerrainPageSample(m, atlas, table, geometry);
             attached = true;
         }

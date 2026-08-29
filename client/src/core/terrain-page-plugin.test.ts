@@ -81,6 +81,28 @@ describe('TerrainPageSamplePlugin', () => {
         expect(defs).toContain('exp2(-level)');
     });
 
+    it('enable→disable→enable rewires the SAME plugin instance to the NEW '
+        + 'textures (a plugin cannot detach; new-ing a second one leaves the '
+        + 'compiled-in one dark — the 2026-08-30 silent no-op)', () => {
+        const { mat } = make();
+        const first = attachTerrainPageSample(mat, tex('atlasA'), tex('tableA'), {
+            baseScaleU: 32, baseScaleV: 32, pagesX0: 32, pagesZ0: 32,
+            worldW: 16384, worldH: 16384,
+        });
+        // The dispose() path: switch off, textures disposed out from under it.
+        first.isEnabled = false;
+        const second = attachTerrainPageSample(mat, tex('atlasB'), tex('tableB'), {
+            baseScaleU: 16, baseScaleV: 16, pagesX0: 16, pagesZ0: 16,
+            worldW: 8192, worldH: 8192,
+        });
+        expect(second).toBe(first);
+        expect(second.atlasTexture).toEqual(tex('atlasB'));
+        expect(second.tableTexture).toEqual(tex('tableB'));
+        expect(second.geometry.pagesX0).toBe(16);
+        expect(second.isEnabled).toBe(true);
+        expect(defines(second)).toEqual({ TERRAIN_PAGE_SAMPLE: true });
+    });
+
     it('attachTerrainPageSample enables and configures, and would throw on a '
         + 'setter that did not take', () => {
         const { mat } = make();
