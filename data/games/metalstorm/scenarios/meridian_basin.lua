@@ -180,9 +180,9 @@ return {
     -- battle. Engineers stay home: a builder walking into the contested core
     -- is not a posture, it is a casualty. The radar is immobile.
     units = {
-        { def = 'ms_tanks_s2', team = 0, x = 6600, z = 1200, facing = 'south', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 0, x = 6600, z = 1200, facing = 'south', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
-        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 6200, z = 1200, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 13184, z = 1200, facing = 'south', count = 1 },
@@ -204,9 +204,9 @@ return {
         -- departure zone above yourself.
         { def = 'fable_airship', team = 0, x = 7200, z = 1400, facing = 'south' },
 
-        { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
-        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 4, x = 6200, z = 15184, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 4, x = 13184, z = 15184, facing = 'north', count = 1 },
@@ -223,7 +223,7 @@ return {
         -- a warning if the launch supplied no team 8 (game_scenario.lua
         -- stageUnits' live-team check).
         { def = 'ms_soldiers_s1', team = 8, x = 11584, z = 8192, facing = 'north', count = 6, spacing = 110 },
-        { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 140 },
+        { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 270 },
         -- The Reavers' gun trucks. ms_technical is the Anarchic archetype's
         -- signature vehicle (PLAN-metalstorm-worldbuilding §4): scrap-built,
         -- fast, thin-skinned, a bed-mounted autocannon — a scavenger band

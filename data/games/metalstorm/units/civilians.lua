@@ -11,6 +11,11 @@ return {
         maxdamage = 200, mass = 60,
         maxvelocity = 1.4, acceleration = 0.3, brakerate = 0.3, turnrate = 1500,
         footprintx = 2, footprintz = 2,
+        -- M3: stand one packed crowd clear of the next. 2 x the 17-elmo
+        -- extent above, less the 8 the INFANTRY MoveDef already enforces
+        -- (gamedata/moveinfo.tdf). See the block in `_builder.lua` for why
+        -- this and not `footprintx/z`, which is the ground-blocking yardmap.
+        separationDistance = 26,
         sightdistance = 250,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
         customparams = {
@@ -23,6 +28,15 @@ return {
             -- recorded a few lines below moved `impostor_size` and NOT it, which
             -- is exactly how a 12-person crowd ended up 5 m across.
             member_clearance = '3',
+            -- M3: the ground this crowd covers on screen, in elmos — the outer
+            -- edge of the outermost member once the client has packed the blob
+            -- (client/squads/formation.js). Hand-written here, and only here,
+            -- because civilians are not part of the 4-scale system and so do
+            -- not run through `_builder.lua`, which derives it for everything
+            -- else. Pinned in `tests/squad_extents_spec.lua` against the same
+            -- golden table the client asserts from its own port, so a drift
+            -- fails a test rather than putting two crowds inside each other.
+            squad_footprint_radius = '17',
             -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
             -- (models/ms_civilians.gltf), baked directional sprite far
             -- (models/ms_civilians_impostor.ktx2 — deliberately no team mask,
@@ -60,6 +74,11 @@ return {
         maxdamage = 300, mass = 70,
         maxvelocity = 1.5, acceleration = 0.3, brakerate = 0.3, turnrate = 1400,
         footprintx = 2, footprintz = 2,
+        -- M3: stand one packed crowd clear of the next. 2 x the 17-elmo
+        -- extent above, less the 8 the INFANTRY MoveDef already enforces
+        -- (gamedata/moveinfo.tdf). See the block in `_builder.lua` for why
+        -- this and not `footprintx/z`, which is the ground-blocking yardmap.
+        separationDistance = 26,
         sightdistance = 300,
         canmove = true, canattack = true, canpatrol = true, canstop = true,
         canguard = true,
@@ -69,6 +88,11 @@ return {
             squad_size = '8', formation_type = 'blob', formation_radius = '18',
             -- M2: same body plan as ms_civilians above — 0.7 m of ground.
             member_clearance = '3',
+            -- M3 ground extent — see the note on ms_civilians above. A militia
+            -- band packs to the same radius as the crowd: the blob template's
+            -- tightest pair is what sets it, and 8 bodies at 3 elmos of
+            -- clearance need the same room 12 of them do.
+            squad_footprint_radius = '17',
             -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
             -- (models/ms_militia.gltf), baked directional sprite far; militia
             -- get a team armband (models/ms_militia_impostor{,_team}.ktx2).

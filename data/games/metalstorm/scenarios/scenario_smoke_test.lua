@@ -84,7 +84,7 @@ return {
     },
 
     units = {
-        { def = 'ms_tanks_s2', team = 0, x = 4352, z = 4352, facing = 'east', count = 2, spacing = 150,
+        { def = 'ms_tanks_s2', team = 0, x = 4352, z = 4352, facing = 'east', count = 2, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 8704, 0, 8704 } } } },
         { def = 'ms_engineers_s2', team = 0, x = 4200, z = 4500, facing = 'east', count = 1 },
 

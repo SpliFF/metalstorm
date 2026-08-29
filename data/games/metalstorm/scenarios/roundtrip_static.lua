@@ -62,12 +62,12 @@ return {
     -- target turns, and a turn is a transform difference the strict bar would
     -- report as a capture gap.
     units = {
-        { def = 'ms_tanks_s2',     team = 0, x = 4352, z = 4352, facing = 'west',  count = 4, spacing = 150 },
+        { def = 'ms_tanks_s2',     team = 0, x = 4352, z = 4352, facing = 'west',  count = 4, spacing = 290 },
         { def = 'ms_soldiers_s1',  team = 0, x = 4352, z = 4700, facing = 'west',  count = 6, spacing = 120 },
         { def = 'ms_engineers_s2', team = 0, x = 4050, z = 4352, facing = 'west',  count = 2, spacing = 150 },
         { def = 'ms_radar_s1',     team = 0, x = 4050, z = 4700, facing = 'west',  count = 1 },
 
-        { def = 'ms_tanks_s2',     team = 1, x = 13056, z = 13056, facing = 'east', count = 4, spacing = 150 },
+        { def = 'ms_tanks_s2',     team = 1, x = 13056, z = 13056, facing = 'east', count = 4, spacing = 290 },
         { def = 'ms_soldiers_s1',  team = 1, x = 13056, z = 12700, facing = 'east', count = 6, spacing = 120 },
         { def = 'ms_engineers_s2', team = 1, x = 13350, z = 13056, facing = 'east', count = 2, spacing = 150 },
         { def = 'ms_radar_s1',     team = 1, x = 13350, z = 12700, facing = 'east', count = 1 },

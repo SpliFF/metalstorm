@@ -239,3 +239,64 @@ describe('two squads crossing the same ground', () => {
     expect(after).toBeGreaterThan(before);
   });
 });
+
+// ── The M3 golden table ────────────────────────────────────────────────────
+//
+// unit-motion M3, the between-squad half of the same user report. The sim
+// spaces one squad from the next by `separationDistance`, which `_builder.lua`
+// derives from the extent the CLIENT draws the formation at — so the sim's
+// idea of how much ground a squad covers is a Lua PORT of the templates above,
+// and a silent drift between the two ports would put the units back inside
+// each other with every test still green.
+//
+// This table is the pin. The same numbers are asserted from the Lua side in
+// `LuaRules/Gadgets/tests/squad_extents_spec.lua`, computed by that port; here
+// they are computed by formation.js. Editing a template means editing both
+// ports and re-deriving this table — which is exactly the moment somebody
+// should have to think about it.
+const M3_SQUAD_EXTENTS = [
+  // def,               type,     count, authoredRadius, clearance, outerRadius
+  ['ms_tanks_s1',       'wedge',      8, 24,  18, 135],
+  ['ms_tanks_s2',       'wedge',      4, 34,  34, 145],
+  ['ms_tanks_s3',       'wedge',      2, 48,  48, 126],
+  ['ms_soldiers_s1',    'line',      16, 24,   3,  55],
+  ['ms_soldiers_s2',    'line',       8, 34,   3,  37],
+  ['ms_artillery_s1',   'line',       8, 24,  18, 163],
+  ['ms_artillery_s2',   'line',       4, 34,  30, 134],
+  ['ms_mechs_s1',       'wedge',      8, 24,   7,  53],
+  ['ms_engineers_s1',   'line',       8, 24,   3,  27],
+  ['ms_civilians',      'blob',      12, 20,   3,  17],
+  ['ms_ships_s1',       'column',     4, 24,  80, 448],
+  ['ms_subs_s3',        'column',     2, 48, 180, 594],
+];
+
+/** The extent `_builder.lua`'s `squadOuterRadius` computes, in formation.js
+ *  terms: the outer edge of the outermost member of the packed formation,
+ *  measured from the squad's own position (which is where the sim unit is). */
+function outerRadius(type, count, authoredRadius, clearance) {
+  if (count < 2) return clearance;
+  const r = packedFormationRadius(type, count, authoredRadius,
+                                  clearance * 2 * DEFAULT_CONFIG.memberSpacingMul);
+  let maxR = 0;
+  for (const s of buildSlots(type, count, r)) maxR = Math.max(maxR, Math.hypot(s.x, s.z));
+  return maxR + clearance;
+}
+
+describe('squad ground extent — the golden table the Lua port must reproduce', () => {
+  for (const [def, type, count, authored, clearance, expected] of M3_SQUAD_EXTENTS) {
+    it(`${def} covers ${expected} elmos of radius`, () => {
+      expect(Math.round(outerRadius(type, count, authored, clearance))).toBe(expected);
+    });
+  }
+
+  it('a single hull covers exactly its own clearance — no formation to measure', () => {
+    expect(outerRadius('wedge', 1, 68, 104)).toBe(104);   // ms_tanks_s4
+  });
+
+  it('memberSpacingMul is the shared input, so a change there moves BOTH ports', () => {
+    // The Lua port hard-codes 1.15 as MEMBER_SPACING_MUL with a pointer back
+    // here. If this ever moves, the table above stops matching and both sides
+    // have to be re-derived together — which is the intent.
+    expect(DEFAULT_CONFIG.memberSpacingMul).toBe(1.15);
+  });
+});
