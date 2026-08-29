@@ -19,7 +19,7 @@
 // pose ingest — that is event-time code and lives in soa-squad.js. The kernel
 // runs once per frame and touches only what moving members need.
 
-import { arrive, clampLen, wrapAngle, softLeashPull, headingFromVelocity } from './steering.js';
+import { arrive, clampLen, wrapAngle, softLeashPull, headingFromVelocity, turnToward } from './steering.js';
 import { isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
 import { steerMemberInto as airSteerInto } from './air-cohesion.js';
 import { steerMemberInto as navalSteerInto } from './naval-cohesion.js';
@@ -85,6 +85,9 @@ const _cursor = {
   headingY: 0, gait: 0, slot: 0, bank: 0, altitudeOffset: 0, depth: 0,
 };
 const _ctx = { profile: null, slotWorld: null, columnTarget: null, nowSec: 0, centroidSpeed: 0 };
+/** Reusable {x,z} for `turnToward`'s re-pointed velocity (PLAN-perf M10 — the
+ *  ground loop allocates nothing). */
+const _turned = { x: 0, z: 0 };
 
 const _slotW = { x: 0, z: 0 };       // slot target / steerer `slotWorld`
 const _trailPt = { x: 0, z: 0 };     // steerer `columnTarget`
@@ -365,20 +368,25 @@ function trackStuck(store, sq, i, tx, tz, cfg, backend) {
 }
 
 /** Member.integrate, inlined over arrays. `blend` 1 = the caller already
- *  turn-rate-capped its heading (naval/air) and must not be smoothed twice. */
-function integrateGround(store, i, desiredVx, desiredVz, dt, backend, blend) {
+ *  turn-rate-capped its heading (naval/air) and must not be smoothed twice;
+ *  those callers pass the default infinite `maxDelta` for the same reason
+ *  (M1 — see steering.js `turnToward`). Keep this in step with Member.integrate:
+ *  squad-soa-parity.test.js compares the two engines member-for-member. */
+function integrateGround(store, i, desiredVx, desiredVz, dt, backend, blend,
+  maxDelta = Infinity, coupling = 0) {
   let vx = store.mvx[i], vz = store.mvz[i];
   vx += (desiredVx - vx) * blend;
   vz += (desiredVz - vz) * blend;
+  const speed = Math.sqrt(vx * vx + vz * vz);
+  if (speed > 0.05) {
+    store.mHeading[i] = turnToward(store.mHeading[i], vx, vz, speed, maxDelta, coupling, _turned);
+    vx = _turned.x; vz = _turned.z;
+    store.mGait[i] = (store.mGait[i] + speed * dt * 0.1) % 1;
+  }
   store.mvx[i] = vx; store.mvz[i] = vz;
   const x = store.mx[i] + vx * dt, z = store.mz[i] + vz * dt;
   store.mx[i] = x; store.mz[i] = z;
   store.my[i] = backend.groundHeight(x, z);
-  const speed = Math.sqrt(vx * vx + vz * vz);
-  if (speed > 0.05) {
-    store.mHeading[i] = headingFromVelocity(vx, vz);
-    store.mGait[i] = (store.mGait[i] + speed * dt * 0.1) % 1;
-  }
 }
 
 // --- direct-write path (S5, §13a/§13b) --------------------------------------
@@ -509,6 +517,12 @@ function stepGroundSquad(store, sq, grid, passability, bigUnits, backend, dt, ma
   const usePass = !!(passability && moveClass);
   const nBig = bigUnits.length;
   const blend = Math.min(1, dt * 8);
+  // M1 bounded visual turn, hoisted once per squad: a per-member profile lookup
+  // in the game's hottest loop is exactly the cost this file exists to avoid.
+  // A profile with no cap yields Infinity, which `turnToward` treats as the
+  // pre-M1 identity — that is also the bench's null control.
+  const maxDelta = (sq.profile.turnRateCap ?? Infinity) * dt;
+  const coupling = sq.profile.arcCoupling ?? 0;
   const end = sq.base + sq.size;
   const frameNo = schedule.frameNo;
   // Views hoisted into locals for the whole squad (the SoA idiom): `store.mx`
@@ -582,18 +596,21 @@ function stepGroundSquad(store, sq, grid, passability, bigUnits, backend, dt, ma
     clampLen(_desired, underHull ? maxSpeed * cfg.underHullSpeedPenalty : maxSpeed);
 
     // Member.integrate, inlined against the hoisted views (the same math
-    // `integrateGround` runs for the naval/transport paths).
+    // `integrateGround` runs for the naval/transport paths). The M1 bounded
+    // turn runs BEFORE the displacement so an arc-coupled hull actually travels
+    // along the arc; `maxDelta`/`coupling` are hoisted per squad above.
     let vx = mvx[i], vz = mvz[i];
     vx += (_desired.x - vx) * blend;
     vz += (_desired.z - vz) * blend;
+    const speed = Math.sqrt(vx * vx + vz * vz);
+    if (speed > 0.05) {
+      mHeading[i] = turnToward(mHeading[i], vx, vz, speed, maxDelta, coupling, _turned);
+      vx = _turned.x; vz = _turned.z;
+      mGait[i] = (mGait[i] + speed * dt * 0.1) % 1;
+    }
     mvx[i] = vx; mvz[i] = vz;
     px += vx * dt; pz += vz * dt;
     let py = backend.groundHeight(px, pz);
-    const speed = Math.sqrt(vx * vx + vz * vz);
-    if (speed > 0.05) {
-      mHeading[i] = headingFromVelocity(vx, vz);
-      mGait[i] = (mGait[i] + speed * dt * 0.1) % 1;
-    }
 
     // Hard leash, inlined.
     const lx = px - cx, lz = pz - cz;

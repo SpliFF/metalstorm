@@ -163,3 +163,64 @@ export function softLeashPull(px, pz, cx, cz, softRadius, gain, out) {
   out.x = dx * s; out.z = dz * s;
   return out;
 }
+
+/**
+ * Bounded visual turn (PLAN-metalstorm-squads.md §9c, unit-motion M1).
+ *
+ * USER-REPORTED 2026-08-29 watching `crossing_standoff`: ground members "spin
+ * on the spot and flip direction in milliseconds". They did — every ground
+ * member wrote `headingFromVelocity(vx, vz)` straight into its heading each
+ * frame, so the hull was a pure read-out of the steering vector. Air and naval
+ * had capped their heading since cohesion §6/§7; ground never did.
+ *
+ * Two effects, both wanted, from one call:
+ *
+ *  1. **Rate limit.** The heading moves at most `maxDelta` radians this step
+ *     (the caller passes `turnRateCap * dt`, hoisted per squad). A member whose
+ *     steering vector reverses no longer reverses its hull with it — the hull
+ *     swings there over `pi / turnRateCap` seconds.
+ *  2. **Arc following.** When the turn IS rate-limited, `coupling` re-points
+ *     the velocity along the newly-capped heading instead of leaving it on the
+ *     steering vector. `coupling = 1` is a fully non-holonomic hull: it can
+ *     only travel where it is pointing, so a course change traces a circle of
+ *     radius `speed / turnRateCap` rather than a pivot-in-place. `coupling = 0`
+ *     leaves the path alone and only the hull lags — which is what infantry
+ *     should do, because people sidestep and tanks do not.
+ *
+ * NULL CONTROL (this is deliberate, `turn-slew.bench.ts` depends on it):
+ * `maxDelta = Infinity` makes both comparisons true on every finite delta, so
+ * this returns `desired` and copies the velocity through untouched — bit-for-
+ * bit the pre-M1 behaviour, with the call still compiled in. That is how the
+ * bench separates "the cost of the slew" from "the cost of calling anything".
+ *
+ * PERF (⚠ this runs per member per frame in the game's hottest phase — perf
+ * M9/M25). The straight-line case, which is nearly every member on nearly
+ * every frame, adds a subtract, a `wrapAngle` (one `%`), two compares and two
+ * stores on top of the `atan2` that was already being paid. No allocation, no
+ * `sin`/`cos`, no per-member property lookups. The trig is paid ONLY on the
+ * frames a member is actually turning harder than its cap — which is exactly
+ * the population whose motion we are buying.
+ *
+ * @param heading   current heading (rad, model −Z forward — see the note above)
+ * @param vx,vz     steered velocity this step
+ * @param speed     |v|, already computed by the caller (do not re-hypot)
+ * @param maxDelta  max heading change this step, radians (`cap * dt`)
+ * @param coupling  0..1 arc-following weight, only applied when rate-limited
+ * @param out       reusable {x,z} — receives the (possibly re-pointed) velocity
+ * @returns the new heading (radians)
+ */
+export function turnToward(heading, vx, vz, speed, maxDelta, coupling, out) {
+  const desired = Math.atan2(-vx, -vz);
+  const delta = wrapAngle(desired - heading);
+  if (delta <= maxDelta && delta >= -maxDelta) {
+    out.x = vx; out.z = vz;
+    return desired;
+  }
+  const capped = heading + (delta < 0 ? -maxDelta : maxDelta);
+  // velocityFromHeading, inlined against the speed the caller already has.
+  const tx = -Math.sin(capped) * speed;
+  const tz = -Math.cos(capped) * speed;
+  out.x = vx + (tx - vx) * coupling;
+  out.z = vz + (tz - vz) * coupling;
+  return capped;
+}

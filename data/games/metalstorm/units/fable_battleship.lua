@@ -26,7 +26,13 @@ return {
         -- showcase hull and the roster battleship agree: between BAR bats
         -- (9800) and epoch (50000). Mass matches the roster s4 (1500×8).
         maxdamage = 24000, mass = 12000,
-        maxvelocity = 1.8, acceleration = 0.045, brakerate = 0.06, turnrate = 160,
+        maxvelocity = 1.8, acceleration = 0.045, brakerate = 0.06, turnrate = 29,
+        -- Turn rate re-derived 2026-08-29 with ms_ships_s4, which this hull is
+        -- aligned to: 160 put an 80 m battleship on a 0.18-hull-length radius
+        -- after the 2026-08-27 world-scale re-import. 29 = 1.01 L (37.7 s for a
+        -- 180). turninplace=false is the half that stops the pivot; see
+        -- units/ships.lua for the derivation.
+        turninplace = false, turninplacespeedlimit = 1.8,
         footprintx = 14, footprintz = 14,
         sightdistance = 700,
         -- The model's spinning mast radar is real intel, not set dressing;

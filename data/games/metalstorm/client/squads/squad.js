@@ -985,12 +985,18 @@ export class Squad {
     // traversal cost for underpass classes (flow.md §3).
     clampLen(_desired, underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed);
 
+    // M1 bounded visual turn — the OO twin of soa-kernel's hoisted
+    // `maxDelta`/`coupling`. No cap on the profile means Infinity, which is
+    // `turnToward`'s pre-M1 identity.
+    const maxDelta = (this.profile.turnRateCap ?? Infinity) * dt;
+    const coupling = this.profile.arcCoupling ?? 0;
+    const blend = Math.min(1, dt * 8);
     if (_pt === 12) {
       const sx = m.x, sz = m.z, sy = m.y, svx = m.vx, svz = m.vz, sh = m.headingY, sg = m.gait;
-      for (let r = _pn; r > 0; r--) m.integrate(_desired.x, _desired.z, dt, this.backend);
+      for (let r = _pn; r > 0; r--) m.integrate(_desired.x, _desired.z, dt, this.backend, blend, maxDelta, coupling);
       m.x = sx; m.z = sz; m.y = sy; m.vx = svx; m.vz = svz; m.headingY = sh; m.gait = sg;
     }
-    m.integrate(_desired.x, _desired.z, dt, this.backend);
+    m.integrate(_desired.x, _desired.z, dt, this.backend, blend, maxDelta, coupling);
     if (_pt === 13) {
       const sx = m.x, sz = m.z, sy = m.y;
       for (let r = _pn; r > 0; r--) this._applyHardLeash(m, leash);

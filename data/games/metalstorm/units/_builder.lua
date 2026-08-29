@@ -161,6 +161,47 @@ local function mk(spec)
             def.customparams.multi_piece = '1'
         end
 
+        -- Turn-in-place (unit-motion M1, USER-REPORTED 2026-08-29: "units spin
+        -- on the spot ... turning needs turning CIRCLES").
+        --
+        -- The engine defaults `turnInPlace` to TRUE and `turnInPlaceAngleLimit`
+        -- to 0 (Sim/Units/UnitDef.cpp:508-513), and GroundMoveType.cpp:1187 is
+        -- then `mix(targetSpeed, turnModSpeed, reqTurnAngle > angleLimit)` — so
+        -- with the defaults, ANY nonzero course change drops the unit to
+        -- turnModSpeed, which bottoms out at 0.1 x maxSpeed. Every Metalstorm
+        -- hull except the trains has been braking to a crawl and pivoting for
+        -- even a few degrees of correction. Nobody chose that; it is what
+        -- happens when the key is never written.
+        --
+        --   turnInPlace              false = never stop to turn, arc instead.
+        --   turnInPlaceSpeedLimitFrac  fraction of THIS scale's maxvelocity to
+        --                            hold as the floor while turning. The
+        --                            engine compares TIPSL against elmos/FRAME
+        --                            (AMoveType::maxSpeed = unitDef->speed /
+        --                            GAME_SPEED), which is what `maxvelocity`
+        --                            already is — but UnitDef.cpp's own default
+        --                            for the key is computed in elmos/second,
+        --                            so an explicit value is the only way to
+        --                            get a predictable floor. 1.0 = a constant-
+        --                            speed arc.
+        --   turnInPlaceAngleLimit    degrees of course change taken at speed
+        --                            before the unit brakes to pivot. For a
+        --                            tracked vehicle this is the honest model:
+        --                            it arcs through gentle corrections and
+        --                            neutral-steers only for sharp ones.
+        --
+        -- Per-scale (`o.`) wins over per-class (`spec.`); both are optional and
+        -- an absent key leaves engine behaviour untouched.
+        local turnInPlace = o.turnInPlace
+        if turnInPlace == nil then turnInPlace = spec.turnInPlace end
+        if turnInPlace ~= nil then def.turninplace = turnInPlace end
+
+        local tipFrac = o.turnInPlaceSpeedLimitFrac or spec.turnInPlaceSpeedLimitFrac
+        if tipFrac then def.turninplacespeedlimit = def.maxvelocity * tipFrac end
+
+        local tipAngle = o.turnInPlaceAngleLimit or spec.turnInPlaceAngleLimit
+        if tipAngle then def.turninplaceanglelimit = tipAngle end
+
         -- Per-scale free-form overrides win over everything above.
         if o.override then
             for k, v in pairs(o.override) do def[k] = v end

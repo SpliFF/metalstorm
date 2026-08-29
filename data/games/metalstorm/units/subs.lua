@@ -16,18 +16,33 @@ return mk{
     movementclass = 'SUB',
     baseHp = 1600, baseMass = 1000, baseSpeed = 1.8, baseSquad = 4,
     baseFootprint = 3, formation = 'column',
+    -- Turn rates re-derived 2026-08-29 alongside ships.lua — same cause (the
+    -- 2026-08-27 world-scale re-import lengthened every hull 8x and the
+    -- 2026-08-20 rates never followed) and the same 1.0 hull-length target:
+    --
+    --   def   hull   v e/s   old tr   old R    new tr   new R    180 deg
+    --   s1    18 m    60      500    0.29 L      145    1.00 L     7.5 s
+    --   s2    30 m    54      420    0.19 L       78    1.00 L    14.0 s
+    --   s3    45 m    66      400    0.16 L       64    1.00 L    17.1 s
+    --   s4    65 m    36      250    0.10 L       24    1.00 L    45.5 s
+    --
+    -- s4 at 45 s for a 180 is a long time to commit a strategic boat to a course.
+    -- That is the point of a leviathan and it is deliberate, but it is the first
+    -- number to revisit if the class plays badly.
+    turnInPlace = false,
+    turnInPlaceSpeedLimitFrac = 1.0,
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_TORPEDO_S1' } },
                 -- 4 boats ≈ 700 hp each (BAR armsub 840); builder's 1600
                 -- aggregate made each boat half a BAR T1 sub.
                 maxdamage = 2800,
-                maxvelocity = 2.0, turnrate = 500,
+                maxvelocity = 2.0, turnrate = 145,
                 acceleration = 0.10, brakerate = 0.10,
                 sightdistance = 350,
                 override = { sonardistance = 500, waterline = 10 },
                 description = 'Coastal sub pack' },
         [2] = { weapons = { [1] = { name = 'MS_TORPEDO_S2' } },
-                maxvelocity = 1.8, turnrate = 420,
+                maxvelocity = 1.8, turnrate = 78,
                 acceleration = 0.08, brakerate = 0.08,
                 sightdistance = 400,
                 override = { sonardistance = 600, waterline = 12 },
@@ -39,7 +54,7 @@ return mk{
                 -- description promises a pair but round(4/4) collapses to 1.
                 squad = 2,
                 maxdamage = 6800,
-                maxvelocity = 2.2, turnrate = 400,
+                maxvelocity = 2.2, turnrate = 64,
                 acceleration = 0.09, brakerate = 0.09,
                 sightdistance = 450,
                 override = { sonardistance = 750, waterline = 14 },
@@ -50,7 +65,7 @@ return mk{
                 -- VLS fires from a dived hull (the surface CRUISE_S2 never
                 -- would); same range/damage as the S2 bird.
                 maxdamage = 14000,
-                maxvelocity = 1.2, turnrate = 250,
+                maxvelocity = 1.2, turnrate = 24,
                 acceleration = 0.05, brakerate = 0.06,
                 sightdistance = 500,
                 override = { sonardistance = 900, waterline = 14 },
