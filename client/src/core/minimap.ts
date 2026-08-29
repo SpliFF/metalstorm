@@ -28,6 +28,8 @@ import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTextur
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import type { LosBitmap } from './los-bitmap.js';
 import type { GpMinimapBlips, GpMinimapMetalSpots } from './game-worker-protocol.js';
+import type { ObjectiveMarker } from './objective-markers.js';
+import { colorFor as objectiveMarkerColor } from './objective-marker-renderer.js';
 import { metalSpotMarkerRadius } from './metal-spots.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
@@ -151,6 +153,13 @@ export interface MinimapConfig {
  *  - `attack`:  reserved for future widget-driven attack alerts
  *    (red). No producer wired yet — the channel exists so the rebuild
  *    palette doesn't need re-extending when one lands. */
+/// battle-clarity U2: an objective smaller than this still gets a ring big
+/// enough to see on a 200 px minimap (elmos).
+const MINIMAP_OBJECTIVE_MIN_RADIUS = 140;
+/// Fixed centre pip, so a hold circle spanning half the map is still locatable
+/// as a POINT and not only as an outline running off the edge.
+const MINIMAP_OBJECTIVE_PIP = 90;
+
 type MinimapPingKind = 'seismic' | 'marker' | 'attack';
 
 interface MinimapPing {
@@ -266,6 +275,16 @@ export class Minimap {
     // unclaimed-gold for every spot regardless of who holds it).
     private metalSpotOuterMesh: Mesh | null = null;
     private metalSpotInnerMesh: Mesh | null = null;
+
+    /// battle-clarity U2: objective markers, one mesh per distinct tint.
+    /// A ring (thin-instanced plane, per-marker scale) for an objective with an
+    /// area, plus a fixed-size pip at the centre so a large hold circle is
+    /// still findable when the ring is bigger than the minimap can usefully
+    /// draw. Grouped by colour rather than one mesh per objective because the
+    /// tint is the only thing that varies per material.
+    private objectiveRingMeshes = new Map<string, Mesh>();
+    private objectivePipMeshes = new Map<string, Mesh>();
+    private objectiveMarkers: readonly ObjectiveMarker[] = [];
     // Map id parsed out of the loadBackground URL. Used by detach() so
     // the popup viewport can fetch the same map's thumbnail as its
     // backdrop.
@@ -902,6 +921,98 @@ export class Minimap {
         return disc;
     }
 
+    /**
+     * battle-clarity U2: the objective markers, as the minimap's answer to
+     * "where".
+     *
+     * Fed the SAME derived list the world rings draw from
+     * (`objective-markers.ts`, computed in the worker and posted over
+     * `gp:objectiveMarkers`), rather than re-derived from the params map main
+     * also holds — the minimap is what a player uses to decide where to LOOK,
+     * so a minimap that disagrees with the world about which objectives exist
+     * sends them to the wrong place.
+     *
+     * Wholesale replacement, like `applyFeed`. Rebuilds instance buffers here
+     * rather than per render tick because the worker only posts on an actual
+     * change; a static board costs nothing after the first call.
+     */
+    applyObjectiveMarkers(markers: readonly ObjectiveMarker[]): void {
+        this.objectiveMarkers = markers;
+
+        // Bucket by tint — the only thing that varies per material.
+        const byTint = new Map<string, ObjectiveMarker[]>();
+        for (const m of markers) {
+            const c = objectiveMarkerColor(m);
+            const key = `${c.r.toFixed(3)}_${c.g.toFixed(3)}_${c.b.toFixed(3)}`;
+            let bucket = byTint.get(key);
+            if (!bucket) { bucket = []; byTint.set(key, bucket); }
+            bucket.push(m);
+        }
+
+        for (const [key, mesh] of this.objectiveRingMeshes) {
+            if (!byTint.has(key)) mesh.thinInstanceCount = 0;
+        }
+        for (const [key, mesh] of this.objectivePipMeshes) {
+            if (!byTint.has(key)) mesh.thinInstanceCount = 0;
+        }
+
+        const rot = Quaternion.Identity();
+        for (const [key, bucket] of byTint) {
+            const color = objectiveMarkerColor(bucket[0]);
+            const ring = this.ensureObjectiveMesh('ring', key, color);
+            const pip = this.ensureObjectiveMesh('pip', key, color);
+            const ringM = new Float32Array(bucket.length * 16);
+            const pipM = new Float32Array(bucket.length * 16);
+            for (let i = 0; i < bucket.length; i++) {
+                const m = bucket[i];
+                // Diameter, because the base plane is unit-sized: a marker's
+                // ring on the minimap covers the objective's real footprint, so
+                // "that circle is half the map" is a true statement the player
+                // can act on rather than a fixed icon that hides the scale.
+                const d = Math.max(2 * MINIMAP_OBJECTIVE_MIN_RADIUS, 2 * m.r);
+                Matrix.Compose(new Vector3(d, d, d), rot, new Vector3(m.x, 16, m.z))
+                    .copyToArray(ringM, i * 16);
+                const p = MINIMAP_OBJECTIVE_PIP;
+                Matrix.Compose(new Vector3(p, p, p), rot, new Vector3(m.x, 18, m.z))
+                    .copyToArray(pipM, i * 16);
+            }
+            ring.thinInstanceSetBuffer('matrix', ringM, 16, true);
+            pip.thinInstanceSetBuffer('matrix', pipM, 16, true);
+        }
+    }
+
+    /** The markers the minimap is currently drawing. Verification hook — the
+     *  minimap canvas defeats CDP capture (see `captureFrameStats`), so a live
+     *  run reads this rather than trusting a screenshot to have drawn them. */
+    getObjectiveMarkers(): readonly ObjectiveMarker[] {
+        return this.objectiveMarkers;
+    }
+
+    private ensureObjectiveMesh(kind: 'ring' | 'pip', key: string, color: Color3): Mesh {
+        const cache = kind === 'ring' ? this.objectiveRingMeshes : this.objectivePipMeshes;
+        const cached = cache.get(key);
+        if (cached) return cached;
+        // A torus for the area (an outline — a filled disc over a hold circle
+        // would blank out the blips inside the objective the player is trying
+        // to read) and a disc for the centre pip.
+        const mesh = kind === 'ring'
+            ? MeshBuilder.CreateTorus(`minimapObjRing-${key}`,
+                { diameter: 1, thickness: 0.055, tessellation: 40 }, this.scene)
+            : MeshBuilder.CreateDisc(`minimapObjPip-${key}`,
+                { radius: 0.5, tessellation: 16 }, this.scene);
+        if (kind === 'pip') mesh.rotation.x = Math.PI / 2;   // lay flat, facing up
+        else mesh.scaling.y = 0.001;                          // flatten the torus
+        mesh.bakeCurrentTransformIntoVertices();
+        mesh.isPickable = false;
+        const mat = new StandardMaterial(`minimapObj${kind}Mat-${key}`, this.scene);
+        mat.emissiveColor = color;
+        mat.disableLighting = true;
+        mat.alpha = kind === 'ring' ? 0.75 : 0.95;
+        mesh.material = mat;
+        cache.set(key, mesh);
+        return mesh;
+    }
+
     /** Render the minimap. Call at ~10Hz. */
     render(): void {
         this.updateEntityInstances();
@@ -1323,6 +1434,11 @@ export class Minimap {
         this.metalSpotOuterMesh = null;
         this.metalSpotInnerMesh?.dispose();
         this.metalSpotInnerMesh = null;
+        for (const mesh of this.objectiveRingMeshes.values()) { mesh.material?.dispose(); mesh.dispose(); }
+        for (const mesh of this.objectivePipMeshes.values()) { mesh.material?.dispose(); mesh.dispose(); }
+        this.objectiveRingMeshes.clear();
+        this.objectivePipMeshes.clear();
+        this.objectiveMarkers = [];
         this.fogTexture?.dispose();
         this.fogTexture = null;
         this.fogQuad?.dispose();

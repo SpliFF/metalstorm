@@ -18,6 +18,7 @@ import type { FxLightPool } from './fx-light-pool.js';
 import type { ProjectileRenderer } from './projectile-renderer.js';
 import type { ImpostorRenderer } from './impostor-renderer.js';
 import type { SceneLighting } from './scene-lighting.js';
+import type { ObjectiveMarkerRenderer } from './objective-marker-renderer.js';
 import type { AssetLoader } from './asset-loader.js';
 import { defaultMapLighting, type MapLighting } from './map-lighting.js';
 
@@ -42,6 +43,19 @@ export const gpCtx = {
     sceneLighting:      null as SceneLighting | null,
     /** was gpMapLighting (~4895) — keep current initialiser semantics */
     mapLighting:        defaultMapLighting() as MapLighting,
+    /**
+     * battle-clarity U2: the world-anchored objective marker layer.
+     *
+     * Lives here rather than as a game-processor module-local because the
+     * objectives it draws arrive through the LuaUI half — `rulesParamUpdate`
+     * lands in `lua-ui-host.ts`, and that file cannot import game-processor
+     * without a cycle. The LuaUI half only ever sets `objectiveMarkersDirty`;
+     * the GP half owns the recompute and the throttle.
+     */
+    objectiveMarkers:   null as ObjectiveMarkerRenderer | null,
+    /** Set by the LuaUI half when an `objective_*` / `region_*` param moved.
+     *  Cleared by the GP half's render loop when it recomputes. */
+    objectiveMarkersDirty: false,
     /** was gpUiGl (~4971) */
     uiGl:               null as WebGL2RenderingContext | null,
     /** was gpLuaUiActive (~4972) */

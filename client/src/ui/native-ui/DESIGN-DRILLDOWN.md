@@ -214,18 +214,38 @@ each caller re-inventing a definition list.
 | answers | "where is this?" | "what is this?" |
 | examples | objective ring/beacon, off-screen combat ping, contact marker, minimap blip | the focus summary chip, a context panel, the global surfaces |
 | owner | render worker (Babylon scene / ground decals) | `#ui-root` DOM |
-| built by | **U2** (markers), **U3** (pings) | U0 (this file), U1, U3 |
+| built by | **U2** (markers — DONE), **U3** (pings) | U0 (this file), U1, U3 |
 | fade rule | must fade with camera distance and must never hide the fight under it | never overlaps the centre or lower-centre of the viewport |
 
 A world icon is always *also* a rung-1 affordance: clicking it drills, exactly
 like clicking a chip. That is what makes "explore by clicking the world" and
 "explore by clicking the UI" the same interaction rather than two.
 
-**Not built in U0:** world-anchored floating icons. They need the marker layer
-U2 owns. Until then rung-1 affordances are viewport-anchored, and `focus-hud.ts`
-docks its chip stack at `top-center` — the only dock that is both near the
-player's eye line and outside the centre/lower-centre band the design system
-reserves for selection gestures and orders.
+**U2 built the world half** — `objective-marker-renderer.ts` (a ground ring at
+the objective's own radius, faction-tinted, in the worker's Babylon scene) and
+its minimap counterpart, both fed by one derivation in `objective-markers.ts`.
+Three of its decisions are the row above, made concrete:
+
+- **The fade rule is code, not prose.** `fadeForDistance` is off below a
+  260-elmo camera-to-look-at delta and full by 520, so a player who zooms in to
+  fight loses the rings entirely. Measured live: alpha 0 at 100 elmos, 0.45 at
+  850 and at 3600.
+- **The mark is an OUTLINE, never a fill.** A translucent disc over a
+  1011-elmo hold circle would grey out every unit inside the objective being
+  fought over — which is the same failure as a resident panel, in 3D.
+- **The label is the chip's own string.** `objective-phrasing.ts` composes it
+  once; the marker layer composes no text. That is enforced by a test, after a
+  live run caught the ring saying "Protect your people" under a chip reading
+  "Protect near Storm Sound".
+
+**Still not built:** a world icon that is *clickable* — §4's "a world icon is
+always ALSO a rung-1 affordance" is half-true today. The markers draw; clicking
+one does not drill, because picking happens in the worker and there is no
+worker→main channel for "the player clicked an objective marker". Travel in the
+other direction (chip → camera) is live. Rung-1 affordances therefore stay
+viewport-anchored, and `focus-hud.ts` docks its chip stack at `top-center` — the
+only dock that is both near the player's eye line and outside the centre/lower-
+centre band the design system reserves for selection gestures and orders.
 
 ---
 
@@ -360,7 +380,9 @@ per-frame DOM mutation.
 
 ### Deliberately not in U0
 
-- **World-anchored floating icons** — need U2's marker layer.
+- **World-anchored floating icons** — needed U2's marker layer. **Built in U2**
+  for the `objective` kind (rings + minimap blips); still not *clickable*, see
+  §4.
 - **The rung-4 global access point** — designed in §6, built by U3.
 - **Objective / town / enemy-force kinds** — U1, U2, U3 respectively. Each is a
   `createDrilldown` call, not a new mechanism. **`objective` landed in U1** and

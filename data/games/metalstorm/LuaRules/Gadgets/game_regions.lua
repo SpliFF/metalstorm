@@ -155,6 +155,20 @@ function GG.Regions.GetContested()
     return out
 end
 
+--- The region's extent as a circle: `x, z, r`, or nil for a key the active
+--- provider cannot place (an unknown key, or the graph provider's synthetic
+--- "wilds", which has no polygon).
+---
+--- Added for battle-clarity U2: an objective that names a region has to be
+--- findable by LOOKING, and a ring needs a radius. `region_<key>_x/_z` were
+--- already published but carried no extent, so an objective on a region could
+--- only ever be drawn as a point. The approximation each provider makes — and
+--- why they differ — is documented on `partition.lua`'s `regionCircle`.
+function GG.Regions.Area(key)
+    if not provider or not provider.area then return nil end
+    return provider.area(key)
+end
+
 function GG.Regions.Value(key)
     local meta = regionMeta(key)
     return (meta and meta.value) or 0

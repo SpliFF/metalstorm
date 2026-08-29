@@ -80,6 +80,75 @@ function M.gridSectorName(key)
     return 'Sector ' .. M.columnLabel(tonumber(col)) .. tostring(tonumber(row) + 1)
 end
 
+-- ------------------------------------------------------------
+-- Region extent as a CIRCLE (battle-clarity U2)
+-- ------------------------------------------------------------
+--
+-- The world/minimap objective markers need an AREA to draw, and a `control`
+-- objective's area is its region. A region is a polygon (graph) or a clipped
+-- cell (grid), neither of which is a circle — so this is a deliberate,
+-- documented approximation rather than a hidden one:
+--
+--   * graph — the AREA-EQUIVALENT radius, sqrt(polygonArea / pi), about the
+--     authored centre. Not the max vertex distance: since M9m a generated
+--     region's polygon is its component's COASTLINE, whose farthest vertex can
+--     sit kilometres from anything the player would call "the region", and a
+--     ring drawn out there reads as a bug. An equal-footprint circle is wrong
+--     in the same small way everywhere instead of wildly wrong in one place.
+--   * grid — the INSCRIBED radius of the clipped cell (half its shorter side),
+--     so a sector ring never spills into its neighbours.
+--
+-- Pure: no Spring, no GG. `GG.Regions.Area` is the thin wrapper.
+
+--- Shoelace area of a closed-implicitly polygon ({x=,z=} list). Always >= 0
+--- (winding is not something authored data is required to get right).
+function M.polygonArea(poly)
+    if type(poly) ~= 'table' or #poly < 3 then return 0 end
+    local sum, n = 0, #poly
+    local j = n
+    for i = 1, n do
+        sum = sum + (poly[j].x + poly[i].x) * (poly[j].z - poly[i].z)
+        j = i
+    end
+    return math.abs(sum) * 0.5
+end
+
+--- Centroid of a polygon's vertices. Only used when no authored `centre` is
+--- present — the same fallback publishRegionStatics uses, kept here so both
+--- read the region's position identically.
+function M.polygonCentre(poly)
+    if type(poly) ~= 'table' or #poly == 0 then return nil end
+    local sx, sz = 0, 0
+    for _, v in ipairs(poly) do sx = sx + v.x; sz = sz + v.z end
+    return sx / #poly, sz / #poly
+end
+
+--- x, z, r for an authored region's `meta` table, or nil when it carries no
+--- usable polygon. Radius is clamped: a hairline ring is invisible at command
+--- height and a map-wide one is not a marker.
+local MIN_REGION_RADIUS = 128
+local MAX_REGION_RADIUS = 4096
+
+function M.regionCircle(meta)
+    if type(meta) ~= 'table' then return nil end
+    local poly = meta.polygon
+    if type(poly) ~= 'table' or #poly < 3 then return nil end
+    local cx, cz
+    local centre = meta.centre
+    if type(centre) == 'table' and type(centre.x) == 'number' and type(centre.z) == 'number' then
+        cx, cz = centre.x, centre.z
+    else
+        cx, cz = M.polygonCentre(poly)
+    end
+    if not cx then return nil end
+    local area = M.polygonArea(poly)
+    if area <= 0 then return nil end
+    local r = math.sqrt(area / math.pi)
+    if r < MIN_REGION_RADIUS then r = MIN_REGION_RADIUS end
+    if r > MAX_REGION_RADIUS then r = MAX_REGION_RADIUS end
+    return cx, cz, r
+end
+
 function M.newGridProvider(mapWidth, mapHeight, desiredSize)
     local regionSize = M.gridRegionSize(mapWidth, mapHeight, desiredSize)
     local gridW = math.max(MIN_REGIONS_PER_AXIS, math.ceil(mapWidth / regionSize))
@@ -135,6 +204,18 @@ function M.newGridProvider(mapWidth, mapHeight, desiredSize)
                 end
             end
             return out
+        end,
+
+        --- Inscribed circle of the CLIPPED cell — see M.regionCircle's header
+        --- for why grid and graph answer this differently.
+        area = function(key)
+            local col, row = tostring(key):match('^(%d+):(%d+)$')
+            if not col then return nil end
+            local ix, iz = tonumber(col), tonumber(row)
+            if ix < 0 or ix >= gridW or iz < 0 or iz >= gridH then return nil end
+            local x0, x1 = ix * regionSize, math.min((ix + 1) * regionSize, mapWidth)
+            local z0, z1 = iz * regionSize, math.min((iz + 1) * regionSize, mapHeight)
+            return (x0 + x1) / 2, (z0 + z1) / 2, math.min(x1 - x0, z1 - z0) / 2
         end,
 
         -- Grid regions have no authored metadata.
@@ -409,6 +490,9 @@ function M.newGraphProvider(regionsData, mapWidth, mapHeight)
         byKey = byKey,
         keys = function() return keys end,
         lookupGrid = lookup,
+        --- Area-equivalent circle about the authored centre (M.regionCircle).
+        --- "wilds" is synthetic and has no polygon, so it has no area.
+        area = function(key) return M.regionCircle(byKey[key]) end,
     }
 end
 

@@ -59,6 +59,8 @@ export interface TestHarnessDeps {
 export interface MinimapCaptureSource {
     captureFrame(): string;
     captureFrameStats(): MinimapFrameStats;
+    /** battle-clarity U2 — what the minimap believes it is drawing. */
+    getObjectiveMarkers(): readonly { id: number; x: number; z: number; r: number; label: string }[];
 }
 
 /** Options for `captureFrame`. `region` is in DEVICE pixels (the worker
@@ -829,6 +831,20 @@ export class TestHarness {
         const mm = this.deps.getMinimap();
         if (!mm) throw new Error('[test] no minimap — not in a game session?');
         return mm.captureFrame();
+    }
+
+    /**
+     * battle-clarity U2: the objective markers the minimap is drawing.
+     *
+     * A capture proves pixels changed; this proves WHICH objectives the
+     * minimap thinks it is showing, so a live run can assert that the minimap
+     * and the world rings agree rather than eyeballing two images. Reading it
+     * beside `__gp('__objectiveMarkers.current()')` is the whole check.
+     */
+    minimapObjectiveMarkers(): readonly { id: number; x: number; z: number; r: number; label: string }[] {
+        const mm = this.deps.getMinimap();
+        if (!mm) throw new Error('[test] no minimap — not in a game session?');
+        return mm.getObjectiveMarkers();
     }
 
     /** Summary statistics for one minimap frame, without the base64 payload.

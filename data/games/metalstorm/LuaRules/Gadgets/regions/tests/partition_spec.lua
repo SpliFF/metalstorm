@@ -406,3 +406,81 @@ describe("lookup grid", function()
         assert.are.equal('a', cellRegions[1])
     end)
 end)
+
+-- ============================================================
+-- Region extent as a circle (battle-clarity U2)
+-- ============================================================
+--
+-- `GG.Regions.Area` is the only reason an objective that names a region can be
+-- drawn on the map at all. The two providers approximate differently and the
+-- difference is the point, so both are pinned here.
+
+describe("region circle", function()
+    it("computes polygon area by the shoelace rule, winding-agnostic", function()
+        local ccw = square(0, 0, 100, 100)
+        local cw  = { {x=0,z=0}, {x=0,z=100}, {x=100,z=100}, {x=100,z=0} }
+        assert.are.equal(10000, Partition.polygonArea(ccw))
+        assert.are.equal(10000, Partition.polygonArea(cw))
+        assert.are.equal(0, Partition.polygonArea({ {x=0,z=0}, {x=1,z=1} }))
+        assert.are.equal(0, Partition.polygonArea(nil))
+    end)
+
+    it("uses the AREA-EQUIVALENT radius, not the farthest vertex", function()
+        -- A 2000x2000 square with one 8000-elmo spike, which is the shape a
+        -- generated coastline actually has. Farthest-vertex would draw a
+        -- ~8000-elmo ring around a region that is 2000 across.
+        local spiked = { {x=0,z=0}, {x=2000,z=0}, {x=2000,z=2000}, {x=0,z=2000}, {x=0,z=8000} }
+        local _, _, r = Partition.regionCircle({ polygon = spiked, centre = {x=1000, z=1000} })
+        assert.is_true(r < 2500, 'radius should track footprint, not the spike: ' .. tostring(r))
+    end)
+
+    it("prefers the authored centre over the vertex average", function()
+        local x, z = Partition.regionCircle({
+            polygon = square(0, 0, 1000, 1000), centre = { x = 250, z = 750 },
+        })
+        assert.are.equal(250, x)
+        assert.are.equal(750, z)
+        local vx, vz = Partition.regionCircle({ polygon = square(0, 0, 1000, 1000) })
+        assert.are.equal(500, vx)
+        assert.are.equal(500, vz)
+    end)
+
+    it("clamps: a tiny region still gets a visible ring", function()
+        local _, _, r = Partition.regionCircle({ polygon = square(0, 0, 10, 10) })
+        assert.are.equal(128, r)
+    end)
+
+    it("returns nil for anything it cannot place", function()
+        assert.is_nil(Partition.regionCircle(nil))
+        assert.is_nil(Partition.regionCircle({}))
+        assert.is_nil(Partition.regionCircle({ polygon = { {x=0,z=0}, {x=1,z=1} } }))
+    end)
+
+    it("graph provider answers area() per key and refuses 'wilds'", function()
+        local p = Partition.newGraphProvider({
+            { key = 'a', polygon = square(0, 0, 1000, 1000), neighbors = {} },
+        }, 4096, 4096)
+        local x, z, r = p.area('a')
+        assert.are.equal(500, x)
+        assert.are.equal(500, z)
+        assert.is_true(r > 500 and r < 570)   -- sqrt(1e6/pi) = 564
+        assert.is_nil(p.area('wilds'))
+        assert.is_nil(p.area('nope'))
+    end)
+
+    it("grid provider inscribes the CLIPPED cell so rings never overlap", function()
+        local p = Partition.newGridProvider(8192, 8192, 2048)
+        local x, z, r = p.area('0:0')
+        assert.are.equal(1024, x)
+        assert.are.equal(1024, z)
+        assert.are.equal(1024, r)
+        -- A map whose last column hangs off the edge: 5000/2048 -> 3 columns,
+        -- the last one only 904 wide, so its inscribed radius is 452.
+        local q = Partition.newGridProvider(5000, 5000, 2048)
+        local lx, _, lr = q.area('2:0')
+        assert.are.equal((4096 + 5000) / 2, lx)
+        assert.are.equal(452, lr)
+        assert.is_nil(q.area('9:9'))
+        assert.is_nil(q.area('west_scarp'))
+    end)
+end)
