@@ -98,3 +98,74 @@ export function slotToWorld(slot, cx, cz, headingY, out) {
   out.z = cz + (-slot.x * s + slot.z * c);
   return out;
 }
+
+// ── Slot packing (unit-motion M2, USER-REPORTED 2026-08-29) ────────────────
+//
+// "Units visually overlap each other, within squads and between them."
+//
+// They did, and the templates above are why. Every one of them scales purely
+// with `formation_radius`, and that number was authored 2026-07-10
+// (`e4dad36907`) against models that were 8x smaller in elmos than the ones
+// that ship: the world-scale re-import landed 2026-08-27 (`1cfafc337e`,
+// 8 elmos = 1 m applied at import) and NOTHING that spaces units followed it.
+// `_builder.lua`'s default `formation_radius = 24 * growth^0.5` therefore packs
+// 8 tanks — 4.5 m hulls, 36 elmos — into a wedge 48 elmos across. They are
+// inside each other before they take a step. Same story as M1's naval turn
+// rates, same two dates.
+//
+// The fix is a FLOOR, not a rewrite. A def's authored radius is still honoured
+// whenever it is already big enough; when it is not, the radius grows to the
+// smallest value that keeps every pair of members at least `minSpacing` apart.
+// The templates are LINEAR in radius, so the tightest pair distance at radius 1
+// is a pure function of (type, count) — measure it once, divide, done. No
+// solver, no per-frame work, no change to any template's shape: a squad packed
+// this way is the same formation, drawn at the size its own models need.
+
+const _spacingCache = new Map();
+
+/**
+ * The smallest distance between any two slots of `buildSlots(type, count, 1)`.
+ * Multiply by a formation radius to get that formation's tightest member-to-
+ * member spacing, or divide a required spacing by it to get the radius that
+ * achieves it.
+ *
+ * Memoised per `type:count` — the O(n^2) scan runs once per distinct formation
+ * SHAPE for the whole session, at squad-construction time, never per frame.
+ * Returns 0 for a formation with fewer than two slots (nothing to separate).
+ */
+export function slotSpacingPerRadius(type, count) {
+  const n = count | 0;
+  if (n < 2) return 0;
+  const key = `${type}:${n}`;
+  const hit = _spacingCache.get(key);
+  if (hit !== undefined) return hit;
+  const slots = buildSlots(type, n, 1);
+  let min = Infinity;
+  for (let i = 0; i < slots.length; i++) {
+    for (let j = i + 1; j < slots.length; j++) {
+      const dx = slots[i].x - slots[j].x, dz = slots[i].z - slots[j].z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < min) min = d2;
+    }
+  }
+  const out = min === Infinity ? 0 : Math.sqrt(min);
+  _spacingCache.set(key, out);
+  return out;
+}
+
+/**
+ * The formation radius to actually build slots at: the authored radius, or the
+ * radius that spaces members `minSpacing` apart, whichever is LARGER.
+ *
+ * Never shrinks a formation — a def that authored a generous radius keeps it,
+ * so this can only add space, never take it away. `minSpacing <= 0` (a def with
+ * no `member_clearance`) returns the authored radius untouched, which is the
+ * pre-M2 behaviour and the bench's null control.
+ */
+export function packedFormationRadius(type, count, authoredRadius, minSpacing) {
+  const authored = authoredRadius > 0 ? authoredRadius : 0;
+  if (!(minSpacing > 0)) return authored;
+  const per = slotSpacingPerRadius(type, count);
+  if (!(per > 0)) return authored;
+  return Math.max(authored, minSpacing / per);
+}

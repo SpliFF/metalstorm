@@ -37,6 +37,10 @@ return mk{
     movementclass = 'SHIP',
     baseHp = 2500, baseMass = 1500, baseSpeed = 2.2, baseSquad = 4,
     baseFootprint = 4, formation = 'column',
+    -- M2 member spacing (metres): hull LENGTH, DESIGN-GUIDE ships row and the
+    -- measured forge hulls (s1 20.00 m, s2 34.90 m, s3 55.00 m). A column of
+    -- four 20 m boats needs 92 m of water; it was being given 48 elmos (6 m).
+    sizes = { 20, 35, 55, 80 },
     turnInPlace = false,
     turnInPlaceSpeedLimitFrac = 1.0,   -- constant-speed arc; ships answer the helm, they do not stop
     scales = {

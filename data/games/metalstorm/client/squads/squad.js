@@ -3,9 +3,10 @@
 // PLAN-metalstorm-squad-cohesion.md, PLAN-metalstorm-squad-pathfinding.md.
 
 import { Member } from './member.js';
-import { buildSlots, slotToWorld } from './formation.js';
+import { buildSlots, packedFormationRadius, slotToWorld } from './formation.js';
 import { arrive, separate, clampLen, wrapAngle, softLeashPull } from './steering.js';
 import { isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
+import { memberClearance } from './config.js';
 import { profileFor } from './movement-profiles.js';
 import { steerMember as airSteer } from './air-cohesion.js';
 import { steerMember as navalSteer } from './naval-cohesion.js';
@@ -126,7 +127,18 @@ export class Squad {
 
     // Cosmetic roster.
     this.size = Math.max(1, def.squadSize | 0);
-    this.slots = buildSlots(def.formationType, this.size, def.formationRadius);
+    // M2 member spacing — the same three lines soa-squad.js's SquadRec runs.
+    // Keep them in step: S6's parity suite drives both engines off one def and
+    // compares member-for-member, so a divergence here is a parity failure.
+    this.memberClearance = memberClearance(def);
+    this.formationRadius = packedFormationRadius(
+      def.formationType, this.size, def.formationRadius,
+      this.memberClearance * 2 * cfg.memberSpacingMul);
+    this.separationRadius = this.memberClearance > 0
+      ? Math.min(cfg.separationRadiusMax,
+          Math.max(cfg.separationRadius, this.memberClearance * cfg.separationClearanceMul))
+      : cfg.separationRadius;
+    this.slots = buildSlots(def.formationType, this.size, this.formationRadius);
     this.members = [];
     this.aliveCount = this.size;        // monotonic non-increasing (§4)
 
@@ -820,8 +832,8 @@ export class Squad {
     this._prevUpdateCx = this.cx; this._prevUpdateCz = this.cz; this._prevUpdateHeading = this.heading;
 
     const maxSpeed = this.def.maxSpeed * this.cfg.memberSpeedMultiplier;
-    const leash = this.def.formationRadius * this.cfg.maxMemberDistance;
-    const softLeashDist = this.def.formationRadius * (this.profile.softLeash ?? 1.2);
+    const leash = this.formationRadius * this.cfg.maxMemberDistance;
+    const softLeashDist = this.formationRadius * (this.profile.softLeash ?? 1.2);
     const inTurn = this._headingRate > this.cfg.turnTrailBiasRateThreshold;
     // moveinfo.tdf CLASS.name, shared by BOTH consumers: passability queries
     // (pathfinding §2) and footprint-underpass checks (flow §3/§4). A def-
@@ -925,14 +937,14 @@ export class Squad {
         const nbP = neighbourQuery(m);
         const nP = typeof nbP === 'number' ? nbP : undefined;
         separate(m.x, m.z, m.squadId, nP === undefined ? nbP : neighbourQuery.buf,
-          this.cfg.separationRadius,
+          this.separationRadius,
           this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
           this.cfg.separationDeadband, _sep, nP);
       }
       const nb = neighbourQuery(m);
       const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
       separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
-        this.cfg.separationRadius,
+        this.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
         this.cfg.separationDeadband, _sep, n, skipInterSquadSeparation);
     }
@@ -1044,7 +1056,7 @@ export class Squad {
       const nb = neighbourQuery(m);
       const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
       separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
-        this.cfg.separationRadius,
+        this.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
         this.cfg.separationDeadband, _sep, n, skipInterSquadSeparation);
     }
@@ -1078,7 +1090,7 @@ export class Squad {
     m.integrateAir(desired.x, desired.y, desired.z, dt);
     // Air has no hard-leash ground-height dependency; still guarantee
     // "squad stays together" via the same world-space clamp (§1 layer 3).
-    const leash = this.def.formationRadius * this.cfg.maxMemberDistance;
+    const leash = this.formationRadius * this.cfg.maxMemberDistance;
     const dx = m.x - this.cx, dz = m.z - this.cz;
     const d = Math.hypot(dx, dz);
     if (d > leash) { const s = leash / d; m.x = this.cx + dx * s; m.z = this.cz + dz * s; }

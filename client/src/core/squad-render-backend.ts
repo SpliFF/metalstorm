@@ -673,6 +673,31 @@ export class SquadRenderBackend {
 
         if (wantFallback && entry.atlas) spriteFade = 1;
 
+        // ONE gate on the sprite tier, because `entry.atlas` is what makes that
+        // tier legal and two of the branches above set `spriteFade` without
+        // consulting it: the far-distance branch (`d2 >= D*D`) and the
+        // crossfade band. `impostorDist` comes off the def (a customparam) and
+        // the atlas arrives over the network, so a member created before its
+        // sheet lands has D set and no atlas — and the two unguarded branches
+        // then reached `getSpritePool(..., undefined)` and threw
+        // `Cannot read properties of undefined (reading 'width')` out of the
+        // render worker. That is a FATAL: the recovery ladder respawned the
+        // worker into the same crash twice and gave up at R3, i.e. the world
+        // view is gone for the rest of the session.
+        //
+        // Reproduced 2026-08-30 while filming unit-motion M2 — spawn any squad
+        // def carrying `impostor_distance` (ms_soldiers_s1, ms_tanks_s1,
+        // ms_civilians …) into a client whose atlas for it has not streamed.
+        // It is not M2's defect; it is fixed here because it made M2's
+        // on-screen verification impossible.
+        //
+        // Dropping the tier is the behaviour the block above already documents
+        // ("without one the member drops to the capsule instead"): with no
+        // sprite and no model, the last-resort capsule reconcile below picks
+        // the member up, and the real sprite takes over on the frame after the
+        // atlas lands.
+        if (spriteFade !== undefined && !entry.atlas) spriteFade = undefined;
+
         // Reconcile model occupancy — one pool (and slot) per model piece, all
         // carrying the same fade so a multi-piece body dissolves as one object.
         if (modelFade !== undefined && model) {

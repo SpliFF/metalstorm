@@ -8,6 +8,11 @@ return mk{
     -- (54 e/s) had rifle sections outrunning BAR scout cars.
     baseHp = 400, baseMass = 90, baseSpeed = 1.4, baseSquad = 16,
     baseFootprint = 2, formation = 'line',
+    -- M2 member spacing (metres, ground clearance diameter). A soldier is
+    -- 1.8-2.1 m TALL but stands in about 0.7-0.95 m of ground once shoulders,
+    -- pack and rifle are counted (gen_infantry.py SHOULDER 0.205 half-width);
+    -- height is the wrong number here. s4 is the sealed exo shell, broader.
+    sizes = { 0.7, 0.75, 0.8, 0.95 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S1' } },
                 description = 'Rifle section — numerous and expendable',

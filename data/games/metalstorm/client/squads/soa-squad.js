@@ -9,7 +9,8 @@
 // per-squad and this all runs at sync/casualty cadence, not per render frame).
 
 import { allocRun, freeRun, isAlive, isReleased, setAlive, setReleased } from './soa-store.js';
-import { buildSlots, slotToWorld } from './formation.js';
+import { buildSlots, packedFormationRadius, slotToWorld } from './formation.js';
+import { memberClearance } from './config.js';
 import { profileFor } from './movement-profiles.js';
 import { projectDropPoint, scatterSlot } from './squad-transport.js';
 
@@ -76,7 +77,19 @@ export class SquadRec {
 
     this.size = Math.max(1, def.squadSize | 0);
     this.base = allocRun(store, this.size);
-    const { slotsX, slotsZ } = slotsFor(def.formationType, this.size, def.formationRadius);
+    // M2 member spacing, resolved ONCE here (Squad's constructor runs the same
+    // three lines — keep them in step, S6 parity drives both engines). All
+    // three are pure functions of the def + config, so nothing downstream of
+    // this pays for them per frame.
+    this.memberClearance = memberClearance(def);
+    this.formationRadius = packedFormationRadius(
+      def.formationType, this.size, def.formationRadius,
+      this.memberClearance * 2 * cfg.memberSpacingMul);
+    this.separationRadius = this.memberClearance > 0
+      ? Math.min(cfg.separationRadiusMax,
+          Math.max(cfg.separationRadius, this.memberClearance * cfg.separationClearanceMul))
+      : cfg.separationRadius;
+    const { slotsX, slotsZ } = slotsFor(def.formationType, this.size, this.formationRadius);
     this.slotsX = slotsX; this.slotsZ = slotsZ;
 
     this.cx = 0; this.cy = 0; this.cz = 0;

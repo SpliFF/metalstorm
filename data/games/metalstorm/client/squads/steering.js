@@ -65,6 +65,18 @@ export function arrive(px, pz, tx, tz, maxSpeed, arrivalRadius, out) {
  * `neighbours` is an array (or any iterable) of {x,z,squadId?,radius?};
  * accumulates into out {x,z}.
  *
+ * FALLOFF (unit-motion M2, USER-REPORTED 2026-08-29 — "units visually overlap
+ * each other"). The contribution is `(r/d - 1)` along the away-vector: 0 at the
+ * separation boundary, 1 at half of it, unbounded at contact. It used to be
+ * plain `1/d`, which is not scale-invariant and was the reason widening the
+ * radius bought nothing: at the 14-elmo radius this shipped with, a neighbour
+ * 10 elmos away contributed 0.1, against an arrival term worth up to 1.0, so
+ * separation could displace a member about ONE ELMO off its slot before
+ * arrival won. It could never open a gap — whatever the slots said, stood.
+ * `(r/d - 1)` contributes 0.4 at that same distance and 1.0 once a hull is
+ * halfway inside its neighbour, which is what makes crossing squads part.
+ * Same flop count (one divide, one subtract, replacing a divide).
+ *
  * `count` (optional) is how many leading entries of `neighbours` are live.
  * The hot path passes SquadManager's reusable neighbour buffer plus its fill
  * count, so this runs an indexed loop with no iterator and no allocation
@@ -108,8 +120,9 @@ export function separate(px, pz, selfSquadId, neighbours, separationRadius, same
       const d = Math.sqrt(d2);
       if (r - d < deadband) continue; // §7: weak overlap near the boundary — ignore
       const w = nb.squadId === selfSquadId ? sameWeight : otherWeight;
-      out.x += (dx / d / d) * w;   // weight by inverse distance, then pair-type
-      out.z += (dz / d / d) * w;
+      const f = (r / d - 1) * w / d;  // normalised falloff, then pair-type
+      out.x += dx * f;
+      out.z += dz * f;
       n++;
     }
   }

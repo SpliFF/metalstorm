@@ -16,6 +16,13 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '12', formation_type = 'blob', formation_radius = '20',
+            -- M2 (USER-REPORTED 2026-08-29): ground clearance RADIUS in elmos,
+            -- 0.7 m of ground per person at 8 elmos = 1 m. The client floors the
+            -- formation radius off this; `formation_radius` above is the pre-M2
+            -- number and is left as authored — note that the WORLD-SCALE x8 sweep
+            -- recorded a few lines below moved `impostor_size` and NOT it, which
+            -- is exactly how a 12-person crowd ended up 5 m across.
+            member_clearance = '3',
             -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
             -- (models/ms_civilians.gltf), baked directional sprite far
             -- (models/ms_civilians_impostor.ktx2 — deliberately no team mask,
@@ -60,6 +67,8 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '8', formation_type = 'blob', formation_radius = '18',
+            -- M2: same body plan as ms_civilians above — 0.7 m of ground.
+            member_clearance = '3',
             -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
             -- (models/ms_militia.gltf), baked directional sprite far; militia
             -- get a team armband (models/ms_militia_impostor{,_team}.ktx2).

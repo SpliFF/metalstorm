@@ -184,8 +184,11 @@ function stepSquad(store, sq, grid, passability, bigUnits, backend, dt, nowSec, 
   sq.prevUpdateCx = sq.cx; sq.prevUpdateCz = sq.cz; sq.prevUpdateHeading = sq.heading;
 
   const maxSpeed = sq.def.maxSpeed * cfg.memberSpeedMultiplier;
-  const leash = sq.def.formationRadius * cfg.maxMemberDistance;
-  const softLeashDist = sq.def.formationRadius * (sq.profile.softLeash ?? 1.2);
+  // `sq.formationRadius` is the M2-PACKED radius, not `sq.def.formationRadius`:
+  // the leash has to follow the slots outward or a squad whose slots grew to
+  // fit its models is clamped straight back on top of itself.
+  const leash = sq.formationRadius * cfg.maxMemberDistance;
+  const softLeashDist = sq.formationRadius * (sq.profile.softLeash ?? 1.2);
   const inTurn = sq.headingRate > cfg.turnTrailBiasRateThreshold;
   const moveClass = sq.def.moveClass ?? sq.profile.moveClass;
   // sin/cos of the heading hoisted ONCE per squad (§11b) — slotToWorld inlined
@@ -286,7 +289,7 @@ function separateFromGrid(store, sq, grid, i, cfg, sameSquadOnly, out, frameNo) 
   const px = store.mx[i], pz = store.mz[i];
   const found = queryInto(grid, store, px, pz, i, cap, _nSlot, _nX, _nZ, _nR, frameNo);
   const base = sq.base, end = sq.base + sq.size;
-  const defaultR = cfg.separationRadius;
+  const defaultR = sq.separationRadius;   // M2: per-squad, sized to the hull
   const deadband = cfg.separationDeadband;
   const sameW = cfg.separationWeightSameSquad, otherW = cfg.separationWeightOtherSquad;
   let hits = 0;
@@ -301,8 +304,9 @@ function separateFromGrid(store, sq, grid, i, cfg, sameSquadOnly, out, frameNo) 
       const d = Math.sqrt(d2);
       if (r - d < deadband) continue;
       const w = same ? sameW : otherW;
-      out.x += (dx / d / d) * w;
-      out.z += (dz / d / d) * w;
+      const f = (r / d - 1) * w / d;  // M2 normalised falloff — see steering.js
+      out.x += dx * f;
+      out.z += dz * f;
       hits++;
     }
   }

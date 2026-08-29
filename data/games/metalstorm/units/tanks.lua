@@ -6,6 +6,11 @@ return mk{
     movementclass = 'VEH',
     baseHp = 1400, baseMass = 500, baseSpeed = 2.6, baseSquad = 8,
     baseFootprint = 2, formation = 'wedge',
+    -- M2 member spacing (metres): hull LENGTH per the DESIGN-GUIDE tanks row,
+    -- used as a circumscribed circle so two hulls never interpenetrate at any
+    -- relative heading. s1/s3 are the measured forge models (4.5 m tankette,
+    -- 12 m tracked heavy); s2/s4 are the table.
+    sizes = { 4.5, 8.5, 12, 26 },
     -- Turn RATES are left alone: at 8 elmos = 1 m the four scales already turn
     -- in 0.6-1.3 hull lengths, which is right for a tracked vehicle. What was
     -- wrong is that they BRAKED to do it, so the radius they actually drove was

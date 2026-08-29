@@ -17,6 +17,34 @@ local function round(x) return math.floor(x + 0.5) end
 
 local SCALE_WORDS = { 'Light', 'Line', 'Heavy', 'Super-heavy' }
 
+-- ── World scale + per-member spacing (unit-motion M2, USER-REPORTED
+-- 2026-08-29: "units visually overlap each other, within squads and between
+-- them") ───────────────────────────────────────────────────────────────────
+--
+-- 8 elmos = 1 metre. Settled and LANDED 2026-08-27 (`1cfafc337e`, Option A of
+-- PLAN-world-scale.md §5): the x8 is applied at model import, so a 4.5 m
+-- tankette is 36 elmos long in the world the player sees. Do not re-derive it
+-- and do not surface elmos as an authoring concern — everything below is
+-- authored in METRES and converted here, once.
+--
+-- `spec.sizes` is a 4-entry table of the class's GROUND-PLANE CLEARANCE
+-- DIAMETER in metres, per scale: the circle a single member needs to itself so
+-- two of them never interpenetrate at any relative heading. For vehicles and
+-- vessels that is the hull LENGTH (the circumscribed circle — heading-
+-- independent, which slot geometry is not). For classes whose dominant
+-- dimension is VERTICAL — infantry, mechs, masts — it is the body's ground
+-- extent, NOT its height: a 1.85 m soldier occupies about 0.75 m of ground, and
+-- spacing people by their height would spread a rifle section over 40 m.
+-- Sources are `tools/forge/docs/DESIGN-GUIDE.md`'s scale table and the measured
+-- extents recorded per model in `../ASSETS.md`.
+--
+-- It becomes `customparams.member_clearance`, an elmo RADIUS, which the client
+-- squad engine reads (`client/squads/config.js` memberClearance) to floor the
+-- formation radius and to size the separation term. A class that omits `sizes`
+-- emits nothing and keeps the pre-M2 spacing — a deliberate opt-in, so a new
+-- class cannot silently inherit a wrong footprint.
+local ELMOS_PER_METRE = 8
+
 local function mk(spec)
     local defs = {}
     for s = 1, 4 do
@@ -72,6 +100,42 @@ local function mk(spec)
                 authority_cost_base = tostring(o.authorityCost or s),
             },
         }
+
+        -- Per-member ground clearance RADIUS in elmos (M2). Authored in metres
+        -- as a diameter (see the note at the top of this file); `o.clearance`
+        -- lets one scale override the class curve without forking the table.
+        local clearanceM = o.clearance or (spec.sizes and spec.sizes[s])
+        if clearanceM and clearanceM > 0 then
+            def.customparams.member_clearance =
+                tostring(round(clearanceM * ELMOS_PER_METRE / 2))
+        end
+
+        -- SIM footprint for a SINGLE-HULL def (M2 sim half). When squad_size
+        -- resolves to 1 the sim unit IS one model, so its footprint is a
+        -- statement about that hull and nothing else — and the generic curve
+        -- (`baseFootprint + s - 1`) was making some absurd ones: `ms_ships_s3`
+        -- is a **55 m** cruiser and reserved 6 x 6 footprint cells, i.e. 12 m,
+        -- so it shared ground with infantry. The engine's own rule is
+        -- `footprint metres = footprintx * 2` (SPRING_FOOTPRINT_SCALE 2 x
+        -- SQUARE_SIZE 8 = 16 elmos per cell, DESIGN-MODEL-BUILDING §4), so the
+        -- honest value is the authored hull size in metres over two.
+        --
+        -- Deliberately WIDEN-ONLY and single-hull-only:
+        --   * a def whose curve is already generous keeps it (mechs-s4 is 11 m
+        --     tall but only ~6.6 m of ground, and its 10 m footprint is fine);
+        --   * a MULTI-member squad's footprint is the squad's pathing
+        --     reservation, not one member's, and sizing that to the full
+        --     formation diameter is a pathfinding change with a blast radius
+        --     this milestone did not measure. Left alone on purpose — see the
+        --     handoff note.
+        local squadSize = tonumber(def.customparams.squad_size) or 1
+        if squadSize == 1 and clearanceM and clearanceM > 0 and not o.footprint then
+            local want = round(clearanceM / 2)     -- metres -> footprint cells
+            if want > def.footprintx then
+                def.footprintx = want
+                def.footprintz = want
+            end
+        end
 
         -- Impostor LOD opt-in (PLAN-metalstorm-beta-units.md §2.1, engine ask
         -- B1). impostorOnly units (infantry/civilians per the beta roster)

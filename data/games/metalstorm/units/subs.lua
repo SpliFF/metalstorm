@@ -16,6 +16,8 @@ return mk{
     movementclass = 'SUB',
     baseHp = 1600, baseMass = 1000, baseSpeed = 1.8, baseSquad = 4,
     baseFootprint = 3, formation = 'column',
+    -- M2 member spacing (metres): hull length, DESIGN-GUIDE subs row.
+    sizes = { 18, 30, 45, 65 },
     -- Turn rates re-derived 2026-08-29 alongside ships.lua — same cause (the
     -- 2026-08-27 world-scale re-import lengthened every hull 8x and the
     -- 2026-08-20 rates never followed) and the same 1.0 hull-length target:
