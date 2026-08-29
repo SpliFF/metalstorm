@@ -19,6 +19,7 @@
  */
 
 import type { ObjectiveMarker } from './objective-markers.js';
+import type { BattleMoment, BattleMomentMarker } from './battle-events.js';
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
 import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg, RosterPlayerInfo } from './connection.js';
 import type { PresentationClockStats } from './presentation-clock.js';
@@ -698,6 +699,23 @@ export type GpMessageToMain =
      * evaluation tick.
      */
     | { type: 'gp:objectiveMarkers'; markers: ObjectiveMarker[] }
+    /**
+     * battle-clarity U3: what just happened in the battle, and where on screen
+     * it is happening now.
+     *
+     * Combat reaches the client ONLY in the worker (two outcome families —
+     * `CombatEvent` and `VolleyOutcome` — plus the death and roster streams),
+     * so the detection has to live there; the wording, the notices and the
+     * history live on main beside every other drill-down surface. This message
+     * is the whole seam between them.
+     *
+     * `moments` carries only what is NEW since the last post (usually empty).
+     * `markers` is the CURRENT screen state of every moment still live, posted
+     * whenever it changes because the camera moved — that is what lets an
+     * edge-of-screen pointer keep pointing, and what makes it disappear the
+     * moment the player looks at the fight.
+     */
+    | { type: 'gp:battleMoments'; moments: BattleMoment[]; markers: BattleMomentMarker[] }
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
      *  The `springConfig.*` prefix also triggers a clientSettings.set side-effect

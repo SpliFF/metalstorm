@@ -23,6 +23,7 @@ import { clientSettings } from '../../core/client-settings.js';
 import { parseRevealPredicate } from './reveal-predicate.js';
 import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
 import { uiActionRegistry } from './ui-action-registry.js';
+import { globalSurface, parseMenuMount } from './global-surface.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -34,6 +35,9 @@ import nativeUiCss from './native-ui.css?raw';
 const KNOWN_STORE_PATHS: ReadonlySet<string> = new Set([
     'gameRulesParams', 'teamRulesParams', 'playerRoster', 'selection',
     'economy', 'unitQueues', 'directives', 'gameEvents', 'orgGroups',
+    // battle-clarity U3: live screen state of the battle moments, and the
+    // scenario briefing the rung-4 Reports tab re-reads.
+    'battleMarkers', 'briefing',
 ]);
 
 export interface WidgetManifest {
@@ -161,6 +165,15 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // game-dir module.
     'focus-hud': () => import('./focus-hud.js'),
     'objective-hud': () => import('./objective-hud.js'),
+    // battle-clarity U3. `moment-hud` is the decaying awareness layer;
+    // `event-log` and `objective-board` are the rung-4 tabs behind the one
+    // access point, and each shares a module with the rung-1 surface it mirrors
+    // so the two can never word one event differently.
+    'moment-hud': () => import('./moment-hud.js'),
+    'event-log': () => import('./moment-hud.js').then((m) => ({ default: m.eventLog })),
+    'objective-board': () =>
+        import('./objective-hud.js').then((m) => ({ default: m.objectiveBoard })),
+    'briefing-panel': () => import('./briefing-panel.js'),
 };
 
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */
@@ -259,8 +272,11 @@ export class WidgetLoader {
             return;
         }
 
-        // Create mount points
-        this.createMountPoints();
+        // Create mount points. The rung-4 surface is only built when this
+        // game's manifest actually folds something into it (DESIGN-DRILLDOWN
+        // §6) — an access point that opens an empty window is worse than none,
+        // and ZK/BAR manifests have no `menu:*` mounts at all.
+        this.createMountPoints(manifest);
 
         const baseUrl = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
 
@@ -296,6 +312,11 @@ export class WidgetLoader {
                 console.error(`[widget-loader] Failed to load widget ${descriptor.id}:`, e);
             }
         }
+
+        // Now that every immediate widget has mounted, hide the tabs nothing
+        // landed in (a crashed widget leaves its pane empty, and a tab onto
+        // nothing is a dead end).
+        if (globalSurface.mounted) globalSurface.settle();
     }
 
     /** Warn on `subscribes` entries that name no real store path. */
@@ -391,7 +412,7 @@ export class WidgetLoader {
      *
      * Mount points are positioned using CSS classes that games can override.
      */
-    private createMountPoints(): void {
+    private createMountPoints(manifest?: WidgetManifest): void {
         if (!this.uiRoot) return;
 
         const mountPointIds = [
@@ -420,6 +441,25 @@ export class WidgetLoader {
         // The design system owns dock geometry AND the mount's pointer-events
         // discipline (frame: none, panels: auto) — see native-ui.css.
         injectStyle('native-ui-design-system', nativeUiCss);
+
+        // battle-clarity U3 (DESIGN-DRILLDOWN.md §6): the one global access
+        // point. Its panes become mount points named `menu:<tab>`, so folding a
+        // rail panel behind it is a MOUNT change in the manifest and not a
+        // rewrite of a working widget.
+        const wantsMenu = (manifest?.widgets ?? [])
+            .some((w) => parseMenuMount(w.mount) !== null);
+        if (wantsMenu) {
+            const dock = this.mountPoints.get('top-right');
+            if (dock) {
+                globalSurface.mount(dock, this.uiRoot);
+                for (const w of manifest!.widgets) {
+                    const tab = parseMenuMount(w.mount);
+                    if (!tab) continue;
+                    const pane = globalSurface.paneFor(tab);
+                    if (pane) this.mountPoints.set(w.mount, pane);
+                }
+            }
+        }
 
         this.trackTopLeftDock();
     }
@@ -809,6 +849,7 @@ export class WidgetLoader {
 
         // Removing the mounts also detaches every panel frame we built inside
         // them (a widget's own dispose() only removes its content).
+        globalSurface.dispose();
         for (const mount of this.mountPoints.values()) {
             mount.remove();
         }

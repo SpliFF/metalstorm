@@ -1,7 +1,8 @@
 # DESIGN-DRILLDOWN — the battle UI's interaction framework
 
-**Status:** U0 (framework + story-1 vertical slice) is built. U1–U4 implement
-*inside* this; they add kinds, not mechanisms.
+**Status:** U0 (framework + story-1 slice), U1 (objectives), U2 (world markers)
+and U3 (awareness + the one access point) are built. U4 implements *inside*
+this; it adds kinds, not mechanisms.
 
 **Authority:** the USER DESIGN DIRECTIVE of 2026-08-29, recorded in
 `.tasks/notes/battle-clarity.md` and in the `ui-drilldown-directive` memory. It
@@ -214,7 +215,7 @@ each caller re-inventing a definition list.
 | answers | "where is this?" | "what is this?" |
 | examples | objective ring/beacon, off-screen combat ping, contact marker, minimap blip | the focus summary chip, a context panel, the global surfaces |
 | owner | render worker (Babylon scene / ground decals) | `#ui-root` DOM |
-| built by | **U2** (markers — DONE), **U3** (pings) | U0 (this file), U1, U3 |
+| built by | **U2** (markers — DONE), **U3** (off-screen pointers — DONE) | U0 (this file), U1, U3 |
 | fade rule | must fade with camera distance and must never hide the fight under it | never overlaps the centre or lower-centre of the viewport |
 
 A world icon is always *also* a rung-1 affordance: clicking it drills, exactly
@@ -238,11 +239,27 @@ Three of its decisions are the row above, made concrete:
   live run caught the ring saying "Protect your people" under a chip reading
   "Protect near Storm Sound".
 
+**U3 built the off-screen half.** An engagement the camera is not looking at
+gets a minimap `attack` ping (the existing counterbattery ping, reused rather
+than a second ping vocabulary) *and* a clamped edge pointer that travels when
+clicked. The classification is the worker's, because the worker owns the camera:
+`gpTickBattleEvents` projects each live moment through the same view×projection
+the scene just rendered with, at 2 Hz, and posts only when the answer changes.
+Two rules of the row above, made concrete again:
+
+- **On screen ⇒ no marker at all.** An arrow pointing at something already in
+  view is noise, and the pointer disappears the moment the player looks.
+- **Behind the camera is not "far left".** A point behind the eye projects to a
+  MIRRORED screen position, so the pointer is pinned by an explicit
+  in-front-of-camera test rather than by its raw projected x — otherwise it
+  points the wrong way exactly when the player most needs it.
+
 **Still not built:** a world icon that is *clickable* — §4's "a world icon is
-always ALSO a rung-1 affordance" is half-true today. The markers draw; clicking
-one does not drill, because picking happens in the worker and there is no
-worker→main channel for "the player clicked an objective marker". Travel in the
-other direction (chip → camera) is live. Rung-1 affordances therefore stay
+always ALSO a rung-1 affordance" is half-true today. The objective markers draw;
+clicking one does not drill, because picking happens in the worker and there is
+no worker→main channel for "the player clicked an objective marker". Travel in
+the other direction (chip → camera) is live, and the edge pointers ARE clickable
+(they are DOM, not scene geometry). Rung-1 affordances therefore stay
 viewport-anchored, and `focus-hud.ts` docks its chip stack at `top-center` — the
 only dock that is both near the player's eye line and outside the centre/lower-
 centre band the design system reserves for selection gestures and orders.
@@ -297,10 +314,10 @@ sustained form and is exposed as a rung-3 action.
 > Global battle options behind **one** access point: statistics, detailed
 > reports, events, objectives, diplomacy.
 
-**Design (U0) — not built (U3 builds it):**
+**Built in U3** — `global-surface.ts`, exactly as designed:
 
-- **One control**, in the `top-right` dock, next to nothing else. A single
-  labelled button, plus one key binding (`Tab`).
+- **One control**, in the `top-right` dock. A single labelled button (`Battle ▾`)
+  plus one key binding (`Tab`).
 - **It opens ONE surface**, centred and modal-ish, with a tab strip:
   `Statistics · Reports · Events · Objectives · Diplomacy`. Rung 4 is the one
   rung with no size budget, because it is the one rung the player is *only*
@@ -309,13 +326,33 @@ sustained form and is exposed as a rung-3 action.
   the tab, not a rail panel, and so `focusModel.openSurface`/`closeSurface`
   record it — which is what lets story 4's "close that" bind to something.
 - **Every entry in that list is forbidden from docking beside the viewport.**
-  If a surface is in the rung-4 tab strip it is not also a rail panel. This is
-  the rule that retires `scoreboard-panel`, `parley-panel` and
-  `ai-command-panel` from the rails (§7).
+  Enforced by construction rather than by prose: folding a panel in is a
+  **`mount` change in the game manifest** (`mount: "menu:statistics"`), the
+  loader routes `menu:<tab>` to that tab's pane, and a widget has exactly one
+  mount. That is what retired `scoreboard-panel`, `parley-panel` and
+  `ai-command-panel` from the rails (§7) without rewriting one of them.
 - **The one permitted leak**: a single always-visible victory-condition line
   ("Raven Basin: contested — hold clock resets") as a rung-1 affordance that
   drills into the Objectives tab. It is rung 1 because it changes what the
   player does next; everything else in the list does not.
+
+Three rules the surface makes code rather than prose:
+
+1. **A tab onto nothing never renders.** `settle()` runs after the widgets have
+   loaded and hides every tab whose pane is empty — and hides the ACCESS POINT
+   ITSELF when nothing folded in at all. A button that opens an empty window is
+   the "this UI is broken" signal the framework exists to remove, and it is what
+   a ZK/BAR manifest (no `menu:*` mounts) would otherwise get.
+2. **`Tab` and `Esc` are consumed in the capture phase**, for the reason
+   `drilldown.ts` documents: `main.ts` has a global Escape handler that opens the
+   quit dialog, and a surface that closes AND quits is worse than one that does
+   neither. While closed it leaves Escape alone, so Esc still quits. Neither key
+   is taken from a focused text field.
+3. **The line is filled, never derived.** `setSummaryLine` is called by the
+   objective HUD — the one module that parses the objective wire — so there is
+   still exactly one reader of it. "Contested" is asserted only from having
+   WATCHED the published progress go backwards; the sim publishes no such field,
+   and inventing one would break §4's phrasing rule 1.
 
 ---
 
@@ -334,7 +371,7 @@ over viewport **≈9.3% at defaults, ≈20.4% with every panel expanded** — an
 | `#hud-selection` — "Selected: unit 42" / "Selected: 3 units" | **DEMOTE** | superseded by the rung-1 focus chip, which says the same thing with a *name*. A raw id readout is the definition of the spreadsheet. **Not removed in U0**: the engine HUD is shared with ZK/BAR and Metalstorm is the only game with a focus HUD, so the fold needs a per-game switch. Filed for U1 and **NOT done in U1 either** — U1 spent its removal budget on `objectives-panel`, which was the panel its own content replaced. Still open; the per-game switch is the whole job. |
 | `#hud-minimap` | **keep at rung 0** | spatial, not tabular; it is the one always-on surface that answers "where" |
 | `#detach-minimap-btn` ("Pop out ↗") | **DEMOTE** | a permanent chrome button for a rare action. Should appear on hover over the minimap. Cosmetic; unscheduled. |
-| `#hud-help` — "Left click: select · Right click: move…" | **DEMOTE** | permanent onboarding text that never goes away and is read once. Should be first-session-only (the onboarding lane already gates on `sessions_played`) or live behind the rung-4 access point. **Filed for U3** with the rest of the guidance surfaces. |
+| `#hud-help` — "Left click: select · Right click: move…" | **already folded** — `style="display:none"` in `hud.html` and NO code path sets it visible | Filed for U3; U3 checked and found the work already done rather than doing it again. `grep -rn "hud-help" client/src` finds only the CSS reserve variable (`--hud-help-reserve`, which the bottom-centre dock still clears). The strip is not on screen and has not been; nothing was changed. |
 
 ### Metalstorm native-UI panels — `data/games/metalstorm/ui/metalstorm.ui.json`
 
@@ -342,12 +379,14 @@ over viewport **≈9.3% at defaults, ≈20.4% with every panel expanded** — an
 |---|---|---|
 | `authority-bar` | top-left pill, always on | **KEEP at rung 0** — already key-numbers-only (YOU / TEAM). Should gain a rung-2 drill (the authority ledger) instead of pushing its event ring at the player as toasts. Unscheduled. |
 | `objectives-panel` | ~~right rail, **expanded by default**, contains a bounty *form*~~ | **DONE in U1 — demoted to rung 1 + 2.** Off the rail and out of the manifest; the board is now `objective-hud` at top-centre. The widget and `ui/lib/objectives.js` stay on disk, unmounted and annotated, because two of its surfaces are rung-4 content **U3** must re-home: the bounty *form* (never live — `objectives.createBounty` has no wire target) and the 5-entry outcome log (which outlives the sim's 30 s retention window, as the decaying toasts deliberately do not). |
-| `scoreboard-panel` | right rail, collapsed | **FOLD to rung 4** — "statistics". Off the rail entirely. |
-| `parley-panel` | left rail, collapsed | **FOLD to rung 4** — "diplomacy". Off the rail entirely. |
-| `ai-command-panel` | left rail, collapsed, tallest panel in the HUD | **FOLD to rung 4** — "reports"; its change feed is "events". Off the rail entirely. |
+| `scoreboard-panel` | ~~right rail~~ → `menu:statistics` | **DONE in U3.** Off the rail; same widget, one manifest line changed. |
+| `parley-panel` | ~~left rail~~ → `menu:diplomacy` | **DONE in U3.** Off the rail; same widget. |
+| `ai-command-panel` | ~~left rail, tallest panel in the HUD~~ → `menu:reports` | **DONE in U3.** Off the rail; same widget. Its change feed is NOT the Events tab — that is the battle log (`moment-hud.ts`), which renders from the worker's `BattleMoment` records. |
 | `command-composer` | bottom-centre, expanded: `[VERB] [SUBJECT] [TARGET] [WHEN]` chips + a priority slider + a commit button | **RETIRE.** This is the spreadsheet, literally: a four-slot form for issuing one order. Superseded by rung-3 actions (context-specific, no slots) and by story 4's sentence. **U4's call to remove**, because U4 is what replaces it; flagged here so it is a decision and not an oversight. |
 | `command-console` | bottom-centre, resident transcript | **DEMOTE to summonable.** The mechanism is right and stays; being *resident* is wrong. **U4** makes it one key to open, out of the way when closed. |
 | `focus-hud` | top-centre, **nothing in the DOM until something is selected** | new in U0 — the reference implementation of rung 1/2/3 |
+| `moment-hud` | top-right under the access point, **nothing in the DOM until something happens** | new in U3 — the decaying awareness notices, plus the off-screen edge pointers. Every notice is a rung-1 chip that drills. |
+| `event-log` · `objective-board` · `briefing-panel` | rung 4 only, behind the access point | new in U3 — the full history, the full objective board, and the scenario story + field advice + par clock that used to exist only on the boot splash. |
 
 ### The resting HUD this audit targets
 
@@ -355,6 +394,13 @@ After U1–U4 land the audit above, a player who has selected nothing and opened
 nothing sees: **the authority pill, the minimap, the global access point, and
 the victory-condition line.** Both rails are empty. Everything else arrives
 because the player pointed at something.
+
+**As of U3 the rails ARE empty**, verified on screen in a live
+`crossing_standoff` and pinned by a manifest test (`moment-hud.test.ts`, "EMPTIES
+BOTH RAILS"). What is still resident and should not be: the objective chip stack
+(§6's leak, deliberately, capped at three), and `command-composer` +
+`command-console` at bottom-centre — both **U4's**, because U4 is what replaces
+them.
 
 ---
 
@@ -383,12 +429,18 @@ per-frame DOM mutation.
 - **World-anchored floating icons** — needed U2's marker layer. **Built in U2**
   for the `objective` kind (rings + minimap blips); still not *clickable*, see
   §4.
-- **The rung-4 global access point** — designed in §6, built by U3.
+- **The rung-4 global access point** — designed in §6, **built in U3**.
 - **Objective / town / enemy-force kinds** — U1, U2, U3 respectively. Each is a
   `createDrilldown` call, not a new mechanism. **`objective` landed in U1** and
-  was exactly that: one `createDrilldown` call, no new mechanism. `town` and
-  `enemy-force` are still declared-with-no-detail-view, so the §3 rule ("a kind
-  is added only when a rung-2 view exists for it") still has two debts open.
+  was exactly that: one `createDrilldown` call, no new mechanism. **`area`
+  gained its rung-2 view in U3** — a battle moment is a place where something
+  happened, so a notice is an `area` ref with a what/who/where/when panel and
+  the same travel affordance as every other ref. `town` and `enemy-force` are
+  still declared-with-no-detail-view, so the §3 rule ("a kind is added only when
+  a rung-2 view exists for it") still has two debts open. U3 did not close
+  `enemy-force`: an enemy moment is about a PLACE we saw something happen, not
+  about a force we can select, name or inspect, and giving it a kind whose
+  detail view could only repeat the notice would be a dead end wearing a label.
 - **A selection port.** Rung 3 cannot yet offer "select the whole squad" for a
   partial selection: changing the *client* selection needs the worker's
   `selectUnits` op, and the only main-thread channel to it today is

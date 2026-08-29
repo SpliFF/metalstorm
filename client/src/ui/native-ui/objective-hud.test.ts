@@ -28,8 +28,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import objectiveHud, {
-    ANNOUNCE_MS, REFRESH_MS, objectiveRefFor, summaryFor, type Board,
+    ANNOUNCE_MS, REFRESH_MS, objectiveBoard, objectiveRefFor, summaryFor, type Board,
 } from './objective-hud.js';
+import { globalSurface } from './global-surface.js';
 import { MAX_OBJECTIVE_CHIPS, type ObjectivePlace, type ObjectiveRecord } from './objective-model.js';
 import { SUMMARY_MAX_STATS } from './drilldown.js';
 import { focusModel } from './focus-model.js';
@@ -126,8 +127,11 @@ describe('loader contract', () => {
         // is that no RAIL widget claims the objectives.
         for (const w of manifest.widgets) {
             // Only titled widgets get panel chrome, so only they can BE a rail
-            // panel; the chrome-less built-ins have no title at all.
+            // panel; the chrome-less built-ins have no title at all. A
+            // `menu:*` mount is rung 4 behind the access point (U3) — an
+            // objective board is CORRECT there, and this check is about rails.
             if (typeof w.title !== 'string') continue;
+            if (w.mount.startsWith('menu:')) continue;
             expect(w.title, w.id).not.toMatch(/objective/i);
         }
     });
@@ -572,7 +576,7 @@ describe('state changes announce themselves and then LEAVE', () => {
         const toast = mount.querySelector('.nui-toast')!;
         expect(toast.textContent).toContain('Objective complete');
         expect(toast.textContent).toContain('+300');
-        expect(toast.classList.contains('nui-toast--award')).toBe(true);
+        expect(toast.classList.contains('nui-toast--good')).toBe(true);
     });
 
     it('tells the loser of an open race that it went to the other side', () => {
@@ -586,8 +590,8 @@ describe('state changes announce themselves and then LEAVE', () => {
         flush();
         const toast = mount.querySelector('.nui-toast')!;
         expect(toast.textContent).toContain('went to the other side');
-        expect(toast.classList.contains('nui-toast--award')).toBe(false);
-        expect(toast.classList.contains('nui-toast--refusal')).toBe(true);
+        expect(toast.classList.contains('nui-toast--good')).toBe(false);
+        expect(toast.classList.contains('nui-toast--bad')).toBe(true);
     });
 
     it('toasts a failure and an expiry as losses', () => {
@@ -638,5 +642,121 @@ describe('state changes announce themselves and then LEAVE', () => {
         objectiveHud.dispose();
         expect(() => vi.advanceTimersByTime(ANNOUNCE_MS * 2)).not.toThrow();
         expect(document.querySelectorAll('.nui-toast')).toHaveLength(0);
+    });
+});
+
+// ─────────────── 5. U3: the victory line and the rung-4 board ───────────
+
+describe('the one permitted always-visible line (U3, DESIGN-DRILLDOWN §6)', () => {
+    let mount: HTMLElement;
+    let dock: HTMLElement;
+    let host: HTMLElement;
+
+    const ctx = (): WidgetContext => ({
+        store: {} as WidgetContext['store'],
+        mount,
+        identity: { playerId: 0, teamId: 0, accountId: 0 },
+    });
+
+    beforeEach(() => {
+        vi.useFakeTimers();
+        document.body.replaceChildren();
+        mount = document.createElement('div');
+        dock = document.createElement('div');
+        host = document.createElement('div');
+        document.body.append(mount, dock, host);
+        focusModel.clear();
+        uiStore.clear();
+        cameraPortHolder.install({ call: () => {}, pose: () => null });
+        namedEntityIndex.replaceAll([{
+            id: 'raven_basin', type: 'region', name: 'Raven Basin',
+            x: 4400, z: 4400, aliases: [],
+        } as never]);
+        uiStore.setGameFrame(900);
+        globalSurface.mount(dock, host);
+    });
+
+    afterEach(() => {
+        objectiveHud.dispose();
+        objectiveBoard.dispose();
+        globalSurface.dispose();
+        focusModel.clear();
+        uiStore.clear();
+        namedEntityIndex.clear();
+        cameraPortHolder.clear();
+        vi.useRealTimers();
+    });
+
+    const line = () => dock.querySelector('.nui-access__summary') as HTMLButtonElement;
+
+    it('reports the VICTORY objective and nothing else', () => {
+        objectiveHud.init(ctx());
+        uiStore.updateGameRulesParams(publish(
+            { type: 'control', state: 'active', region: 'raven_basin', progress: 0.4 },
+            { type: 'control', state: 'active', region: 'raven_basin', victory: 1, progress: 0.6 },
+        ));
+        flush();
+        expect(line().hidden).toBe(false);
+        expect(line().textContent).toBe('Hold Raven Basin: 60% held');
+    });
+
+    it('says CONTESTED once the published hold clock goes backwards', () => {
+        // The sim publishes no `contested` field. The only honest source is
+        // having WATCHED progress drop, which is what a reset hold clock does.
+        objectiveHud.init(ctx());
+        uiStore.updateGameRulesParams(publish({
+            type: 'control', state: 'active', region: 'raven_basin', victory: 1, progress: 0.6,
+        }));
+        flush();
+        uiStore.updateGameRulesParams(publish({
+            type: 'control', state: 'active', region: 'raven_basin', victory: 1, progress: 0.05,
+        }));
+        flush();
+        expect(line().textContent).toBe('Hold Raven Basin: contested — hold clock resets');
+    });
+
+    it('is HIDDEN when the scenario publishes no victory condition', () => {
+        objectiveHud.init(ctx());
+        uiStore.updateGameRulesParams(publish({
+            type: 'control', state: 'active', region: 'raven_basin',
+        }));
+        flush();
+        expect(line().hidden).toBe(true);
+    });
+
+    it('leaves with the widget', () => {
+        objectiveHud.init(ctx());
+        uiStore.updateGameRulesParams(publish({
+            type: 'control', state: 'active', region: 'raven_basin', victory: 1, progress: 0.2,
+        }));
+        flush();
+        expect(line().hidden).toBe(false);
+        objectiveHud.dispose();
+        expect(line().hidden).toBe(true);
+    });
+
+    it('drills into the FULL board, which shows what the chip stack caps off', () => {
+        // U1 capped the resting stack at MAX_OBJECTIVE_CHIPS and left an
+        // overflow line that lengthened it in place. This is where the rest
+        // went — the seam U1's `render` marked for U3.
+        objectiveBoard.init(ctx());
+        const many = Array.from({ length: MAX_OBJECTIVE_CHIPS + 3 }, () => ({
+            type: 'control', state: 'active', region: 'raven_basin',
+        }));
+        uiStore.updateGameRulesParams(publish(...many));
+        flush();
+        expect(mount.querySelectorAll('.nui-board .nui-dd'))
+            .toHaveLength(MAX_OBJECTIVE_CHIPS + 3);
+        // The SAME drilldown primitive, so an objective opened here reads
+        // exactly as it does at rung 1.
+        (mount.querySelector('.nui-dd__chip') as HTMLButtonElement).click();
+        expect(mount.querySelector('.nui-dd__panel')!.textContent).toContain('Reward');
+    });
+
+    it('says so plainly when the board is empty', () => {
+        objectiveBoard.init(ctx());
+        flush();
+        expect(mount.querySelector('.nui-log__empty')!.textContent)
+            .toContain('No objectives');
     });
 });

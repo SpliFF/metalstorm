@@ -65,17 +65,29 @@ import {
 import {
     announcement, briefing, consequencePhrase, formatClock, originPhrase,
     progressPhrase, rewardPhrase, shortName, stateWord, taskLine, timePhrase,
+    victoryLine,
 } from './objective-phrasing.js';
+import { createNoticeLane, type NoticeLane } from './notice-lane.js';
+import { globalSurface } from './global-surface.js';
 import type { Widget, WidgetContext } from './widget-loader.js';
 
 /** How often the chips re-read the clock. One second, because the only thing
  *  that changes between store notifications is a countdown measured in seconds. */
 export const REFRESH_MS = 1000;
 
-/** How long a state change stays loud: the toast's life and the chip
+/** How long a state change stays loud: the notice's life and the chip
  *  highlight's, in one number so they decay together. Long enough to notice
- *  mid-fight, short enough that nothing accumulates on screen. */
+ *  mid-fight, short enough that nothing accumulates on screen.
+ *
+ *  U3 note: the notice half is now `notice-lane.ts`'s, shared with the battle
+ *  moments — the brief's "one mechanism, not two". This number is passed to the
+ *  lane as this widget's TTL rather than being re-implemented beside it. */
 export const ANNOUNCE_MS = 7000;
+
+/** How long a victory objective keeps reading "contested" after its published
+ *  progress went backwards. A hold clock reset is a moment, not a state, and
+ *  the wire carries no flag for it — see `victoryLine`. */
+export const CONTESTED_MS = 20_000;
 
 /**
  * A chip's live sources, looked up by id at render time.
@@ -128,11 +140,13 @@ function mount(ctx: WidgetContext): void {
     overflow.className = 'nui-objectives__overflow';
     overflow.hidden = true;
 
-    const toasts = document.createElement('div');
-    toasts.className = 'nui-toasts nui-objectives__toasts';
-
-    root.append(stack, overflow, toasts);
+    root.append(stack, overflow);
     ctx.mount.append(root);
+
+    // U3: the ONE notice mechanism, shared with the battle moments. U1 grew its
+    // own toast queue here; it was lifted into `notice-lane.ts` rather than
+    // duplicated, so there is one set of rules about how long a notice lives.
+    const lane: NoticeLane = createNoticeLane(root, { defaultTtlMs: ANNOUNCE_MS });
 
     const board: Board = {
         byId: new Map(), placeById: new Map(), frame: 0,
@@ -140,23 +154,29 @@ function mount(ctx: WidgetContext): void {
     };
     const handles = new Map<number, { handle: DrilldownHandle; travellable: boolean }>();
     const announcer = createObjectiveAnnouncer();
-    const toastTimers = new Set<ReturnType<typeof setTimeout>>();
     let showAll = false;
+    /** Last progress seen per objective, so a hold clock RESET is observable —
+     *  the wire has no `contested` field and this is the only honest source. */
+    const lastProgress = new Map<number, number>();
+    /** id → wall clock until which it reads as contested. */
+    const contestedUntil = new Map<number, number>();
 
     overflow.addEventListener('click', () => { showAll = !showAll; render(); });
 
-    // ── the toast queue: one line, decaying ─────────────────────────────
-
+    // ── the notice: one line, decaying, in the shared lane ──────────────
+    //
+    // PLAIN TEXT and not a drilldown, unlike a battle moment: the objective's
+    // own rung-1 chip is already on screen one line up, and giving the notice a
+    // second chip for the same objective would put two affordances for one
+    // thing in the player's eye at once. The chip highlight (`is-announcing`)
+    // is what ties the two together.
     const toast = (event: ObjectiveEvent): void => {
-        const el = document.createElement('div');
-        el.className = 'nui-toast';
-        if (event.kind === 'complete') el.classList.add('nui-toast--award');
-        else if (event.kind !== 'appeared') el.classList.add('nui-toast--refusal');
-        el.dataset.objectiveId = String(event.id);
-        el.textContent = announcement(event.kind, event.record, board.placeById.get(event.id) ?? null);
-        toasts.append(el);
-        const timer = setTimeout(() => { el.remove(); toastTimers.delete(timer); }, ANNOUNCE_MS);
-        toastTimers.add(timer);
+        lane.push({
+            key: `objective:${event.id}:${event.kind}`,
+            text: announcement(event.kind, event.record, board.placeById.get(event.id) ?? null),
+            tone: event.kind === 'complete' ? 'good'
+                : event.kind === 'appeared' ? undefined : 'bad',
+        });
     };
 
     // ── reading the board ───────────────────────────────────────────────
@@ -193,6 +213,23 @@ function mount(ctx: WidgetContext): void {
         }
         for (const [id, until] of [...board.announcedUntil]) {
             if (until <= now) board.announcedUntil.delete(id);
+        }
+
+        // A hold clock that RESET is the one contested signal the wire gives
+        // us, and it only exists as a difference between two reads — the
+        // published `progress` going backwards. Watched here, where every read
+        // already passes.
+        for (const o of mine) {
+            const p = typeof o.progress === 'number' ? o.progress : null;
+            if (p === null) continue;
+            const prev = lastProgress.get(o.id);
+            if (prev !== undefined && p < prev - 0.01) {
+                contestedUntil.set(o.id, now + CONTESTED_MS);
+            }
+            lastProgress.set(o.id, p);
+        }
+        for (const [id, until] of [...contestedUntil]) {
+            if (until <= now) contestedUntil.delete(id);
         }
 
         return mine;
@@ -235,6 +272,23 @@ function mount(ctx: WidgetContext): void {
             el.classList.toggle('is-resolved', isResolved(o));
         }
 
+        // DESIGN-DRILLDOWN §6's one permitted leak: the victory condition's
+        // state, always visible beside the access point, drilling into the full
+        // board rather than carrying detail of its own. Filled from here
+        // because this widget is the one thing that parses the objective wire —
+        // a second reader is how two surfaces start disagreeing.
+        const victory = ranked.find((o) => o.victory === 1 && !isResolved(o))
+            ?? ranked.find((o) => o.victory === 1);
+        globalSurface.setSummaryLine(
+            victory
+                ? victoryLine(victory, board.placeById.get(victory.id) ?? null, {
+                    frame: board.frame,
+                    teamId: board.teamId,
+                    contested: contestedUntil.has(victory.id),
+                })
+                : null,
+        );
+
         const hidden = ranked.length - visible.length;
         overflow.hidden = ranked.length <= MAX_OBJECTIVE_CHIPS;
         overflow.textContent = showAll
@@ -265,10 +319,10 @@ function mount(ctx: WidgetContext): void {
     teardown = () => {
         unsubscribe();
         clearInterval(timer);
-        for (const t of toastTimers) clearTimeout(t);
-        toastTimers.clear();
+        lane.dispose();
         for (const { handle } of handles.values()) handle.dispose();
         handles.clear();
+        globalSurface.setSummaryLine(null);
         root.remove();
     };
 }
@@ -427,4 +481,108 @@ function actionsFor(ctx: WidgetContext, board: Board, id: number): DrilldownActi
     ];
 }
 
+// ───────────────────── rung 4: the Objectives tab ───────────────────────
+
+/**
+ * The FULL board, behind the one access point (DESIGN-DRILLDOWN.md §6).
+ *
+ * U1 capped the resting stack at `MAX_OBJECTIVE_CHIPS` and left the rest behind
+ * an overflow line that lengthened the stack in place — the seam its `render`
+ * marked for U3. This is where that line now goes: every objective, ranked the
+ * same way, drawn with the SAME `createDrilldown` spec as the chips, so an
+ * objective opened here reads exactly as it does at rung 1.
+ *
+ * It shares this file rather than importing half of it, for the same reason
+ * `event-log` shares `moment-hud.ts`: the board and the chips are one reading
+ * of one wire format, and two files would be two readings.
+ */
+const objectiveBoard: Widget = {
+    id: 'objective-board',
+    init(ctx: WidgetContext): void { mountBoard(ctx); },
+    dispose(): void { boardTeardown?.(); boardTeardown = null; },
+};
+
+let boardTeardown: (() => void) | null = null;
+
+function mountBoard(ctx: WidgetContext): void {
+    boardTeardown?.();
+
+    const root = document.createElement('div');
+    root.className = 'nui-board';
+    ctx.mount.append(root);
+
+    const board: Board = {
+        byId: new Map(), placeById: new Map(), frame: 0,
+        teamId: ctx.identity?.teamId, delegated: new Set(), announcedUntil: new Map(),
+    };
+    const handles = new Map<number, DrilldownHandle>();
+
+    const render = (): void => {
+        const params = uiStore.getGameRulesParams();
+        const regions = new Map(
+            namedEntityIndex.getByType('region').map((r) => [String(r.id), r]),
+        );
+        const resolvers = {
+            region: (key: string) => {
+                const r = regions.get(key);
+                return r ? { name: r.name, x: r.x, z: r.z } : undefined;
+            },
+            nearest: (at: { x: number; z: number }) => nearestPlace(at),
+        };
+        const mine = parseObjectives(params).filter((o) => visibleTo(o, board.teamId));
+        board.byId = new Map(mine.map((o) => [o.id, o]));
+        board.placeById = new Map(mine.map((o) => [o.id, resolvePlace(o, resolvers)]));
+        board.frame = uiStore.getGameFrame();
+        board.delegated = delegatedSet(ctx);
+
+        const ranked = rankObjectives(mine, {
+            frame: board.frame, playerId: ctx.identity?.playerId, changedIds: new Set(),
+        });
+        const wanted = new Set(ranked.map((o) => o.id));
+        for (const [id, handle] of handles) {
+            if (!wanted.has(id)) { handle.dispose(); handles.delete(id); }
+        }
+        if (ranked.length === 0) {
+            root.replaceChildren();
+            const empty = document.createElement('p');
+            empty.className = 'nui-log__empty';
+            empty.textContent = 'No objectives on the board.';
+            root.append(empty);
+            return;
+        }
+        root.querySelector('.nui-log__empty')?.remove();
+        for (const o of ranked) {
+            const place = board.placeById.get(o.id) ?? null;
+            let handle = handles.get(o.id);
+            if (!handle) {
+                handle = createDrilldown({
+                    ref: objectiveRefFor(o, place),
+                    summary: () => summaryFor(board, o.id),
+                    detail: (host) => renderDetail(host, board, o.id),
+                    actions: () => actionsFor(ctx, board, o.id),
+                });
+                handles.set(o.id, handle);
+            } else {
+                handle.refresh();
+            }
+            root.append(handle.el);
+            handle.el.classList.toggle('is-victory', o.victory === 1);
+            handle.el.classList.toggle('is-resolved', isResolved(o));
+        }
+    };
+
+    const unsubscribe = uiStore.subscribe(['gameRulesParams', 'teamRulesParams'], render);
+    const timer = setInterval(render, REFRESH_MS);
+    render();
+
+    boardTeardown = () => {
+        unsubscribe();
+        clearInterval(timer);
+        for (const handle of handles.values()) handle.dispose();
+        handles.clear();
+        root.remove();
+    };
+}
+
+export { objectiveBoard };
 export default objectiveHud;
