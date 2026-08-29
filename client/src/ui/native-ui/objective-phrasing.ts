@@ -56,6 +56,23 @@ function placeName(place: ObjectivePlace | null): string | null {
  *
  * `extract` reads its `stage` because securing a pickup and flying it out are
  * different jobs in different places, and the sim publishes which one is live.
+ *
+ * KNOWN GAP, measured live on `crossing_standoff` (U1's screenshot run) and
+ * deliberately not fixed here: a title names an objective by TYPE and PLACE, so
+ * two objectives of the same type on the same region get the SAME title. The
+ * basin really does carry three at once — the scripted victory objective
+ * (⬡300) plus two generated control objectives (⬡115 each) — and the stack
+ * rendered "Hold Raven Basin" three times, distinguishable only by their reward
+ * and progress numbers. Every row was truthful and none was a duplicate; they
+ * were simply not tellable apart at a glance, which is the complaint this whole
+ * step exists to answer.
+ *
+ * It is not fixed here because the fix is not a phrasing change: disambiguating
+ * needs to know what ELSE is on the stack, and a function that takes one record
+ * cannot. It belongs where the stack is assembled (`objective-hud.ts`'s
+ * `render`), qualifying only the titles that actually collide — adding "the
+ * war" or the scope to every title unconditionally would make the common case
+ * worse to fix the rare one.
  */
 export function shortName(o: ObjectiveRecord, place: ObjectivePlace | null): string {
     const named = placeName(place);
