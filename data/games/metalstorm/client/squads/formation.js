@@ -3,22 +3,26 @@
 // rotated to the streamed heading at use time.
 // See PLAN-metalstorm-squads.md §9.
 //
-// CONVENTION, and a known defect (2026-08-29). `slotToWorld` applies exactly
-// the rotation `SquadRenderBackend.writeYawMatrix` applies to the mesh, and in
-// that frame the unit's forward is local −Z (glTF-native; see the
-// heading-convention note in steering.js). The templates below, however, were
-// authored against the older +Z-forward reading — the same mistake that made
-// every squad member render 180° reversed (fixed in steering.js/member.js/
-// soa-kernel.js). So `column`'s member 0 and `wedge`'s "lead" currently sit at
-// the REAR of the formation, not the front.
+// CONVENTION (settled 2026-08-29). `slotToWorld` applies exactly the rotation
+// `SquadRenderBackend.writeYawMatrix` applies to the mesh, and in that frame
+// the unit's forward is local −Z (glTF-native; see the heading-convention note
+// in steering.js). So in these templates −Z is AHEAD of the squad centre and
+// +Z is behind it: `column`'s member 0 and `wedge`'s lead carry the most
+// negative z, and the trailing ranks count up toward +z.
 //
-// NOT fixed here on purpose: re-signing the z offsets moves every member, and
-// the resulting trajectories push `squad-soa-parity.test.js` past its
-// hand-tuned f32 OO-vs-SoA residual bars (0.005 position / 0.001 heading).
-// That is tolerance sensitivity rather than a new divergence — both paths
-// share these templates — but widening a deliberately tuned parity bar to
-// wave through a formation change is not something to do inside a facing fix.
-// Do it as its own change, with the parity harness re-baselined.
+// This was wrong until now. The templates were authored against the older
+// +Z-forward reading — the same mistake that made every squad member render
+// 180° reversed (fixed in steering.js/member.js/soa-kernel.js) — so a column's
+// lead sat at the REAR. That facing fix deliberately left the slot geometry
+// alone, because re-signing the z offsets moves every member and the resulting
+// trajectories shift `squad-soa-parity.test.js`'s hand-tuned f32 OO-vs-SoA
+// residual bars. Done here as its own change, with the parity harness
+// re-baselined against a re-measured residual (see that file's re-baseline
+// note) rather than by widening a tolerance.
+//
+// The change was exactly a mirror: `column` and `wedge` slot z negated,
+// nothing else. `line` sits at z 0 and `blob` is a disc with no forward
+// semantics, so neither moves — pinned by `heading-convention.test.js`.
 
 /**
  * Generate `count` local slot offsets for a formation type.
@@ -43,22 +47,23 @@ function line(n, r) {
   return out;
 }
 
-// Single file down local Z (depth).
+// Single file down local Z (depth), lead member FIRST: member 0 takes the most
+// forward slot (−r) and each subsequent member falls in behind it toward +z.
 function column(n, r) {
   const out = [];
   const spacing = (2 * r) / Math.max(1, n);
-  for (let i = 0; i < n; i++) out.push({ x: 0, z: r - i * spacing });
+  for (let i = 0; i < n; i++) out.push({ x: 0, z: -r + i * spacing });
   return out;
 }
 
-// V / arrowhead: lead member forward, wings trailing.
+// V / arrowhead: lead member forward (−z), wings trailing back toward +z.
 function wedge(n, r) {
-  const out = [{ x: 0, z: r }];
+  const out = [{ x: 0, z: -r }];
   let i = 1, depth = 1;
   while (i < n) {
     const off = depth * (r / Math.max(1, n / 2));
-    out.push({ x: -off, z: r - off });
-    if (i + 1 < n) out.push({ x: off, z: r - off });
+    out.push({ x: -off, z: off - r });
+    if (i + 1 < n) out.push({ x: off, z: off - r });
     i += 2; depth++;
   }
   return out.slice(0, n);
@@ -84,8 +89,8 @@ function blob(n, r) {
 /**
  * Rotate a local slot into world space around a centroid. This is the SAME
  * rotation the renderer applies to the mesh, so a slot and the hull drawn on
- * it always agree. headingY in radians; forward is local −Z (RH, glTF-native)
- * — see the module header for the templates' known mismatch with that.
+ * it always agree. headingY in radians; forward is local −Z (RH, glTF-native),
+ * matching the templates above.
  */
 export function slotToWorld(slot, cx, cz, headingY, out) {
   const s = Math.sin(headingY), c = Math.cos(headingY);
