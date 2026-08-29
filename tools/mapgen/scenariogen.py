@@ -2339,9 +2339,45 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
             if hops > best or (hops == best and pair < best_pair):
                 best, best_pair = hops, pair
     if best_pair is None:
-        raise Rejected(
-            f"{map_id}: no two `home` regions are connected in the region "
-            f"graph, so no two sides could ever reach each other.")
+        # THE HOP WALK ABOVE IS A CHOICE, NOT A GATE — and until now its
+        # inability to choose was the module's one REFUSAL decided by
+        # `hop_distances` alone, in flat contradiction of gate_reachability's
+        # own docstring ("checked against the passability mask, never against
+        # the region graph ... that distinction is the entire lesson of
+        # Meridian Basin"). An archipelago whose `home` regions each sit in
+        # their own graph component was thrown out HERE, several statements
+        # before the mask was ever consulted, so `--player` — whose entire job
+        # is "islands, a river or a strait are legitimate, the crossing is the
+        # player's transport problem" — never reached the gate it relaxes.
+        # Skerry Reach is the measured case: 118 regions, 86 graph components,
+        # all 8 `home` regions isolated. It is the ONLY shipped map that
+        # publishes a road `crossings` table, so this line is why no generated
+        # war had ever staged a bridge span (PLAN-maps §2m ⛔ (b)).
+        #
+        # Choosing a pair anyway is not a relaxation: `gate_reachability` runs
+        # a few statements below with `mutual = test_scenario`, so a test
+        # scenario on a genuinely split map is still refused — by the mask, and
+        # with a message that names the movement class that fails instead of
+        # one about a graph.
+        #
+        # `len(homes) < 2` is the one case that stays a refusal in both modes:
+        # there is no pair to choose from at all, which is not a map shape the
+        # mask could rescue. (Reachable only via `--sides 1` on a one-`home`
+        # map; the `len(homes) < sides` check above catches every other route.)
+        if len(homes) < 2:
+            raise Rejected(
+                f"{map_id}: no two `home` regions are connected in the region "
+                f"graph, so no two sides could ever reach each other.")
+        # Farthest apart on the GROUND instead of in the graph — the same
+        # intent as the hop walk (do not start the armies adjacent), expressed
+        # in the only metric a graph-split map still has. Squared distance, so
+        # no float sqrt can reorder two pairs that tie; the key pair breaks the
+        # tie, never dict order.
+        best_pair = min(
+            (-((region_centre(a)[0] - region_centre(b)[0]) ** 2
+               + (region_centre(a)[1] - region_centre(b)[1]) ** 2),
+             tuple(sorted((a["key"], b["key"]))))
+            for i, a in enumerate(homes) for b in homes[i + 1:])[1]
 
     by_key = {r["key"]: r for r in regions}
     side_regions = [by_key[best_pair[0]], by_key[best_pair[1]]]
@@ -2391,12 +2427,29 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # side 0 happened to land on) would silently exclude every objective on
     # every other island, and the picker would report "no winnable objective"
     # about a map full of them. Chosen on value alone instead.
-    reach = [hop_distances(regions, r["key"]) for r in side_regions]
+    #
+    # THE HOP FILTER THAT USED TO BE HERE MADE EXACTLY THE MISTAKE THAT
+    # PARAGRAPH FORBIDS, and it is gone. `any(r["key"] not in hop_distances(...))`
+    # excluded every region the region GRAPH could not walk to from both
+    # landing zones, so on a split map it emptied the candidate list and the
+    # run died as "no winnable objective" — a claim about a `neighbors` list
+    # dressed as a claim about the ground.
+    #
+    # Removing it costs the strict mode nothing, because the mask already made
+    # the same check twice and better: `region_anchor(..., want_comp)` below
+    # admits only regions in the sides' SHARED mask component, and the second
+    # `gate_reachability` call (with the victory anchor in the point set)
+    # re-states the invariant over the shipped positions. Measured rather than
+    # argued — victory region and side regions are unchanged on all three
+    # acceptance maps at seeds 1/7/42, and meridian_basin is still refused with
+    # the same HEAVY-class message:
+    #
+    #   scorched_crossing_v2.4  raven_basin    amber_row / iron_bend
+    #   wanderlust2.1           vesper_basin   dusk_reach / south_crossing
+    #   techno_lands_..._wide   bitter_shelf   dusk_flat / fallow_drift
     victory = None
     for r in sorted(regions, key=lambda r: (-r["value"], r["key"])):
         if "home" in r["tags"] or "island" in r["tags"]:
-            continue
-        if any(r["key"] not in d for d in reach):
             continue
         if region_anchor(terrain, r, want_comp) is None:
             continue
@@ -2406,9 +2459,10 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
             victory = r
             break
     if victory is None:
+        # The message no longer mentions the region graph, because the graph is
+        # no longer consulted here: what emptied the list is the ground.
         raise Rejected(
-            f"{map_id}: no non-home region is both reachable in the region "
-            f"graph from every landing zone and reachable on the ground for "
+            f"{map_id}: no non-home region is reachable on the ground for "
             f"{', '.join(terrain.classes)} — there is no ground both armies "
             f"could contest, so this war has no winnable objective.")
     victory_anchor = region_anchor(terrain, victory, want_comp)
@@ -3003,6 +3057,12 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         # shape.
         "test_scenario": test_scenario,
         "mutually_reachable": test_scenario,
+        # Which `home` regions the sides were seated in. Reported because the
+        # choice is not always the hop walk's: on a map whose region graph has
+        # no connected home pair the pairing falls back to ground distance, and
+        # "the two armies did not start adjacent" is then a claim about this
+        # list rather than about a number of hops nobody can recount.
+        "side_regions": [r["key"] for r in side_regions],
         "victory_region": victory["key"],
         "hostile_team": hostile_team,
         "clusters": [(c["kind"], c["region"]["key"], c["owner"])
@@ -3820,13 +3880,18 @@ def main(argv=None):
                          "per side. Explicit knobs still win, so "
                          "`--coverage --towns 5` means five towns.")
     ap.add_argument("--player", action="store_true",
-                    help="generate for a HUMAN: drop the mutual-ground-"
-                         "reachability gate, so islands, rivers and straits "
-                         "produce a scenario instead of a refusal. Without it "
-                         "this is a TEST scenario and the gate applies — the "
-                         "safe direction, since a machine-run war between two "
-                         "armies that cannot meet never resolves and nobody "
-                         "is watching.")
+                    help="generate for a HUMAN: drop the two gates that refuse "
+                         "a SPLIT map — mutual ground reachability, and the "
+                         "victory region's graph-reachability filter — so "
+                         "islands, rivers and straits produce a scenario "
+                         "instead of a refusal. Nothing that grades the actual "
+                         "GROUND is relaxed: a placement on impassable "
+                         "terrain, and a home region with no ground its own "
+                         "roster can move on, are still refused in both modes. "
+                         "Without it this is a TEST scenario and both apply — "
+                         "the safe direction, since a machine-run war between "
+                         "two armies that cannot meet never resolves and "
+                         "nobody is watching.")
     ap.add_argument("--game-dir", default=None,
                     help="data/games/metalstorm (default: derived from map-dir)")
     ap.add_argument("--out", default=None,
