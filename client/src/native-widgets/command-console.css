@@ -13,13 +13,34 @@
  * same log — the geometry is already sized for it.
  */
 
+/*
+ * U4: the command line is SUMMONED (`/`), not docked. It carries its own
+ * frame now that it is no longer wrapped in loader panel chrome — an untitled
+ * widget mounts bare, and a titled one would put a permanent "Command ▾"
+ * header at the bottom of the resting HUD, which is the resident panel
+ * DESIGN-DRILLDOWN §7 asked this step to remove.
+ */
 .command-console {
     display: flex;
     flex-direction: column;
     gap: 6px;
     width: 560px;
     max-width: calc(100vw - 32px);
+    padding: var(--nui-pad);
+    background: var(--nui-bg);
+    border: 1px solid var(--nui-border);
+    border-top-color: var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45);
+    color: var(--nui-text);
+    font: var(--nui-font);
+    pointer-events: auto;
 }
+
+/* Dismissed. `display: none` and not opacity: a transparent command line is
+   still a tab stop and still takes the click that was meant for the unit
+   underneath it. */
+.command-console--hidden { display: none; }
 
 /* ── Transcript ─────────────────────────────────────────────────────── */
 
@@ -239,4 +260,16 @@
 
 .command-console--listening .cc-input {
     border-color: color-mix(in srgb, var(--nui-bad) 55%, var(--nui-border));
+}
+
+/* ── The U4 confirm gate ────────────────────────────────────────────────
+   The reading of a focus-bound order, with `Do it` / `Cancel`. It uses the
+   clarification chips as they stand rather than a second chip mechanism: from
+   the player's seat this IS a question ("did I understand you?"), and the one
+   thing it needs that a question does not is for the affirmative to look like
+   the affirmative. */
+.cc-chip--yes:not(.cc-chip--dead) {
+    border-color: var(--nui-accent);
+    color: var(--nui-text);
+    font-weight: 500;
 }

@@ -159,6 +159,30 @@ export interface ResolverDeps {
     groupPosition?: (groupId: number) => { x: number; z: number } | undefined;
     /** The group the player has selected, for a `selection` subject. */
     selectionGroupId?: number | null;
+    /**
+     * What the selection MEANS, from `focusModel.orderSubjects()` (U4).
+     *
+     * Strictly richer than `selectionGroupId`, which is a single id or null and
+     * therefore answers "nothing is selected" to three completely different
+     * boards: an empty selection, four of a six-tank group, and two whole
+     * groups at once. A player looking at six selected tanks being told
+     * "nothing is selected" is the kind of answer that makes a command line
+     * feel broken.
+     *
+     * With this present the `selection` subject can say which of the three it
+     * is, and — the case that matters — can ASK when the selection spans
+     * several groups, instead of refusing an order the player has every reason
+     * to think is unambiguous.
+     *
+     * Absent ⇒ the M0 behaviour on `selectionGroupId` alone, unchanged.
+     */
+    selectionSubjects?: readonly {
+        label: string;
+        groupId?: number;
+        partial: boolean;
+        /** Units covered, for agreement in the refusal ("9 units ARE"). */
+        count?: number;
+    }[];
 }
 
 /** What a class-count subject resolved to: the groups to fan out over. */
@@ -278,10 +302,8 @@ export class NLResolver {
 
             case 'selection': {
                 const selected = this.deps.selectionGroupId;
-                if (selected == null) {
-                    return refuse('Nothing is selected — name a group, or select one first.');
-                }
-                return ok({ type: 'group', groupId: selected });
+                if (selected != null) return ok({ type: 'group', groupId: selected });
+                return this.selectionFromFocus();
             }
 
             // groupId 0 = the compile table's condition-scoped subject: the sim
@@ -298,6 +320,85 @@ export class NLResolver {
             case 'class-count':
                 return refuse('internal: class-count subjects resolve through resolveClassCount');
         }
+    }
+
+    /**
+     * "2 tank squads" — the phrase a class-count subject is CALLED.
+     *
+     * Public because the interpretation echo (`nl-interpretation.ts`) needs the
+     * same words this resolver puts in its own clarify question, and because
+     * the label is the one part of a class-count subject the echo may safely
+     * state: which SQUADS it fans out to depends on the target position, so an
+     * echo that named them could name different ones than the executor picks.
+     *
+     * Falls back to the player's own phrase when the class is unknown — the
+     * caller is about to refuse it by name anyway, and an echo is not the place
+     * to discover that.
+     */
+    classCountLabel(subject: Extract<NLSubject, { type: 'class-count' }>): string {
+        const match = this.deps.vocabulary.lookup(subject.class);
+        const plural = match?.label ?? subject.class;
+        return subject.count === 1
+            ? `1 ${singularish(plural)}`
+            : `${subject.count} ${plural}`;
+    }
+
+    /**
+     * What "them" means when the selection is not exactly one whole group.
+     *
+     * Three boards, three different honest answers, where there used to be one
+     * refusal:
+     *
+     *  - **several groups selected** — ASK. The player selected two armies and
+     *    said "pull them back"; the sentence is one order per force (envelope
+     *    rule 6) and which one is a question with an obvious answer set. This
+     *    is the one place a `selection` subject can clarify, and the options
+     *    are group names, so the answer patches straight back into an
+     *    `entity-ref` subject with no round trip.
+     *  - **part of one group selected** — REFUSE, by name. Widening a partial
+     *    selection to the whole squad would move units the player did not
+     *    select, and narrowing an order to "the four you have highlighted" is
+     *    not a thing a directive can express (`GroupDirective` takes a group,
+     *    not a roster). Say which group, and say how many of it are selected.
+     *  - **loose units only** — REFUSE, by name. Directives address groups, so
+     *    ungrouped units genuinely cannot be ordered this way; naming the
+     *    fix ("name this group …") is what makes that actionable rather than
+     *    a dead end.
+     */
+    private selectionFromFocus(): Resolution<CommandSubject> {
+        const subjects = this.deps.selectionSubjects ?? [];
+        if (subjects.length === 0) {
+            return refuse('Nothing is selected — name a group, or select one first.');
+        }
+
+        const groups = subjects.filter((s) => s.groupId !== undefined);
+
+        if (groups.length > 1) {
+            return {
+                kind: 'clarify',
+                question: `You have ${groups.map((g) => g.label).join(' and ')} selected — which one?`,
+                options: groups.slice(0, MAX_CLARIFY_NAMES).map((g) => g.label)
+                    .concat(CANCEL_OPTION),
+                patchable: true,
+            };
+        }
+
+        if (groups.length === 1) {
+            const only = groups[0];
+            if (!only.partial) return ok({ type: 'group', groupId: only.groupId! });
+            return refuse(
+                `Only part of ${only.label} is selected — select the whole squad, ` +
+                `or name it in the order.`);
+        }
+
+        // Agreement follows the COUNT of units, not the count of subjects: one
+        // anonymous ref covering nine units reads "9 units", and "9 units is"
+        // is the same defect U3 fixed in "1 tank squad were destroyed".
+        const loose = subjects[0];
+        const plural = subjects.length > 1 || (loose.count ?? 1) > 1;
+        return refuse(
+            `${loose.label} ${plural ? 'are' : 'is'} not in a squad, ` +
+            `and orders go to squads — try "name this group <callsign>" first.`);
     }
 
     /**
@@ -335,9 +436,7 @@ export class NLResolver {
         const clauses = this.classClauses(phrase, subject.scale);
         if (!clauses) return refuse(`"${phrase}" isn't a unit class I know.`);
 
-        const label = subject.count === 1
-            ? `1 ${singularish(match.label)}`
-            : `${subject.count} ${match.label}`;
+        const label = this.classCountLabel(subject);
 
         const candidates = this.deps.groups.filter((g) => {
             const dominant = this.dominantClass(g);

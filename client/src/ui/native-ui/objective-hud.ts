@@ -114,6 +114,14 @@ export function objectiveRefFor(o: ObjectiveRecord, place: ObjectivePlace | null
         id: o.id,
         label: shortName(o, place),
         position: place ? { x: place.x, z: place.z } : undefined,
+        // The NAME of where it is, separate from the title — story 4's "defend
+        // it" resolves against this. It cannot use the title: the entity index
+        // holds this objective as "Hold: Raven Basin" while the chip reads
+        // "Hold Raven Basin", and a sentence that binds to the title lands on
+        // a name the resolver has never heard of. `approximate` places are
+        // still named ("near Storm Sound" is Storm Sound); the hedge is in the
+        // phrasing, not in which place it is.
+        ...(place?.name ? { place: place.name } : {}),
         data: { objectiveType: o.type, victory: o.victory === 1, scope: o.scope },
     };
 }

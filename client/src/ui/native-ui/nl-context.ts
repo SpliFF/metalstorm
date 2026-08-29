@@ -34,6 +34,7 @@ import type { ClassVocabulary } from './class-vocabulary.js';
 import type { Census } from './query-engine.js';
 import type { NamedEntity, EntityType } from './named-entity-index.js';
 import type { OrgGroupSummary, DirectiveSummary } from './ui-store.js';
+import type { NLContextFocus } from './nl-focus.js';
 
 // ───────────────────────────────── the shape ───────────────────────────────
 
@@ -100,6 +101,25 @@ export interface NLContext {
     /** Panel ids a `ui` action may name. */
     panels: string[];
     self: NLContextSelf;
+    /**
+     * What the player is looking at right now (battle-clarity U4).
+     *
+     * This is the field that makes "attack that town" an order rather than a
+     * refusal, and it is why it is worth its bytes on every request: the rest
+     * of this payload describes the WORLD, and a sentence full of pronouns is
+     * not about the world, it is about the player's attention. Without it the
+     * model has `self.selection: 4` — a count — and no way to know that the
+     * four are 3rd Tanks, or that an objective briefing is open.
+     *
+     * Names, kinds and place names only, exactly like everything else here;
+     * `focus-model.ts`'s `nlFocus()` enforces that at the source rather than
+     * this module trimming ids off afterwards.
+     *
+     * Omitted when the HUD has no focus model wired (a harness, a fixture
+     * run) — absent means "unknown", which the prompt treats the same way it
+     * treats an empty selection.
+     */
+    focus?: NLContextFocus;
 }
 
 // ─────────────────────────────────── caps ──────────────────────────────────
@@ -131,6 +151,8 @@ export interface BuildContextDeps {
     mapName?: string;
     /** Spendable authority, when the rulesParam is readable. */
     authority?: number;
+    /** `focusContextFor(focusModel.nlFocus())`. Omitted ⇒ no `focus` field. */
+    focus?: NLContextFocus;
 }
 
 /**
@@ -225,6 +247,7 @@ export function buildNLContext(deps: BuildContextDeps): NLContext {
         classes,
         panels: [...deps.panelIds].sort(),
         self,
+        ...(deps.focus ? { focus: deps.focus } : {}),
     };
 }
 

@@ -81,6 +81,19 @@ export interface FocusRef {
     position?: { x: number; z: number };
     /** Sim unit ids this ref covers. Empty for pure places. */
     unitIds?: readonly number[];
+    /**
+     * The NAME of the place this ref is at, when one is known — "Raven Basin"
+     * for the objective whose chip reads "Hold Raven Basin".
+     *
+     * A name, deliberately, not the `position` above: this is what story 4's
+     * "defend it" binds to, and the NL envelope is name-addressed, so a
+     * position here would be unusable at the one seam it exists for. It has to
+     * be a name the entity index also holds, because that is what the resolver
+     * will look up — an objective's own TITLE is not (the index calls it
+     * "Hold: Raven Basin"), which is exactly why this field is separate from
+     * `label` rather than being derived from it.
+     */
+    place?: string;
     /** Kind-specific payload the detail view reads. Never rendered generically. */
     data?: Record<string, unknown>;
 }
@@ -197,6 +210,64 @@ export function resolveSelectionSubjects(
 type Listener = (state: FocusState) => void;
 
 /**
+ * One focus reference as the natural-language layer sees it: a kind, a name,
+ * and — when the thing is somewhere — the NAME of that somewhere.
+ *
+ * No ids and no coordinates, for the reason `nl-context.ts`'s header gives at
+ * length: the envelope that comes back is name-addressed, `nl-resolver.ts` is
+ * what turns a name into an id under rules the local path shares, and an id
+ * handed to the model is a resolver bypass wearing a helpful face.
+ */
+export interface FocusBrief {
+    kind: FocusKind;
+    label: string;
+    /** `FocusRef.place` — what "defend IT" binds to. */
+    place?: string;
+}
+
+/** What `nlFocus()` answers. The whole of story 4's interpretation context. */
+export interface NLFocusView {
+    /** The pronoun antecedent: `drilled > the single subject > null`. */
+    primary: FocusBrief | null;
+    subjects: FocusBrief[];
+    drilled: FocusBrief | null;
+    openSurfaces: string[];
+    selectionCount: number;
+}
+
+/**
+ * The selection as an ORDER path sees it — ids included, and therefore never
+ * shipped anywhere near the model.
+ *
+ * Separate from `nlFocus()` on purpose. `nlFocus` answers "what may a sentence
+ * call this"; this answers "which group would an order actually move", which
+ * needs the id and needs to know whether the whole roster is selected. The
+ * `partial` flag is the reason it is not just `matchSelectionToGroup`: a
+ * player with four of six tanks selected is LOOKING at 3rd Tanks (so rung 1
+ * says so) but has not selected 3rd Tanks (so an order must not quietly move
+ * the other two).
+ */
+export interface FocusOrderSubject {
+    label: string;
+    /** The org-group id, when this subject is a group. Absent ⇒ loose units. */
+    groupId?: number;
+    /** Some of the group's roster is selected, not all of it. */
+    partial: boolean;
+    /** How many units this subject covers. Carried so a sentence about it can
+     *  agree with it: "9 units ARE not in a squad", "1 unit IS". A refusal
+     *  that counts the subjects instead says "is" for all nine — the same
+     *  agreement defect U3 fixed in the battle-moment wording. */
+    count: number;
+}
+
+/** `place`, for a ref that has one either explicitly or by being one. */
+function placeNameOf(ref: FocusRef): string | undefined {
+    if (ref.place) return ref.place;
+    if (ref.kind === 'town' || ref.kind === 'area') return ref.label;
+    return undefined;
+}
+
+/**
  * The session's focus state.
  *
  * Every mutator collapses to "compute the next state, notify if it differs".
@@ -307,14 +378,16 @@ export class FocusModel {
      * there IS no unambiguous "it", and saying so is the honest answer — the
      * clarify path exists for exactly this.
      */
-    nlFocus(): {
-        primary: { kind: FocusKind; label: string } | null;
-        subjects: { kind: FocusKind; label: string }[];
-        drilled: { kind: FocusKind; label: string } | null;
-        openSurfaces: string[];
-        selectionCount: number;
-    } {
-        const brief = (r: FocusRef) => ({ kind: r.kind, label: r.label });
+    nlFocus(): NLFocusView {
+        const brief = (r: FocusRef): FocusBrief => ({
+            kind: r.kind,
+            label: r.label,
+            // A place name, never a position — see `FocusRef.place`. `town`
+            // and `area` refs ARE their place, so they supply it themselves
+            // rather than every producer having to remember to set the field
+            // to the string it just put in `label`.
+            ...(placeNameOf(r) ? { place: placeNameOf(r)! } : {}),
+        });
         const drilled = this.state.drilled ? brief(this.state.drilled) : null;
         const subjects = this.state.subjects.map(brief);
         return {
@@ -324,6 +397,29 @@ export class FocusModel {
             openSurfaces: [...this.state.openSurfaces],
             selectionCount: this.state.unitIds.length,
         };
+    }
+
+    /**
+     * What the selection means to an ORDER (ids included — main-thread only).
+     *
+     * `resolveSelectionSubjects` has already decided what the raw id list
+     * means; this only projects it. That matters more than it looks: before
+     * story 4 the order path asked `matchSelectionToGroup` and the HUD asked
+     * the focus model, and the two agreed only because they implement the same
+     * rule twice. One reader of one resolution is how they stay agreed.
+     *
+     * Loose units come back with no `groupId`: they are a real selection the
+     * player can see, and an order path that dropped them would silently
+     * answer "nothing is selected" to someone looking at six selected tanks.
+     */
+    orderSubjects(): FocusOrderSubject[] {
+        return this.state.subjects.map((s) => ({
+            label: s.label,
+            ...(s.kind === 'squad' && typeof s.id === 'number' ? { groupId: s.id } : {}),
+            partial: s.data?.partial === true,
+            count: s.unitIds?.length
+                ?? (typeof s.data?.selectedCount === 'number' ? s.data.selectedCount : 1),
+        }));
     }
 
     /** One line of prose for a transcript echo or a debug readout. */

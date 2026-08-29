@@ -1,0 +1,104 @@
+{
+  "_comment": "battle-clarity U4 — sentences that only mean something because of what the player is looking at. Every fixture runs on `basin-focus` (Chimera Squad selected, the objective 'Hold Fallow Gate' drilled open) and every `expected` envelope names the RESOLVED thing: rule 10 tells the model to write the name it read out of `focus`, never the pronoun the player said. Two of them are the cases where the honest answer is NOT an order — a pronoun whose antecedent is a force cannot be a place, and a sentence with no antecedent at all refuses rather than guessing. The offline half of the same behaviour (which produces the pronoun and lets `nl-focus.ts` bind it) is covered in nl-client.test.ts and nl-focus.test.ts; these fixtures are what a scored eval run measures the MODEL against.",
+  "fixtures": [
+    {
+      "name": "\"defend it\" with an objective drilled — the objective's place, not its title",
+      "utterance": "defend it",
+      "context": "basin-focus",
+      "expected": {
+        "say": "Chimera Squad is defending Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": { "type": "selection" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "GroupDirective", "groupId": 1 }],
+        "saysLike": ["directive issued"]
+      }
+    },
+    {
+      "name": "\"pull them back to Osprey Fen\" — a subject pronoun is the selection",
+      "utterance": "pull them back to Osprey Fen",
+      "context": "basin-focus",
+      "expected": {
+        "say": "Chimera Squad is pulling back to Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": { "type": "selection" },
+              "target": { "type": "entity-ref", "name": "Osprey Fen" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "GroupDirective", "groupId": 1 }],
+        "saysLike": ["directive issued"]
+      }
+    },
+    {
+      "name": "\"attack that town\" — the pronoun wins over the name hiding inside it",
+      "utterance": "attack that town",
+      "context": "basin-focus",
+      "expected": {
+        "say": "Chimera Squad is attacking Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": { "type": "selection" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "GroupDirective", "groupId": 1 }],
+        "saysLike": ["directive issued"]
+      }
+    },
+    {
+      "name": "\"show me that\" — a camera pronoun goes to the same place, and commits nothing",
+      "utterance": "show me that",
+      "context": "basin-focus",
+      "ports": true,
+      "expected": {
+        "say": "Framing Fallow Gate.",
+        "actions": [
+          { "kind": "camera", "camera": { "op": "focus", "targetRef": "Fallow Gate" } }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "saysLike": ["Fallow Gate"]
+      }
+    },
+    {
+      "name": "a pronoun whose antecedent is a FORCE is not a place — refuse, by name",
+      "utterance": "defend Chimera Squad",
+      "context": "basin-focus",
+      "expected": {
+        "actions": [
+          {
+            "kind": "refuse",
+            "reason": "\"Chimera Squad\" is one of your forces, not a place — name where you want them to defend."
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refuses": true
+      }
+    }
+  ]
+}

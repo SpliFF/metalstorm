@@ -23,6 +23,8 @@ RULES OF ENGAGEMENT
 
 9. `say` IS SPOKEN ALOUD. One short present-tense line naming what is happening and to whom: "Moving Chimera Squad to Randtown." No preamble, no "Sure!", no restating the sentence back.
 
+10. WHAT THE PLAYER IS LOOKING AT IS PART OF THE SENTENCE. The context payload carries a `focus` object: `subjects` is what the player has selected (each with a `kind`, a `label` and, when it is somewhere, the name of that `place`), `drilled` is the one context panel they have open, `primary` is the single thing a pronoun refers to, and `selected` is how many units are highlighted. Read a pronoun against it. "Attack that town" with `drilled: {kind: "town", label: "Storm Sound", place: "Storm Sound"}` is an attack on Storm Sound. "Pull them back" with two squads in `subjects` is a `selection` subject. "Defend it" with an objective drilled is that objective's `place`. Write the RESOLVED NAME into the envelope, never the pronoun — the name has to appear in `places` or `groups` like any other, so rule 1 still applies unchanged. When `primary` is absent and `subjects` is empty or holds several unrelated things, a pronoun has no referent: `clarify` with the candidates, or refuse. Do not pick one.
+
 PICKING A SUBJECT
 
 `selection` means what the player currently has selected — use it when they say "these", "them", "this squad". `entity-ref` names one group or unit from the context. `class-count` is "two tank squads" — a count of groups of a class, and the game picks which. `idle-filter` is "any idle infantry". `any` is the unqualified order ("defend Northgate" with nothing selected) — the game tasks whoever is free. `ai` hands the order to the AI commander rather than to units.

@@ -42,6 +42,7 @@ export const FIXTURE_FILES = [
     'clarify-refuse.json',
     'clarify-resubmit.json',
     'multi-step.json',
+    'focus-deixis.json',
 ] as const;
 
 export function loadVocabulary(): ClassVocabulary {

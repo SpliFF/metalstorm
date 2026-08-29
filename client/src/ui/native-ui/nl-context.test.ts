@@ -17,6 +17,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
     buildNLContext, MAX_PLACES, MAX_GROUPS, type BuildContextDeps,
 } from './nl-context.js';
@@ -213,6 +216,46 @@ describe('the caps hold on a huge map', () => {
             groups: [group({ name: '' }), group({ groupId: 2, name: 'Real Squad' })],
         }));
         expect(ctx.groups.map((g) => g.n)).toEqual(['Real Squad']);
+    });
+});
+
+describe('the focus rides along (U4)', () => {
+    const focus = {
+        primary: { kind: 'objective' as const, label: 'Hold Raven Basin', place: 'Raven Basin' },
+        subjects: [{ kind: 'squad' as const, label: '3rd Tanks' }],
+        drilled: { kind: 'objective' as const, label: 'Hold Raven Basin', place: 'Raven Basin' },
+        surfaces: ['command-console'],
+        selected: 3,
+    };
+
+    it('is carried verbatim, and still carries no ids', () => {
+        const ctx = buildNLContext(deps({ focus }));
+        expect(ctx.focus).toEqual(focus);
+        // Same rule as everything else in this payload: a name the model can
+        // echo is a name the resolver will vet; an id is a bypass.
+        expect(JSON.stringify(ctx)).not.toContain('"id"');
+    });
+
+    it('is OMITTED when the HUD has no focus model wired', () => {
+        // Absent means "unknown", which the prompt treats the way it treats an
+        // empty selection. A `focus: null` would be a claim nothing can make.
+        expect(buildNLContext(deps())).not.toHaveProperty('focus');
+    });
+
+    it('the shipped prompt tells the model what to do with it', () => {
+        // The field and the rule that reads it ship in different files (this
+        // payload, and data/games/metalstorm/ui/nl-instructions.md, which BOTH
+        // the C++ proxy and tools/nl-eval load). A field with no rule is bytes
+        // paid for on every request and read by nobody.
+        const instructions = readFileSync(
+            join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..',
+                 'data', 'games', 'metalstorm', 'ui', 'nl-instructions.md'),
+            'utf8',
+        );
+        expect(instructions).toContain('WHAT THE PLAYER IS LOOKING AT IS PART OF THE SENTENCE');
+        for (const field of ['`focus`', 'subjects', 'drilled', 'primary', 'place']) {
+            expect(instructions, field).toContain(field);
+        }
     });
 });
 
