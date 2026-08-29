@@ -10,9 +10,53 @@ export const DEFAULT_CONFIG = {
   // catch up; values are in world units/sec, scaled by squad speed at runtime.
   memberSpeedMultiplier: 1.25,
   arrivalRadius: 12,             // elmos: ease-in distance to a slot
+  // FLOOR ONLY since unit-motion M2. A def that declares `member_clearance`
+  // gets `clearance * separationClearanceMul` instead; this is what a def with
+  // no declared footprint still gets. 14 elmos is 1.75 m at the shipped world
+  // scale (8 elmos = 1 m, `1cfafc337e`) — smaller than every unit in the game,
+  // which is why it was never the thing holding members apart.
   separationRadius: 14,          // elmos: push apart below this member spacing
   separationWeight: 1.4,         // overall separation gain vs arrival/leash
   arrivalWeight: 1.0,
+
+  // --- Member footprint / spacing (unit-motion M2, USER-REPORTED 2026-08-29)
+  //
+  // A def declares its member's ground clearance RADIUS in elmos via
+  // `customparams.member_clearance` (units/_builder.lua derives it from the
+  // class's authored model size at 8 elmos = 1 m). Two things read it, both at
+  // squad-construction time — neither adds per-frame work:
+  //
+  //  1. the formation radius floor (formation.js `packedFormationRadius`), so
+  //     slots are at least `2 * clearance * memberSpacingMul` apart;
+  //  2. this squad's separation radius, so the steering term that keeps
+  //     members and other squads apart engages at the size of the actual hull
+  //     instead of a flat 14 elmos.
+  //
+  // A def that declares nothing gets `minSpacing = 0` and `separationRadius`
+  // above — i.e. exactly the pre-M2 numbers. That is the null control the
+  // `member-spacing.bench.ts` arm leans on.
+
+  // Slot spacing = 2 * member_clearance * this. 1.15 leaves 15 % of a hull
+  // width of air between two members packed as tightly as their formation
+  // allows — enough that the models read as separate at strategic zoom without
+  // spreading a squad into a crowd.
+  memberSpacingMul: 1.15,
+
+  // Separation radius = member_clearance * this. 2.2 puts the push-apart
+  // boundary just outside two touching hulls (2.0 = contact), so the term is
+  // already ramping when they close rather than firing after they interpenetrate.
+  separationClearanceMul: 2.2,
+
+  // Hard ceiling on a squad's separation radius, elmos. NOT a taste knob — it
+  // is the spatial hash's guaranteed reach. `soa-grid.js` sizes its cell at
+  // `max(separationRadius, maxMemberFootprint) * 1.5` and queries 3x3, so a
+  // neighbour further than ONE CELL away is invisible to the query no matter
+  // what radius the caller asks for. A radius past this would silently find
+  // nothing at its own boundary and read as "separation stopped working" —
+  // clamping is the honest failure. Keep in step with the cell formula: a
+  // ships-s1 squad wants 176 elmos and gets 72, and leans on the big-unit
+  // repulsor (which IS registered at up to `maxMemberFootprint`) instead.
+  separationRadiusMax: 72,
 
   // --- Collision (PLAN-metalstorm-squad-collision.md) ---------------------
 
@@ -332,6 +376,24 @@ export const DEFAULT_CONFIG = {
 // no civilian/military special case (PLAN-metalstorm.md §7).
 export function isSquadDef(def) {
   return (Number(def?.customParams?.squad_size) || 1) > 1;
+}
+
+/**
+ * A member's ground clearance RADIUS in elmos, or 0 when the def declares none.
+ *
+ * Authored as `customparams.member_clearance` (units/_builder.lua). 0 means
+ * "no declared footprint" and every consumer must fall back to its pre-M2
+ * constant — this is deliberately NOT guessed from mass or footprint:
+ *   - `mass` is on a tonnes-like curve, not a size (it puts a 55 m cruiser at
+ *     18 m), and `memberCapsuleHeight`'s use of it is a LAST-resort proxy for
+ *     defs that ship no art at all;
+ *   - `footprintx/z` is the SQUAD's pathing reservation, not one member's.
+ * Both are the kind of derived-from-the-wrong-thing constant that produced the
+ * overlap in the first place. A def that wants space says how much.
+ */
+export function memberClearance(def) {
+  const v = Number(def?.memberClearance ?? def?.customParams?.member_clearance);
+  return Number.isFinite(v) && v > 0 ? v : 0;
 }
 
 // Strength → live member count.

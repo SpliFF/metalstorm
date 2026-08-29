@@ -18,6 +18,10 @@ return mk{
     canmove = false,
     baseHp = 2000, baseMass = 2000, baseSquad = 4,
     baseFootprint = 3, formation = 'blob',
+    -- M2 member spacing (metres). Emplacements do not move, but a scale-1
+    -- battery still draws FOUR members and they were stacked. Ground extent
+    -- of the mount, ~0.8 of the DESIGN-GUIDE static-defense height row.
+    sizes = { 2.4, 3.6, 4.8, 6.4 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S2' } },
                 maxdamage = 2800,           -- 700/nest x4 — vs tank squad 1400

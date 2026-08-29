@@ -6,6 +6,36 @@ return mk{
     movementclass = 'VEH',
     baseHp = 1400, baseMass = 500, baseSpeed = 2.6, baseSquad = 8,
     baseFootprint = 2, formation = 'wedge',
+    -- M2 member spacing (metres): hull LENGTH per the DESIGN-GUIDE tanks row,
+    -- used as a circumscribed circle so two hulls never interpenetrate at any
+    -- relative heading. s1/s3 are the measured forge models (4.5 m tankette,
+    -- 12 m tracked heavy); s2/s4 are the table.
+    sizes = { 4.5, 8.5, 12, 26 },
+    -- Turn RATES are left alone: at 8 elmos = 1 m the four scales already turn
+    -- in 0.6-1.3 hull lengths, which is right for a tracked vehicle. What was
+    -- wrong is that they BRAKED to do it, so the radius they actually drove was
+    -- a fraction of that.
+    --
+    -- MEASURED IN GAME 2026-08-29 (ms_tanks_s2, flat map, settled straight leg,
+    -- then a hard 90): the hull turned at 1.081 rad/s — its def rate, correct —
+    -- but slowed from 75 e/s to 32 e/s through the turn, so the driven radius
+    -- was 20 elmos = 2.5 m against a 9 m hull. 0.28 hull lengths is a pivot,
+    -- not an arc, and it is what the user reported.
+    --
+    -- The lever is NOT turnInPlaceAngleLimit. That key is only read on the
+    -- `turnInPlace == true` branch (GroundMoveType.cpp:1187), where it merely
+    -- picks WHICH turns brake — a 90 exceeds any sane angle limit, so it braked
+    -- anyway. Verified in game: with turnInPlaceAngleLimit = 45 the 90 still
+    -- drove a 2.5 m radius. Only the `turnInPlace == false` branch (line 1185)
+    -- carries a speed FLOOR, and a floor is the whole point.
+    --
+    -- 0.8 keeps a tank at >= 60 e/s through any turn: R = 60 / 1.093 = 55 elmos
+    -- = 6.9 m, 0.76 hull lengths — a visible arc — while still letting it shed
+    -- some speed for the sharpest ones. BALANCE-VISIBLE, both ways: a column
+    -- crosses turning ground markedly faster than before, and a tank can no
+    -- longer spin on the spot to bring its front armour round.
+    turnInPlace = false,
+    turnInPlaceSpeedLimitFrac = 0.8,
     -- Ballparks (unit props review 2026-08-20): per-member HP ≈ maxdamage /
     -- squad_size, compared against BAR vehicle lines (flash 730hp/101e/s,
     -- stumpy 1800/75, bull 4650/62, goliath 7800/39). maxvelocity is

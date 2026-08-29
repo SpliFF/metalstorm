@@ -144,13 +144,13 @@ Your column is already rolling. The enemy's is too. You will meet in the middle.
         -- other, which is how a war can be decided with no shot fired
         -- (endtoend D20's fire-7 finding). Engineers and the sensor mast stay
         -- home on purpose; they are not part of the push.
-        { def = 'ms_tanks_s2', team = 0, x = 1156, z = 6272, facing = 'north', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 0, x = 1156, z = 6272, facing = 'north', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_tanks_s3', team = 0, x = 1091, z = 6609, facing = 'north', count = 2, spacing = 180,
+        { def = 'ms_tanks_s3', team = 0, x = 1091, z = 6609, facing = 'north', count = 2, spacing = 252,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_soldiers_s1', team = 0, x = 766, z = 6497, facing = 'north', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 0, x = 766, z = 6497, facing = 'north', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_artillery_s2', team = 0, x = 636, z = 6272, facing = 'north', count = 2, spacing = 160,
+        { def = 'ms_artillery_s2', team = 0, x = 636, z = 6272, facing = 'north', count = 2, spacing = 268,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 765, z = 6046, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 1026, z = 6046, facing = 'north' },
@@ -164,13 +164,13 @@ Your column is already rolling. The enemy's is too. You will meet in the middle.
         { def = 'fable_airship', team = 0, x = 1300, z = 6600, facing = 'north' },
 
         -- ================= UNION (team 1) — landing zone `iron_bend` =======
-        { def = 'ms_tanks_s2', team = 1, x = 6532, z = 896, facing = 'south', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 1, x = 6532, z = 896, facing = 'south', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_tanks_s3', team = 1, x = 6467, z = 1233, facing = 'south', count = 2, spacing = 180,
+        { def = 'ms_tanks_s3', team = 1, x = 6467, z = 1233, facing = 'south', count = 2, spacing = 252,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_soldiers_s1', team = 1, x = 6142, z = 1121, facing = 'south', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 1, x = 6142, z = 1121, facing = 'south', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
-        { def = 'ms_artillery_s2', team = 1, x = 6012, z = 896, facing = 'south', count = 2, spacing = 160,
+        { def = 'ms_artillery_s2', team = 1, x = 6012, z = 896, facing = 'south', count = 2, spacing = 268,
           orders = { { cmd = 'FIGHT', params = { 4480, 0, 4480 } } } },
         { def = 'ms_engineers_s1', team = 1, x = 6142, z = 670, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 1, x = 6402, z = 670, facing = 'south' },

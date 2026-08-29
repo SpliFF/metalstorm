@@ -25,6 +25,8 @@ return mk{
     baseHp = 800, baseMass = 300, baseSpeed = 6.5, baseSquad = 8,
     baseSight = 500,
     baseFootprint = 3, formation = 'line',
+    -- M2 member spacing (metres): wingspan, DESIGN-GUIDE bombers row.
+    sizes = { 8, 12, 16, 22 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_BOMB_S1',
                                     onlytargetcategory = 'LAND SHIP SUB' } },

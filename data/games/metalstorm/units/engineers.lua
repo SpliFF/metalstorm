@@ -30,6 +30,9 @@ return mk{
     -- baseSpeed 1.4 e/f = 42 e/s at s1 — same walking-pace fix as soldiers.lua.
     baseHp = 300, baseMass = 80, baseSpeed = 1.4, baseSquad = 8,
     baseFootprint = 2,
+    -- Shares the soldiers body plan (gen_infantry.py) — same ground extent,
+    -- plus a hard hat and a wrench. See soldiers.lua for the derivation.
+    sizes = { 0.7, 0.75, 0.8, 0.95 },
     scales = {
         [1] = { -- 60 HP per member × 8 (builder default 300 gave 37.5/member).
                 maxdamage = 480,

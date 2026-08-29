@@ -27,7 +27,7 @@ const TWO_PI = Math.PI * 2;
 export function steerMemberInto(squad, member, dt, ctx, out) {
   const { profile, slotWorld, nowSec, centroidSpeed } = ctx;
   const cruiseSpeed = squad.def.maxSpeed * (profile.cruiseSpeedMul ?? 1);
-  const radius = squad.def.formationRadius;
+  const radius = squad.formationRadius ?? squad.def.formationRadius;
 
   let targetX, targetZ;
   if (centroidSpeed <= profile.loiterSpeedEpsilon) {

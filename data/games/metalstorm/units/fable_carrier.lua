@@ -33,7 +33,12 @@ return {
         category = 'SHIP MOBILE',
         movementclass = 'SHIP',
         maxdamage = 26000, mass = 7000,
-        maxvelocity = 1.4, acceleration = 0.04, brakerate = 0.05, turnrate = 150,
+        maxvelocity = 1.4, acceleration = 0.04, brakerate = 0.05, turnrate = 18,
+        -- Same re-derivation as ms_ships_s4 (2026-08-29). At 102 m this was the
+        -- worst offender in the roster: turnrate 150 spun a fleet carrier on a
+        -- 0.12-hull-length radius. 18 = 0.99 L, 60.7 s for a 180 — which is what
+        -- a carrier is. See units/ships.lua for the method.
+        turninplace = false, turninplacespeedlimit = 1.4,
         footprintx = 16, footprintz = 16,
         sightdistance = 750, airsightdistance = 900,
         canmove = true, canattack = true, canpatrol = true, canstop = true,

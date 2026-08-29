@@ -65,6 +65,18 @@ export function arrive(px, pz, tx, tz, maxSpeed, arrivalRadius, out) {
  * `neighbours` is an array (or any iterable) of {x,z,squadId?,radius?};
  * accumulates into out {x,z}.
  *
+ * FALLOFF (unit-motion M2, USER-REPORTED 2026-08-29 — "units visually overlap
+ * each other"). The contribution is `(r/d - 1)` along the away-vector: 0 at the
+ * separation boundary, 1 at half of it, unbounded at contact. It used to be
+ * plain `1/d`, which is not scale-invariant and was the reason widening the
+ * radius bought nothing: at the 14-elmo radius this shipped with, a neighbour
+ * 10 elmos away contributed 0.1, against an arrival term worth up to 1.0, so
+ * separation could displace a member about ONE ELMO off its slot before
+ * arrival won. It could never open a gap — whatever the slots said, stood.
+ * `(r/d - 1)` contributes 0.4 at that same distance and 1.0 once a hull is
+ * halfway inside its neighbour, which is what makes crossing squads part.
+ * Same flop count (one divide, one subtract, replacing a divide).
+ *
  * `count` (optional) is how many leading entries of `neighbours` are live.
  * The hot path passes SquadManager's reusable neighbour buffer plus its fill
  * count, so this runs an indexed loop with no iterator and no allocation
@@ -108,8 +120,9 @@ export function separate(px, pz, selfSquadId, neighbours, separationRadius, same
       const d = Math.sqrt(d2);
       if (r - d < deadband) continue; // §7: weak overlap near the boundary — ignore
       const w = nb.squadId === selfSquadId ? sameWeight : otherWeight;
-      out.x += (dx / d / d) * w;   // weight by inverse distance, then pair-type
-      out.z += (dz / d / d) * w;
+      const f = (r / d - 1) * w / d;  // normalised falloff, then pair-type
+      out.x += dx * f;
+      out.z += dz * f;
       n++;
     }
   }
@@ -162,4 +175,65 @@ export function softLeashPull(px, pz, cx, cz, softRadius, gain, out) {
   const s = (over * gain) / dist;
   out.x = dx * s; out.z = dz * s;
   return out;
+}
+
+/**
+ * Bounded visual turn (PLAN-metalstorm-squads.md §9c, unit-motion M1).
+ *
+ * USER-REPORTED 2026-08-29 watching `crossing_standoff`: ground members "spin
+ * on the spot and flip direction in milliseconds". They did — every ground
+ * member wrote `headingFromVelocity(vx, vz)` straight into its heading each
+ * frame, so the hull was a pure read-out of the steering vector. Air and naval
+ * had capped their heading since cohesion §6/§7; ground never did.
+ *
+ * Two effects, both wanted, from one call:
+ *
+ *  1. **Rate limit.** The heading moves at most `maxDelta` radians this step
+ *     (the caller passes `turnRateCap * dt`, hoisted per squad). A member whose
+ *     steering vector reverses no longer reverses its hull with it — the hull
+ *     swings there over `pi / turnRateCap` seconds.
+ *  2. **Arc following.** When the turn IS rate-limited, `coupling` re-points
+ *     the velocity along the newly-capped heading instead of leaving it on the
+ *     steering vector. `coupling = 1` is a fully non-holonomic hull: it can
+ *     only travel where it is pointing, so a course change traces a circle of
+ *     radius `speed / turnRateCap` rather than a pivot-in-place. `coupling = 0`
+ *     leaves the path alone and only the hull lags — which is what infantry
+ *     should do, because people sidestep and tanks do not.
+ *
+ * NULL CONTROL (this is deliberate, `turn-slew.bench.ts` depends on it):
+ * `maxDelta = Infinity` makes both comparisons true on every finite delta, so
+ * this returns `desired` and copies the velocity through untouched — bit-for-
+ * bit the pre-M1 behaviour, with the call still compiled in. That is how the
+ * bench separates "the cost of the slew" from "the cost of calling anything".
+ *
+ * PERF (⚠ this runs per member per frame in the game's hottest phase — perf
+ * M9/M25). The straight-line case, which is nearly every member on nearly
+ * every frame, adds a subtract, a `wrapAngle` (one `%`), two compares and two
+ * stores on top of the `atan2` that was already being paid. No allocation, no
+ * `sin`/`cos`, no per-member property lookups. The trig is paid ONLY on the
+ * frames a member is actually turning harder than its cap — which is exactly
+ * the population whose motion we are buying.
+ *
+ * @param heading   current heading (rad, model −Z forward — see the note above)
+ * @param vx,vz     steered velocity this step
+ * @param speed     |v|, already computed by the caller (do not re-hypot)
+ * @param maxDelta  max heading change this step, radians (`cap * dt`)
+ * @param coupling  0..1 arc-following weight, only applied when rate-limited
+ * @param out       reusable {x,z} — receives the (possibly re-pointed) velocity
+ * @returns the new heading (radians)
+ */
+export function turnToward(heading, vx, vz, speed, maxDelta, coupling, out) {
+  const desired = Math.atan2(-vx, -vz);
+  const delta = wrapAngle(desired - heading);
+  if (delta <= maxDelta && delta >= -maxDelta) {
+    out.x = vx; out.z = vz;
+    return desired;
+  }
+  const capped = heading + (delta < 0 ? -maxDelta : maxDelta);
+  // velocityFromHeading, inlined against the speed the caller already has.
+  const tx = -Math.sin(capped) * speed;
+  const tz = -Math.cos(capped) * speed;
+  out.x = vx + (tx - vx) * coupling;
+  out.z = vz + (tz - vz) * coupling;
+  return capped;
 }

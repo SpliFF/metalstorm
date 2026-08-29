@@ -25,6 +25,9 @@ return mk{
     baseHp = 500, baseMass = 150, baseSpeed = 9.0, baseSquad = 8,
     baseSight = 550,
     baseFootprint = 2, formation = 'wedge',
+    -- M2 member spacing (metres): WINGSPAN, DESIGN-GUIDE fighters row — an
+    -- aircraft's widest dimension is what a formation has to clear.
+    sizes = { 6, 9, 12, 16 },
     scales = {
         -- s1 interceptor drones: 62 hp/member — expendable airframes. The MG
         -- alone cannot reliably engage air, so the flight carries the light

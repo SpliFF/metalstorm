@@ -22,6 +22,11 @@ return mk{
     baseHp = 900, baseMass = 300, baseSpeed = 2.0, baseTurn = 1200,
     baseSquad = 8,
     baseFootprint = 2, formation = 'wedge',
+    -- M2 member spacing (metres). The DESIGN-GUIDE mechs row is HEIGHT
+    -- (3/5/7.5/11 m); a walker's ground extent is its stance, about 0.6 of
+    -- that. Spacing them by height would leave a squad of light mechs three
+    -- body-widths apart.
+    sizes = { 1.8, 3.0, 4.5, 6.6 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S2' } },
                 description = 'Recon walker pack',

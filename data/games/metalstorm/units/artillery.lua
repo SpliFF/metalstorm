@@ -22,6 +22,8 @@ return mk{
     -- Spotter-reliant: 380/460/540/620 sight vs weapon ranges 750-3200.
     baseSight = 380,
     baseFootprint = 3, formation = 'line',
+    -- M2 member spacing (metres): hull length, DESIGN-GUIDE artillery row.
+    sizes = { 4.5, 7.5, 10.5, 15 },
     scales = {
         -- Sluggish accel/brake at every scale — guns limber up slowly.
         [1] = { weapons = { [1] = { name = 'MS_MORTAR_S2' } },

@@ -128,9 +128,9 @@ return {
     -- reason): the ladder wants a war that keeps *moving*, and an army that
     -- never resolves its posture is exactly that.
     units = {
-        { def = 'ms_tanks_s2', team = 0, x = 6600, z = 1200, facing = 'south', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 0, x = 6600, z = 1200, facing = 'south', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
-        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 6200, z = 1200, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 13184, z = 1200, facing = 'south', count = 1 },
@@ -139,9 +139,9 @@ return {
         { def = 'ms_supply_truck', team = 0, x = 5900, z = 1400, facing = 'south', count = 1 },
         { def = 'fable_airship', team = 0, x = 7200, z = 1400, facing = 'south' },
 
-        { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
+        { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 290,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
-        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 100,
+        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 110,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 4, x = 6200, z = 15184, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 4, x = 13184, z = 15184, facing = 'north', count = 1 },
@@ -151,7 +151,7 @@ return {
         { def = 'fable_airship', team = 4, x = 7200, z = 14984, facing = 'north' },
 
         { def = 'ms_soldiers_s1', team = 8, x = 11584, z = 8192, facing = 'north', count = 6, spacing = 110 },
-        { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 140 },
+        { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 270 },
         { def = 'ms_technical',   team = 8, x = 11400, z = 8420, facing = 'north', count = 3, spacing = 130 },
 
         { def = 'ms_grain_silo',  team = 'neutral', x = 8000, z = 3900, facing = 'south',

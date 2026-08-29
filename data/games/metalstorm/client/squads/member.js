@@ -1,7 +1,11 @@
 // member.js — one visual squad member. Cosmetic kinematic state only.
 // See PLAN-metalstorm-squads.md §8, §9.
 
-import { headingFromVelocity } from './steering.js';
+import { headingFromVelocity, turnToward } from './steering.js';
+
+/** Reusable {x,z} for `turnToward`'s re-pointed velocity — module scope so
+ *  `integrate` allocates nothing (PLAN-perf M10). */
+const _turned = { x: 0, z: 0 };
 
 export class Member {
   constructor(id, visual) {
@@ -55,20 +59,33 @@ export class Member {
    * `blend` overrides the default damped approach (air/naval steerers
    * pre-apply their own turn-rate cap and pass blend=1 so the heading isn't
    * smoothed twice).
+   *
+   * `maxDelta`/`coupling` are the M1 bounded visual turn (see steering.js
+   * `turnToward` and the turn-rate note in movement-profiles.js). The defaults
+   * — an infinite cap — are exactly the pre-M1 behaviour, which is what the
+   * naval and transport callers want: naval already capped its own heading
+   * upstream and must not be capped twice, for the same reason it passes
+   * blend=1. The SoA twin of this method is soa-kernel's `integrateGround`.
    */
-  integrate(desiredVx, desiredVz, dt, backend, blend = Math.min(1, dt * 8)) {
+  integrate(desiredVx, desiredVz, dt, backend, blend = Math.min(1, dt * 8),
+            maxDelta = Infinity, coupling = 0) {
     this.vx += (desiredVx - this.vx) * blend;
     this.vz += (desiredVz - this.vz) * blend;
+
+    const speed = Math.hypot(this.vx, this.vz);
+    if (speed > 0.05) {
+      // Turn FIRST, then travel: the arc-coupled velocity is what displaces
+      // the member this step, which is what makes the path an arc rather than
+      // a straight line with a lagging hull bolted on.
+      this.headingY = turnToward(this.headingY, this.vx, this.vz, speed,
+        maxDelta, coupling, _turned);
+      this.vx = _turned.x; this.vz = _turned.z;
+      this.gait = (this.gait + speed * dt * 0.1) % 1;
+    }
 
     this.x += this.vx * dt;
     this.z += this.vz * dt;
     this.y = backend.groundHeight(this.x, this.z);
-
-    const speed = Math.hypot(this.vx, this.vz);
-    if (speed > 0.05) {
-      this.headingY = headingFromVelocity(this.vx, this.vz); // face travel
-      this.gait = (this.gait + speed * dt * 0.1) % 1;
-    }
   }
 
   /**

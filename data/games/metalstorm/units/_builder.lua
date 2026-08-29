@@ -17,6 +17,190 @@ local function round(x) return math.floor(x + 0.5) end
 
 local SCALE_WORDS = { 'Light', 'Line', 'Heavy', 'Super-heavy' }
 
+-- ── World scale + per-member spacing (unit-motion M2, USER-REPORTED
+-- 2026-08-29: "units visually overlap each other, within squads and between
+-- them") ───────────────────────────────────────────────────────────────────
+--
+-- 8 elmos = 1 metre. Settled and LANDED 2026-08-27 (`1cfafc337e`, Option A of
+-- PLAN-world-scale.md §5): the x8 is applied at model import, so a 4.5 m
+-- tankette is 36 elmos long in the world the player sees. Do not re-derive it
+-- and do not surface elmos as an authoring concern — everything below is
+-- authored in METRES and converted here, once.
+--
+-- `spec.sizes` is a 4-entry table of the class's GROUND-PLANE CLEARANCE
+-- DIAMETER in metres, per scale: the circle a single member needs to itself so
+-- two of them never interpenetrate at any relative heading. For vehicles and
+-- vessels that is the hull LENGTH (the circumscribed circle — heading-
+-- independent, which slot geometry is not). For classes whose dominant
+-- dimension is VERTICAL — infantry, mechs, masts — it is the body's ground
+-- extent, NOT its height: a 1.85 m soldier occupies about 0.75 m of ground, and
+-- spacing people by their height would spread a rifle section over 40 m.
+-- Sources are `tools/forge/docs/DESIGN-GUIDE.md`'s scale table and the measured
+-- extents recorded per model in `../ASSETS.md`.
+--
+-- It becomes `customparams.member_clearance`, an elmo RADIUS, which the client
+-- squad engine reads (`client/squads/config.js` memberClearance) to floor the
+-- formation radius and to size the separation term. A class that omits `sizes`
+-- emits nothing and keeps the pre-M2 spacing — a deliberate opt-in, so a new
+-- class cannot silently inherit a wrong footprint.
+local ELMOS_PER_METRE = 8
+
+-- ── Squad ground extent + between-squad separation (unit-motion M3,
+-- USER-REPORTED 2026-08-29: "units visually overlap each other, within squads
+-- and BETWEEN them") ────────────────────────────────────────────────────────
+--
+-- M2 fixed the WITHIN case (the formation-radius floor above) and measured the
+-- between case as real: in `crossing_standoff` two `ms_tanks_s2` squad units
+-- sat 32.5 elmos apart while each squad draws 289 elmos wide. M3 asks which
+-- def-level knob parts them. The answer is NOT `footprintx/z`, and that is a
+-- measured verdict rather than a preference — see the note above the
+-- single-hull block.
+--
+-- The knob is `separationDistance`, which the engine documents as exactly this
+-- job (UnitDef.h:201-209): "an additional collision boundary in elmos to keep
+-- units separated ... The larger of two units' separation distance will be
+-- applied. This only impacts mobile units to mobile units. This is deliberate
+-- because otherwise units would be unable to squeeze between buildings." It is
+-- read at UnitDef.cpp:356 and was unused by any content in this repo until now.
+--
+-- Two properties make a LARGE value safe here, both checked in the engine
+-- source rather than assumed:
+--   * a push that would put a unit on non-traversable ground is DROPPED
+--     (GroundMoveType.cpp:2306-2312 — "prevent units from pushing each other
+--     into buildings far enough that the pathing systems can't get them out
+--     again"), and the per-frame response is capped at 2 * SQUARE_SIZE, so a
+--     big separation cannot shove a squad off a bridge or into a wall;
+--   * it widens the ARRIVAL radius too (HandleUnitCollisionsAux, lines 283 and
+--     326), so a squad ordered onto ground another squad already holds calls
+--     Arrived() short of it instead of shoving forever — the engine's own
+--     comment is "kill long pushing contests". That is the behaviour this
+--     milestone wants, not a side effect to be tolerated.
+--
+-- The value is `2 * outerRadius` minus the floor the engine already applies,
+-- where `outerRadius` is how much ground the def actually covers on screen:
+-- the packed formation's outer hull for a squad, one member's clearance for a
+-- single hull. Both squads then stand exactly clear of each other rather than
+-- interpenetrating.
+
+-- Mobile-vs-mobile collision floor DIAMETER per movement class, in elmos.
+-- NOT a free constant: `GroundMoveType::HandleUnitCollisions` takes BOTH radii
+-- from the MoveDef (lines 2282 and 2594), and MoveDef::xsize is built from
+-- `gamedata/moveinfo.tdf`'s per-class `footprintx` as
+-- `xsize = footprintx * SPRING_FOOTPRINT_SCALE`, forced odd
+-- (MoveDefHandler.cpp:298-311), giving a MaxInterior radius of
+-- `xsize / 2 * SQUARE_SIZE`. Keep in step with moveinfo.tdf; a class missing
+-- here contributes 0, which only ever makes the emitted separation larger.
+local MOVE_CLASS_FLOOR_DIAMETER = {
+    INFANTRY = 8,      -- footprintx 1 -> xsize 1 -> radius  4
+    VEH      = 24,     -- footprintx 2 -> xsize 3 -> radius 12
+    HEAVY    = 56,     -- footprintx 4 -> xsize 7 -> radius 28
+    SHIP     = 56,     -- footprintx 4 -> xsize 7 -> radius 28
+    SUB      = 40,     -- footprintx 3 -> xsize 5 -> radius 20
+}
+
+-- Slot templates, ported from client/squads/formation.js. The shapes must stay
+-- identical between the two because the sim spaces squads by the extent the
+-- CLIENT draws them at; `tests/squad_extents_spec.lua` and
+-- `client/squads/member-spacing.test.js` assert the same golden extents from
+-- their own side, so a drift in either port fails a test rather than showing up
+-- as overlap on screen.
+local function slotsLine(n, r)
+    local out, span = {}, math.max(1, n - 1)
+    local step = (2 * r) / math.max(1, span)
+    for i = 0, n - 1 do out[#out + 1] = { x = -r + i * step, z = 0 } end
+    return out
+end
+
+local function slotsColumn(n, r)
+    local out = {}
+    local step = (2 * r) / math.max(1, n)
+    for i = 0, n - 1 do out[#out + 1] = { x = 0, z = -r + i * step } end
+    return out
+end
+
+local function slotsWedge(n, r)
+    local out = { { x = 0, z = -r } }
+    local i, depth = 1, 1
+    while i < n do
+        local off = depth * (r / math.max(1, n / 2))
+        out[#out + 1] = { x = -off, z = off - r }
+        if i + 1 < n then out[#out + 1] = { x = off, z = off - r } end
+        i, depth = i + 2, depth + 1
+    end
+    while #out > n do table.remove(out) end
+    return out
+end
+
+local function slotsBlob(n, r)
+    local out = { { x = 0, z = 0 } }
+    local placed, ring = 1, 1
+    while placed < n do
+        local perRing = math.min(n - placed, math.max(4, math.floor(ring * 5)))
+        local rr = (ring / math.ceil(math.sqrt(n))) * r
+        for k = 0, perRing - 1 do
+            local a = (k / perRing) * math.pi * 2 + ring * 0.6
+            out[#out + 1] = { x = math.cos(a) * rr, z = math.sin(a) * rr }
+        end
+        placed, ring = placed + perRing, ring + 1
+    end
+    while #out > n do table.remove(out) end
+    return out
+end
+
+local BUILD_SLOTS = {
+    line = slotsLine, column = slotsColumn, wedge = slotsWedge, blob = slotsBlob,
+}
+
+local function buildSlots(ftype, n, r)
+    return (BUILD_SLOTS[ftype] or slotsLine)(n, r)
+end
+
+--- Tightest slot-to-slot distance of `buildSlots(type, count, 1)`. The
+--- templates are LINEAR in radius, so this one number converts between a
+--- required member spacing and the radius that achieves it.
+local function slotSpacingPerRadius(ftype, count)
+    if count < 2 then return 0 end
+    local slots = buildSlots(ftype, count, 1)
+    local min = math.huge
+    for i = 1, #slots do
+        for j = i + 1, #slots do
+            local dx, dz = slots[i].x - slots[j].x, slots[i].z - slots[j].z
+            local d2 = dx * dx + dz * dz
+            if d2 < min then min = d2 end
+        end
+    end
+    return (min == math.huge) and 0 or math.sqrt(min)
+end
+
+--- The radius slots are actually built at: the authored radius, or the radius
+--- that holds members `minSpacing` apart, whichever is larger. Mirrors
+--- `packedFormationRadius` in formation.js, including its never-shrink rule.
+local function packedFormationRadius(ftype, count, authored, minSpacing)
+    local a = (authored > 0) and authored or 0
+    if not (minSpacing > 0) then return a end
+    local per = slotSpacingPerRadius(ftype, count)
+    if not (per > 0) then return a end
+    return math.max(a, minSpacing / per)
+end
+
+--- How much ground the def covers on screen, as a radius in elmos: the outer
+--- edge of the outermost member of the packed formation. `MEMBER_SPACING_MUL`
+--- mirrors `config.js` memberSpacingMul, which the client applies to the
+--- clearance before flooring the radius.
+local MEMBER_SPACING_MUL = 1.15
+local function squadOuterRadius(ftype, count, authoredRadius, clearanceElmos)
+    if count < 2 then return clearanceElmos end
+    local r = packedFormationRadius(ftype, count, authoredRadius,
+                                    clearanceElmos * 2 * MEMBER_SPACING_MUL)
+    local slots = buildSlots(ftype, count, r)
+    local maxR = 0
+    for _, s in ipairs(slots) do
+        local d = math.sqrt(s.x * s.x + s.z * s.z)
+        if d > maxR then maxR = d end
+    end
+    return maxR + clearanceElmos
+end
+
 local function mk(spec)
     local defs = {}
     for s = 1, 4 do
@@ -62,7 +246,16 @@ local function mk(spec)
                 ms_class         = spec.class,
                 ms_scale         = tostring(s),
                 -- Client fan-out hints (PLAN-macro-squads.md):
-                squad_size       = tostring(o.squad or
+                -- Scale 4 is always ONE super-heavy hull, so the curve is
+                -- overridden here rather than after the fact. It used to be
+                -- patched further down, AFTER the two blocks below that branch
+                -- on squad size — so `ms_soldiers_s4` (curve: 2) was read as a
+                -- multi-member squad by both of them and only became a single
+                -- hull afterwards. Harmless for M2's footprint block by luck
+                -- (the value it wanted was under the curve anyway); not
+                -- harmless for M3's extent, which sized a 2-slot line for a
+                -- def that draws one model.
+                squad_size       = (s == 4) and '1' or tostring(o.squad or
                                      math.max(1, round((spec.baseSquad or 8) / growth))),
                 formation_type   = o.formation or spec.formation or 'line',
                 formation_radius = tostring(o.formationRadius or
@@ -72,6 +265,66 @@ local function mk(spec)
                 authority_cost_base = tostring(o.authorityCost or s),
             },
         }
+
+        -- Per-member ground clearance RADIUS in elmos (M2). Authored in metres
+        -- as a diameter (see the note at the top of this file); `o.clearance`
+        -- lets one scale override the class curve without forking the table.
+        local clearanceM = o.clearance or (spec.sizes and spec.sizes[s])
+        if clearanceM and clearanceM > 0 then
+            def.customparams.member_clearance =
+                tostring(round(clearanceM * ELMOS_PER_METRE / 2))
+        end
+
+        -- SIM footprint for a SINGLE-HULL def (M2 sim half). When squad_size
+        -- resolves to 1 the sim unit IS one model, so its footprint is a
+        -- statement about that hull and nothing else — and the generic curve
+        -- (`baseFootprint + s - 1`) was making some absurd ones: `ms_ships_s3`
+        -- is a **55 m** cruiser and reserved 6 x 6 footprint cells, i.e. 12 m,
+        -- so it shared ground with infantry. The engine's own rule is
+        -- `footprint metres = footprintx * 2` (SPRING_FOOTPRINT_SCALE 2 x
+        -- SQUARE_SIZE 8 = 16 elmos per cell, DESIGN-MODEL-BUILDING §4), so the
+        -- honest value is the authored hull size in metres over two.
+        --
+        -- Deliberately WIDEN-ONLY and single-hull-only:
+        --   * a def whose curve is already generous keeps it (mechs-s4 is 11 m
+        --     tall but only ~6.6 m of ground, and its 10 m footprint is fine);
+        --   * a MULTI-member squad's footprint stays on the generic curve, and
+        --     M3 MEASURED why rather than leaving it unknown as M2 did. M2's
+        --     handoff called a squad's `footprintx/z` "the squad's pathing
+        --     reservation". It is not one. In this engine `footprintx/z` here
+        --     is NEITHER of the two things widening it was supposed to buy:
+        --       - it is not the path-search corridor width. The pathfinder
+        --         clears `MoveDef::xsize`, built from `gamedata/moveinfo.tdf`'s
+        --         per-class `footprintX` (MoveDefHandler.cpp:298-311) and never
+        --         from the unit def. Every VEH def searches at xsize 3 = 24
+        --         elmos whatever it declares here;
+        --       - it is not what parts two moving squads either. Mobile-vs-
+        --         mobile collision takes BOTH radii from the MoveDef
+        --         (GroundMoveType.cpp:2282 and 2594), so the 12+12 = 24 elmo
+        --         floor that produced M2's measured 32.5 would not move by one
+        --         elmo if this said 18.
+        --     What it DOES size is the ground-blocking yardmap
+        --     (GroundBlockingObjectMap.cpp:100-101 says so in as many words:
+        --     "unit yardmaps always contain sx=UnitDef::xsize * sz=UnitDef::
+        --     zsize cells (the unit->moveDef footprint can have different
+        --     dimensions)"). At the ~17 cells an honest `ms_tanks_s1` formation
+        --     diameter implies, a halted squad would mark a 272-elmo square as
+        --     an obstacle for everyone else: 3.1x the widest town main street
+        --     (88 elmos, town_templates.py `main_street`) and 3.9x the widest
+        --     highway deck (70.4 = the shipped maps' road_width 44 x the
+        --     ROAD_HIGHWAY width_mult 1.6, terragen/roads.py). That is the
+        --     pathing blast radius M2 was right to be wary of — and it is paid
+        --     for nothing, since it buys no separation at all.
+        --     Between-squad separation is `separationDistance` instead; see the
+        --     block below.
+        local squadSize = tonumber(def.customparams.squad_size) or 1
+        if squadSize == 1 and clearanceM and clearanceM > 0 and not o.footprint then
+            local want = round(clearanceM / 2)     -- metres -> footprint cells
+            if want > def.footprintx then
+                def.footprintx = want
+                def.footprintz = want
+            end
+        end
 
         -- Impostor LOD opt-in (PLAN-metalstorm-beta-units.md §2.1, engine ask
         -- B1). impostorOnly units (infantry/civilians per the beta roster)
@@ -157,13 +410,90 @@ local function mk(spec)
         -- Scale 4 = single super-heavy unit: multi-piece, cosmetic turrets
         -- (the "one synced entity, cosmetic sub-parts" pattern).
         if s == 4 then
-            def.customparams.squad_size = '1'
-            def.customparams.multi_piece = '1'
+            def.customparams.multi_piece = '1'   -- squad_size is set above
         end
+
+        -- Turn-in-place (unit-motion M1, USER-REPORTED 2026-08-29: "units spin
+        -- on the spot ... turning needs turning CIRCLES").
+        --
+        -- The engine defaults `turnInPlace` to TRUE and `turnInPlaceAngleLimit`
+        -- to 0 (Sim/Units/UnitDef.cpp:508-513), and GroundMoveType.cpp:1187 is
+        -- then `mix(targetSpeed, turnModSpeed, reqTurnAngle > angleLimit)` — so
+        -- with the defaults, ANY nonzero course change drops the unit to
+        -- turnModSpeed, which bottoms out at 0.1 x maxSpeed. Every Metalstorm
+        -- hull except the trains has been braking to a crawl and pivoting for
+        -- even a few degrees of correction. Nobody chose that; it is what
+        -- happens when the key is never written.
+        --
+        --   turnInPlace              false = never stop to turn, arc instead.
+        --   turnInPlaceSpeedLimitFrac  fraction of THIS scale's maxvelocity to
+        --                            hold as the floor while turning. The
+        --                            engine compares TIPSL against elmos/FRAME
+        --                            (AMoveType::maxSpeed = unitDef->speed /
+        --                            GAME_SPEED), which is what `maxvelocity`
+        --                            already is — but UnitDef.cpp's own default
+        --                            for the key is computed in elmos/second,
+        --                            so an explicit value is the only way to
+        --                            get a predictable floor. 1.0 = a constant-
+        --                            speed arc.
+        --   turnInPlaceAngleLimit    degrees of course change taken at speed
+        --                            before the unit brakes to pivot. For a
+        --                            tracked vehicle this is the honest model:
+        --                            it arcs through gentle corrections and
+        --                            neutral-steers only for sharp ones.
+        --
+        -- Per-scale (`o.`) wins over per-class (`spec.`); both are optional and
+        -- an absent key leaves engine behaviour untouched.
+        local turnInPlace = o.turnInPlace
+        if turnInPlace == nil then turnInPlace = spec.turnInPlace end
+        if turnInPlace ~= nil then def.turninplace = turnInPlace end
+
+        local tipFrac = o.turnInPlaceSpeedLimitFrac or spec.turnInPlaceSpeedLimitFrac
+        if tipFrac then def.turninplacespeedlimit = def.maxvelocity * tipFrac end
+
+        local tipAngle = o.turnInPlaceAngleLimit or spec.turnInPlaceAngleLimit
+        if tipAngle then def.turninplaceanglelimit = tipAngle end
 
         -- Per-scale free-form overrides win over everything above.
         if o.override then
             for k, v in pairs(o.override) do def[k] = v end
+        end
+
+        -- Between-squad separation (M3). Deliberately the LAST thing computed:
+        -- `tanks` scale 3 and 4 move themselves from VEH to HEAVY through
+        -- `o.override`, and the separation floor to subtract is the one the
+        -- def actually ends up with. Reading `spec.movementclass` here instead
+        -- billed those two scales the VEH floor and over-asked by 32 elmos —
+        -- caught by `tests/squad_extents_spec.lua`, not by inspection.
+        --
+        -- `squad_footprint_radius` is how much ground this def covers on
+        -- screen, in elmos: the outer edge of the outermost member of the
+        -- packed formation, or one member's clearance for a single hull. It is
+        -- emitted as a customparam because the scenario spawner and the tools
+        -- need the same number the sim spaces by (`scenarios/*.lua` `spacing`
+        -- is set to its DIAMETER), and because it is the value the spec pins
+        -- against formation.js.
+        --
+        -- `separationDistance` then asks the engine for a gap two of these
+        -- stand clear in: two outer radii, less the floor the MoveDef already
+        -- enforces. Derived from the ROUNDED radius so the customparam and the
+        -- separation cannot disagree by a fraction of an elmo.
+        --
+        -- Emitted only for defs that HAVE a movement class. That is not an
+        -- oversight about aircraft: `UnitDef::separationDistance` is read
+        -- exclusively by GroundMoveType, so on a def with no MoveDef it would
+        -- be dead data. Air formations still interleave — a named residual.
+        if clearanceM and clearanceM > 0 then
+            local outerRadius = round(squadOuterRadius(
+                def.customparams.formation_type, squadSize,
+                tonumber(def.customparams.formation_radius) or 0,
+                tonumber(def.customparams.member_clearance)))
+            def.customparams.squad_footprint_radius = tostring(outerRadius)
+            if def.movementclass and def.separationDistance == nil then
+                local want = 2 * outerRadius
+                             - (MOVE_CLASS_FLOOR_DIAMETER[def.movementclass] or 0)
+                if want > 0 then def.separationDistance = want end
+            end
         end
 
         defs[name] = def
