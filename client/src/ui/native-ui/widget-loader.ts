@@ -149,6 +149,12 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // command-language.md §4) needs the bundled console-exchange + accelerator
     // + class-vocabulary modules.
     'command-console': () => import('../../native-widgets/command-console.js'),
+    // The drill-down ladder's rung 1/2/3 for a selected force
+    // (DESIGN-DRILLDOWN.md §6). Built in because it is the framework itself —
+    // focus model, drilldown primitive and camera travel are engine modules,
+    // not game-authored ones, so it cannot be fetched as a standalone
+    // game-dir module.
+    'focus-hud': () => import('./focus-hud.js'),
 };
 
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */

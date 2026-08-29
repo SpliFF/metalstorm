@@ -13,6 +13,16 @@
       "subscribes": ["teamRulesParams", "gameRulesParams", "playerRoster"]
     },
     {
+      "id": "focus-hud",
+      "entry": "widgets/focus-hud.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/ui/native-ui/focus-hud.ts) via BUILTIN_WIDGETS — it IS the drill-down framework (focus model + drilldown primitive + camera travel), which are engine modules, so there is no game-dir copy.",
+      "mount": "top-center",
+      "_chrome": "NO title on purpose: the loader only builds panel chrome for titled widgets, and a summary affordance must not read as a panel that lives here. The widget renders nothing at all while the selection is empty (DESIGN-DRILLDOWN.md §4 rung 1).",
+      "nlAliases": ["selection", "focus", "selected units"],
+      "subscribes": ["selection", "orgGroups"]
+    },
+    {
       "id": "objectives-panel",
       "entry": "widgets/objectives-panel.js",
       "mount": "right",

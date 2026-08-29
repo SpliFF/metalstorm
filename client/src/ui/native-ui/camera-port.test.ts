@@ -88,6 +88,35 @@ describe('the worker ops', () => {
         expect(h.notes[0]).toContain('position');
     });
 
+    it('travelTo rides the ground-anchored op, not focusOn', () => {
+        // The whole point of `travelTo` (DESIGN-DRILLDOWN.md §5): `focusOn`
+        // pans the look-at to sea level, so on any map with relief the drill-
+        // down's "go there" would arrive looking under the hill it was asked
+        // to show. Naming the op is the assertion.
+        const h = makePort();
+        h.port.travelTo(900, 1200);
+        expect(h.calls).toHaveLength(1);
+        expect(h.calls[0].method).toBe('cameraSnapToGround');
+        expect(h.calls[0].args.slice(0, 2)).toEqual([900, 1200]);
+    });
+
+    it('travelTo passes no height, so the player keeps their zoom', () => {
+        // `snapToGround` preserves the current camera-to-look-at distance when
+        // `height` is absent. Sending one would re-zoom the player on every
+        // "go there", which is a camera they have to fight back.
+        const h = makePort();
+        h.port.travelTo(10, 20, { durationMs: 250 });
+        expect(h.calls[0].args[2]).toEqual({ durationMs: 250 });
+    });
+
+    it('travelTo cancels an active follow', () => {
+        const h = makePort();
+        h.port.follow({ label: 'Hammerfall', position: () => ({ x: 0, z: 0 }) });
+        h.port.travelTo(500, 500);
+        expect(h.port.followingLabel()).toBeNull();
+        expect(h.ended.map((e) => e.reason)).toEqual(['camera-action']);
+    });
+
     it('saveView / loadView reach the worker slot table', () => {
         const h = makePort();
         h.port.saveView(3);

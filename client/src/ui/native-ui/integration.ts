@@ -49,6 +49,7 @@ if (typeof window !== 'undefined') {
 }
 import { WidgetLoader } from './widget-loader.js';
 import { startEntityIndexProducer } from './entity-index-producer.js';
+import { bindSelectionToFocus, focusModel } from './focus-model.js';
 
 let widgetLoader: WidgetLoader | null = null;
 let activeConnection: CommandConnection | null = null;
@@ -56,6 +57,11 @@ let activeConnection: CommandConnection | null = null;
 // module scope so the same session teardown that disposes the widget loader
 // also stops the producer and clears the index.
 let stopEntityIndexProducer: (() => void) | null = null;
+// Selection mirror → focus model (DESIGN-DRILLDOWN.md §3). Same lifetime as the
+// widget loader: the focus model is what every drill-down surface renders from,
+// so a binding that outlived the session would keep the last battle's selection
+// resolved against the next one's org groups.
+let stopFocusBinding: (() => void) | null = null;
 
 /**
  * Initialize native UI for a game session.
@@ -90,6 +96,14 @@ export async function initializeNativeUI(
         stopEntityIndexProducer = null;
     }
     stopEntityIndexProducer = startEntityIndexProducer();
+
+    // Resolve the world selection into named subjects the whole HUD (and, from
+    // U4, the NL layer) reads. Bound BEFORE the widgets mount so a widget that
+    // renders from the focus model in `init()` sees the current selection
+    // rather than an empty one.
+    stopFocusBinding?.();
+    focusModel.clear();
+    stopFocusBinding = bindSelectionToFocus(uiStore);
 
     // Create new loader and load widgets
     widgetLoader = new WidgetLoader();
@@ -378,6 +392,11 @@ export function disposeNativeUI(): void {
         stopEntityIndexProducer();
         stopEntityIndexProducer = null;
     }
+    if (stopFocusBinding) {
+        stopFocusBinding();
+        stopFocusBinding = null;
+    }
+    focusModel.clear();
     activeConnection = null;
     // Note: We don't clear the ui-store here as it may be used across sessions
 }

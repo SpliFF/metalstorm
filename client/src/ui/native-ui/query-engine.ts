@@ -71,6 +71,19 @@ export interface CensusUnit {
     scale?: number;
     x: number;
     z: number;
+    /**
+     * Health as a fraction of maximum, 0..1. Absent when the mirror has not
+     * carried a health field for this unit yet.
+     *
+     * Added for the drill-down ladder's rung 1 (DESIGN-DRILLDOWN.md §4): a
+     * summary chip's job is to answer "is this force OK?", and no combination
+     * of the other fields answers it. It is on the census rather than a new op
+     * because the census is already the client's LOS-honest unit mirror — a
+     * second unit feed would be a second thing to keep true.
+     */
+    health?: number;
+    /** True while the unit is under way. The one state word rung 1 shows. */
+    moving?: boolean;
 }
 
 export interface Census {
@@ -529,8 +542,11 @@ function stripSideWords(phrase: string): string {
 }
 
 /** "tanks" + scale 3 → "heavy tanks". The scale words are `_builder.lua`'s
- *  SCALE_WORDS, which the vocabulary's own scale phrases are built from. */
-const SCALE_WORDS: Record<NLScale, string> = { 1: 'light', 2: 'line', 3: 'heavy', 4: 'super-heavy' };
+ *  SCALE_WORDS, which the vocabulary's own scale phrases are built from.
+ *  Exported so the HUD's summary affordance (focus-hud.ts) names a force with
+ *  the same words a sentence may use for it, rather than carrying a third copy
+ *  of this table. */
+export const SCALE_WORDS: Record<NLScale, string> = { 1: 'light', 2: 'line', 3: 'heavy', 4: 'super-heavy' };
 
 function describeClassPhrase(label: string, scale?: NLScale): string {
     if (!scale) return label;
