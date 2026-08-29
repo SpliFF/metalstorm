@@ -573,8 +573,15 @@
     white-space: nowrap;
     animation: nui-toast-in 0.15s ease;
 }
+/* Two vocabularies, deliberately both kept. `good`/`bad`/`accent` is the
+   generic tone the shared notice lane speaks (matching `StatTone`); `award` /
+   `refund` / `refusal` are the authority ledger's own words, spoken by a
+   game-dir widget that keeps its own toast queue because it is fetched as a
+   standalone ES module and cannot import the bundled lane. */
+.nui-toast--good,
 .nui-toast--award,
 .nui-toast--refund { border-left-color: var(--nui-good); color: var(--nui-good); }
+.nui-toast--bad,
 .nui-toast--refusal { border-left-color: var(--nui-bad); color: var(--nui-bad); }
 
 @keyframes nui-toast-in {
@@ -842,10 +849,10 @@
     50%      { background: var(--nui-accent-dim); }
 }
 
-/* Toasts hang BELOW the stack rather than above it: this dock is at the top of
-   the screen, so upward is off-screen. Centred and non-interactive — an
-   announcement is read, never clicked. */
-.nui-objectives__toasts {
+/* Notices hang BELOW the stack rather than above it: this dock is at the top of
+   the screen, so upward is off-screen. Centred, because the objective stack it
+   belongs to is centred. */
+.nui-objectives .nui-notices {
     left: 50%;
     transform: translateX(-50%);
     align-items: center;
@@ -866,4 +873,250 @@
 
 @media (prefers-reduced-motion: reduce) {
     .nui-objectives .nui-dd.is-announcing > .nui-dd__row > .nui-dd__chip { animation: none; }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   battle-clarity U3 — awareness, and the one global access point
+   ══════════════════════════════════════════════════════════════════════
+   Three surfaces, in ladder order:
+
+     .nui-notices   the decaying notice lane (rung 1, shared — notice-lane.ts)
+     .nui-edge      an off-screen pointer (world-anchored in spirit; §4)
+     .nui-access    the ONE access point + the one permitted always-on line
+     .nui-global    rung 4 — the only rung with no size budget
+
+   Nothing here is on screen at rest except `.nui-access`, which is one button
+   and one line.
+   ────────────────────────────────────────────────────────────────────── */
+
+/* ── the notice lane ─────────────────────────────────────────────────── */
+
+/* Unlike U1's objective toasts, a battle notice IS clickable — it is a rung-1
+   affordance carrying a whole drilldown — so the lane opts back into pointer
+   events. The base `.nui-toasts` rule sets none, for announcements that are
+   read and never clicked; that stays true for the plain-text ones. */
+.nui-notices { pointer-events: none; }
+.nui-notices .nui-toast--drill { pointer-events: auto; }
+
+/* A notice that carries a drilldown is a frame around a chip, not a line of
+   text: drop the toast's own padding so the chip's geometry is the one the
+   player sees, and let the panel it opens spill out of it. */
+.nui-toast--drill {
+    padding: 0;
+    background: none;
+    border: none;
+    white-space: normal;
+}
+.nui-toast--accent { border-left-color: var(--nui-accent); }
+
+.nui-moments {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    max-width: min(360px, 34vw);
+}
+/* Under the access point, right-aligned with it. */
+.nui-moments .nui-notices {
+    position: static;
+    margin-top: var(--nui-gap);
+    align-items: flex-end;
+}
+
+/* ── off-screen pointers ─────────────────────────────────────────────── */
+
+/* A full-viewport layer with nothing in it at rest. The pointers are the one
+   thing in this HUD allowed near the edges of the centre band, because their
+   whole job is to say "the fight is that way" — DESIGN-DRILLDOWN §4. */
+.nui-edge-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 25;
+}
+.nui-edge-layer[hidden] { display: none; }
+
+.nui-edge {
+    position: absolute;
+    transform: translate(-50%, -50%) rotate(var(--nui-edge-angle, 0deg));
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    background: rgba(16, 19, 24, 0.82);
+    border: 1px solid var(--nui-bad);
+    border-radius: 50%;
+    color: var(--nui-bad);
+    font-size: 11px;
+    line-height: 20px;
+    text-align: center;
+    cursor: pointer;
+    pointer-events: auto;
+    animation: nui-edge-pulse 1.6s ease-in-out infinite;
+}
+.nui-edge:hover { background: var(--nui-bg-hover); }
+
+@keyframes nui-edge-pulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+}
+
+/* ── the access point (§6) ───────────────────────────────────────────── */
+
+.nui-access {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-gap);
+    justify-content: flex-end;
+}
+
+/* The one permitted always-visible line: the victory condition's state. It is
+   a button because it drills — everything on this HUD that reports something
+   is also a way in to it. */
+.nui-access__summary {
+    max-width: 42ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 3px 9px;
+    background: rgba(16, 19, 24, 0.9);
+    border: 1px solid var(--nui-border);
+    border-left: 3px solid var(--nui-gold);
+    border-radius: var(--nui-radius);
+    color: var(--nui-text);
+    font: var(--nui-font);
+    cursor: pointer;
+}
+.nui-access__summary:hover { border-color: var(--nui-accent); }
+.nui-access__summary[hidden] { display: none; }
+
+.nui-access__btn {
+    padding: 3px 10px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    color: var(--nui-text);
+    font: var(--nui-font);
+    cursor: pointer;
+}
+.nui-access__btn:hover { background: var(--nui-bg-hover); }
+.nui-access__btn.is-open { border-color: var(--nui-accent); color: var(--nui-accent); }
+.nui-access__btn[hidden] { display: none; }
+
+/* ── rung 4 ──────────────────────────────────────────────────────────── */
+
+/* Centred and large. This is the one rung with no size budget, because it is
+   the one rung the player is ONLY looking at — but it is still not full-screen:
+   keeping the battle visible behind it is what stops it feeling like leaving
+   the game. */
+.nui-global {
+    position: absolute;
+    top: 8vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(760px, 78vw);
+    max-height: 74vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--nui-bg);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    pointer-events: auto;
+    z-index: 40;
+}
+.nui-global[hidden] { display: none; }
+
+.nui-global__header {
+    display: flex;
+    align-items: center;
+    gap: var(--nui-gap);
+    padding: 4px 6px;
+    background: var(--nui-bg-head);
+    border-bottom: 1px solid var(--nui-border);
+}
+.nui-global__tabs { display: flex; gap: 2px; flex: 1; }
+
+.nui-global__tab {
+    padding: 4px 12px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--nui-radius);
+    color: var(--nui-text-dim);
+    font: var(--nui-font);
+    cursor: pointer;
+}
+.nui-global__tab:hover { color: var(--nui-text); background: var(--nui-bg-hover); }
+.nui-global__tab.is-active {
+    color: var(--nui-text);
+    background: var(--nui-bg-raised);
+    border-color: var(--nui-border-hi);
+}
+.nui-global__tab[hidden] { display: none; }
+
+.nui-global__close {
+    padding: 2px 8px;
+    background: none;
+    border: none;
+    color: var(--nui-text-faint);
+    font: var(--nui-font);
+    cursor: pointer;
+}
+.nui-global__close:hover { color: var(--nui-bad); }
+
+.nui-global__body {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--nui-pad);
+    scrollbar-width: thin;
+    scrollbar-color: var(--nui-border-hi) transparent;
+}
+.nui-global__pane { display: flex; flex-direction: column; gap: var(--nui-gap); }
+.nui-global__pane[hidden] { display: none; }
+
+/* A rail panel folded in here keeps its own frame (it is the same widget,
+   docked somewhere else) but must stretch rather than sit at rail width. */
+.nui-global__pane > .nui-panel { width: 100%; }
+
+/* ── the battle log (Events tab) ─────────────────────────────────────── */
+
+.nui-log { display: flex; flex-direction: column; gap: 2px; }
+.nui-log__empty { margin: 4px 0; color: var(--nui-text-faint); font-style: italic; }
+
+.nui-log__row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--nui-gap);
+    padding: 3px 6px;
+    background: var(--nui-bg-sunken);
+    border-left: 3px solid var(--nui-border-hi);
+    border-radius: 2px;
+}
+.nui-log__row--good { border-left-color: var(--nui-good); }
+.nui-log__row--bad { border-left-color: var(--nui-bad); }
+.nui-log__row--accent { border-left-color: var(--nui-accent); }
+.nui-log__when {
+    flex: none;
+    min-width: 4.5ch;
+    color: var(--nui-text-faint);
+    font: var(--nui-font-mono);
+}
+.nui-log__text { flex: 1; }
+
+.nui-board { display: flex; flex-direction: column; gap: 4px; }
+
+/* ── the briefing (Reports tab) ──────────────────────────────────────── */
+
+.nui-briefing { display: flex; flex-direction: column; gap: 4px; max-width: 68ch; }
+.nui-briefing__clock {
+    color: var(--nui-accent);
+    font: var(--nui-font-mono);
+}
+.nui-briefing__title { margin: 4px 0 0; font-size: 13px; }
+.nui-briefing__subtitle { margin: 0; color: var(--nui-text-dim); font-style: italic; }
+.nui-briefing__para { margin: 0; color: var(--nui-text-dim); line-height: 1.5; }
+.nui-briefing__tips-head { margin: 6px 0 0; font-size: 11px; color: var(--nui-text-faint); }
+.nui-briefing__tips { margin: 0; padding-left: 18px; color: var(--nui-text-dim); }
+
+@media (prefers-reduced-motion: reduce) {
+    .nui-edge { animation: none; opacity: 1; }
 }

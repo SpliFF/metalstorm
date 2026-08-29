@@ -15,8 +15,8 @@
  * Extracted from lua-widget-worker.ts as part of PLAN-refactor-p3.md WP2c.
  */
 
-import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial,
-    RenderTargetTexture } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Matrix, Color3, Color4, Mesh, MeshBuilder,
+    StandardMaterial, RenderTargetTexture } from '@babylonjs/core';
 // P5: high-res RTT screenshot. Imported from its module path (not the barrel)
 // so the DumpTools side-effects it needs come along in a tree-shaken build.
 import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
@@ -149,6 +149,10 @@ import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './standing-order-renderer.js';
 import { ObjectiveMarkerRenderer } from './objective-marker-renderer.js';
 import { deriveObjectiveMarkers, markersFingerprint, type ObjectiveMarker } from './objective-markers.js';
+import {
+    BattleEventDetector, type BattleMoment, type BattleMomentMarker,
+    type RosterUnit, type Side,
+} from './battle-events.js';
 import { getEngineGl } from './engine-gl.js';
 import {
     applyPlayerTeamRosterEffect,
@@ -231,6 +235,28 @@ let gpObjectiveMarkersCheckedAt = 0;
 /// Last set posted to main, so the minimap message is not re-sent when nothing
 /// about the markers actually moved.
 let gpLastObjectiveMarkerFp = '';
+/// battle-clarity U3: what is happening in the battle, in a form a player can
+/// be told about. Fed from BOTH outcome families (see battle-events.ts's
+/// header on why one of them is not enough), the death stream and the entity
+/// mirror; drained on `GP_BATTLE_TICK_MS`.
+const gpBattleEvents = new BattleEventDetector();
+/// How often the detector's buckets are closed, the roster is re-read and the
+/// screen state of live moments is re-projected. 500 ms: fast enough that an
+/// off-screen pointer tracks a panning camera, slow enough that this is never
+/// per-frame work — PLAN-native-ui.md forbids the latter for the DOM this
+/// eventually drives.
+const GP_BATTLE_TICK_MS = 500;
+let gpBattleTickedAt = 0;
+/// Moments still young enough to carry an on-screen marker, with the wall
+/// clock they were posted at. The HUD's notices decay on the same budget.
+let gpBattleLive: Array<{ id: number; x: number; z: number; bornAt: number }> = [];
+/// How long a moment keeps a marker. Matches the notice lifetime on main
+/// (`NOTICE_MS`) — a pointer that outlives the notice it belongs to is an
+/// arrow to nowhere.
+const GP_BATTLE_MARKER_TTL_MS = 12_000;
+/// Last marker set posted, so a stationary camera over a live fight posts
+/// nothing at all.
+let gpLastBattleMarkerFp = '';
 /// PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
 /// Built in gpInit alongside WorkerSelection; armed by the native BuildMenu via
 /// gp:startBuildPlacement. Pointer handlers route left-clicks here before
@@ -1409,6 +1435,11 @@ function gpConnect(msg: GpInitToWorker): void {
                 // means exactly that; skip.
                 const meta = gpCtx.entityRenderer?.getEntityMeta(entityId);
                 if (meta && meta.lastStateFrame > frame) return;
+                // battle-clarity U3: a death the player can be told about.
+                // Taken here, after the id-recycling guard and on the
+                // PRESENTATION frame, so the notice lands with the explosion
+                // rather than ~D frames before the body arrives.
+                gpBattleEvents.noteDeath(entityId, x, z, frame);
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 // PLAN-metalstorm-squads.md §6 (H2): cascade the squad's members
                 // + clear buffered state so a recycled id can't resurrect it.
@@ -1599,6 +1630,11 @@ function gpConnect(msg: GpInitToWorker): void {
         // interpolated unit reaches the spot rather than ~D frames early.
         onCombatEvents: (events, frame) => {
             for (const ev of events) {
+                // battle-clarity U3: the BALLISTIC half of the outcome census.
+                // `onVolleyOutcomes` below is the other half and neither alone
+                // covers a Metalstorm arsenal — see battle-events.ts's header.
+                gpNoteBattleFire(ev.attackerId, ev.targetId, ev.damage,
+                    ev.x, ev.z, undefined, frame);
                 gpSchedule(frame, 'combatFx', () => {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
@@ -1640,6 +1676,13 @@ function gpConnect(msg: GpInitToWorker): void {
             for (const e of events) {
                 if (e.revealAttacker)
                     postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
+                // battle-clarity U3: the STATISTICAL half of the outcome
+                // census. `attacker_id` is 0 and `team` is 255 when the viewer
+                // cannot see the shooter, which is a real state ("something out
+                // there is hitting us") and is passed through as such rather
+                // than being dropped.
+                gpNoteBattleFire(e.attackerId, e.targetId, e.damage,
+                    e.x, e.z, e.team === 255 ? undefined : e.team, e.resolveFrame);
             }
         },
         // Metalstorm damage-field lifecycle (Model 3 area bombardment, C6).
@@ -3088,6 +3131,15 @@ export function gpInit(msg: GpInitToWorker): void {
                     gpRefreshObjectiveMarkers();
                 }
             }
+            // battle-clarity U3: close the awareness buckets, re-read the
+            // roster, and re-project the live moments against THIS camera.
+            // Beside the marker fade for the same reason it is: both answer
+            // "where is the player looking", and two independent answers to
+            // that would eventually disagree.
+            if (now - gpBattleTickedAt >= GP_BATTLE_TICK_MS) {
+                gpBattleTickedAt = now;
+                gpTickBattleEvents(now, camera, scene);
+            }
         }
         // Age the FX lights after the emitters ran this frame + before
         // scene.render() consumes the lighting; then push distortion/muzzle
@@ -3642,6 +3694,121 @@ function gpRefreshObjectiveMarkers(): void {
     postToMain({ type: 'gp:objectiveMarkers', markers });
 }
 
+/**
+ * battle-clarity U3: normalise one shot from EITHER outcome family into the
+ * detector's vocabulary.
+ *
+ * The two wire events do not agree on what they carry — `CombatEvent` names an
+ * attacker id and no team, `VolleyOutcome` names a team and blanks the attacker
+ * id when the viewer cannot see them — so the sides are resolved here, once,
+ * against the same entity mirror the NL census reads. That is also what keeps
+ * this LOS-honest: a unit that is not in our mirror has no side, and a shot
+ * between two forces we merely watch is somebody else's war.
+ */
+function gpNoteBattleFire(
+    attackerId: number, targetId: number, damage: number,
+    x: number, z: number, attackerTeam: number | undefined, frame: number,
+): void {
+    const targetSide = gpUnitSide(targetId);
+    if (!targetSide) return;                 // not in our mirror ⇒ not our news
+    const attackerSide: Side | 'unknown' =
+        gpUnitSide(attackerId)
+        ?? (attackerTeam !== undefined ? gpSideOfTeam(attackerTeam) : 'unknown');
+    gpBattleEvents.noteFire(
+        { attackerId, targetId, targetSide, attackerSide, x, z, damage }, frame);
+}
+
+/// Which side a team is on, from the local viewer's seat. Shared by the
+/// awareness layer and `gpNlCensus` so "enemy" means one thing on this client.
+function gpSideOfTeam(team: number): Side {
+    const myTeam = liveState.identity.myTeam;
+    if (team === myTeam) return 'own';
+    const myAlly = liveState.teams.get(myTeam)?.allyTeam ?? liveState.identity.myAllyTeam;
+    const ally = liveState.teams.get(team)?.allyTeam;
+    return ally !== undefined && ally === myAlly ? 'ally' : 'enemy';
+}
+
+/// The side of a unit we can currently see, or null when it is not in the
+/// mirror at all (out of LOS, or an id the wire blanked).
+function gpUnitSide(unitId: number): Side | null {
+    if (!unitId) return null;
+    const u = liveState.units.get(unitId);
+    return u ? gpSideOfTeam(u.team) : null;
+}
+
+/**
+ * battle-clarity U3: the awareness tick.
+ *
+ * Three jobs, deliberately on one clock: close the coalescing buckets, re-read
+ * the LOS-honest roster (arrivals, departures, "nearly dead"), and re-project
+ * every live moment against the camera so an off-screen fight can be pointed
+ * at. Everything posted is DATA — the wording is main's, beside the objective
+ * phrasing, because two places composing text about one fight end up calling it
+ * two different things.
+ */
+function gpTickBattleEvents(now: number, camera: FreeCamera, scene: Scene): void {
+    const er = gpCtx.entityRenderer;
+    const roster: RosterUnit[] = [];
+    for (const [unitId, u] of liveState.units) {
+        const cp = unitDefMap.get(u.defId)?.customParams;
+        roster.push({
+            unitId,
+            side: gpSideOfTeam(u.team),
+            x: u.x, z: u.z,
+            ...(Number.isFinite(u.healthRatio) ? { health: u.healthRatio } : {}),
+            ...(cp?.ms_class ? { className: cp.ms_class } : {}),
+            ...(gpSquadIds.has(unitId) ? { squad: true } : {}),
+        });
+    }
+    gpBattleEvents.noteRoster(roster, liveState.gameFrame);
+    const fresh = gpBattleEvents.drain(liveState.gameFrame);
+
+    for (const m of fresh) gpBattleLive.push({ id: m.id, x: m.x, z: m.z, bornAt: now });
+    gpBattleLive = gpBattleLive.filter((l) => now - l.bornAt <= GP_BATTLE_MARKER_TTL_MS);
+
+    // Project against the LIVE camera. `getTransformMatrix()` is the view ×
+    // projection the scene just rendered with, so "on screen" here means the
+    // same thing it means to the player, not an approximation of it.
+    const width = gpEngine?.getRenderWidth() ?? 1;
+    const height = gpEngine?.getRenderHeight() ?? 1;
+    const viewport = camera.viewport.toGlobal(width, height);
+    const transform = scene.getTransformMatrix();
+    const markers: BattleMomentMarker[] = gpBattleLive.map((l) => {
+        const y = er?.getGroundHeight(l.x, l.z) ?? 0;
+        const p = Vector3.Project(new Vector3(l.x, y, l.z),
+            Matrix.IdentityReadOnly, transform, viewport);
+        const sx = p.x / width;
+        const sy = p.y / height;
+        // `p.z` outside 0..1 is behind the camera (or past the far plane); a
+        // point behind the eye projects to a MIRRORED screen position, so an
+        // edge pointer built without this check points the wrong way exactly
+        // when the player most needs it — at the fight they turned away from.
+        const inFront = p.z > 0 && p.z < 1;
+        return {
+            id: l.id,
+            sx: inFront ? sx : (sx < 0.5 ? 1 : 0),
+            sy: inFront ? sy : 0.5,
+            onScreen: inFront && sx >= 0 && sx <= 1 && sy >= 0 && sy <= 1,
+        };
+    });
+
+    // A moment born off-screen is what earns a minimap ping and an edge
+    // pointer, so the classification travels WITH the moment as well as in the
+    // live marker list — main must not have to correlate two messages to know
+    // whether the player saw a battle happen.
+    const byId = new Map(markers.map((m) => [m.id, m]));
+    for (const m of fresh) {
+        if (byId.get(m.id)?.onScreen === false) m.offScreen = true;
+    }
+
+    const fp = markers.map((m) =>
+        `${m.id}:${m.onScreen ? 1 : 0}:${Math.round(m.sx * 200)}:${Math.round(m.sy * 200)}`
+    ).join('|');
+    if (fresh.length === 0 && fp === gpLastBattleMarkerFp) return;
+    gpLastBattleMarkerFp = fp;
+    postToMain({ type: 'gp:battleMoments', moments: fresh, markers });
+}
+
 /// GW4-c5c-3: post the minimap feed to main (~6 Hz). The minimap is a DOM
 /// element with its own Babylon Engine on the main thread (it can't read the
 /// worker's entity renderer), so the worker projects the live entity set down
@@ -4028,6 +4195,10 @@ export function gpShutdown(): void {
     gpCtx.objectiveMarkersDirty = false;
     gpLastObjectiveMarkerFp = '';
     gpObjectiveMarkersCheckedAt = 0;
+    gpBattleEvents.reset();
+    gpBattleLive = [];
+    gpLastBattleMarkerFp = '';
+    gpBattleTickedAt = 0;
     gpLastCommandQueues = [];
     gpPendingActions?.clear();
     gpPendingActions = null;

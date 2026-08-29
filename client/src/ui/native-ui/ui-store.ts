@@ -18,6 +18,26 @@
  * All updates are EVENT-DRIVEN from server streams, never per-frame.
  */
 
+import type { BattleMoment, BattleMomentMarker } from '../../core/battle-events.js';
+
+/** How much battle history the rung-4 Events tab keeps. The sim's own warlog
+ *  ring is 32 and the digest shows 5; this is the client's own record of a
+ *  single session and is bounded for the same reason theirs are — the record
+ *  is not the HUD's job to hold indefinitely. */
+export const BATTLE_HISTORY_MAX = 100;
+
+/** The briefing fields the HUD re-reads. Structurally a `ScenarioBriefing`
+ *  (lobby/scenario-picker.ts) minus the art, which the splash owned and a
+ *  rung-4 tab has no room for. Declared here rather than imported so the store
+ *  does not depend on the lobby. */
+export interface StoredBriefing {
+    title?: string;
+    subtitle?: string;
+    story?: string;
+    tips: readonly string[];
+    parTimeSec?: number;
+}
+
 type Subscriber = () => void;
 type UnsubscribeFn = () => void;
 
@@ -108,7 +128,40 @@ export class UIStore {
     private economy = new Map<number, TeamEconomy>();
     private unitQueues = new Map<number, any[]>(); // unitId -> command queue
     private directives = new Map<number, DirectiveSummary>(); // directiveId -> live directive
-    private gameEvents: any[] = []; // recent events
+    /**
+     * What has happened in the battle (battle-clarity U3).
+     *
+     * This mirror has been declared since the store was written and had NO
+     * producer at all — the file header has always said "combat/unit lifecycle
+     * events", `widget-loader.ts` has always accepted `gameEvents` as a
+     * subscribable path, and nothing ever pushed one. U3 connects it rather
+     * than adding a parallel path beside it.
+     *
+     * It is the rung-4 HISTORY, not the HUD's feed: the decaying notices render
+     * from the moments as they ARRIVE, and this is what the Events tab reads
+     * when the player asks what they missed.
+     */
+    private gameEvents: BattleMoment[] = [];
+    /**
+     * Where each still-live moment is on screen right now.
+     *
+     * Recomputed in the worker (which owns the camera) at 2 Hz and only posted
+     * when it changes, so a stationary camera over a quiet field notifies
+     * nobody. A subscribable path rather than a poll mirror because the whole
+     * point of an edge pointer is that it MOVES when the player pans.
+     */
+    private battleMarkers: readonly BattleMomentMarker[] = [];
+    /**
+     * The scenario briefing this battle booted with (battle-clarity U3).
+     *
+     * `main.ts` fetches it for the boot splash and, until now, threw it away
+     * when the player clicked Begin — so the story and the field advice were
+     * readable exactly once, before the player had seen the map they describe.
+     * Stashing it here is what makes "the briefing is REACHABLE" true: the
+     * Reports tab reads this. Null for a boot with no scenario, no briefing, or
+     * `?skipBriefing=1`.
+     */
+    private briefing: StoredBriefing | null = null;
     private orgGroups: OrgGroupSummary[] = [];
     /**
      * Latest sim frame, mirrored off the scene feed.
@@ -369,14 +422,44 @@ export class UIStore {
         this.notifySubscribers(['directives']);
     }
 
-    /** Add game event */
-    addGameEvent(event: any): void {
-        this.gameEvents.push(event);
-        // Keep only last 100 events
-        if (this.gameEvents.length > 100) {
-            this.gameEvents.shift();
+    /**
+     * Record what just happened (battle-clarity U3).
+     *
+     * Called with the worker's `gp:battleMoments.moments`, which is already
+     * coalesced — one entry per piece of news, not one per shot — so the cap
+     * below is a backstop against a long match, not a de-duplicator.
+     */
+    addBattleMoments(moments: readonly BattleMoment[]): void {
+        if (moments.length === 0) return;
+        this.gameEvents.push(...moments);
+        if (this.gameEvents.length > BATTLE_HISTORY_MAX) {
+            this.gameEvents.splice(0, this.gameEvents.length - BATTLE_HISTORY_MAX);
         }
         this.notifySubscribers(['gameEvents']);
+    }
+
+    /** The scenario briefing, or null when this boot had none. */
+    getBriefing(): StoredBriefing | null { return this.briefing; }
+
+    /** Fed by main.ts at boot, from the same fetch the splash uses. */
+    setBriefing(briefing: StoredBriefing | null): void {
+        this.briefing = briefing;
+        this.notifySubscribers(['briefing']);
+    }
+
+    /** Everything that has happened, oldest first. The rung-4 Events tab. */
+    getBattleMoments(): readonly BattleMoment[] {
+        return this.gameEvents;
+    }
+
+    /** Screen state of the live moments, from the worker's projection. */
+    setBattleMarkers(markers: readonly BattleMomentMarker[]): void {
+        this.battleMarkers = markers;
+        this.notifySubscribers(['battleMarkers']);
+    }
+
+    getBattleMarkers(): readonly BattleMomentMarker[] {
+        return this.battleMarkers;
     }
 
     // ─── Internal ───
@@ -430,6 +513,8 @@ export class UIStore {
         this.unitQueues.clear();
         this.directives.clear();
         this.gameEvents = [];
+        this.battleMarkers = [];
+        this.briefing = null;
         this.orgGroups = [];
         // A stale frame would make the next match's first countdowns tick from
         // the last match's clock.

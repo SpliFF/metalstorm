@@ -148,6 +148,36 @@ export function stateWord(
 }
 
 /**
+ * The one always-visible line (DESIGN-DRILLDOWN.md §6's "one permitted leak"):
+ * the victory condition's current state, in a form the player can act on.
+ *
+ * The design's own example is "Raven Basin: contested — hold clock resets", and
+ * `contested` is the interesting half — but the sim publishes no such field, so
+ * it is never asserted from nothing. It is passed in by the caller, which knows
+ * it for exactly one honest reason: it WATCHED the published progress go
+ * backwards. A hold clock that resets is the only thing that does that, and
+ * "we saw it happen" is the only claim made here (phrasing rule 1).
+ */
+export function victoryLine(
+    o: ObjectiveRecord,
+    place: ObjectivePlace | null,
+    opts: { frame: number; teamId?: number; contested?: boolean },
+): string {
+    const head = shortName(o, place);
+    const state = stateWord(o, opts);
+    if (state !== 'active' && state !== 'securing' && state !== 'evacuating') {
+        return `${head}: ${state}`;
+    }
+    if (opts.contested) {
+        return o.type === 'control'
+            ? `${head}: contested — hold clock resets`
+            : `${head}: contested`;
+    }
+    const progress = progressPhrase(o);
+    return progress ? `${head}: ${progress}` : `${head}: ${state}`;
+}
+
+/**
  * The briefing — the "further information" the player asked for by name.
  *
  * Two or three sentences: what the objective actually asks, then the facts that

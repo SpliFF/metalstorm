@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { UIStore, type DirectiveSummary } from './ui-store';
+import { UIStore, BATTLE_HISTORY_MAX, type DirectiveSummary } from './ui-store';
 
 describe('UIStore', () => {
     let store: UIStore;
@@ -124,28 +124,37 @@ describe('UIStore', () => {
         expect(econ?.energy).toBe(0); // Default value
     });
 
-    it('should manage game events with limit', () => {
+    it('should manage battle moments with a bounded history', () => {
+        // battle-clarity U3: this mirror finally has a producer. It is the
+        // rung-4 Events tab's record, so the cap is what keeps a long match
+        // from turning it into an audit trail.
         vi.useFakeTimers();
         const callback = vi.fn();
 
-        // Subscribe before adding events
         store.subscribe(['gameEvents'], callback);
 
-        // Add 105 events
-        for (let i = 0; i < 105; i++) {
-            store.addGameEvent({ id: i, type: 'test' });
+        const moment = (id: number) => ({
+            id, kind: 'kills' as const, frame: id * 30,
+            x: 0, z: 0, count: 1, unitIds: [id],
+        });
+        for (let i = 1; i <= BATTLE_HISTORY_MAX + 5; i++) {
+            store.addBattleMoments([moment(i)]);
         }
-
         vi.runAllTimers();
-
-        // Should have been notified for the batch
         expect(callback).toHaveBeenCalled();
 
-        // Add another event to verify it still works
+        const kept = store.getBattleMoments();
+        expect(kept).toHaveLength(BATTLE_HISTORY_MAX);
+        // The NEWEST survive: a player opening the log after a fight wants the
+        // last thing that happened, not the first.
+        expect(kept[kept.length - 1].id).toBe(BATTLE_HISTORY_MAX + 5);
+
+        // An empty batch must not wake every subscriber — the worker posts on
+        // marker movement too, and most of those carry no new moments.
         callback.mockClear();
-        store.addGameEvent({ id: 999, type: 'new' });
+        store.addBattleMoments([]);
         vi.runAllTimers();
-        expect(callback).toHaveBeenCalled();
+        expect(callback).not.toHaveBeenCalled();
     });
 
     // ─── Directive mirror (`gp:directives`) — PLAN-macro-ui.md §3 ───

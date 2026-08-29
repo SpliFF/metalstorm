@@ -949,11 +949,15 @@ async function maybeShowBriefing(
     briefingSplash?.dismiss();
     briefingSplash = null;
     try {
-        // Read once, at the mount decision. Automation sets it so a harness
-        // never waits on a button (launch_scenario's browserUrl appends it).
-        if (new URLSearchParams(window.location.search).get('skipBriefing') === '1') return;
         const scenarioId = modOptions.scenario;
         if (!scenarioId || !gameId) return;
+        // Read once, at the mount decision. Automation sets it so a harness
+        // never waits on a button (launch_scenario's browserUrl appends it).
+        // It suppresses the SPLASH only — the briefing is still fetched and
+        // stashed below, because "reachable behind the access point" must not
+        // depend on whether a splash was shown.
+        const skipSplash =
+            new URLSearchParams(window.location.search).get('skipBriefing') === '1';
 
         const res = await fetch(`/api/games/${encodeURIComponent(gameId)}/scenarios`);
         if (!res.ok) return;
@@ -967,6 +971,20 @@ async function maybeShowBriefing(
             ? `/api/games/data/${encodeURIComponent(gameId)}/${entry.briefing.image}`
             : (mapId ? `/api/maps/thumb/${encodeURIComponent(mapId)}` : null);
 
+        // battle-clarity U3: keep it. The splash is dismissed the moment the
+        // player clicks Begin, and until now that was the only time this text
+        // existed — the story and the field advice were readable exactly once,
+        // before the player had seen the map they describe. The rung-4 Reports
+        // tab re-reads it from here.
+        uiStore.setBriefing({
+            title: entry.briefing.title,
+            subtitle: entry.briefing.subtitle,
+            story: entry.briefing.story,
+            tips: entry.briefing.tips,
+            parTimeSec: entry.briefing.parTimeSec,
+        });
+
+        if (skipSplash) return;
         briefingSplash = showBriefingSplash(gameTemplates, entry.briefing, {
             fallbackTitle: entry.displayName,
             imageUrl,
@@ -1418,6 +1436,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // radar blip at the firing position so artillery is counterable.
             case 'gp:counterbatteryPing':
                 minimap?.pushAttackPing({ x: m.x, z: m.z });
+                break;
+            // battle-clarity U3: what just happened in the battle, and where it
+            // is on screen. The worker owns the detection (combat only reaches
+            // the client there) and the projection (it owns the camera); main
+            // owns the wording, the notices and the history.
+            case 'gp:battleMoments':
+                for (const moment of m.moments) {
+                    // A fight the player was not looking at gets a minimap ping
+                    // as well as a notice — the user report is literally a
+                    // battle that died off camera. Reuses the existing `attack`
+                    // ping rather than adding a second ping vocabulary.
+                    if (moment.offScreen) minimap?.pushAttackPing({ x: moment.x, z: moment.z });
+                }
+                uiStore.addBattleMoments(m.moments);
+                uiStore.setBattleMarkers(m.markers);
                 break;
             // GW4-c5c-2: resolved sound events / music transitions from the worker.
             case 'gp:audioSoundEvents':
