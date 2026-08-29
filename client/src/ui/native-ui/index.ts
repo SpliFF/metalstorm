@@ -112,3 +112,26 @@ export type {
     VoicePort, VoiceError, VoiceErrorKind, VoiceBackend, VoiceGlobals,
     PushToTalk, PushToTalkState, PushToTalkDeps, SpeechOutPort,
 } from './voice-capture.js';
+
+// ── The drill-down interaction framework (DESIGN-DRILLDOWN.md, U0) ──
+// Focus model: the one source of truth for what the player is attending to,
+// read by every HUD surface and (story 4) by the NL layer.
+export {
+    FocusModel, focusModel, focusRefKey, resolveSelectionSubjects, bindSelectionToFocus,
+} from './focus-model.js';
+export type {
+    FocusKind, FocusRef, FocusState, FocusGroupLike, FocusStoreLike,
+} from './focus-model.js';
+
+// The container primitive every drill-down surface is built from.
+export {
+    createDrilldown, detailRow, detailReference, SUMMARY_MAX_STATS,
+} from './drilldown.js';
+export type {
+    DrilldownSpec, DrilldownHandle, DrilldownSummary, DrilldownStat, DrilldownAction, StatTone,
+} from './drilldown.js';
+
+// "Go there" — the camera-travel affordance, ground-anchored via
+// `cameraSnapToGround` (the rig ignores free `setCameraPose`).
+export { travelTo, canTravelTo, createGoThereButton, TRAVEL_DURATION_MS } from './camera-travel.js';
+export type { TravelTarget, TravelResult, TravelRefusal } from './camera-travel.js';

@@ -4808,12 +4808,18 @@ function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
 /// NOTHING outside this map is read. There is no "all units" collection on the
 /// client to accidentally reach for, which is what makes LOS honesty a property
 /// of the data path rather than of a filter someone has to remember.
+/** Speed above which a unit reads as "moving" for the HUD's rung-1 state word
+ *  (elmos/second). Well above the sub-elmo jitter a stationary unit's
+ *  position-delta velocity carries, well below any real move order. */
+const NL_CENSUS_MOVING_SPEED = 1.0;
+
 function gpNlCensus(): {
     frame: number;
     myTeam: number;
     units: Array<{
         unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
         className?: string; scale?: number; x: number; z: number;
+        health?: number; moving?: boolean;
     }>;
 } {
     const myTeam = liveState.identity.myTeam;
@@ -4828,6 +4834,7 @@ function gpNlCensus(): {
     const units: Array<{
         unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
         className?: string; scale?: number; x: number; z: number;
+        health?: number; moving?: boolean;
     }> = [];
 
     for (const [unitId, u] of liveState.units) {
@@ -4835,6 +4842,11 @@ function gpNlCensus(): {
         const className = cp?.ms_class;
         const scaleRaw = cp?.ms_scale;
         const scale = scaleRaw !== undefined ? Number(scaleRaw) : undefined;
+        // `healthRatio` / the velocity triple are already on the mirror (the
+        // entityState handler maintains both); this just exposes them, so the
+        // HUD's "strength / state" summary costs no new stream.
+        const health = Number.isFinite(u.healthRatio) ? u.healthRatio : undefined;
+        const speed = Math.hypot(u.vx, u.vz);
         units.push({
             unitId,
             team: u.team,
@@ -4843,6 +4855,8 @@ function gpNlCensus(): {
             ...(scale !== undefined && Number.isFinite(scale) ? { scale } : {}),
             x: u.x,
             z: u.z,
+            ...(health !== undefined ? { health } : {}),
+            ...(Number.isFinite(speed) ? { moving: speed > NL_CENSUS_MOVING_SPEED } : {}),
         });
     }
 

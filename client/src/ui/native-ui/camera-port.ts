@@ -168,6 +168,31 @@ export class CameraPort {
     }
 
     /**
+     * Travel to a ground position, keeping the player's current framing.
+     *
+     * This is the drill-down ladder's "go there" (DESIGN-DRILLDOWN.md §5), and
+     * it is deliberately NOT `focusOn`. `focusOn` pans the look-at to `(x, 0,
+     * z)` — sea level — so on any map with relief the camera arrives looking at
+     * a point below (or floating above) the terrain the player asked to see,
+     * and the further the travel the worse it reads. `cameraSnapToGround`
+     * samples the heightmap for the look-at, which is why the test rig frames
+     * every shot with it and why the whole HUD rides that same path rather
+     * than each surface inventing its own framing.
+     *
+     * Height is deliberately NOT passed: `snapToGround` then preserves the
+     * player's current camera-to-look-at distance, so travelling somewhere
+     * keeps the zoom level they chose. A "go there" that also re-zooms is a
+     * camera the player has to fight back.
+     */
+    travelTo(x: number, z: number, opts: { durationMs?: number } = {}): void {
+        this.stopFollow('camera-action');
+        this.deps.call('cameraSnapToGround', [x, z, {
+            durationMs: opts.durationMs ?? FOCUS_DURATION_MS,
+        }]);
+        this.commandedLookAt = { x, z };
+    }
+
+    /**
      * One zoom step in or out.
      *
      * The worker exposes an ABSOLUTE orbit distance, not a relative step, so the

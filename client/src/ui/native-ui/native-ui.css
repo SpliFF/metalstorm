@@ -586,3 +586,190 @@
     .nui-toast { animation: none; }
     .nui-panel__caret { transition: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Drill-down ladder (DESIGN-DRILLDOWN.md §4)
+   ══════════════════════════════════════════════════════════════════════
+   Three rungs, one look:
+
+     .nui-dd__chip    rung 1 — the summary affordance. Deliberately NOT a
+                      .nui-panel: a panel frame says "this lives here", and a
+                      summary is supposed to arrive and leave with the thing it
+                      summarises. Pill-shaped, one line, no header, no border
+                      that reads as chrome.
+     .nui-dd__panel   rung 2 — the context panel. Hangs under the chip it came
+                      from so the drill reads as a movement rather than a new
+                      window opening somewhere else.
+     .nui-dd__actions rung 3 — the action row, always the LAST thing in the
+                      panel, so "what can I do" is always in the same place.
+
+   Nothing here is full-height and nothing here docks: the whole ladder is
+   absent from the DOM when nothing is focused (see focus-hud.ts).
+   ────────────────────────────────────────────────────────────────────── */
+
+.nui-focus {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    /* The mount spans the viewport (see the dock rules above); this keeps the
+       stack itself narrow so it never becomes a bar across the top. */
+    max-width: min(520px, 60vw);
+}
+.nui-focus[hidden] { display: none; }
+
+.nui-focus__overflow {
+    padding: 2px 8px;
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    font-style: italic;
+}
+
+.nui-dd {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+}
+
+.nui-dd__row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+}
+
+.nui-dd__chip {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 4px 10px;
+    background: rgba(16, 19, 24, 0.9);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: 12px;
+    color: var(--nui-text);
+    font: var(--nui-font);
+    text-align: left;
+    cursor: pointer;
+}
+.nui-dd__chip:hover { background: rgba(35, 41, 50, 0.94); border-color: var(--nui-accent-dim); }
+.nui-dd.is-open > .nui-dd__row > .nui-dd__chip {
+    border-color: var(--nui-accent-dim);
+    border-bottom-left-radius: 2px;
+    border-bottom-right-radius: 2px;
+}
+
+.nui-dd__title {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 700;
+}
+
+.nui-dd__state {
+    flex: none;
+    padding: 1px 6px;
+    background: var(--nui-bg-raised);
+    border-radius: 7px;
+    color: var(--nui-text-dim);
+    font: 600 9px/1.4 system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.nui-dd__state[hidden] { display: none; }
+
+.nui-dd__stats {
+    flex: none;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-left: auto;
+}
+.nui-dd__stat {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    font: var(--nui-font-mono);
+    white-space: nowrap;
+}
+.nui-dd__stat-label {
+    color: var(--nui-text-faint);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.nui-dd__stat-value { color: var(--nui-text); font-weight: 700; font-size: 12px; }
+.nui-dd__stat-value--good { color: var(--nui-good); }
+.nui-dd__stat-value--bad { color: var(--nui-bad); }
+.nui-dd__stat-value--accent { color: var(--nui-accent); }
+.nui-dd__stat-value--gold { color: var(--nui-gold); }
+
+.nui-dd__caret {
+    flex: none;
+    color: var(--nui-text-faint);
+    font-size: 9px;
+}
+
+.nui-dd__panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 7px 10px;
+    background: var(--nui-bg);
+    border: 1px solid var(--nui-accent-dim);
+    border-radius: var(--nui-radius);
+    /* Rung 2 is a handful of facts, never a scrolling document. The cap is
+       what stops a context panel growing into the resident data panel the
+       directive rejects; anything that needs more room is a rung-4 surface
+       behind the global access point. */
+    max-height: 40vh;
+    overflow-y: auto;
+}
+.nui-dd__panel[hidden] { display: none; }
+
+.nui-dd__body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.nui-dd__fact,
+.nui-dd__ref {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.nui-dd__fact-label {
+    flex: none;
+    min-width: 62px;
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.nui-dd__fact-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: var(--nui-font-mono);
+}
+
+.nui-dd__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-top: 5px;
+    border-top: 1px solid var(--nui-border);
+}
+.nui-dd__actions[hidden] { display: none; }
+
+/* "Go there" is the same affordance wherever it appears — chip row, fact row,
+   later an objective or a contact ping — so it is styled once, here. */
+.nui-go-there { flex: none; }
