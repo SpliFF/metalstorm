@@ -57,7 +57,7 @@ Five habits this surface replaces — do not fall back to the old folklore:
 | `restart_client` | Restart the Vite client pane (:8012) via the mprocs control channel; `{clearCache?}` also wipes `client/node_modules/.vite` | After editing a worker-imported client file (`entity-renderer.ts`, `game-processor.ts`) that Vite serves stale |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
-This server also exposes the browser relay tools (`client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` — these **run code in a connected browser and return the answer**, falling back to printing a chrome-devtools snippet when one of the relay's three gates refuses) and the server-side test verbs (`spawn_unit`, `give_order`, `set_los`, `set_cheats`, `set_unit_invulnerable`, `get_unit_def`, `list_unit_defs`, `get_weapon_def`, `clear_defs_cache`, etc.) — documented in the **`spring-test`** skill and [docs/debugging-tools.md](../../../docs/debugging-tools.md#available-tools), plus performance profiling in [docs/debugging-performance.md](../../../docs/debugging-performance.md).
+This server also exposes **`capture_subject`** — the one call from "show me this unit / def / place" to a usable image, with the framing, the sim hold and the black-frame check done for you (see [Showing yourself something](#showing-yourself-something-capture_subject) below; reach for it before any hand-rolled camera + screenshot pair) — plus the browser relay tools (`client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` — these **run code in a connected browser and return the answer**, falling back to printing a chrome-devtools snippet when one of the relay's three gates refuses) and the server-side test verbs (`spawn_unit`, `give_order`, `set_los`, `set_cheats`, `set_unit_invulnerable`, `get_unit_def`, `list_unit_defs`, `get_weapon_def`, `clear_defs_cache`, etc.) — documented in the **`spring-test`** skill and [docs/debugging-tools.md](../../../docs/debugging-tools.md#available-tools), plus performance profiling in [docs/debugging-performance.md](../../../docs/debugging-performance.md).
 
 ## Self-diagnosis: SQLite binding & SPRING_DB (read this when probes look wrong)
 
@@ -131,6 +131,68 @@ The three **C++** restart tools (`restart_lobby`/`restart_logserver`/`restart_ga
 - **Lobby** (`restart_lobby`): persists running game-server PIDs/ports to SQLite so active games survive. Also via `SIGHUP` or `POST /api/exec {"scope":"lobby","code":"restart"}`. Re-runs the same startup recovery as a cold start (adopt-or-reset); a fresh-launched game's roster handoff is not broken by it.
 - **Log server** (`restart_logserver`): use if `get_logs`/`search_logs` start failing with `fetch failed`. Also via `SIGHUP` or `POST /api/logs/restart`.
 - **Game server** (`restart_game`): broadcasts `GameRestarting` to clients, which reload and reconnect. Also via `SIGHUP` or `POST /api/restart` on the game port. Use instead of end→relaunch when iterating on server code.
+
+## Showing yourself something: `capture_subject`
+
+**If the goal is "look at X", this is the one call — do not hand-roll camera
+math.** `capture_subject` goes from a *subject* to an *image you can trust*, in
+a single relay round trip.
+
+```
+capture_subject {"def": "ms_subs_s4", "angle": "side"}
+capture_subject {"unitId": 26175}
+capture_subject {"unitIds": [16366, 6227, 28378, 26175], "angle": "top", "fill": 0.9}
+capture_subject {"def": "fable_tank", "spawn": {"x": 8704, "z": 15360}, "angle": "low"}
+capture_subject {"area": {"x1": 6000, "z1": 1200, "x2": 7000, "z2": 2000}}
+```
+
+It exists because the assemble-it-yourself version demonstrably does not work:
+
+- **A constant `height:` cannot frame two subjects.** Framing comes from the
+  subject's **own model bounds** — measured on a real run, the same call put the
+  camera 43 elmos from a 2.0 m subject and 905 from a 66.9 m one.
+- **Camera-then-screenshot is two round trips, and the sim does not wait.** A
+  guided playthrough on 2026-08-29 advanced **1,000+ sim frames** between the
+  two, and the engagement it was aiming at was over. Resolve → frame → hold →
+  capture → judge all happen browser-side inside one evaluation.
+- **A black frame is not a deliverable.** Mean luminance is checked; a black
+  frame re-frames up and out and retries; a frame that is still black returns
+  `ok:false` with the causes named.
+
+Four things it handles that are easy to get wrong by hand:
+
+1. **`def` resolves against the CLIENT mirror**, not the server's `units` verb
+   (which caps at 100 rows and can name units the browser cannot draw). "No live
+   entity of def X reached this client" is an error, not an empty-ground shot.
+2. ⚠ **A paused sim streams no fresh spawns and no fresh LOS reveals.** The
+   plan is therefore always `spawn → los on → wait ~600 ms → pause → capture`,
+   and it is echoed back in the `plan:` line. Pausing first is the classic
+   picture-of-empty-ground bug.
+3. **Restores are conditional.** A sim that was already paused stays paused;
+   LOS already on stays on; they run in a `finally`, so a failed capture never
+   leaves the world frozen.
+4. **The metadata leads with the verdict** — `capture: OK`, or
+   `capture: UNUSABLE — … do not trust the image`. It also reports
+   `metresAcross` (at the 8 elmos = 1 m contract) and `model=loaded|FALLBACK`,
+   so "the model loaded" is a claim you can check without squinting at pixels.
+
+Angle presets are **world**-relative, named for a unit at heading 0, which faces
+−Z: `three-quarter` (default), `front` (yaw −90°), `rear`, `side` (yaw 0°),
+`top` (pitch 85°), `low` (loose near-horizon — the shot for judging a model
+against the terrain it stands on). Override with `yawDeg` / `pitchDeg` / `fill`.
+Turn off the world-freezing with `pause:false`, the LOS reveal with
+`reveal:false`.
+
+Worked examples with committed images (both standing on-screen debts this tool
+was built to close) live in
+[`tools/debug-mcp/shots/README.md`](../../../tools/debug-mcp/shots/README.md);
+the full contract is in
+[docs/debugging-tools.md](../../../docs/debugging-tools.md#looking-at-something-capture_subject).
+
+Reach past it only for: `client_screenshot` (raw shutter, camera left where it
+is), `browser_test` + `test.orbit` (keep the rig and step around a model), or
+chrome-devtools `take_screenshot` (DOM/HUD only — it cannot see the WebGL2
+canvas).
 
 ## Camera control
 

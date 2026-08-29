@@ -2885,6 +2885,25 @@ export class EntityRenderer {
         return this.entityMeta.get(id)?.defId;
     }
 
+    /**
+     * Live entity ids for a def NAME, newest (highest id) first — the
+     * subject-resolution step of `test.captureSubject({def})`.
+     *
+     * Deliberately answered from the CLIENT mirror rather than the server's
+     * `units` verb: the server list is capped at 100 rows and, more to the
+     * point, an id the renderer has never streamed cannot be framed no matter
+     * what the sim says about it. An empty array here is the honest "this
+     * client cannot show you that", which is exactly the diagnosis a capture
+     * needs before it wastes a shot on empty ground.
+     */
+    findEntitiesByDef(defName: string): number[] {
+        const ids: number[] = [];
+        for (const [id, meta] of this.entityMeta) {
+            if (this.defInfos.get(meta.defId)?.name === defName) ids.push(id);
+        }
+        return ids.sort((a, b) => b - a);
+    }
+
     /** Resolve a piece's index by name (glb node name, e.g. "Turret") for
      *  an entity's model — the lookup a `pieceSpin` FX binding
      *  (fx-bindings.ts, PLAN-fx-offload X4) needs before it can call

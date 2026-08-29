@@ -83,6 +83,24 @@ server, a squatted port, a stale binary — `list_stack` classifies it and
 
 ## Framing a screenshot
 
+**If you just want to look at something, use `capture_subject` and stop here:**
+
+```
+capture_subject {"def": "ms_subs_s4", "angle": "side"}
+capture_subject {"unitId": 26175}
+capture_subject {"area": {"x1": 6000, "z1": 1200, "x2": 7000, "z2": 2000}}
+```
+
+One MCP call: it resolves the subject, frames it from the subject's own model
+bounds (no guessed `height:`), pauses the sim so the target is still there when
+the shutter falls, captures a presented frame, and checks the pixels — all in
+ONE relay round trip, because two round trips let the sim run away between them.
+See the `spring-debug` skill and
+[docs/debugging-tools.md](../../../docs/debugging-tools.md#looking-at-something-capture_subject).
+
+Everything below is the hand-rolled path, for when you need the camera somewhere
+`capture_subject`'s presets do not reach.
+
 Camera is client-side; no admin needed. Via the relay (`client_eval
 {target:'test'}`) or chrome-devtools `evaluate_script`:
 

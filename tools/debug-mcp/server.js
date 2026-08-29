@@ -26,6 +26,10 @@ import {
     BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
 } from './browser.js';
 import {
+    DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
+    parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
+} from './capture-subject.js';
+import {
     classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
     probeSqliteAnnotations, dbDivergenceWarning,
 } from './sqlite-health.js';
@@ -1868,6 +1872,45 @@ const TOOLS = [
         },
     },
 
+    {
+        name: 'capture_subject',
+        description: '**Subject → usable image, in ONE call.** The tool to reach for whenever you want to LOOK at something in a running game; do not hand-roll camera math out of `browser_test focus` + `client_screenshot` again. '
+            + 'Pass ONE subject — `unitId`, `unitIds` (framed together), `def` (the newest live instance this client actually has, optionally spawned first), `position {x,z}` or `area {x1,z1,x2,z2}` — and it resolves the subject, frames it FROM ITS OWN MODEL BOUNDS (a 4 m rifleman and a 65 m submarine both fill the frame; `angle` presets front/rear/side/top/three-quarter/low), holds the world still, captures a presented frame, and checks the pixels before handing them back. '
+            + 'It exists because the two-call version does not work: each relay round trip costs seconds and the sim does not wait — a guided run on 2026-08-29 advanced 1,000+ sim frames between the camera call and the screenshot call and lost the engagement it was aiming at. Framing and capture therefore happen inside ONE relay evaluation. '
+            + 'Ordering is handled for you, including the trap that a PAUSED SIM STREAMS NO FRESH SPAWNS OR REVEALS: spawn/reveal → let the stream settle → pause → capture → restore. Restores are conditional — a sim that was already paused stays paused, global LOS that was already on stays on. '
+            + 'A black frame is a DIAGNOSIS, not a deliverable: mean luminance is checked, the camera re-frames up and out and retries, and a frame that is still black comes back `ok:false` with the candidate causes named (fog of war, night, subject never rendered). '
+            + RELAY,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId:   { type: 'number', description: 'Frame this unit.' },
+                unitIds:  { type: 'array', items: { type: 'number' }, description: 'Frame these units together (merged bounding sphere, static anchor).' },
+                def:      { type: 'string', description: 'Frame the newest live instance of this unit def known to the browser. With `spawn`, spawn it first.' },
+                position: { type: 'object', description: 'Frame a world point: {x, z, y?, radius?}. y defaults to the terrain height; radius defaults to 120 elmos.' },
+                area:     { type: 'object', description: 'Frame a ground rectangle: {x1, z1, x2, z2}. Framed from its centroid + half-diagonal.' },
+
+                spawn:    { type: 'object', description: 'Spawn `def` first, then frame it: {x, z, team?, count?}. Enables cheats if needed and turns them back off. Ordered spawn → stream settles → pause, because a paused sim never streams the new unit.' },
+
+                angle:    { type: 'string', enum: ['three-quarter', 'front', 'rear', 'side', 'top', 'low'], description: 'Viewpoint preset (default three-quarter). WORLD-relative, named for a unit at heading 0, which faces −Z. `low` frames loose and near-horizon — the shot for judging a model against the terrain it stands on.' },
+                yawDeg:   { type: 'number', description: 'Override the preset bearing (degrees around +Y from +X toward +Z).' },
+                pitchDeg: { type: 'number', description: 'Override the preset elevation (clamped 5–85).' },
+                fill:     { type: 'number', description: 'Fraction of the shorter viewport axis the subject should fill (0.25–0.95). Lower = more terrain context.' },
+
+                pause:    { type: 'boolean', default: true, description: 'Freeze the sim across the capture so the subject is still there when the shutter falls. A sim that was already paused is left paused.' },
+                reveal:   { description: 'true / "auto" (default) reveals global LOS when it is off and restores it after; false never touches LOS (a fogged subject then comes back as a black-frame diagnosis).' },
+
+                maxDim:   { type: 'number', description: 'Longest edge in pixels, 64–2048. Default 1280.' },
+                quality:  { type: 'number', description: 'JPEG quality 0–1.' },
+                retries:  { type: 'number', description: 'Extra framings to try when the frame comes back black. Default 2, max 5.' },
+                luminanceFloor: { type: 'number', description: 'Mean luminance (0–255) at or below which the frame is called black. Default 8.' },
+                streamSettleMs: { type: 'number', description: 'Dwell between a spawn/reveal and the pause, so the entity snapshot carrying it reaches the browser. Default 600.' },
+
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
+        },
+    },
+
     // --- Browser lifecycle ---------------------------------------------
     // The relay tools above need a CONNECTED admin client. These three make
     // one, without a human at a keyboard and without chrome-devtools MCP
@@ -3334,6 +3377,112 @@ async function executeTool(name, args) {
                 content: [
                     { type: 'image', data: m[2], mimeType: m[1] },
                     { type: 'text', text: JSON.stringify(meta, null, 2) },
+                ],
+            };
+        }
+
+        case 'capture_subject': {
+            const argError = validateCaptureArgs(args);
+            if (argError) return `Error: ${argError}`;
+
+            // 1. OBSERVE before touching anything. Every restore step below is
+            //    conditional on what we found, because "undo everything" would
+            //    un-pause a sim somebody else froze and un-reveal a map that
+            //    was revealed on purpose.
+            const state = { simPaused: null, los: parseLosStatus(null), cheatsOn: null };
+            try {
+                const gs = await execJsonVerb('state', args.roomId);
+                if (gs.json && typeof gs.json.paused === 'boolean') state.simPaused = gs.json.paused;
+            } catch { /* leave null — planCapture treats it as "not already paused" */ }
+            try {
+                const los = await execOnGameServer('server', 'json los status', args.roomId);
+                state.los = parseLosStatus(los.success ? los.output : null);
+            } catch { /* leave unknown — the plan then leaves LOS alone, loudly */ }
+            if (args.spawn) {
+                try {
+                    const c = await execOnGameServer('server', 'json cheats status', args.roomId);
+                    if (c.success) {
+                        try { state.cheatsOn = Boolean(JSON.parse(c.output).cheatEnabled); }
+                        catch { state.cheatsOn = /cheatEnabled=on/.test(c.output); }
+                    }
+                } catch { /* leave null — we then do not toggle cheats at all */ }
+            }
+
+            const plan = planCapture(args, state);
+            const notes = [...plan.notes];
+            let spawnedIds = [];
+            let revealed = state.los.allOn === true;
+
+            const runStep = async (s) => {
+                switch (s.op) {
+                    case 'cheats':
+                        await execOnGameServer('server', s.enable ? 'cheats on' : 'cheats off', args.roomId);
+                        return;
+                    case 'spawn': {
+                        const cmd = `spawn ${s.def} ${s.x} ${s.z} ${s.team} ${s.count}`;
+                        const j = await execJsonVerb(cmd, args.roomId);
+                        const reply = j.json ?? j.legacy;
+                        if (j.json?.error) throw new Error(`spawn failed: ${j.json.error}`);
+                        spawnedIds = parseSpawnIds(reply);
+                        if (!spawnedIds.length) {
+                            notes.push(`spawn reply carried no unit id (${String(reply).slice(0, 120)})`
+                                + ' — falling back to resolving the def by name');
+                        }
+                        return;
+                    }
+                    case 'los':
+                        await execOnGameServer('server', s.enable ? 'los on' : 'los off', args.roomId);
+                        revealed = s.enable;
+                        return;
+                    case 'settle':
+                        await new Promise(r => setTimeout(r, s.ms));
+                        return;
+                    case 'pause':
+                        await execOnGameServer('server', s.paused ? 'pause' : 'unpause', args.roomId);
+                        return;
+                    default:
+                        return;
+                }
+            };
+
+            let relayed;
+            try {
+                for (const s of plan.pre) await runStep(s);
+                // 2. THE ONE ROUND TRIP. Resolve → frame → dwell → hold →
+                //    capture → judge → retry, all browser-side. Splitting this
+                //    is the bug (see the tool description).
+                relayed = await clientEval(
+                    'test',
+                    buildHarnessCall({ ...args, __revealed: revealed }),
+                    args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+            } finally {
+                // 3. Restore even when the capture threw — a half-applied
+                //    capture that leaves the sim paused poisons the session.
+                for (const s of plan.post) {
+                    try { await runStep(s); }
+                    catch (e) { notes.push(`restore step ${s.op} failed: ${e.message}`); }
+                }
+            }
+
+            if (relayed.fallback) {
+                return `Relay unavailable: ${relayed.fallback}. `
+                    + 'capture_subject needs a CONNECTED admin browser — open one with '
+                    + '`open_client({roomId})`, or launch with `openBrowser:true`.';
+            }
+            if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+            const shot = clientEvalValue(relayed.output);
+            if (!shot || typeof shot !== 'object' || !shot.dataUrl) {
+                return `Unexpected captureSubject reply: ${String(relayed.output).slice(0, 400)}`;
+            }
+            const m = /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+            if (!m) return `captureSubject returned a non-data-URL image (${shot.dataUrl.slice(0, 60)}…)`;
+            if (spawnedIds.length) notes.push(`spawned unit id(s): ${spawnedIds.join(', ')}`);
+            return {
+                content: [
+                    { type: 'image', data: m[2], mimeType: m[1] },
+                    { type: 'text', text: formatCaptureMeta(shot, {
+                        notes, plan: describePlan(plan), clientId: relayed.clientId,
+                    }) },
                 ],
             };
         }

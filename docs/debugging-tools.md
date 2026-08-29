@@ -243,6 +243,7 @@ condition and keeps the ordinary per-tool error paths.
 | `client_eval` | `code` (required), `target` (`js`\|`worker`\|`widgets`\|`test`, default `js`), `roomId`, `clientId`, `timeoutMs` (default `10000`, clamped 500–60000) | Run code **inside a connected browser** and get the result back, over [`POST /api/client/eval`](api.md#browser-eval-relay). Targets: `js` = main-thread globals (`document`, `window.test`, `window.lobby`); `worker` = render-worker globals (`__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool` — the hooks the render-core move stranded there); `widgets` = Lua in the in-worker LuaUI runtime; `test` = an expression with the `window.test` harness's members in scope (`readyState()`, `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. See the three gates + the deadlock warning below |
 | `client_ready` | `roomId`, `clientId` | The **browser's** readiness (`window.test.readyState()`): renderer up, defs ingested, LuaUI booted, newest game frame, feed age. Different question from `wait_for_game`, which is server-side — a game can be server-ready while the tab is still ingesting defs |
 | `client_screenshot` | `maxDim` (default `1280`, clamped 64–2048), `quality`, `roomId`, `clientId` | Relays `window.test.captureFrame({maxDim, stats:true})` and returns a real **MCP image content block** (a Claude session can see it) plus a text block of `{clientId, width, height, frameId, gameFrame, stats, bytes}`. `captureFrame` waits for a presented frame rather than grabbing a stale backbuffer. A 640px capture is ~600 KB — the wire cap is 4 MB |
+| `capture_subject` | ONE of `unitId` \| `unitIds[]` \| `def` \| `position{x,z,y?,radius?}` \| `area{x1,z1,x2,z2}`; plus `spawn{x,z,team?,count?}`, `angle` (`three-quarter`\|`front`\|`rear`\|`side`\|`top`\|`low`), `yawDeg`, `pitchDeg`, `fill`, `pause` (default `true`), `reveal` (default auto), `maxDim`, `quality`, `retries`, `luminanceFloor`, `streamSettleMs`, `roomId`, `clientId` | **Subject → usable image, in one call.** Resolves the subject, frames it from its own model bounds, holds the world still, captures a presented frame and *checks the pixels* — see [Looking at something](#looking-at-something-capture_subject) below. Returns an MCP image block plus a metadata block whose first line is the verdict. This is the tool to reach for; `client_screenshot` is the raw shutter under it |
 | `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md). Since P7 these **relay for real** over `/api/client/eval` and return the answer; the paste-into-chrome-devtools snippet is now only the fallback when a gate refuses |
 
 **The three gates on every relayed tool.** All of them fall back to printing a
@@ -304,6 +305,85 @@ Claude: [uses get_logs with level=4 (ERROR), section="lua"]
 Found 3 Lua errors:
   [142] [ERROR] [spring-server:lua:LuaRules] runtime error in 'GameFrame': ...
 ```
+
+### Looking at something (`capture_subject`)
+
+**Do not hand-roll camera math to take a screenshot.** `capture_subject` is one
+MCP call from a *subject* to an *image you can trust*, and it exists because the
+hand-rolled version does not work. Three failures, each of which has cost whole
+sessions:
+
+- **Height and zoom guessed against unknown bounds.** `focus(id, {height:800})`
+  frames a 4 m rifleman and a 65 m submarine identically — one shot is an empty
+  field, the other a texture close-up. Verified numbers from a real run: the
+  same call put the camera **43 elmos** from a 2.0 m subject and **905 elmos**
+  from a 66.9 m one. No constant does that.
+- **Camera and capture were two round trips.** Each relay hop costs seconds and
+  the sim does not wait. A guided playthrough on 2026-08-29 advanced **1,000+
+  sim frames** between "look here" and "take the shot" and lost the engagement
+  it was aiming at. Resolve → frame → hold → capture → judge therefore all run
+  inside ONE relay evaluation.
+- **A black frame came back as a deliverable.** Fog of war, night lighting and
+  a camera inside terrain all produce a perfectly valid PNG of nothing.
+
+```
+capture_subject {"def": "ms_subs_s4", "angle": "side"}
+capture_subject {"unitIds": [16366, 6227, 28378, 26175], "angle": "top", "fill": 0.9}
+capture_subject {"def": "fable_tank", "spawn": {"x": 8704, "z": 15360}, "angle": "low"}
+capture_subject {"area": {"x1": 6000, "z1": 1200, "x2": 7000, "z2": 2000}}
+```
+
+**What it does, and the order it does it in.** The ordering is the load-bearing
+part; three of these steps are in the sequence because doing them anywhere else
+silently produces a picture of empty ground.
+
+1. **Resolve.** `unitId`/`unitIds` → live bounding spheres (merged); `def` →
+   the newest instance **this client actually has streamed** (not the server's
+   unit list, which is capped at 100 rows and can name units the browser cannot
+   draw); `position`/`area` → a ground anchor, heightmap-sampled. A subject that
+   never arrives is an error naming the reason, never a blind shot.
+2. **Frame from the subject's own radius** through the orbit rig — the
+   ground-anchored path (the rig ignores a free `setCameraPose`). `angle`
+   presets are world-relative and named for a unit at heading 0, which faces
+   **−Z**: `front` is yaw −90°, `side` yaw 0°, `top` pitch 85°, `low` a loose
+   near-horizon shot for judging a model against the terrain it stands on.
+3. **Spawn/reveal BEFORE the pause.** ⚠ **A paused sim streams no fresh spawns
+   and no fresh LOS reveals** — the unit exists in the sim but the entity
+   snapshot that would carry it to the browser is something the tick does. So
+   the plan is always `spawn → los on → wait ~600 ms → pause → capture`, and it
+   is printed back to you in the `plan:` line.
+4. **Restore only what it changed.** A sim that was *already* paused stays
+   paused; global LOS that was *already* on stays on; cheats it enabled it
+   disables. Restores run in reverse order, in a `finally`, so a capture that
+   throws never leaves the sim frozen.
+5. **Judge the pixels.** Mean luminance is checked against a floor; a black
+   frame re-frames **up and out** and retries (up to `retries`, default 2). A
+   frame that is still black returns `ok:false` with the candidate causes named
+   in the order worth checking.
+
+**Read the first line of the metadata block.** It is either `capture: OK` or
+`capture: UNUSABLE — read `diagnosis` below, do not trust the image`. After it:
+
+```
+subject: def ms_subs_s4 — 66.9 m across (r=268 elmos) at 2168, -19, 8192, model=loaded
+framing: side yaw=0° pitch=12° fill=0.75 distance=845 elmos
+plan: los on → wait 600ms for the stream → pause sim → capture → resume sim → los off
+```
+
+`metresAcross` is the subject's real extent at the project's **8 elmos = 1 m**
+contract (PLAN-world-scale §2), so a scale regression shows up in the numbers
+and not only by eyeballing the picture. `model=FALLBACK` means you are looking
+at a procedural placeholder, not the art — that warning has saved a "the model
+loaded fine" claim more than once.
+
+Worked examples with committed output, including both acceptance debts this
+tool was built to close, are in
+[`tools/debug-mcp/shots/README.md`](../tools/debug-mcp/shots/README.md).
+
+**When to reach past it.** `client_screenshot` for the raw shutter with the
+camera exactly where it already is; `browser_test` + `test.orbit` when you want
+to keep the rig and step around a model interactively; chrome-devtools
+`take_screenshot` for DOM/HUD overlays (it cannot see the WebGL2 canvas).
 
 ### Reliable live game-drive verification
 
