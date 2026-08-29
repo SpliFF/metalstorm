@@ -160,6 +160,26 @@ the clarify path exists for exactly this.
 to make the resolution visible ("Moving 3rd Tanks to Storm Sound") before the
 order executes. U0 does not touch the NL layer.
 
+**Done in U4**, and two things were learned in the doing:
+
+- A `FocusBrief` carries a **`place` name** as well as a label, because they are
+  not the same string and only one of them resolves: the objective chip reads
+  "Hold Raven Basin", the entity index holds "Hold: Raven Basin", and the place
+  is "Raven Basin". "Defend it" binds to the third. `FocusRef.place` is the
+  field; `town`/`area` refs supply it by being it.
+- `nlFocus()` gained a sibling, **`orderSubjects()`**, which carries ids and the
+  partial flag and is therefore never shipped anywhere near the model.
+  `nlFocus` answers "what may a sentence call this"; `orderSubjects` answers
+  "which group would an order actually move", and the two questions have
+  different answers on a partial selection. Before it, the order path asked
+  `matchSelectionToGroup` while the HUD asked this model, and they agreed only
+  by implementing the same rule twice.
+
+The binding itself is `nl-focus.ts` — one module, read by BOTH producers (the
+offline slot-filler and the proxy), because a pronoun that means one thing with
+the proxy up and another with it down is the divergence the envelope contract
+exists to prevent.
+
 ### Lifetime
 
 `bindSelectionToFocus(uiStore)` is installed by `integration.ts` at
@@ -382,8 +402,8 @@ over viewport **≈9.3% at defaults, ≈20.4% with every panel expanded** — an
 | `scoreboard-panel` | ~~right rail~~ → `menu:statistics` | **DONE in U3.** Off the rail; same widget, one manifest line changed. |
 | `parley-panel` | ~~left rail~~ → `menu:diplomacy` | **DONE in U3.** Off the rail; same widget. |
 | `ai-command-panel` | ~~left rail, tallest panel in the HUD~~ → `menu:reports` | **DONE in U3.** Off the rail; same widget. Its change feed is NOT the Events tab — that is the battle log (`moment-hud.ts`), which renders from the worker's `BattleMoment` records. |
-| `command-composer` | bottom-centre, expanded: `[VERB] [SUBJECT] [TARGET] [WHEN]` chips + a priority slider + a commit button | **RETIRE.** This is the spreadsheet, literally: a four-slot form for issuing one order. Superseded by rung-3 actions (context-specific, no slots) and by story 4's sentence. **U4's call to remove**, because U4 is what replaces it; flagged here so it is a decision and not an oversight. |
-| `command-console` | bottom-centre, resident transcript | **DEMOTE to summonable.** The mechanism is right and stays; being *resident* is wrong. **U4** makes it one key to open, out of the way when closed. |
+| `command-composer` | ~~bottom-centre, expanded: `[VERB] [SUBJECT] [TARGET] [WHEN]` chips + a priority slider + a commit button~~ | **DONE in U4 — retired.** Out of the manifest; the file stays on disk with its suite green, because it is still the only surface that can draw a ROUTE target (`nl-resolver.ts` refuses route verbs by name and points at it). Re-homing that map arm as a rung-3 action is what would let the file be deleted. |
+| `command-console` | ~~bottom-centre, resident transcript~~ → summoned with `/` | **DONE in U4 — demoted to summonable.** Untitled (a `title` is what gives a widget loader chrome, and a permanent "Command ▾" header is the resident panel this row was about), nothing in the DOM until `/`, Esc dismisses, transcript survives. Registered through the new summonable-widget contract (`Widget.open/close/isOpen` + `registerSummonActions`) so "open the command console" still reaches it and the manifest still owns the names. |
 | `focus-hud` | top-centre, **nothing in the DOM until something is selected** | new in U0 — the reference implementation of rung 1/2/3 |
 | `moment-hud` | top-right under the access point, **nothing in the DOM until something happens** | new in U3 — the decaying awareness notices, plus the off-screen edge pointers. Every notice is a rung-1 chip that drills. |
 | `event-log` · `objective-board` · `briefing-panel` | rung 4 only, behind the access point | new in U3 — the full history, the full objective board, and the scenario story + field advice + par clock that used to exist only on the boot splash. |
@@ -395,12 +415,12 @@ nothing sees: **the authority pill, the minimap, the global access point, and
 the victory-condition line.** Both rails are empty. Everything else arrives
 because the player pointed at something.
 
-**As of U3 the rails ARE empty**, verified on screen in a live
-`crossing_standoff` and pinned by a manifest test (`moment-hud.test.ts`, "EMPTIES
-BOTH RAILS"). What is still resident and should not be: the objective chip stack
-(§6's leak, deliberately, capped at three), and `command-composer` +
-`command-console` at bottom-centre — both **U4's**, because U4 is what replaces
-them.
+**As of U4 the rails AND the bottom are empty**, verified on screen in a live
+`crossing_standoff` (`ui-mount-left`, `ui-mount-right` and `ui-mount-bottom-center`
+all report 0 children on the player path) and pinned by two manifest tests
+(`moment-hud.test.ts` "EMPTIES BOTH RAILS", `command-console.test.ts` "RETIRES the
+command composer"). The one thing still resident by design is the objective chip
+stack (§6's leak, capped at three).
 
 ---
 

@@ -40,6 +40,11 @@ import {
     executeNLResponse,
     type ExecutionReport, type ExecutorPorts, type NLConsoleLine, type NLConsolePort,
 } from './nl-executor.js';
+import type { NLFocusView } from './focus-model.js';
+import {
+    bindFocusReferences, findSubjectDeictic, findTargetDeictic, isTargetDeictic,
+} from './nl-focus.js';
+import { interpret, type InterpretationPlan } from './nl-interpretation.js';
 
 /** What the offline parser produced, plus the transparency notes that belong
  *  under whatever line the executor ends up printing. */
@@ -69,6 +74,16 @@ type NLRename = Extract<NLGroupAction, { op: 'rename' }>;
  */
 export interface AdapterDeps extends ExchangeDeps {
     patterns?: LocalPatternDeps;
+    /**
+     * What the player is looking at (battle-clarity U4, `nl-focus.ts`).
+     *
+     * Read at two points, both of them about pronouns: the offline producer
+     * uses it to know that a sentence with no target still HAS one ("attack
+     * that town"), and `bindFocusReferences` uses it to turn that pronoun into
+     * a name. Absent ⇒ a pronoun refuses, which is the same answer an empty
+     * focus gives — no sentence changes meaning because this dep is missing.
+     */
+    focus?: NLFocusView | null;
 }
 
 /**
@@ -208,6 +223,9 @@ function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
 
     const outcome = planUtterance(utterance, deps);
 
+    const deictic = deicticCommand(utterance, outcome, deps);
+    if (deictic) return deictic;
+
     if (outcome.kind === 'refused') {
         return {
             outcome,
@@ -227,7 +245,7 @@ function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
             kind: 'command',
             intent: {
                 verb: intent.verb,
-                subject: subjectToEnvelope(outcome),
+                subject: subjectToEnvelope(outcome, utterance),
                 ...(targetToEnvelope(parsed) ? { target: targetToEnvelope(parsed)! } : {}),
                 priority: getPriorityBand(intent.priority) as NLPriority,
                 ...(whenToEnvelope(parsed) ? { when: whenToEnvelope(parsed)! } : {}),
@@ -235,7 +253,144 @@ function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
         }],
     };
 
-    return { outcome, notes: outcome.notes, response };
+    // U4: a pronoun the subject rule consumed is no longer "not understood".
+    // `outcome.notes` is the slot-filler's own transparency line, built before
+    // this file knew the word was meaningful, and leaving it would tell the
+    // player their pronoun was ignored one line under an order that obeyed it.
+    const consumed = consumedDeictics(utterance, response);
+    return { outcome, notes: withoutWords(outcome.notes, consumed), response };
+}
+
+/** The deictic words this envelope actually used, lower-cased. */
+function consumedDeictics(utterance: string, response: NLResponse): Set<string> {
+    const used = new Set<string>();
+    for (const action of response.actions) {
+        if (action.kind !== 'command') continue;
+        if (action.intent.subject.type === 'selection') {
+            const target = findTargetDeictic(utterance);
+            const rest = target ? utterance.toLowerCase().replace(target, ' ') : utterance;
+            const phrase = findSubjectDeictic(rest);
+            if (phrase) for (const w of phrase.split(/\s+/)) used.add(w);
+        }
+        const target = action.intent.target;
+        if (target && target.type !== 'point' && isTargetDeictic(target.name)) {
+            for (const w of target.name.toLowerCase().split(/\s+/)) used.add(w);
+        }
+    }
+    return used;
+}
+
+/** Rewrite the "didn't understand" note without the words that now mean
+ *  something, dropping it entirely when nothing is left unexplained. */
+function withoutWords(notes: string[], drop: Set<string>): string[] {
+    if (drop.size === 0) return notes;
+    return notes.flatMap((note) => {
+        const match = /^didn't understand: (.*)$/.exec(note);
+        if (!match) return [note];
+        const kept = match[1].split(', ')
+            .filter((quoted) => !drop.has(quoted.replace(/^'|'$/g, '').toLowerCase()));
+        return kept.length ? [`didn't understand: ${kept.join(', ')}`] : [];
+    });
+}
+
+/**
+ * "attack that town" — the offline path's pronoun rescue (U4).
+ *
+ * Two boards need it, and the second is the one that matters:
+ *
+ * 1. The slot-filler refused for want of a target. "defend it" names nothing
+ *    it can match, so without this the sentence is simply not an order.
+ *
+ * 2. **The slot-filler found a name INSIDE the pronoun.** `attack that town`
+ *    on Meridian Basin resolves — to *Randtown*, because "town" is a substring
+ *    of it, with "that" and "town" ALSO listed as unmatched words. That is the
+ *    accelerator's known over-reach (PLAN §7 M5's residual: a leftover word
+ *    fuzzy-matched into a target), and it is the exact failure a pronoun makes
+ *    dangerous: a sentence about the town the player is looking at silently
+ *    becomes an order against a town on the other side of the map.
+ *
+ * So the test is not "did it fail" but "is the name it found made of the
+ * pronoun's own words". If every word of the matched query sits inside the
+ * deictic phrase, the match is a coincidence of spelling and the phrase wins.
+ * A sentence that names a real place outside the pronoun ("attack Northgate")
+ * is untouched, which keeps the standing rule that this kind of pattern can
+ * only ADD sentences the local path executes.
+ *
+ * It emits the PRONOUN, not a resolved name — exactly as the model does when
+ * it echoes the player's word — so `bindFocusReferences` is the single place
+ * that decides what "that town" points at, for both producers. Emitting a
+ * bound name from here would be a second binding policy, and the whole reason
+ * this file hands NAMES to the resolver rather than the ids the slot-filler
+ * already found is that two policies is how the wrong army moves.
+ */
+function deicticCommand(
+    utterance: string, outcome: ExchangeOutcome, deps: AdapterDeps,
+): LocalParse | null {
+    const parsed = outcome.parsed;
+    if (!parsed?.verb) return null;
+
+    const phrase = findTargetDeictic(utterance);
+    if (!phrase) return null;
+
+    if (outcome.kind === 'refused') {
+        if (outcome.reason !== 'no-target') return null;
+    } else if (!queryIsMadeOf(parsed.targetQuery, phrase)) {
+        return null;
+    }
+
+    // A subject pronoun in the same sentence ("pull them back to the ridge")
+    // is the selection; no pronoun and no named subject falls through to the
+    // M0 three-way rule, which the executor echoes as "team-wide".
+    //
+    // Searched with the TARGET phrase cut out first: "that" is a subject
+    // pronoun and also the first word of "that town", so scanning the whole
+    // sentence would read "attack that town" as an order to the selection —
+    // and refuse it outright with nothing selected.
+    const withoutTarget = utterance.toLowerCase().replace(phrase, ' ');
+    const subject: NLSubject = parsed.subject?.type === 'ai'
+        ? { type: 'ai' }
+        : parsed.subject?.type === 'idle-filter'
+            ? { type: 'idle-filter', filterClass: parsed.subject.filterClass ?? '' }
+            : parsed.subjectQuery
+                ? { type: 'entity-ref', name: parsed.subjectQuery }
+                : findSubjectDeictic(withoutTarget) !== null || deps.selectionGroupId != null
+                    ? { type: 'selection' }
+                    : { type: 'any' };
+
+    return {
+        outcome,
+        // The unmatched-words note still rides along MINUS the pronoun: "that
+        // town" is now meaningful, but "quickly" in the same sentence still
+        // isn't, and dropping the whole note would hide that.
+        notes: withoutWords(outcome.notes, new Set(phrase.split(/\s+/))),
+        response: {
+            actions: [{
+                kind: 'command',
+                intent: {
+                    verb: parsed.verb,
+                    subject,
+                    target: { type: 'entity-ref', name: phrase },
+                    priority: (parsed.priority
+                        ? getPriorityBand(parsed.priority) as NLPriority
+                        : 'normal'),
+                    // `region-contested` borrows its region from the target
+                    // query, and there is no target query here — so only the
+                    // condition that needs no ref survives. A when-gate that
+                    // silently lost its region would be an order that fires
+                    // immediately, which is the opposite of what was asked.
+                    ...(parsed.when?.type === 'under-attack'
+                        ? { when: { type: 'under-attack' as const } } : {}),
+                },
+            }],
+        },
+    };
+}
+
+/** Is every word of the matched target query a word of the deictic phrase? */
+function queryIsMadeOf(query: string | null | undefined, phrase: string): boolean {
+    if (!query) return true;                       // no name found at all
+    const words = new Set(phrase.toLowerCase().split(/\s+/));
+    return query.toLowerCase().split(/\s+/).every((w) => words.has(w));
 }
 
 /**
@@ -247,7 +402,9 @@ function parseOne(utterance: string, deps: AdapterDeps): LocalParse {
  * order with nothing selected becomes `any` — the team-wide, take-whatever-idles
  * subject the compile table has always produced for it.
  */
-function subjectToEnvelope(outcome: Extract<ExchangeOutcome, { kind: 'sent' }>): NLSubject {
+function subjectToEnvelope(
+    outcome: Extract<ExchangeOutcome, { kind: 'sent' }>, utterance: string,
+): NLSubject {
     const { parsed, subjectSource } = outcome;
 
     if (parsed.subject?.type === 'ai') return { type: 'ai' };
@@ -255,7 +412,24 @@ function subjectToEnvelope(outcome: Extract<ExchangeOutcome, { kind: 'sent' }>):
         return { type: 'idle-filter', filterClass: parsed.subject.filterClass ?? '' };
     }
     if (subjectSource === 'selection') return { type: 'selection' };
-    if (subjectSource === 'team') return { type: 'any' };
+    if (subjectSource === 'team') {
+        // U4: "withdraw THEM to Amber Row" is not a team-wide order.
+        //
+        // The slot-filler has no grammar, so a subject pronoun lands in
+        // `unmatched` and the M0 three-way rule falls through to `any` — a
+        // sentence that explicitly named its subject quietly becoming "whoever
+        // is free". `selection` is what the player said, and the resolver is
+        // where it is decided whether that is orderable (it may refuse, or ask
+        // which of two selected groups).
+        //
+        // The target phrase is cut out before the search, for the reason
+        // `deicticCommand` does the same: "that" is a subject pronoun and also
+        // the first word of "that town".
+        const target = findTargetDeictic(utterance);
+        const rest = target ? utterance.toLowerCase().replace(target, ' ') : utterance;
+        if (findSubjectDeictic(rest) !== null) return { type: 'selection' };
+        return { type: 'any' };
+    }
 
     // A named group: hand back THE PLAYER'S OWN WORDS, not the name of whatever
     // the slot-filler's top hit happened to be. Emitting the matched name would
@@ -304,6 +478,18 @@ function clampText(text: string): string {
 export interface LocalRunDeps extends AdapterDeps {
     /** Executor ports. `resolver` is required; camera/ui/query are M3. */
     ports: ExecutorPorts;
+    /**
+     * The confirm gate (U4). Called with the reading of a sentence whose
+     * meaning DEPENDED on the focus — a pronoun was bound — before anything is
+     * sent. Returning false holds the envelope: nothing executes, and the
+     * caller gets it back in `held` to put behind a `Do it` / `Cancel` chip.
+     *
+     * Optional, and its absence means "no gate", not "refuse": a harness, a
+     * fixture run and the eval all execute straight through, which is what
+     * keeps the golden fixtures a test of interpretation rather than of the
+     * console's chrome.
+     */
+    confirm?: (plan: InterpretationPlan) => boolean;
     /** Registered panel ids (`uiActionRegistry.ids()`), so a `ui` envelope naming
      *  a panel that doesn't exist is caught by the CONTRACT rather than by the
      *  registry three layers down. Omitted ⇒ charset-only checking (§1). */
@@ -314,6 +500,12 @@ export interface LocalRunResult {
     response: NLResponse;
     validation: ValidationResult;
     report: ExecutionReport;
+    /**
+     * Set when the confirm gate held the sentence. `response` is then the
+     * BOUND envelope — the one the player is being shown — so the console can
+     * execute exactly what it echoed by handing it straight back.
+     */
+    held?: InterpretationPlan;
 }
 
 /**
@@ -348,11 +540,84 @@ export function runLocalUtterance(utterance: string, deps: LocalRunDeps): LocalR
         return { response, validation, report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] } };
     }
 
-    const report = executeNLResponse(validation.value, {
-        ...deps.ports,
-        console: withNotes(deps.ports.console, notes),
+    return {
+        ...deliver(validation.value, deps, notes),
+        validation,
+    };
+}
+
+/**
+ * Run an envelope this client BUILT — the clarification-answer path (M5).
+ *
+ * Same validator, same binder, same reading, same gate as a sentence: an
+ * envelope patched with a chosen callsign is still an envelope, and the one
+ * property worth protecting is that it cannot reach `sendCommand` by a route
+ * with fewer checks on it than the route a typed sentence takes.
+ */
+export function executeEnvelope(response: NLResponse, deps: LocalRunDeps): LocalRunResult {
+    const validation = validateNLResponse(response, {
+        vocabulary: deps.vocabulary,
+        ...(deps.panelIds ? { panelIds: deps.panelIds } : {}),
     });
-    return { response, validation, report };
+    if (!validation.ok) {
+        const line: NLConsoleLine = {
+            kind: 'refused',
+            text: `I couldn't put that in a form the game accepts: ${validation.errors[0]}.`,
+            notes: validation.errors.slice(1, 4),
+        };
+        deps.ports.console.say(line);
+        return {
+            response, validation,
+            report: { lines: [line], sent: [], refusals: [line.text], ran: [], notRun: [] },
+        };
+    }
+    return { ...deliver(validation.value, deps, []), validation };
+}
+
+/**
+ * Bind the focus, echo the reading, gate it, execute it — the tail every
+ * producer shares (U4).
+ *
+ * One function, called by the local run AND the proxy run, because the whole
+ * argument for the envelope contract is that a sentence means the same thing
+ * whichever parser produced it. A pronoun bound on one path and not the other
+ * would be exactly the divergence `nl-envelope.ts` exists to prevent.
+ *
+ * The reading is handed over as the envelope's `say` rather than printed here.
+ * That is not a shortcut: `executeNLResponse` holds `say` until the first
+ * action actually succeeds, so an interpretation is never printed above the
+ * refusal or the question that contradicts it — the failure that deferral was
+ * written for. It also means the model's own `say` is REPLACED whenever we
+ * could build a reading, which is the right way round: the model writes its
+ * line before resolution, and this one is written after it.
+ */
+function deliver(
+    response: NLResponse, deps: LocalRunDeps, notes: string[],
+): { response: NLResponse; report: ExecutionReport; held?: InterpretationPlan } {
+    const bound = bindFocusReferences(response, deps.focus);
+    const plan = interpret(bound.response, {
+        resolver: deps.ports.resolver,
+        ...(deps.groupLabel ? { groupLabel: deps.groupLabel } : {}),
+        bindings: bound.bindings,
+    });
+
+    if (plan?.needsConfirm && deps.confirm && !deps.confirm(plan)) {
+        // Held. Nothing was sent, nothing was said, and the caller holds the
+        // exact envelope that was echoed — so what the player confirms and
+        // what executes cannot drift apart between the two moments.
+        return {
+            response: bound.response,
+            report: { lines: [], sent: [], refusals: [], ran: [], notRun: [] },
+            held: plan,
+        };
+    }
+
+    const toRun = plan ? { ...bound.response, say: plan.text } : bound.response;
+    const report = executeNLResponse(toRun, {
+        ...deps.ports,
+        console: notes.length ? withNotes(deps.ports.console, notes) : deps.ports.console,
+    });
+    return { response: bound.response, report };
 }
 
 // ─────────────────────────── the proxy run (M4) ───────────────────────────
@@ -466,8 +731,11 @@ export async function runUtterance(
         };
     }
 
-    const report = executeNLResponse(validation.value, deps.ports);
-    return { response: validation.value, validation, report, source: 'proxy' };
+    // Same tail as the local path: bind the focus, echo the reading, gate it.
+    // A model that wrote "it" because the player did gets the same binding the
+    // offline parser gets, and a model that wrote the real name binds nothing
+    // and is charged nothing for passing through here.
+    return { ...deliver(validation.value, deps, []), validation, source: 'proxy' };
 }
 
 type ProxyOutcome =

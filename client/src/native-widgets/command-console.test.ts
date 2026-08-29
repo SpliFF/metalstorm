@@ -10,12 +10,16 @@
  * modules and cannot be fetched as a standalone game-dir module) and
  * `hideForSpectator` (it issues orders).
  *
- * There is no DOM environment in this suite (no jsdom/happy-dom installed —
- * see command-composer.test.ts), so mount/render is verified live in the
- * browser rather than faked here.
+ * From U4 the widget also owns an open/closed state — it is SUMMONED with `/`
+ * and puts nothing in the DOM until it is — so the summon behaviour is
+ * exercised for real under happy-dom below. The interpretation it shows once
+ * open belongs to `ui/native-ui/nl-interpretation.test.ts`; what only this file
+ * can check is that the resting HUD is empty and that one key changes that.
  */
 
-import { describe, it, expect } from 'vitest';
+// @vitest-environment happy-dom
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -48,7 +52,44 @@ describe('command-console widget', () => {
         // Order-issuing panel ⇒ never mounted for a spectator session.
         expect(entry.hideForSpectator).toBe(true);
         expect(entry.mount).toBe('bottom-center');
-        expect(entry.title).toBeTruthy();
+        // NO title, from U4 (DESIGN-DRILLDOWN.md §7). A title is what makes the
+        // loader wrap a widget in panel chrome, and a permanent "Command ▾"
+        // header at bottom-centre is precisely the resident panel this step was
+        // asked to remove. It is summoned instead.
+        expect(entry.title).toBeUndefined();
+    });
+
+    it('exposes the summonable contract the loader registers', async () => {
+        // `open`/`close`/`isOpen` are how an untitled widget stays addressable
+        // by name ("open the command console") without a second alias table in
+        // the client — see widget-loader `registerSummonActions`.
+        const widget = (await import('./command-console.js')).default;
+        expect(typeof widget.open).toBe('function');
+        expect(typeof widget.close).toBe('function');
+        expect(typeof widget.isOpen).toBe('function');
+
+        const loader = readFileSync(
+            join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'native-ui', 'widget-loader.ts'),
+            'utf8',
+        );
+        expect(loader).toContain('registerSummonActions');
+    });
+
+    it('RETIRES the command composer — the last resident bottom-centre panel', () => {
+        // DESIGN-DRILLDOWN §7 files `[VERB][SUBJECT][TARGET][WHEN]` + a
+        // priority slider under RETIRE: it is the spreadsheet the directive
+        // rejects, and this step is what replaces it. Nothing else would catch
+        // it coming back.
+        const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'));
+        const ids = manifest.widgets.map((w: { id: string }) => w.id);
+        expect(ids).not.toContain('command-composer');
+
+        // ... and the command line is the ONLY thing that may mount at the
+        // bottom, since it is absent from the DOM until summoned.
+        const bottom = manifest.widgets
+            .filter((w: { mount: string }) => w.mount.startsWith('bottom'))
+            .map((w: { id: string }) => w.id);
+        expect(bottom).toEqual(['command-console']);
     });
 
     it('is registered in BUILTIN_WIDGETS under its manifest id', async () => {
@@ -59,6 +100,114 @@ describe('command-console widget', () => {
             'utf8',
         );
         expect(source).toContain("'command-console': () => import('../../native-widgets/command-console.js')");
+    });
+
+    /**
+     * U4: the resting HUD, and the one key that changes it.
+     *
+     * Run against a real DOM because the claim is about the DOM: "nothing is
+     * mounted" is not something a source grep can establish, and it is the
+     * whole verdict §7 gives this widget.
+     */
+    describe('summoning', () => {
+        let mount: HTMLElement;
+        let widget: {
+            init: (ctx: unknown) => void; dispose: () => void;
+            open?: () => void; close?: () => void; isOpen?: () => boolean;
+        };
+
+        const ctx = () => ({
+            store: {
+                getSelection: () => ({ unitIds: [] }),
+                getOrgGroups: () => [],
+                getDirectives: () => [],
+                subscribe: () => () => {},
+            },
+            mount,
+            identity: { playerId: 0, teamId: 0, accountId: 0 },
+            sendCommand: () => {},
+        });
+
+        const press = (code: string, key = code) => {
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                code, key, bubbles: true, cancelable: true,
+            }));
+            window.dispatchEvent(new KeyboardEvent('keydown', {
+                code, key, bubbles: true, cancelable: true,
+            }));
+        };
+
+        beforeEach(async () => {
+            vi.spyOn(console, 'log').mockImplementation(() => {});
+            mount = document.createElement('div');
+            document.body.append(mount);
+            widget = (await import('./command-console.js')).default as typeof widget;
+            widget.init(ctx());
+        });
+
+        afterEach(() => {
+            widget.dispose();
+            mount.remove();
+            vi.restoreAllMocks();
+        });
+
+        it('mounts NOTHING — the resting HUD has no command line in it', () => {
+            expect(mount.childElementCount).toBe(0);
+            expect(widget.isOpen!()).toBe(false);
+        });
+
+        it.each(['Slash', 'NumpadDivide'])(
+            '`/` (%s) builds it, focuses the field and greets once', (code) => {
+            press(code, '/');
+            const console_ = mount.querySelector('.command-console');
+            expect(console_).not.toBeNull();
+            expect(widget.isOpen!()).toBe(true);
+            expect(document.activeElement).toBe(mount.querySelector('#cc-input'));
+            expect(mount.querySelectorAll('.cc-line--system')).toHaveLength(1);
+        });
+
+        it('Esc dismisses it and the transcript survives', () => {
+            press('Slash', '/');
+            press('Escape', 'Escape');
+            expect(widget.isOpen!()).toBe(false);
+            expect(mount.querySelector('.command-console')!.classList)
+                .toContain('command-console--hidden');
+
+            // Summoning again picks the conversation back up rather than
+            // starting a new one — the greeting is not repeated.
+            press('Slash', '/');
+            expect(mount.querySelectorAll('.cc-line--system')).toHaveLength(1);
+        });
+
+        it('does not steal `/` from a text field', () => {
+            press('Slash', '/');
+            const input = mount.querySelector('#cc-input') as HTMLInputElement;
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+                code: 'Slash', key: '/', bubbles: true, cancelable: true,
+            }));
+            // Typing a slash into an order must type a slash.
+            expect(widget.isOpen!()).toBe(true);
+        });
+
+        it('leaves Escape alone while closed, so Esc still means quit', () => {
+            const event = new KeyboardEvent('keydown', {
+                code: 'Escape', key: 'Escape', bubbles: true, cancelable: true,
+            });
+            window.dispatchEvent(event);
+            // Not consumed: main.ts's quit-to-lobby handler is downstream of
+            // this one, and a command line that is not open has no business
+            // swallowing the key (drilldown.ts and global-surface.ts make the
+            // same promise).
+            expect(event.defaultPrevented).toBe(false);
+        });
+
+        it('teardown removes the DOM and the key binding', () => {
+            press('Slash', '/');
+            widget.dispose();
+            expect(mount.childElementCount).toBe(0);
+            press('Slash', '/');
+            expect(mount.childElementCount).toBe(0);
+        });
     });
 
     /**
@@ -75,12 +224,19 @@ describe('command-console widget', () => {
         it('creates the mic only behind the feature detect', () => {
             // An unavailable API must produce NO button — not a disabled one, not
             // a hidden one in the tab order (§4 "hide the mic affordance cleanly
-            // where unavailable"). The early return is the whole guarantee.
+            // where unavailable"). Two guards now, because U4 moved the BUTTON
+            // into the summoned DOM while the KEY stays bound at init: the
+            // detect gates `state.voice`, and `state.voice` gates the button.
             expect(source).toContain('if (!isVoiceCaptureAvailable()) return;');
-            const guardAt = source.indexOf('if (!isVoiceCaptureAvailable()) return;');
-            const micAt = source.indexOf("document.createElement('button')");
-            expect(guardAt).toBeGreaterThan(-1);
-            expect(micAt).toBeGreaterThan(guardAt);
+            expect(source).toContain('if (!state.voice || state.voice.mic) return;');
+        });
+
+        it('a hold SUMMONS the command line, so dictation is visible', () => {
+            // Words being recognised into a hidden field are words the player
+            // cannot correct before they execute — the same argument the
+            // confirm gate makes one layer up.
+            const hold = source.slice(source.indexOf('function beginHold()'));
+            expect(hold.slice(0, hold.indexOf('}'))).toContain('summon(');
         });
 
         it('submits a spoken sentence through the typed sentence\'s function', () => {

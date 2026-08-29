@@ -40,11 +40,38 @@
  * charging and spectator gating apply exactly as they do for the composer.
  * The manifest also carries `hideForSpectator`, so a spectator never gets the
  * panel at all.
+ *
+ * ── U4 (battle-clarity): summonable, focus-aware, and it says what it heard ──
+ *
+ * Three changes, all of them from DESIGN-DRILLDOWN.md:
+ *
+ * 1. **Nothing in the DOM until it is asked for** (§9 rule 6). `/` summons the
+ *    command line, Esc dismisses it, and the resting HUD has no trace of it —
+ *    §7's verdict on this widget was "the mechanism is right and being
+ *    RESIDENT is wrong". The transcript survives a dismiss, so summoning it
+ *    again is picking a conversation back up rather than starting one.
+ *
+ * 2. **The focus is the interpretation context** (§3). `focusModel` feeds both
+ *    halves: the context payload the model reads (`focusContextFor`) and the
+ *    resolver's selection rules (`orderSubjects`). "Attack that town" is an
+ *    order because the console knows what the player is looking at.
+ *
+ * 3. **A focus-bound reading is confirmed before it is sent.** When a pronoun
+ *    was resolved against the focus, the console shows the reading it arrived
+ *    at — "3rd Tanks attacking Storm Sound" — with `Do it` / `Cancel`, and
+ *    sends nothing until the player taps. See `nl-interpretation.ts` for why
+ *    that gate is not on every sentence.
+ *
+ * Voice (M6) is untouched and NOT extended here: holding the push-to-talk key
+ * summons the command line so the interim transcript is visible as it is
+ * dictated, and release goes through the same `submit()` — so a spoken order
+ * gets the same focus context, the same reading and the same confirm chip as a
+ * typed one, with no speech-specific path anywhere in the interpretation.
  */
 
 import { namedEntityIndex } from '../ui/native-ui/named-entity-index.js';
 import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
-import { runUtterance } from '../ui/native-ui/nl-client.js';
+import { executeEnvelope, runUtterance } from '../ui/native-ui/nl-client.js';
 import { buildNLContext } from '../ui/native-ui/nl-context.js';
 import { browserTokenStore, getAccessToken } from '../lobby/auth-tokens.js';
 import { NLResolver } from '../ui/native-ui/nl-resolver.js';
@@ -53,8 +80,8 @@ import { cameraPortHolder, createNLCameraPort } from '../ui/native-ui/camera-por
 import { uiActionRegistry, createNLUiActionPort } from '../ui/native-ui/ui-action-registry.js';
 import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js';
 import { answerLocally, isCancel, resubmissionText } from '../ui/native-ui/nl-clarify.js';
-import { validateNLResponse } from '../ui/native-ui/nl-envelope.js';
-import { executeNLResponse } from '../ui/native-ui/nl-executor.js';
+import { focusModel } from '../ui/native-ui/focus-model.js';
+import { focusContextFor } from '../ui/native-ui/nl-focus.js';
 import {
     isVoiceCaptureAvailable, createWebSpeechVoicePort, createPushToTalk,
     createSpeechOutPort, readPushToTalkCode, isTextEntryTarget,
@@ -97,16 +124,73 @@ const state = {
     /** What was in the input field when the hold started, restored on cancel —
      *  a half-typed order must survive an accidental key press. */
     typedBeforeHold: '',
+    /**
+     * U4 summon state. `built` is whether the DOM exists at all (it is created
+     * on the first summon and then kept, so the transcript survives a dismiss);
+     * `visible` is whether it is on screen right now.
+     */
+    built: false,
+    visible: false,
+    greeted: false,
+    /**
+     * A reading waiting for `Do it` — `{ response, plan, utterance, entry }`.
+     * Holds the BOUND envelope, so what executes is exactly what was echoed.
+     */
+    pendingConfirm: null,
 };
+
+/**
+ * The keys that summon the command line.
+ *
+ * `/` is the command-line key everywhere else and is unclaimed here: the
+ * worker's order hotkeys are all letters (`worker-command-modes.ts`), `V` is
+ * push-to-talk, `Tab` is the global access point and `Enter` finishes a
+ * directive-shape capture.
+ *
+ * BOTH physical keys that produce a slash, paired the way the worker already
+ * pairs `Enter`/`NumpadEnter`: a binding on the main-row key alone silently
+ * does nothing for anyone typing on the numpad — and it is what CDP sends, so
+ * it is also what a scripted live check presses.
+ */
+const SUMMON_CODES = ['Slash', 'NumpadDivide'];
+const SUMMON_LABEL = '/';
 
 /** Exchanges (you+game pairs) the proxy accepts. */
 const MAX_HISTORY_EXCHANGES = 2;
 
+/**
+ * Mount the widget — which, from U4, mounts NOTHING.
+ *
+ * The console owns a key binding, a registry entry and a voice hold. It owns
+ * no DOM until the player asks for it: `#ui-mount-bottom-center` stays empty,
+ * which is what "the resting HUD is the authority pill, the minimap, the
+ * access point and the victory line" (§7) actually requires of this widget.
+ */
 function init(ctx) {
     state.ctx = ctx;
     state.log = [];
+    state.built = false;
+    state.visible = false;
+    state.greeted = false;
 
     injectStyle('command-console-style', consoleCss);
+
+    setupVoice();
+    bindSummonKey();
+
+    console.log('[command-console] Initialized (summon with ' + SUMMON_LABEL + ')');
+}
+
+/**
+ * Build the command line, once.
+ *
+ * Deferred rather than built-and-hidden because a hidden text input is still a
+ * tab stop, still a focus target and still in the accessibility tree — a
+ * resting HUD that a screen reader announces a command field in is resident by
+ * every measure except the visual one.
+ */
+function ensureUi() {
+    if (state.built || !state.ctx) return;
 
     const container = document.createElement('div');
     container.className = 'command-console';
@@ -115,11 +199,12 @@ function init(ctx) {
         <form class="cc-input-row" id="cc-form">
             <input type="text" id="cc-input" class="cc-input" autocomplete="off"
                 aria-label="Type a command"
-                placeholder='Type an order: "defend Northgate", "idle tanks hold Slag Forge high"' />
+                placeholder='Type an order: "defend Northgate", "attack that town"' />
+            <button type="button" class="nui-btn" id="cc-close" aria-label="Close the command line (Esc)">Esc</button>
             <button type="submit" class="nui-btn nui-btn--primary" id="cc-send">Send</button>
         </form>
     `;
-    // The mic is APPENDED by setupVoice when — and only when — the browser has a
+    // The mic is APPENDED by `attachMic` when — and only when — the browser has a
     // speech API. Building it into the markup above and hiding it later would
     // leave a hidden control in the tab order on every non-Chromium browser.
 
@@ -127,7 +212,8 @@ function init(ctx) {
     state.logEl = container.querySelector('#cc-log');
     state.inputEl = container.querySelector('#cc-input');
 
-    ctx.mount.appendChild(container);
+    state.ctx.mount.appendChild(container);
+    state.built = true;
 
     const form = container.querySelector('#cc-form');
     form.addEventListener('submit', (e) => {
@@ -141,6 +227,8 @@ function init(ctx) {
             say('refused', 'Something went wrong handling that — nothing sent.');
         });
     });
+
+    container.querySelector('#cc-close').addEventListener('click', () => dismiss());
 
     // One delegated listener for every chip, now and forever: `renderLog`
     // replaces the log's innerHTML on each line, so per-button listeners would
@@ -157,19 +245,82 @@ function init(ctx) {
 
     // The game binds camera/hotkeys on window keydown; those handlers already
     // skip INPUT targets, but stop the propagation anyway so a future binding
-    // can't start eating letters the player is typing into an order.
+    // can't start eating letters the player is typing into an order. Escape
+    // dismisses the whole command line rather than only blurring the field:
+    // one key opened it, the same key closes it from wherever focus is.
     state.inputEl.addEventListener('keydown', (e) => {
         e.stopPropagation();
-        if (e.key === 'Escape') state.inputEl.blur();
+        if (e.key === 'Escape') dismiss();
     });
 
-    setupVoice(container);
+    attachMic(container);
+}
 
-    say('system', state.voice
-        ? `Type an order in plain words, or hold ${state.voice.keyLabel} and say it. Try "defend <region>" — or "help".`
-        : 'Type an order in plain words. Try "defend <region>" — or "help".');
+/**
+ * Show the command line. Idempotent, and the ONE way it ever appears.
+ *
+ * `focusModel.openSurface` is what makes it addressable as part of the focus —
+ * "close that" with the command line open has something to bind to, and a
+ * rung-2 panel can see that the HUD is busy.
+ */
+function summon({ focusInput = true } = {}) {
+    ensureUi();
+    if (!state.container) return;
+    state.container.classList.remove('command-console--hidden');
+    state.visible = true;
+    focusModel.openSurface('command-console');
 
-    console.log('[command-console] Initialized');
+    if (!state.greeted) {
+        state.greeted = true;
+        say('system', state.voice
+            ? `Type an order in plain words, or hold ${state.voice.keyLabel} and say it. ` +
+              'It reads what you have selected — "attack that town" works. Try "help".'
+            : 'Type an order in plain words. It reads what you have selected — ' +
+              '"attack that town" works. Try "help".');
+    }
+    if (focusInput) state.inputEl?.focus();
+}
+
+/** Hide it. The transcript stays: dismissing is putting the conversation down,
+ *  not ending it. */
+function dismiss() {
+    if (!state.visible) return;
+    state.visible = false;
+    state.container?.classList.add('command-console--hidden');
+    state.inputEl?.blur();
+    focusModel.closeSurface('command-console');
+}
+
+function isOpen() {
+    return state.visible;
+}
+
+/**
+ * `/` opens it; Esc closes it.
+ *
+ * CAPTURE phase, for the reason `drilldown.ts` and `global-surface.ts` both
+ * document: `main.ts` has a window-level Escape handler that opens the
+ * quit-to-lobby dialog, and a command line that closes AND quits is worse than
+ * one that does neither. While the console is closed, Escape is left entirely
+ * alone, so Esc still means "quit" at every other moment.
+ */
+function bindSummonKey() {
+    const onKeyDown = (e) => {
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (SUMMON_CODES.includes(e.code) && !isTextEntryTarget(e.target) && !e.shiftKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            summon();
+            return;
+        }
+        if (e.key === 'Escape' && state.visible) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismiss();
+        }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    state.unsubs.push(() => window.removeEventListener('keydown', onKeyDown, true));
 }
 
 // ───────────────────────────── voice (M6) ─────────────────────────────
@@ -189,7 +340,7 @@ function init(ctx) {
  * pointer-down — a user gesture, which is also what the browser requires before
  * it will prompt for permission at all.
  */
-function setupVoice(container) {
+function setupVoice() {
     state.speaker = createSpeechOutPort();
 
     if (!isVoiceCaptureAvailable()) return;
@@ -198,16 +349,6 @@ function setupVoice(container) {
 
     const code = readPushToTalkCode();
     const keyLabel = code.startsWith('Key') ? code.slice(3) : code;
-
-    const mic = document.createElement('button');
-    mic.type = 'button';
-    mic.id = 'cc-mic';
-    mic.className = 'cc-mic';
-    mic.setAttribute('aria-pressed', 'false');
-    mic.setAttribute('aria-label', `Hold to talk (${keyLabel})`);
-    mic.title = `Hold to talk — or hold ${keyLabel}. Esc while holding cancels.`;
-    mic.innerHTML = '<span class="cc-mic__dot" aria-hidden="true"></span><span class="cc-mic__glyph" aria-hidden="true">🎙</span>';
-    container.querySelector('#cc-form').insertBefore(mic, container.querySelector('#cc-send'));
 
     const ptt = createPushToTalk({
         port,
@@ -243,24 +384,7 @@ function setupVoice(container) {
         },
     });
 
-    state.voice = { port, ptt, mic, code, keyLabel };
-
-    // ── mic button: press and hold ──
-    mic.addEventListener('pointerdown', (e) => {
-        e.preventDefault();                 // don't steal focus from the input
-        // Capture the pointer so the release is seen even if the cursor has
-        // wandered off the button by then — otherwise a drag off the mic leaves
-        // it hot with nobody listening for the key-up.
-        try { mic.setPointerCapture(e.pointerId); } catch { /* not supported */ }
-        beginHold();
-    });
-    const endPointer = (e) => {
-        if (state.voice?.ptt.state === 'off') return;
-        try { mic.releasePointerCapture(e.pointerId); } catch { /* already released */ }
-        ptt.release();
-    };
-    mic.addEventListener('pointerup', endPointer);
-    mic.addEventListener('pointercancel', () => ptt.cancel());
+    state.voice = { port, ptt, mic: null, code, keyLabel };
 
     // ── the bindable key ──
     // CAPTURE phase: main.ts's global Escape handler (quit-to-lobby) and the
@@ -306,8 +430,61 @@ function setupVoice(container) {
     });
 }
 
+/**
+ * The mic button, built with the rest of the command line rather than at init.
+ *
+ * The push-to-talk KEY is bound at init and works with the command line closed
+ * — that is the whole promise of push-to-talk, and a player mid-battle should
+ * not have to open a text field to speak. The button is the affordance for
+ * people who would rather click, and an affordance only has to exist where it
+ * can be seen.
+ */
+function attachMic(container) {
+    if (!state.voice || state.voice.mic) return;
+    const { ptt, keyLabel } = state.voice;
+
+    const mic = document.createElement('button');
+    mic.type = 'button';
+    mic.id = 'cc-mic';
+    mic.className = 'cc-mic';
+    mic.setAttribute('aria-pressed', 'false');
+    mic.setAttribute('aria-label', `Hold to talk (${keyLabel})`);
+    mic.title = `Hold to talk — or hold ${keyLabel}. Esc while holding cancels.`;
+    mic.innerHTML = '<span class="cc-mic__dot" aria-hidden="true"></span><span class="cc-mic__glyph" aria-hidden="true">🎙</span>';
+    container.querySelector('#cc-form').insertBefore(mic, container.querySelector('#cc-close'));
+
+    mic.addEventListener('pointerdown', (e) => {
+        e.preventDefault();                 // don't steal focus from the input
+        // Capture the pointer so the release is seen even if the cursor has
+        // wandered off the button by then — otherwise a drag off the mic leaves
+        // it hot with nobody listening for the key-up.
+        try { mic.setPointerCapture(e.pointerId); } catch { /* not supported */ }
+        beginHold();
+    });
+    const endPointer = (e) => {
+        if (state.voice?.ptt.state === 'off') return;
+        try { mic.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+        ptt.release();
+    };
+    mic.addEventListener('pointerup', endPointer);
+    mic.addEventListener('pointercancel', () => ptt.cancel());
+
+    state.voice.mic = mic;
+}
+
+/**
+ * A hold SUMMONS the command line.
+ *
+ * The words being recognised go into the input field, and a dictated sentence
+ * the player cannot see is a sentence they cannot correct before it executes —
+ * which is the same argument the confirm gate makes one layer up. Focus stays
+ * where it was (`focusInput: false`): stealing it mid-hold would put the
+ * push-to-talk key inside a text field, where `isTextEntryTarget` correctly
+ * refuses to open the mic.
+ */
 function beginHold() {
     if (!state.voice || state.voice.ptt.state !== 'off') return;
+    summon({ focusInput: false });
     state.typedBeforeHold = state.inputEl?.value ?? '';
     state.voice.ptt.press();
 }
@@ -357,13 +534,27 @@ function dispose() {
     state.logEl = null;
     state.inputEl = null;
     state.log = [];
+    state.built = false;
+    state.visible = false;
+    state.greeted = false;
+    state.pendingConfirm = null;
+    focusModel.closeSurface('command-console');
     document.getElementById('command-console-style')?.remove();
 
     console.log('[command-console] Disposed');
 }
 
-/** Append one transcript line (+ optional dim transparency notes) and scroll. */
+/**
+ * Append one transcript line (+ optional dim transparency notes) and scroll.
+ *
+ * Anything the game says SUMMONS the command line. A spoken order, a follow
+ * that just ended, a question waiting on a chip — each of those is something
+ * the player has to be able to read, and a transcript that answered into a
+ * hidden panel would be the "the game silently ignored me" failure the whole
+ * refusal-copy discipline in this stack exists to prevent.
+ */
 function say(kind, text, notes = [], extra = {}) {
+    if (!state.visible) summon({ focusInput: false });
     const who = kind === 'you' ? 'you' : kind === 'system' ? '' : 'game';
     state.log.push({ who, kind, text, notes, chosen: [], ...extra });
     if (state.log.length > MAX_LOG_LINES) state.log.splice(0, state.log.length - MAX_LOG_LINES);
@@ -410,11 +601,14 @@ function renderChips(entry, index) {
         const classes = ['cc-chip'];
         if (on) classes.push('cc-chip--on');
         if (entry.dead) classes.push('cc-chip--dead');
+        // The affirmative of a confirm gate looks like the affirmative; every
+        // other chip is one candidate among equals and must not.
+        if (entry.confirm && j === 0) classes.push('cc-chip--yes');
         return `<button type="button" class="${classes.join(' ')}"
             ${entry.dead ? 'disabled' : ''}
             data-line="${index}" data-option="${j}">${escapeHtml(option)}</button>`;
     }).join('');
-    const confirm = pick > 1 && !entry.dead
+    const confirm = pick > 1 && !entry.dead && !entry.confirm
         ? `<button type="button" class="cc-chip cc-chip--go"
              ${entry.chosen.length === pick ? '' : 'disabled'}
              data-line="${index}" data-confirm="1">send ${entry.chosen.length}/${pick}</button>`
@@ -502,6 +696,11 @@ function buildResolver() {
         vocabulary: classVocabulary.current,
         groups: state.ctx?.store.getOrgGroups() ?? [],
         selectionGroupId: selectedGroupId(),
+        // U4: what the selection MEANS, so a `selection` subject can tell an
+        // empty selection from a partial roster from two groups at once. See
+        // `ResolverDeps.selectionSubjects` — `selectionGroupId` above is still
+        // the fast path for the exact-roster case and still decides it.
+        selectionSubjects: focusModel.orderSubjects(),
         ...(unitClass ? { unitClass } : {}),
         groupPosition,
     });
@@ -580,6 +779,29 @@ async function onChip(chip) {
     const entry = state.log[Number(chip.dataset.line)];
     if (!entry || entry.dead) return;
 
+    // ── the U4 confirm gate ──
+    // Checked first because a confirm entry looks exactly like a one-pick
+    // question and would otherwise fall into the clarification flow, which
+    // would try to patch a name into an envelope that was never asking one.
+    if (entry.confirm) {
+        const option = entry.options[Number(chip.dataset.option)];
+        const held = state.pendingConfirm;
+        closeQuestion(entry, option ? [option] : []);
+        state.pendingConfirm = null;
+        if (option !== 'Do it') {
+            say('system', 'cancelled — nothing sent.');
+            return;
+        }
+        if (!held || held.entry !== entry) {
+            // A later sentence superseded this reading. Acting on it now would
+            // send an order built against a board two utterances old.
+            say('refused', 'That reading is out of date now — say it again.');
+            return;
+        }
+        await runEnvelope(held.response, held.utterance);
+        return;
+    }
+
     const pick = entry.pick ?? 1;
 
     if (!chip.dataset.confirm) {
@@ -651,12 +873,14 @@ async function answerQuestion(pending, chosen) {
 }
 
 /**
- * Execute an envelope we built ourselves — the answered-locally path.
+ * Execute an envelope we built ourselves — the answered-locally path, and the
+ * `Do it` half of the confirm gate.
  *
- * It still goes through `validateNLResponse`, for the same reason the local
- * parser's own envelopes do: a patcher that produced a shape the contract
- * rejects should say so here, not have the executor discover it three layers
- * down. Nothing here can reach `sendCommand` except through the executor.
+ * It goes through `executeEnvelope`, which validates, binds the focus and
+ * builds the reading exactly as a typed sentence does: a patcher that produced
+ * a shape the contract rejects says so here rather than having the executor
+ * discover it three layers down, and there is no route to `sendCommand` with
+ * fewer checks on it than the one a sentence takes.
  */
 async function runEnvelope(response, utterance) {
     if (!state.ctx?.sendCommand) {
@@ -666,24 +890,25 @@ async function runEnvelope(response, utterance) {
     await censusCacheHolder.current?.refresh();
 
     const resolver = buildResolver();
-    const validation = validateNLResponse(response, {
+    const result = executeEnvelope(response, {
+        index: namedEntityIndex,
         vocabulary: classVocabulary.current,
+        selectionGroupId: selectedGroupId(),
+        groupLabel,
         panelIds: uiActionRegistry.ids(),
+        focus: focusModel.nlFocus(),
+        // No `confirm`: the player has just answered a question or tapped
+        // `Do it`. Asking again for the same order is the second click that
+        // makes a confirmation step feel like a nag rather than a safeguard.
+        ports: {
+            sendCommand: state.ctx.sendCommand,
+            resolver,
+            console: { say: renderLine },
+            ...buildLocalPorts(resolver),
+        },
     });
-    if (!validation.ok) {
-        say('refused',
-            `I couldn't put that answer in a form the game accepts: ${validation.errors[0]}.`,
-            validation.errors.slice(1, 4));
-        return;
-    }
-
-    const report = executeNLResponse(validation.value, {
-        sendCommand: state.ctx.sendCommand,
-        resolver,
-        console: { say: renderLine },
-        ...buildLocalPorts(resolver),
-    });
-    rememberExchange(utterance, { report });
+    rememberExchange(utterance, result);
+    rememberQuestion(utterance, result);
 }
 
 /**
@@ -705,6 +930,16 @@ async function submit() {
     if (utterance.toLowerCase() === 'help') {
         showHelp();
         return;
+    }
+
+    // A new sentence supersedes an outstanding confirmation, for the same
+    // reason it supersedes a question: the reading was of a board that has
+    // since moved, and a tap on it later would send an order the player has
+    // already replaced.
+    if (state.pendingConfirm) {
+        if (state.pendingConfirm.entry) state.pendingConfirm.entry.dead = true;
+        state.pendingConfirm = null;
+        renderLog();
     }
 
     // A new sentence supersedes an outstanding question: its chips freeze
@@ -750,6 +985,10 @@ async function runUtteranceText(utterance) {
         // is TokenRequired and would 401 every time, so there is nothing to
         // gain from trying and a round trip to lose on every sentence.
         proxy: buildProxyDeps(),
+        // U4: the focus feeds BOTH halves of interpretation — the pronoun
+        // binder here, and (through `buildProxyDeps`) the model's own context.
+        focus: focusModel.nlFocus(),
+        confirm: askToConfirm,
         ports: {
             sendCommand: state.ctx.sendCommand,
             resolver,
@@ -758,8 +997,50 @@ async function runUtteranceText(utterance) {
         },
     });
 
+    if (result.held) {
+        offerConfirmation(utterance, result);
+        return;
+    }
+
     rememberExchange(utterance, result);
     rememberQuestion(utterance, result);
+}
+
+/**
+ * The gate itself: always hold, and let the chips decide.
+ *
+ * A predicate rather than a promise on purpose — the whole envelope path below
+ * `runUtterance` is synchronous by design (`nl-executor.ts`), and awaiting a
+ * player's tap in the middle of it would make every caller async for the sake
+ * of one branch. Holding and re-running is the same amount of work and leaves
+ * the executor exactly as testable as it was.
+ */
+function askToConfirm() {
+    return false;
+}
+
+/**
+ * Show the reading, with `Do it` / `Cancel`.
+ *
+ * The point of this affordance, stated once: a misparse that reaches the army
+ * is discovered by losing units, and a misparse that reaches this line is
+ * discovered by reading one sentence. The echo names what was RESOLVED — "3rd
+ * Tanks attacking Storm Sound" — never the words that were typed, because a
+ * console that reads "attack that town" back has confirmed nothing.
+ */
+function offerConfirmation(utterance, result) {
+    const entry = say('ask', result.held.text, describeBindings(result.held.bindings), {
+        options: ['Do it', 'Cancel'],
+        pick: 1,
+        confirm: true,
+    });
+    state.pendingConfirm = { response: result.response, utterance, entry };
+}
+
+/** "\"that town\" → Storm Sound", under the reading, dim. What the sentence
+ *  would have meant is the one thing the reading itself cannot show. */
+function describeBindings(bindings) {
+    return bindings.map((b) => `"${b.phrase}" → ${b.label}`);
 }
 
 /**
@@ -803,6 +1084,9 @@ function buildProxyDeps() {
         directives: state.ctx.store.getDirectives(),
         panelIds: uiActionRegistry.ids(),
         selectionCount: state.ctx.store.getSelection().unitIds.length,
+        // U4: the model's view of what the player is looking at. Names, kinds
+        // and place names — `nlFocus()` is what guarantees no ids leak here.
+        focus: focusContextFor(focusModel.nlFocus()),
         mapName: state.ctx.mapName ?? '',
         authority: numericRulesParam(`authority_player_${state.ctx.identity.playerId}`),
     });
@@ -932,4 +1216,11 @@ export default {
     id: 'command-console',
     init,
     dispose,
+    // The summonable-widget contract (widget-loader `registerSummonActions`):
+    // a widget with no panel chrome that still has an open/closed state
+    // registers these, so "open the command console" reaches the same summon
+    // the `/` key does and the manifest keeps owning the names.
+    open: () => summon(),
+    close: () => dismiss(),
+    isOpen,
 };

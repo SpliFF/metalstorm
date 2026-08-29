@@ -14,7 +14,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { acceleratorToEnvelope, parseGroupRename, runLocalUtterance } from './nl-client.js';
+import {
+    acceleratorToEnvelope, executeEnvelope, parseGroupRename, runLocalUtterance,
+} from './nl-client.js';
 import { validateNLResponse } from './nl-envelope.js';
 import { planUtterance } from './console-exchange.js';
 import type { NLConsoleLine, NLSentCommand } from './nl-executor.js';
@@ -367,6 +369,133 @@ describe('the rename phrasings', () => {
             const result = validateNLResponse(response, { vocabulary });
             expect(result.ok ? [] : result.errors, utterance).toEqual([]);
         }
+    });
+});
+
+// ───────── U4: pronouns, the reading, and the confirm gate ─────────
+
+describe('the offline path understands a pronoun', () => {
+    const focus = (over: Record<string, unknown> = {}) => ({
+        primary: null, subjects: [], drilled: null, openSurfaces: [],
+        selectionCount: 0, ...over,
+    }) as never;
+
+    const town = (label: string) => ({ kind: 'town' as const, label, place: label });
+
+    it('"attack that town" becomes an order against the drilled place', () => {
+        // The slot-filler refuses this sentence outright — it matches names,
+        // and "that town" is not one. What makes it an order is the focus.
+        const s = setup();
+        const result = runLocalUtterance('attack that town', {
+            ...s.deps,
+            focus: focus({ drilled: town('Slag Forge'), primary: town('Slag Forge') }),
+        });
+
+        expect(result.report.sent).toHaveLength(1);
+        expect(s.lines.map((l) => l.text).join(' | ')).toContain('Slag Forge');
+    });
+
+    it('refuses the same sentence, by name, with nothing in focus', () => {
+        const s = setup();
+        const result = runLocalUtterance('attack that town', { ...s.deps, focus: focus() });
+        expect(result.report.sent).toEqual([]);
+        // NOT "I don't know a place called 'that town'" — the refusal has to be
+        // about the pronoun, because that is what the player has to fix.
+        expect(result.report.refusals.join(' ')).toContain('"that town"');
+    });
+
+    it('"withdraw them to Osprey Fen" is the SELECTION, not the whole team', () => {
+        // Without this the slot-filler drops "them" into the unmatched words
+        // and the M0 three-way rule falls through to `any` — a sentence that
+        // named its subject silently becoming a team-wide order.
+        const s = setup();
+        const parsed = acceleratorToEnvelope('withdraw them to Osprey Fen', s.deps);
+        const action = parsed.response.actions[0];
+        expect(action.kind).toBe('command');
+        if (action.kind !== 'command') return;
+        expect(action.intent.subject).toEqual({ type: 'selection' });
+    });
+
+    it('"withdraw to Osprey Fen" with no pronoun stays team-wide', () => {
+        const s = setup();
+        const parsed = acceleratorToEnvelope('withdraw to Osprey Fen', s.deps);
+        const action = parsed.response.actions[0];
+        if (action.kind !== 'command') throw new Error('expected a command');
+        expect(action.intent.subject).toEqual({ type: 'any' });
+    });
+
+    it('leaves a sentence that names its target completely alone', () => {
+        const s = setup();
+        const result = runLocalUtterance('defend Northgate', {
+            ...s.deps,
+            focus: focus({ drilled: town('Slag Forge') }),
+        });
+        expect(result.report.sent).toHaveLength(1);
+        expect(s.lines.map((l) => l.text).join(' | ')).toContain('Northgate');
+        expect(s.lines.map((l) => l.text).join(' | ')).not.toContain('Slag Forge');
+    });
+});
+
+describe('the reading, and the gate in front of it', () => {
+    const focusOn = (place: string) => ({
+        primary: { kind: 'town', label: place, place },
+        subjects: [], drilled: { kind: 'town', label: place, place },
+        openSurfaces: [], selectionCount: 0,
+    }) as never;
+
+    it('replaces the parser\'s own acknowledgement with the RESOLVED reading', () => {
+        const s = setup();
+        runLocalUtterance('attack that town', {
+            ...s.deps, focus: focusOn('Slag Forge'),
+        });
+        // The `say` line the executor prints is the interpretation, naming what
+        // the pronoun resolved to — not the sentence that was typed.
+        const said = s.lines.find((l) => l.kind === 'system');
+        expect(said?.text).toContain('Slag Forge');
+        expect(said?.text).not.toContain('that town');
+    });
+
+    it('HOLDS a focus-bound order when the gate declines, and sends nothing', () => {
+        const s = setup();
+        const seen: string[] = [];
+        const result = runLocalUtterance('attack that town', {
+            ...s.deps,
+            focus: focusOn('Slag Forge'),
+            confirm: (plan) => { seen.push(plan.text); return false; },
+        });
+
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toContain('Slag Forge');
+        expect(result.held?.needsConfirm).toBe(true);
+        // Nothing sent, and nothing SAID either: a held order must not leave a
+        // line that reads as an outcome.
+        expect(result.report.sent).toEqual([]);
+        expect(s.lines).toEqual([]);
+    });
+
+    it('re-running the held envelope sends exactly what was echoed', () => {
+        const s = setup();
+        const held = runLocalUtterance('attack that town', {
+            ...s.deps, focus: focusOn('Slag Forge'), confirm: () => false,
+        });
+
+        // `Do it`: the console hands the BOUND envelope straight back, so the
+        // order that executes is the one that was confirmed rather than a
+        // re-parse of the sentence against a board that may have moved.
+        const after = executeEnvelope(held.response, s.deps);
+        expect(after.report.sent).toHaveLength(1);
+    });
+
+    it('does NOT gate a sentence that named its own target', () => {
+        const s = setup();
+        let asked = 0;
+        const result = runLocalUtterance('defend Northgate', {
+            ...s.deps,
+            focus: focusOn('Slag Forge'),
+            confirm: () => { asked++; return false; },
+        });
+        expect(asked).toBe(0);
+        expect(result.report.sent).toHaveLength(1);
     });
 });
 

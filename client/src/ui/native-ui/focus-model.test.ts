@@ -218,6 +218,65 @@ describe('nlFocus — the story-4 read', () => {
     });
 });
 
+// ──────────────── U4: the two fields story 4 reads ────────────────
+
+describe('the place a ref is at (U4)', () => {
+    it('a town or an area IS its place, without every producer saying so', () => {
+        const model = new FocusModel();
+        model.drill({ kind: 'town', id: 'storm_sound', label: 'Storm Sound' });
+        expect(model.nlFocus().drilled).toEqual({
+            kind: 'town', label: 'Storm Sound', place: 'Storm Sound',
+        });
+    });
+
+    it('an objective carries a place SEPARATE from its title', () => {
+        // The whole reason the field exists: the chip reads "Hold Raven Basin",
+        // the entity index holds "Hold: Raven Basin", and only "Raven Basin" is
+        // a name `nl-resolver.ts` can look up. "Defend it" binds to the last.
+        const model = new FocusModel();
+        model.drill({
+            kind: 'objective', id: 3, label: 'Hold Raven Basin', place: 'Raven Basin',
+        });
+        expect(model.nlFocus().drilled?.place).toBe('Raven Basin');
+    });
+
+    it('a squad has no place — its position is not a name', () => {
+        const model = new FocusModel();
+        model.setSelection([10], [{
+            kind: 'squad', id: 7, label: '3rd Tanks', position: { x: 900, z: 1200 },
+        }]);
+        expect(model.nlFocus().subjects[0].place).toBeUndefined();
+    });
+});
+
+describe('orderSubjects — the selection as an order sees it (U4)', () => {
+    it('carries the group id and the partial flag, which nlFocus never does', () => {
+        const model = new FocusModel();
+        model.setSelection([10, 11], resolveSelectionSubjects([10, 11], groups));
+        const [first] = model.orderSubjects();
+        expect(first).toMatchObject({ label: '3rd Tanks', groupId: 7 });
+
+        // And the same ids through the model-facing read carry neither.
+        expect(JSON.stringify(model.nlFocus())).not.toContain('groupId');
+    });
+
+    it('marks a partial roster, so an order can refuse to widen it', () => {
+        const model = new FocusModel();
+        model.setSelection([10], resolveSelectionSubjects([10], groups));
+        expect(model.orderSubjects()[0].partial).toBe(true);
+    });
+
+    it('reports loose units with no group id rather than dropping them', () => {
+        // A player looking at six selected tanks must not be told "nothing is
+        // selected"; the resolver turns this into an actionable refusal.
+        const model = new FocusModel();
+        model.setSelection([999], resolveSelectionSubjects([999], groups));
+        expect(model.orderSubjects()).toEqual([
+            { label: 'Unit 999', partial: false, count: 1 },
+        ]);
+    });
+});
+
 describe('bindSelectionToFocus', () => {
     function fakeStore(): FocusStoreLike & { fire(): void; unitIds: number[] } {
         const listeners: Array<() => void> = [];

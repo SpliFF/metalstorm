@@ -210,6 +210,17 @@ function wireContext(key) {
             selection: board.selection ? 1 : 0,
             counts,
         },
+        // battle-clarity U4: what the player is looking at. A contexts.json
+        // entry carries it in the SAME shape `nl-focus.ts`'s `focusContextFor`
+        // emits (kinds, labels, place names — no ids), so it passes through
+        // rather than being projected. Omitted when the board declares none,
+        // exactly as `nl-context.ts` omits it when no focus model is wired.
+        //
+        // Passing it through matters for the reason M7 exists: a harness that
+        // scored a payload missing a field production sends would be measuring
+        // a prompt the game never issues, which is the defect that made every
+        // number M7 could have printed a lie.
+        ...(board.focus ? { focus: board.focus } : {}),
     };
 }
 

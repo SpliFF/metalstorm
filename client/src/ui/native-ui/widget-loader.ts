@@ -138,6 +138,23 @@ export interface Widget {
     init(ctx: WidgetContext): void;
     dispose(): void;
     showRefusalToast?: (cost: number) => void;  // authority-bar specific method
+
+    // ── the summonable contract (battle-clarity U4) ──
+    /**
+     * A widget with an open/closed state of its OWN — summoned by a key,
+     * mounting no DOM until it is — implements these three, and the loader
+     * registers them with `ui-action-registry` under the manifest's `title` /
+     * `nlAliases` exactly as it registers a chrome panel's collapse toggle.
+     *
+     * The alternative was for the widget to register itself with a hardcoded
+     * alias list, which would put a game's panel names in two places: the
+     * manifest (where every other panel's live) and the client bundle. That is
+     * the drift `nlAliases`' own doc comment says the manifest exists to
+     * prevent, so the seam is here instead.
+     */
+    open?: () => void;
+    close?: () => void;
+    isOpen?: () => boolean;
 }
 
 /**
@@ -712,6 +729,7 @@ export class WidgetLoader {
             widget.init(context);
             this.widgets.set(descriptor.id, { widget, context });
             if (panel) this.registerPanelActions(descriptor, panel);
+            else this.registerSummonActions(descriptor, widget);
             console.log(`[widget-loader] Mounted widget ${descriptor.id} at ${descriptor.mount}`);
         } catch (e) {
             console.error(`[widget-loader] Widget ${descriptor.id} init() failed:`, e);
@@ -755,6 +773,34 @@ export class WidgetLoader {
             close: () => panel.setCollapsed(true),
             toggle: () => panel.setCollapsed(!panel.isCollapsed()),
             isOpen: () => !panel.isCollapsed(),
+        });
+        this.panelUnregisters.set(descriptor.id, unregister);
+    }
+
+    /**
+     * A summonable widget's own open/close, registered under the manifest's
+     * names (battle-clarity U4 — see `Widget.open`).
+     *
+     * Registered from the same map and unregistered by the same teardown as a
+     * panel's, so from the command language's side there is one kind of
+     * addressable surface, not two. A widget that implements none of the three
+     * registers nothing — which is every widget that existed before this.
+     */
+    private registerSummonActions(descriptor: WidgetDescriptor, widget: Widget): void {
+        if (!widget.open || !widget.close) return;
+        const open = widget.open.bind(widget);
+        const close = widget.close.bind(widget);
+        const isOpen = widget.isOpen?.bind(widget) ?? (() => false);
+
+        this.panelUnregisters.get(descriptor.id)?.();
+        const unregister = uiActionRegistry.register({
+            id: descriptor.id,
+            label: descriptor.title ?? descriptor.id,
+            aliases: descriptor.nlAliases ?? [],
+            open,
+            close,
+            toggle: () => (isOpen() ? close() : open()),
+            isOpen,
         });
         this.panelUnregisters.set(descriptor.id, unregister);
     }

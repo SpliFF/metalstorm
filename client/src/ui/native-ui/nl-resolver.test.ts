@@ -202,6 +202,89 @@ describe('resolveSingleSubject', () => {
     });
 });
 
+// ─────────────────── the selection, read through the focus (U4) ───────────
+
+describe('what "them" means when the selection is not one whole group', () => {
+    /** `basin` with a focus-model projection bolted on — the console builds
+     *  exactly this from `focusModel.orderSubjects()`. */
+    const withSubjects = (
+        subjects: { label: string; groupId?: number; partial: boolean; count?: number }[],
+    ) => {
+        const base = world('basin');
+        return new NLResolver({
+            index: base.index,
+            vocabulary,
+            groups: base.groups,
+            selectionGroupId: null,
+            selectionSubjects: subjects,
+        });
+    };
+
+    it('ASKS which one when several groups are selected', () => {
+        // The board where the old answer — "Nothing is selected" — was least
+        // defensible: two armies highlighted and the player said "pull them
+        // back". The options are group names, so the answer patches straight
+        // back into an entity-ref subject with no round trip.
+        const found = withSubjects([
+            { label: 'Chimera Platoon', groupId: 1, partial: false },
+            { label: 'Basilisk Platoon', groupId: 2, partial: false },
+        ]).resolveSingleSubject({ type: 'selection' });
+
+        expect(found).toMatchObject({ kind: 'clarify', patchable: true });
+        if (found.kind !== 'clarify') return;
+        expect(found.question).toContain('Chimera Platoon and Basilisk Platoon');
+        expect(found.options).toEqual(['Chimera Platoon', 'Basilisk Platoon', 'cancel']);
+    });
+
+    it('refuses a PARTIAL roster by name rather than widening it', () => {
+        // Widening would move the two units the player did not select. There is
+        // no directive shape for "the four you highlighted" — GroupDirective
+        // takes a group — so the honest answer names the group and the gap.
+        const found = withSubjects([
+            { label: '3rd Tanks', groupId: 7, partial: true },
+        ]).resolveSingleSubject({ type: 'selection' });
+
+        expect(found).toMatchObject({
+            kind: 'refuse',
+            reason: expect.stringContaining('Only part of 3rd Tanks is selected'),
+        });
+    });
+
+    it('resolves a WHOLE roster even without the exact-match fast path', () => {
+        const found = withSubjects([
+            { label: '3rd Tanks', groupId: 7, partial: false },
+        ]).resolveSingleSubject({ type: 'selection' });
+        expect(found).toEqual({ kind: 'ok', value: { type: 'group', groupId: 7 } });
+    });
+
+    it('tells ungrouped units what to do instead of refusing blankly', () => {
+        const found = withSubjects([
+            { label: '6 units', partial: false, count: 6 },
+        ]).resolveSingleSubject({ type: 'selection' });
+        expect(found).toMatchObject({
+            kind: 'refuse',
+            // Agreement follows the units, not the subjects — "6 units is not
+            // in a squad" is what a live run said before `count` existed.
+            reason: '6 units are not in a squad, and orders go to squads — '
+                + 'try "name this group <callsign>" first.',
+        });
+    });
+
+    it('agrees with a single loose unit', () => {
+        const found = withSubjects([
+            { label: 'Unit 42', partial: false, count: 1 },
+        ]).resolveSingleSubject({ type: 'selection' });
+        expect(found).toMatchObject({ kind: 'refuse', reason: expect.stringContaining('Unit 42 is not') });
+    });
+
+    it('still says "nothing is selected" when nothing is', () => {
+        const found = withSubjects([]).resolveSingleSubject({ type: 'selection' });
+        expect(found).toMatchObject({
+            kind: 'refuse', reason: expect.stringContaining('Nothing is selected'),
+        });
+    });
+});
+
 describe('class-count: candidates and ranking', () => {
     const target = { x: 1000, z: 1000 };   // Randtown
 
