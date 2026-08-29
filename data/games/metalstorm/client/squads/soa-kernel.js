@@ -19,7 +19,7 @@
 // pose ingest — that is event-time code and lives in soa-squad.js. The kernel
 // runs once per frame and touches only what moving members need.
 
-import { arrive, clampLen, wrapAngle, softLeashPull } from './steering.js';
+import { arrive, clampLen, wrapAngle, softLeashPull, headingFromVelocity } from './steering.js';
 import { isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
 import { steerMemberInto as airSteerInto } from './air-cohesion.js';
 import { steerMemberInto as navalSteerInto } from './naval-cohesion.js';
@@ -376,7 +376,7 @@ function integrateGround(store, i, desiredVx, desiredVz, dt, backend, blend) {
   store.my[i] = backend.groundHeight(x, z);
   const speed = Math.sqrt(vx * vx + vz * vz);
   if (speed > 0.05) {
-    store.mHeading[i] = Math.atan2(vx, vz);
+    store.mHeading[i] = headingFromVelocity(vx, vz);
     store.mGait[i] = (store.mGait[i] + speed * dt * 0.1) % 1;
   }
 }
@@ -591,7 +591,7 @@ function stepGroundSquad(store, sq, grid, passability, bigUnits, backend, dt, ma
     let py = backend.groundHeight(px, pz);
     const speed = Math.sqrt(vx * vx + vz * vz);
     if (speed > 0.05) {
-      mHeading[i] = Math.atan2(vx, vz);
+      mHeading[i] = headingFromVelocity(vx, vz);
       mGait[i] = (mGait[i] + speed * dt * 0.1) % 1;
     }
 
@@ -736,7 +736,7 @@ function stepAirSquad(store, sq, backend, dt, nowSec, maxSpeed, leash, sinH, cos
     store.my[i] += _steer.y * dt;
     const speed = Math.sqrt(vx * vx + vz * vz);
     if (speed > 0.05) {
-      store.mHeading[i] = Math.atan2(vx, vz);
+      store.mHeading[i] = headingFromVelocity(vx, vz);
       store.mGait[i] = (store.mGait[i] + speed * dt * 0.1) % 1;
     }
 
