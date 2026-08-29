@@ -125,6 +125,13 @@ describe('facts from the census', () => {
         expect(factsFor(squad, null).strength).toBeNull();
         expect(factsFor(squad, census([{}, {}, {}])).strength).toBeNull();
     });
+
+    it('separates "not looked yet" from "looked, not there"', () => {
+        expect(factsFor(squad, null).mirrored).toBe(false);
+        const gone = factsFor(squad, census([{ unitId: 999 } as never]));
+        expect(gone.mirrored).toBe(true);
+        expect(gone.seen).toBe(0);
+    });
 });
 
 describe('summaryFor — what rung 1 may say', () => {
@@ -156,6 +163,17 @@ describe('summaryFor — what rung 1 may say', () => {
         expect(at(0.95).stats?.[1].tone).toBe('good');
         expect(at(0.2).stats?.[1].tone).toBe('bad');
         expect(at(0.6).stats?.[1].tone).toBeUndefined();
+    });
+
+    it('a force the mirror cannot see reads "out of contact", never "idle"', () => {
+        // Found live: four tank squads were destroyed at Raven Basin with their
+        // context panel open, and the chip went on saying IDLE for a force that
+        // no longer existed.
+        const gone = census([]);
+        expect(summaryFor(squad, factsFor(squad, gone)).state).toBe('out of contact');
+        // ...but before the first snapshot arrives we have not looked, and
+        // saying we lost them would be the same lie in the other direction.
+        expect(summaryFor(squad, factsFor(squad, null)).state).toBe('idle');
     });
 
     it('moving beats tasked beats idle', () => {

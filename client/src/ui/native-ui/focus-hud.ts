@@ -71,6 +71,17 @@ const PLACE_TYPES = ['region', 'district', 'city', 'landmark'] as const;
 const CMD_STOP = 0;
 
 interface SquadFacts {
+    /**
+     * Whether a census snapshot answered at all.
+     *
+     * This is what separates "we have not looked yet" from "we looked and they
+     * are not there", and the two must never render the same — it is the same
+     * rule query-engine.ts holds for every NL answer. Found live: four tank
+     * squads were destroyed at Raven Basin with their context panel open, and
+     * without this the chip went on saying IDLE for a force that no longer
+     * existed.
+     */
+    mirrored: boolean;
     /** Members the census can currently see. May be fewer than the selection
      *  if the mirror is behind, and that is reported rather than papered over. */
     seen: number;
@@ -250,6 +261,9 @@ function titleFor(ref: FocusRef, facts: SquadFacts): string {
 }
 
 function stateWord(ref: FocusRef, facts: SquadFacts): string {
+    // The mirror answered and none of them are in it: destroyed, or out of
+    // vision. Saying "idle" here would be a claim about units we cannot see.
+    if (facts.mirrored && facts.seen === 0) return 'out of contact';
     if (facts.moving) return 'moving';
     // "tasked" beats "idle": a stationary squad with a directive is holding,
     // not doing nothing, and the difference is what a player acts on.
@@ -274,11 +288,14 @@ function renderDetail(host: HTMLElement, ref: FocusRef): void {
     }
 
     if (facts.strength === null) {
-        // Say which of the two it is. "Unknown" and "0%" must never render the
-        // same, and a mirror that has not answered yet is not a dead squad.
-        host.append(detailRow('Strength', facts.seen === 0
+        // Say which of the three it is. "Unknown", "not visible" and "0%" must
+        // never render the same: a mirror that has not answered yet is not a
+        // squad we have lost, and neither is a dead one.
+        host.append(detailRow('Strength', !facts.mirrored
             ? 'not reported yet'
-            : 'unknown'));
+            : facts.seen === 0
+                ? 'out of contact — destroyed, or out of vision'
+                : 'unknown'));
     } else {
         const weakest = facts.weakest === null ? '' :
             ` (weakest ${Math.round(facts.weakest * 100)}%)`;
@@ -352,8 +369,8 @@ function actionsFor(ctx: WidgetContext, ref: FocusRef): DrilldownAction[] {
 /** Everything the two rungs above need, derived from one census snapshot. */
 export function factsFor(ref: FocusRef, census: Census | null = snapshot()): SquadFacts {
     const empty: SquadFacts = {
-        seen: 0, strength: null, weakest: null, moving: false,
-        centroid: null, className: null, scale: null,
+        mirrored: census !== null, seen: 0, strength: null, weakest: null,
+        moving: false, centroid: null, className: null, scale: null,
     };
     const ids = ref.unitIds;
     if (!census || !ids || ids.length === 0) return empty;
@@ -391,6 +408,7 @@ export function factsFor(ref: FocusRef, census: Census | null = snapshot()): Squ
     for (const [value, count] of scales) if (count > bestScale) { bestScale = count; scale = value; }
 
     return {
+        mirrored: true,
         seen,
         strength: healthCount > 0 ? healthSum / healthCount : null,
         weakest,
