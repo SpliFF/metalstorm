@@ -52,11 +52,54 @@
 //  2. With truncation out of the way, the residual is Float32 storage: the SoA
 //     store holds positions in Float32Array and the OO engine in doubles, so
 //     every member position is rounded at ~1.2e-4 elmo at map coordinates
-//     ~2000. Measured drift is ~2e-4 at frame 0 and ~1.6e-3 by frame 120 —
-//     bounded, not exponential. §14 S6's stated 1e-3 tolerance is therefore
-//     unreachable at 120 frames BY CONSTRUCTION; the bar below is 1e-3 over
-//     the first 30 frames (where a real divergence shows immediately) and
-//     5e-3 thereafter (3x the measured f32 residual).
+//     ~2000. The drift is bounded, not exponential. §14 S6's stated 1e-3
+//     tolerance is therefore unreachable at 120 frames BY CONSTRUCTION; the
+//     bars below are 1e-3 over the first 30 frames (where a real divergence
+//     shows immediately) and 3x the measured residual thereafter.
+//
+// ── RE-BASELINE 2026-08-29 (formation.js −Z-forward slot templates) ─────────
+// The heading-convention sweep re-signed `column`/`wedge` slot z, so squad 2
+// (`vehicleDef`, formationType 'wedge') now drives a mirrored formation. Its
+// trajectory is more sensitive to the SAME f32 storage residual, and the late
+// bars below moved with it. What was checked BEFORE touching a number, because
+// re-baselining a parity bar is exactly how a real divergence gets waved
+// through:
+//
+//   * Squads 1 and 3 (`groundDef`, formationType 'line') are BIT-IDENTICAL
+//     across the change — same worst residual to the last digit (sq1 late
+//     1.5830572287995892e-3 at f107 m0; sq3 1.4173818649396708e-3 at f100 m1),
+//     same trajectories. `line` slots sit at z 0 and `blob` is a disc, so
+//     neither template moved; only the wedge squad did. The drift is confined
+//     to exactly the squads whose slots were mirrored.
+//   * The residual is STILL pure f32 storage, not a port divergence. Verified
+//     by widening every Float32Array in the SoA path (soa-store, soa-grid,
+//     soa-kernel, soa-squad, squad-manager, governor, passability) to
+//     Float64Array and re-running this script: the two engines then agree to
+//     4.5e-13 — double round-off — on all three squads, with sq2's worst at
+//     the SAME frame/member (f54 m3) it occupies at f32. Widening the store
+//     alone already cut sq2's worst from 1.34e-2 to 9.3e-4. A genuine
+//     divergence does not scale with storage width.
+//   * The backend call SEQUENCE still matches between engines exactly. It did
+//     change in absolute terms (83 -> 86 calls): squad 2's members physically
+//     stand somewhere else now, so proximity-scored victim selection picks a
+//     different one (destroy 2:0 where it used to pick 2:1, and a matching
+//     shift in the icon-tier create/destroy drip). Both engines make the same
+//     new choice, in the same order — that is behaviour following geometry,
+//     not drift.
+//   * The EARLY bars did NOT move and were not touched: worst position
+//     residual over the first 30 frames is 5.8366e-4 (f27 sq3 m0) and worst
+//     heading 2.9403e-4 (f1 sq3 m8), both unchanged. That is deliberate — the
+//     early window is where a real divergence announces itself (the deadband
+//     neutralisation lands at 3e-3 on frame 0), so it keeps its full
+//     sensitivity and the re-baseline is confined to the late window.
+//   * Sensitivity re-confirmed AFTER moving the bars, not assumed: the header's
+//     deadband mutation still fails this suite at the new numbers.
+//
+// Measured worsts after the change (f32, the shipped path):
+//     position  early 5.8366e-4 (f27 sq3 m0)   late 1.3404e-2 (f54 sq2 m3)
+//     heading   early 2.9403e-4 (f1 sq3 m8)    late 2.6213e-3 (f52 sq2 m3)
+//     gait      late 6.4454e-4 (f109 sq2 m3)
+//     call nums 1.4810e-3 (destroy 1:0[2]) — unchanged, so its bar stays 5e-3
 
 import { describe, it, expect } from 'vitest';
 import { SquadManager } from './squad-manager.js';
@@ -330,7 +373,12 @@ describe('§14 S6 — OO vs SoA engine parity over one scripted sequence', () =>
   });
 
   it('passes the same numbers to each of those calls (death FX, wreck poses)', () => {
-    const TOL = 5e-3;   // same bar, same reason, as member positions below
+    // Re-measured at the 2026-08-29 re-baseline and left alone: the worst
+    // residual here is 1.4810e-3, on squad 1, and squad 1 did not move. This
+    // bar is NOT chained to the position bar below any more — the late
+    // position bar widened for the wedge squad, and quietly dragging this one
+    // along with it would relax an assertion nothing asked to relax.
+    const TOL = 5e-3;
     for (let i = 0; i < oo.calls.length; i++) {
       const a = oo.calls[i], b = soa.calls[i];
       for (let k = 0; k < a.nums.length; k++) {
@@ -370,9 +418,15 @@ describe('§14 S6 — OO vs SoA engine parity over one scripted sequence', () =>
   it('places every member within the f32 residual every frame', () => {
     // Two bars, for the reason in header note 2: a genuine divergence shows up
     // in the first frames (the deadband neutralisation lands at 3e-3 on frame
-    // 0), while the f32 storage residual only reaches ~1.6e-3 after a hundred
+    // 0), while the f32 storage residual only accumulates over a hundred
     // frames of closed-loop steering.
-    const EARLY_TOL = 1e-3, EARLY_FRAMES = 30, TOL = 5e-3;
+    //
+    // EARLY_TOL is the sensitive one and is UNCHANGED by the slot re-baseline
+    // (measured 5.8366e-4). TOL covers the wedge squad's amplified f32
+    // residual, 1.3404e-2 at f54 — 3x it, the same margin rule the original
+    // 5e-3 bar was set by. See the re-baseline block in the header for the
+    // evidence that this is still storage precision and not divergence.
+    const EARLY_TOL = 1e-3, EARLY_FRAMES = 30, TOL = 4e-2;
     let worst = 0, worstAt = '', worstEarly = 0, worstEarlyAt = '';
     for (let f = 0; f < FRAMES; f++) {
       const a = oo.frames[f], b = soa.frames[f];
@@ -393,15 +447,30 @@ describe('§14 S6 — OO vs SoA engine parity over one scripted sequence', () =>
   });
 
   it('agrees on member heading and gait (the animation channels) too', () => {
-    const TOL = 1e-3;
+    // Heading gets the same early/late split as position, and for the same
+    // reason. Before the slot re-baseline one flat 1e-3 bar covered the whole
+    // run; the wedge squad's heading residual now reaches 2.6213e-3 late, so a
+    // single bar would have had to be widened across the early window too and
+    // would have thrown away the sensitivity there. Split instead: EARLY_TOL
+    // is the pre-existing 1e-3 against a measured 2.9403e-4 (unchanged by this
+    // change), TOL is 3x the measured 2.6213e-3.
+    //
+    // Gait keeps its flat 1e-3 — measured worst 6.4454e-4, still inside it.
+    const EARLY_TOL = 1e-3, EARLY_FRAMES = 30, TOL = 8e-3, GAIT_TOL = 1e-3;
     for (let f = 0; f < FRAMES; f++) {
       const a = oo.frames[f], b = soa.frames[f];
       for (let i = 0; i < a.length; i++) {
         for (let k = 0; k < a[i].members.length; k++) {
           const m = a[i].members[k], n = b[i].members[k];
           if (!m.alive || m.released) continue;
-          expect(Math.abs(m.heading - n.heading)).toBeLessThanOrEqual(TOL);
-          expect(Math.abs(m.gait - n.gait)).toBeLessThanOrEqual(TOL);
+          const dh = Math.abs(m.heading - n.heading);
+          expect(`f${f} sq${a[i].id} m${k} heading ${dh <= TOL ? 'within' : `OVER (${dh})`}`)
+            .toBe(`f${f} sq${a[i].id} m${k} heading within`);
+          if (f < EARLY_FRAMES) {
+            expect(`f${f} sq${a[i].id} m${k} early heading ${dh <= EARLY_TOL ? 'within' : `OVER (${dh})`}`)
+              .toBe(`f${f} sq${a[i].id} m${k} early heading within`);
+          }
+          expect(Math.abs(m.gait - n.gait)).toBeLessThanOrEqual(GAIT_TOL);
         }
       }
     }
