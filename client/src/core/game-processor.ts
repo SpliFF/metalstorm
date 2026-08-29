@@ -4499,6 +4499,25 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — capture-subject: def name → live entity ids, newest first —
         case 'entitiesByDef':
             return gpCtx.entityRenderer?.findEntitiesByDef(String(args[0] ?? '')) ?? [];
+        // — capture-sequence (ai-visual-debug V2): put the presentation cursor
+        //   ON the newest received frame. The filming path only; see
+        //   PresentationClock.snapToNewest for why the PLL cannot be relied on
+        //   to close a `sim_step`-sized gap, and why this is not the default. —
+        case 'presentationSnap': {
+            const c = gpPresentationClock;
+            if (!c) return { ok: false, reason: 'no presentation clock' };
+            const jumped = c.snapToNewest();
+            return {
+                ok: c.isAnchored,
+                jumpedFrames: jumped,
+                E: c.E,
+                P: c.P,
+                newestFrame: c.newestObservedFrame,
+                gameFrame: gpGameFrame,
+                paused: gpPaused,
+                simSpeed: gpSimSpeed,
+            };
+        }
         // — PLAN-model-harness: render-group toggles for the F8 panel —
         case 'setWireframe':
             if (gpScene) gpScene.forceWireframe = Boolean(args[0]);

@@ -60,6 +60,31 @@ describe('PresentationClock', () => {
         expect(c.frameToMs(6)).toBeCloseTo(100, 5);    // 2× → twice as fast
     });
 
+    // ai-visual-debug V2: single-stepping moves the server by a handful of
+    // frames — far below SNAP_FRAMES — and a paused clock cannot tick the
+    // error away (framesPerMs 0). Without an explicit snap the cursor sits
+    // behind the state the step just produced, which is a stale pose in
+    // every filmed shot.
+    it('snapToNewest closes a sub-snap-threshold gap the PLL would only creep at', () => {
+        const c = new PresentationClock();
+        c.observeFrame(100, 1000);
+        c.setSpeedFactor(0);              // paused, as sim_step leaves it
+        c.observeFrame(106, 1500);        // stepped 6 frames
+        // The PLL only took 10% of the 6-frame error.
+        expect(c.E).toBeCloseTo(100.6, 5);
+        const jumped = c.snapToNewest();
+        expect(jumped).toBeCloseTo(5.4, 5);
+        expect(c.E).toBeCloseTo(106, 5);
+        expect(c.getStats().correctionCount).toBeGreaterThan(0);
+    });
+
+    it('snapToNewest is a no-op before the first snapshot anchors the clock', () => {
+        const c = new PresentationClock();
+        expect(c.snapToNewest()).toBe(0);
+        expect(c.isAnchored).toBe(false);
+        expect(c.E).toBe(0);
+    });
+
     it('honours a manual display-delay override', () => {
         const c = new PresentationClock();
         c.observeFrame(100, 1000);

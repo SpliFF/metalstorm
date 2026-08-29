@@ -194,6 +194,77 @@ is), `browser_test` + `test.orbit` (keep the rig and step around a model), or
 chrome-devtools `take_screenshot` (DOM/HUD only — it cannot see the WebGL2
 canvas).
 
+## Filming motion: `step_sim`, `capture_sequence`, `order_and_film`
+
+`capture_subject` gets you a **pose**. Anything that only exists *while moving*
+— a turn arc, a turret slew, a walk cycle mid-stride, a tracer in flight beside
+a hull — needs a **sequence**, and the three obvious ways to get one all fail:
+speed 1 advances the sim an unknown amount between relay calls, a hard pause
+deletes the thing you are looking at, and slow motion alone narrows the window
+without closing it.
+
+```
+capture_sequence {"unitId": 15976, "frames": 18, "everyNthSimFrame": 12, "angle": "top"}
+order_and_film   {"unitId": 15976, "move": {"x": 6525, "z": 2527}, "frames": 18}
+step_sim         {"frames": 30}          # exactly one game-second, then stop again
+capture_subject  {"unitId": 15976, "simSpeed": 0.1}   # slow-mo instead of a freeze
+```
+
+**Two modes, and the difference is what the frames are worth.**
+
+- **`step` (default) — spacing is EXACT.** The sim is stopped and advanced by
+  `everyNthSimFrame` frames between shots (`sim_step`, a server verb added for
+  this; `rts/Server/SimStep.h`). Because the world only moves when you say so,
+  the seconds each capture costs buy *no* sim time: 18 shots came back
+  `deltas 12, 12, 12, …` with no exception, over 15 s of wall clock. Use this
+  whenever the frames are evidence. No wall-clock ceiling.
+- **`realtime` — spacing is NOMINAL.** The sim is slowed (`simSpeed`, default
+  0.1) and the whole burst runs browser-side inside ONE relay evaluation, so
+  the interval is wall-clock-accurate. ⚠ **Hard ceiling ~6.5 s**: the
+  worker→main relay abandons an evaluation that has not answered in 8 s
+  (`game-processor.ts` ~1237) and the reply — every frame with it — is lost. A
+  burst that would overrun is **refused before the shoot**, with the arithmetic
+  shown. Anything longer belongs in `step` mode.
+
+Things worth knowing before you reach for these:
+
+1. ⚠ **The client's authored-clip clock is WALL-CLOCK, not sim-linked.**
+   Measured 2026-08-30 on `fable_mech`'s 1.2 s `walk` loop: 56.3 key-frames per
+   wall-second at 1×, **55.6 at 0.1×** — ratio 0.99, while the unit's travel
+   ratio was 0.09. So `simSpeed` slows the *world*, not the *legs*. **Pace a
+   clip sequence off the clip's own timebase**, not off sim frames. (Beware
+   long samples: a 1.2 s loop aliases badly — measure over ~150 ms.)
+2. **`gameFrame` is not the frame you are looking at.** It comes from GameInfo,
+   broadcast once a game-second, so it quantises to 30 and would report six
+   genuinely different shots as one instant. The sequence tools report the
+   server frame the step landed on, and separately the client's freshest
+   entity-snapshot frame.
+3. **A stopped sim needs the presentation cursor told to catch up.** With
+   `framesPerMs` at 0 the phase-locked loop has no rate to close a 12-frame gap
+   with, so a shot after a step photographs the *previous* pose — silently.
+   `capture_subject` sets `syncPresentation` whenever it paused the sim itself;
+   `test.presentationSnap()` is the manual hook.
+4. **The verdict is "did anything MOVE", not "is it dark".** N well-exposed,
+   well-framed shots of the same instant is a still life wearing a film's
+   clothes; it comes back `sequence: UNUSABLE` with the causes named. A sim
+   that stepped correctly while the client received nothing is caught too —
+   spacing and picture-change are judged on different clocks.
+5. **Frames go to disk** (`data/captures/<name>/` by default, `outDir` to
+   place them), because the relay's 4 MB cap is per message. `inlineFrames`
+   returns the first few inline for a glance.
+6. **`order_and_film` waits for motion ONSET, and rotation counts.** A tank
+   executing a 180° course change barely translates; heading is the only
+   channel that shows the turn, so either `speedThreshold` (elmos/game-second,
+   default 2) or `turnThreshold` (deg/game-second, default 5) trips it. A unit
+   that never moves is filmed anyway and labelled — a still hull IS the finding
+   when the order was supposed to move it.
+
+Committed sequences: `tools/debug-mcp/shots/m1-tank-180-turn/` (an `ms_tanks_s2`
+through a 192° course reversal, exact 12-frame spacing) and
+`tools/debug-mcp/shots/mech-walk-slowmo/` (one `fable_mech` walk loop at 0.25×,
+mid-stride). See
+[`tools/debug-mcp/shots/README.md`](../../../tools/debug-mcp/shots/README.md).
+
 ## Camera control
 
 The camera lives **only in the browser** (the `RTSCamera` instance, `client/src/core/rts-camera.ts`). There are no camera MCP tools — drive it through the relay (`browser_test` / `client_eval({target:'test'})`) or a chrome-devtools `evaluate_script`. `window.test.*` is **the** surface — there is no `window.camera`; it was documented for years but never installed. Read the live pose with `window.test.cameraPose()` → `{pos:{x,y,z}, lookAt:{x,y,z}}`. Camera calls settle before they resolve, so a screenshot straight after one is safe; for framing that must not drift use `test.withStableCamera(fn)` (locks input, re-checks the pose afterwards and reports drift) or `test.lockInput(true)`.

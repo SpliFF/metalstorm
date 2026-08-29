@@ -72,6 +72,7 @@
 #include "Server/GameStartCoordinator.h"
 #include "Server/ClientMessageHandler.h"
 #include "Server/StateStreamer.h"
+#include "Server/SimStep.h"
 #include "Server/GameHttpRoutes.h"
 #include "Server/HeadlessRun.h"
 #include "Server/StatsDump.h"
@@ -3126,8 +3127,17 @@ int main(int argc, char* argv[])
         // result. The loop itself keeps running — admin `exec` still works
         // for post-mortem inspection, and the observation-window timer in the
         // lifetime-bookkeeping block above is what stops the process.
-        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused
-            && !gameOverRelay.IsDeclared()) {
+        //
+        // `sim_step N` is the ONE exception to the pause gate: it grants a
+        // budget of N frames that this condition spends one per tick, so a
+        // stopped world can be advanced by an exact, known amount and stop
+        // again (Server/SimStep.h — the frame-by-frame filming path). The
+        // Consume() call is short-circuited behind `gs->paused`, so it only
+        // ever runs — and only ever decrements — on a tick the pause would
+        // otherwise have skipped.
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused()
+            && !gameOverRelay.IsDeclared()
+            && (!gs->paused || simstep::Consume())) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }

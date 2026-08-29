@@ -25,7 +25,7 @@
 // Everything here is pure — the handler in server.js executes the plan.
 
 /** Server verbs, in the order the plan emits them. */
-export const PHASE_OPS = ['cheats', 'spawn', 'los', 'settle', 'pause', 'capture'];
+export const PHASE_OPS = ['cheats', 'spawn', 'los', 'settle', 'speed', 'pause', 'capture'];
 
 /** Default dwell (ms) between a spawn/reveal and the pause, so the entity
  *  snapshot carrying the change reaches the browser first. Two 10 Hz-ish
@@ -211,8 +211,38 @@ export function planCapture(args = {}, state = {}) {
                    why: 'a paused sim streams no fresh spawns or reveals' });
     }
 
+    // — sim speed —
+    // AFTER the settle, deliberately. The settle is measured in WALL ms, so
+    // applying 0.1× first would shrink a 600 ms settle to under two sim frames
+    // and we would photograph the empty ground the settle exists to prevent.
+    if (Number.isFinite(args.simSpeed)) {
+        const want = Math.max(0.05, Math.min(100, args.simSpeed));
+        if (state.simSpeed === want) {
+            notes.push(`sim speed was already ${want}× — left as found`);
+        } else {
+            pre.push({ op: 'speed', value: want });
+            if (Number.isFinite(state.simSpeed)) {
+                post.push({ op: 'speed', value: state.simSpeed });
+            } else {
+                notes.push('sim speed before this capture could not be read;'
+                    + ' restoring to 1× on the way out');
+                post.push({ op: 'speed', value: 1 });
+            }
+        }
+    }
+
     // — pause — always LAST of the pre steps.
-    const pause = args.pause !== false;
+    // simSpeed and pause are contradictory: slow motion exists to keep the
+    // subject MOVING through the capture, and pausing is how you stop it. So a
+    // caller who asked for slow motion and did not ask for a pause gets no
+    // pause, and is told which of the two won.
+    let pause = args.pause !== false;
+    if (Number.isFinite(args.simSpeed) && args.pause === undefined) {
+        pause = false;
+        notes.push('simSpeed was requested, so the sim is NOT paused for this'
+            + ' capture — slow motion and a freeze are alternatives, not a pair.'
+            + ' Pass pause:true to override.');
+    }
     if (pause) {
         if (state.simPaused === true) {
             notes.push('sim was already paused — left as found');
@@ -234,6 +264,7 @@ export function describePlan(plan) {
             case 'spawn':  return `spawn ${s.def}×${s.count} @ ${s.x},${s.z} (team ${s.team})`;
             case 'los':    return `los ${s.enable ? 'on' : 'off'}`;
             case 'settle': return `wait ${s.ms}ms for the stream`;
+            case 'speed':  return `speed ${s.value}×`;
             case 'pause':  return s.paused ? 'pause sim' : 'resume sim';
             default:       return s.op;
         }
@@ -256,7 +287,8 @@ export function buildHarnessCall(args = {}) {
     if (args.area !== undefined) spec.area = args.area;
     for (const k of ['angle', 'yawDeg', 'pitchDeg', 'fill', 'maxDim', 'quality',
                      'format', 'retries', 'luminanceFloor', 'settleMs',
-                     'resolveTimeoutMs', 'holdRender', 'restore']) {
+                     'resolveTimeoutMs', 'holdRender', 'restore',
+                     'syncPresentation', 'contrastFloor']) {
         if (args[k] !== undefined) spec[k] = args[k];
     }
     // maxDim is clamped for the same reason client_screenshot clamps it: the

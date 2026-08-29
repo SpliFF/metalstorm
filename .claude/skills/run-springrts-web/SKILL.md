@@ -98,6 +98,20 @@ ONE relay round trip, because two round trips let the sim run away between them.
 See the `spring-debug` skill and
 [docs/debugging-tools.md](../../../docs/debugging-tools.md#looking-at-something-capture_subject).
 
+**If the thing you want to see only exists while it MOVES** — a turn arc, a
+turret slew, a walk cycle mid-stride — use `capture_sequence` / `order_and_film`
+instead; they film N framed shots at a controlled sim-frame spacing (default
+mode steps the sim between shots, so relay latency buys no sim time) and write
+them to disk:
+
+```
+order_and_film {"unitId": 15976, "move": {"x": 6525, "z": 2527}, "frames": 18, "everyNthSimFrame": 12}
+```
+
+⚠ The client's authored-clip clock is **wall-clock, not sim-linked** — `simSpeed`
+slows the world, not the legs. See
+[docs/debugging-tools.md](../../../docs/debugging-tools.md#filming-motion-capture_sequence--step_sim--order_and_film).
+
 Everything below is the hand-rolled path, for when you need the camera somewhere
 `capture_subject`'s presets do not reach.
 

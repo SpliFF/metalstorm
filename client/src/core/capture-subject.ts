@@ -305,6 +305,19 @@ export interface CaptureSubjectSpec {
     /** Caller states that LOS was already revealed — only affects the wording
      *  of a black-frame diagnosis. */
     revealed?: boolean;
+    /**
+     * Put the presentation cursor on the newest received frame before the
+     * shutter falls (ai-visual-debug V2).
+     *
+     * Off by default, and deliberately so: in a running game the display delay
+     * D is the jitter buffer, and discarding it is how you get extrapolation
+     * artefacts. It exists for the STOPPED sim — after `pause_sim` or
+     * `sim_step`, `framesPerMs` is 0, so the phase-locked loop has no rate to
+     * close the gap with and the shot photographs a frame older than the one
+     * the step just produced. `capture_subject` sets it whenever it paused or
+     * stepped the sim itself.
+     */
+    syncPresentation?: boolean;
 }
 
 export interface CaptureSubjectResult {
@@ -329,6 +342,22 @@ export interface CaptureSubjectResult {
         hasModel: boolean | null;
     };
     framing: Framing & { angle: CaptureAngle; distance: number };
+    /**
+     * What the presentation cursor was doing when the shutter fell — present
+     * only when `syncPresentation` ran.
+     *
+     * `newestFrame` is the freshest ENTITY-snapshot frame this client holds,
+     * and it is the honest answer to "which instant is this a picture of".
+     * `gameFrame` is not: it comes from GameInfo, which is broadcast once a
+     * second, so it quantises to 30 and a 9-frame step reads as 0 or 30. A
+     * sequence judged on `gameFrame` would call three genuinely different
+     * shots identical.
+     */
+    presentation?: {
+        ok: boolean; jumpedFrames?: number; E?: number; P?: number;
+        newestFrame?: number; gameFrame?: number; paused?: boolean;
+        simSpeed?: number; reason?: string;
+    } | null;
     attempts: AttemptRecord[];
     warnings: string[];
     /** Non-null means the image is a diagnosis, not a deliverable. */
