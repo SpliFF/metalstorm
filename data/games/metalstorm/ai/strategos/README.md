@@ -10,14 +10,20 @@ like a human.
 Design source of truth: [`PLAN-metalstorm-ai.md`](../../../../../PLAN-metalstorm-ai.md).
 Runtime it targets: [`PLAN-ai.md`](../../../../../PLAN-ai.md).
 
-> **Status: reads live, decisions are pure and tested, writes are stubbed.**
-> The Picture builder (`picture.lua`) now reads real rulesParams + the AI4
-> file API end-to-end (regions, board, economy, force ledger/intel, power
-> table); the pure decision core (slate + planner + config + roles +
-> profiles) is complete and tested headless — see `tests/`. What's left:
-> `actuators.lua`'s real verbs wait on AI2, and a few data gaps (bounty
-> visibility, cost-scale mirror, radar blips, composition counters) are
-> documented at their call sites, not guessed at.
+> **Status (2026-08-29): reads live, decisions are pure and tested, core
+> writes are LIVE.** The Picture builder (`picture.lua`) reads real
+> rulesParams + the AI4 file API end-to-end (regions, board, economy, force
+> ledger/intel, power table); the pure decision core (slate + planner +
+> config + roles + profiles) is complete and tested headless — see `tests/`.
+> `actuators.lua` writes for real since AI2/I1 landed: `AI.createGroup` /
+> `AI.issueDirective` / `AI.setPosture` issue engine directives through the
+> same charged path as a human's wire message, and `AI.sendMessage` carries
+> the `ai.intent` tag to the guidance gadget. Still feature-detected no-ops
+> on the runtime surface: the two parley verbs (`propose` /
+> `respondProposal` — buildable on the I1 message funnel, plan task 4(a)),
+> plus `initiateBuild` (later AI2 slice) and `stakeBounty`; `chat`/`marker`
+> fall back to `AI.log`/nothing. Remaining data gaps (composition counters;
+> I2 rulesParam privacy) are documented at their call sites, not guessed at.
 
 ## Module map
 
@@ -111,11 +117,9 @@ idle-factory / counters-table dependency of `slate.lua`'s `compositionGap`
    convention exactly (the plan's flat `ai/main.lua` layout would not be
    discovered). If you prefer the plan's literal paths, the discovery scan or
    the plan needs reconciling — flagged, not assumed.
-2. **No module loader.** `main.lua` uses `require`. The AI VM has no `require`
-   yet (AI0-loader). The pure modules are still fully testable with busted; the
-   *runtime* won't boot until the loader lands. Recommended fix: register a
-   `require` that resolves against the plugin folder, or concatenate the
-   plugin's files at discovery into one buffer.
+2. ~~**No module loader.**~~ RESOLVED 2026-07-20 — AI0-loader landed
+   (`AIScriptContext::l_require`, sandboxed to the plugin folder; see the
+   engine-asks table above). The multi-file layout boots in the engine VM.
 3. **Per-slot profile/difficulty — HALF DONE.** `main.resolveProfile()` now
    reads a rulesParam hint (`ai_profile_<playerID>` then `ai_profile`, team
    scope, allow-listed against `Config.PROFILES`), and `game_scenario.lua`'s

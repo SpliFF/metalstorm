@@ -90,7 +90,7 @@ without fighting over the single shared `chrome-profile` lock. It also means:
 reads a `?disableWidgets=<name,name>` URL param (comma-separated widget GetInfo
 names) and switches those widgets off once the LuaUI worker is ready — set it on
 the initial navigate unless you are specifically testing that overlay (re-wired
-in P5 — `main.ts:1903-1922`; it is live). The programmatic equivalent, once a
+in P5 — `main.ts`, grep `disableWidgets`; it is live). The programmatic equivalent, once a
 game is up, is `await test.widgets()` / `await test.setWidget(name, false)`.
 
 Worker-side Lua eval is `await window.widgets.eval("...lua...")` (the LuaUI
@@ -142,8 +142,9 @@ question is detail rather than brightness. Both are objective and survive being
 quoted in a plan file.
 
 **Corollary, learned the hard way: a black frame is not always the capture.**
-On `scorched_crossing_v2.4` the terrain really does render black once the splat
-detail is removed (PLAN-endtoend **D48**: the tile albedo is empty, so the
+During the D48 investigation (2026-08, since fixed — the map renders normally now)
+on `scorched_crossing_v2.4` the terrain really did render black once the splat
+detail was removed (PLAN-endtoend **D48**: the tile albedo was empty, so the
 signed splat detail is the only thing painting the ground). The standing "a
 black capture proves nothing" rule cuts both ways — before blaming the harness,
 check `scene.getActiveMeshes().length`, `material.isReady(mesh)`, the effect's
@@ -292,9 +293,11 @@ so it is safe to leave installed; just don't quote it.
 2. **Match credentials to the roster.** The browser auto-logs in as
    `test1`; `launch_game` must run as the **same** user (`username:'test1',
    password:'test'`). Don't mix an `admin` browser with a `test1` game or
-   vice-versa — the roster is per-account. Dev accounts: `test1`/`test`,
-   `admin`/`admin` (plaintext in the `users` table:
-   `query_db "SELECT username,password_hash FROM users"`).
+   vice-versa — the roster is per-account (note: `test1` now carries the
+   **admin** role too, so role isn't the discriminator — the account is).
+   Dev accounts: `test1`/`test`, `admin`/`admin`. These are known by
+   convention — `users.password_hash` holds a **scrypt** digest
+   (`scrypt$32768$8$1$…`), so don't try to read passwords out of the table.
 3. **Fresh-login before the first join.** The stale auto-login token in a
    fresh isolated profile causes `[connection] auth failed: no valid
    token`. Do a credential login and attach it *before* joining:
@@ -327,7 +330,7 @@ The `LobbyUI` instance is exposed on `window.lobby`. All lobby actions can be ca
 
 ```js
 // Room lifecycle
-await lobby.createRoom('test', 'pools_of_ilys_1.0.0')  // name, mapId
+await lobby.createRoom('test', 'scorched_crossing_v2.4')  // name, mapId, scenarioId?
 await lobby.joinRoom(1)                                  // roomId
 await lobby.leave()
 
@@ -345,7 +348,7 @@ await lobby.lobbyGet('/api/rooms')
 Quick-start a game from scratch in one script block:
 
 ```js
-await lobby.createRoom('test', 'pools_of_ilys_1.0.0');
+await lobby.createRoom('test', 'scorched_crossing_v2.4');  // or lobby.maps[0].id
 await lobby.addAI('null', 1);   // AI on team 2 (index 1) — game needs 2 teams
 await lobby.ready(true);         // host must ready up
 await lobby.startGame();         // launches the game server
@@ -389,5 +392,10 @@ await lobby.startGame();         // launches the game server
 
 The stack is mprocs-managed — do not hand-launch services. Bring it up and
 verify with `.claude/skills/run-springrts-web/smoke.sh --start` (see the
-run-springrts-web skill). Ports: client `8012` (Vite), lobby `8011`,
+run-springrts-web skill). **The client bakes the lobby port at build time**:
+`__GAME_SERVER_PORT__` is a Vite `define` fed from `GAME_SERVER_PORT`
+(client/vite.config.ts → client/src/config.ts), set by the mprocs `client`
+proc. A hand-started `npx vite dev` (or an `npm run build`) without
+`GAME_SERVER_PORT=8011` talks to the wrong lobby and fails in ways that look
+like auth bugs. Ports: client `8012` (Vite), lobby `8011`,
 logserver `8010`, game servers dynamic (`9100`+).

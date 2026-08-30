@@ -145,7 +145,7 @@ launch_scenario({ scenarioId: "crossing_standoff", wait: "ready" })
 # → returns when the server accepts connections; no "wait a beat" guesswork.
 # navigate a browser to the returned browserUrl, then:
 wait_for_game({ roomId: <id>, until: "ticking" })
-spawn_unit({ defName: "ms_scout", x: 4096, z: 4096, team: 0, count: 1 })
+spawn_unit({ defName: "ms_tanks_s1", x: 4096, z: 4096, team: 0, count: 1 })
 browser_test({ method: "focus", args: [<id from spawn_unit>] })
 client_screenshot({ maxDim: 640 })      # and look at it
 end_game({ roomId: <id> })              # graceful teardown — always finish here
@@ -156,8 +156,8 @@ end_game({ roomId: <id> })              # graceful teardown — always finish he
 ```
 launch_scenario({ scenarioId: "crossing_standoff", wait: "ready", headless: true, idleGraceSeconds: 600 })
 set_debug_logging({ combat: true, sound: true, weapon: true })
-spawn_unit({ defName: "ms_scout", x: 4000, z: 4000, team: 0, count: 1 })
-spawn_unit({ defName: "ms_scout", x: 4200, z: 4000, team: 1, count: 1 })
+spawn_unit({ defName: "ms_tanks_s1", x: 4000, z: 4000, team: 0, count: 1 })
+spawn_unit({ defName: "ms_tanks_s1", x: 4200, z: 4000, team: 1, count: 1 })
 give_order({ unitId: <atk>, cmdId: 20, params: [<tgt>] })  # CMD.ATTACK = 20
 get_logs({ section: "weapon", limit: 20, roomId: <id> })
 get_logs({ section: "combat", limit: 20, roomId: <id> })
@@ -230,7 +230,7 @@ Toggle individually via `test.log("combat", true)` / `set_debug_logging({...})`.
 
 The MCP tools auto-authenticate as `admin/admin` (override via `SPRING_USER`/`SPRING_PASS` env). All `server` exec calls go through the lobby's `/api/exec` route, which proxies to the active game server — no need to discover the dynamic game-server port yourself when using these tools.
 
-**Dev accounts:** `admin` / `admin` and `test1` / `test`.
+**Dev accounts:** `admin` / `admin` and `test1` / `test` (note: `test1` now has the **admin** role too — don't rely on it as a non-admin control; register a fresh user for role-gating tests). Def names: there is no `ms_scout` — real defs are `ms_scout_buggy` and the squad families `ms_tanks_s1..s4`, `ms_soldiers_s1..`, etc.; `list_unit_defs` is the authority. The `window.test` table above is the core set, not exhaustive — the harness also exposes orbit/sun/clip playback, `listUnitDefs`/`unitDefByName`, `entityBounds`, LOD/wireframe toggles, minimap capture, `squadPerf`, camera slots, `stockpile`/`cheats`/`reviveTeam` (see client/src/core/test-harness.ts). `meridian_basin.lua` (the scenario) is retired; `crossing_standoff` on `scorched_crossing_v2.4` is the live showcase war.
 
 On the `launch_scenario` path none of the browser-login machinery applies — the `browserUrl` carries the host's own session. The **roster coupling** trap (a game server only admits browser users in its launch-time roster, so `launch_game` must run as the same user the browser is logged in as) only exists on the `launch_game` lobby-flow path; that discipline, and the isolated-profile login recipe for concurrent sessions, live in the **game-browser-test** skill ("Isolated mode + session discipline").
 

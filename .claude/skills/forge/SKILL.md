@@ -51,7 +51,22 @@ ASSETS.md row. Batch small props 2–4 per agent.
 
 ## What's here already
 
-`tools/forge/dist/batch-01/` holds 21 finished, validated models
-(gltf+bin+ktx2+png) not yet integrated into the game data tree — check it
-before generating a model that may already exist. `samples/` holds their
-generator triplets. The generator toolkit is the sibling folder tools/fable-model-forge/ in this same tree.
+`tools/forge/dist/batch-01..batch-04/` hold ~70 finished, validated models
+(gltf+bin+ktx2+png) in varying states of integration — several families
+(e.g. the tanks: `ms_tanks_s1`/`ms_tanks_s3` replacing the wz_* placeholders)
+are already integrated into `data/games/metalstorm/models/`. Check BOTH
+`dist/` and the game data tree before generating a model that may already
+exist. `samples/` holds their generator triplets. The generator toolkit is
+the sibling folder tools/fable-model-forge/ in this same tree.
+
+## World-scale contract (×8) — REQUIRED for integration
+
+Forge models are authored in **metres**, but the engine adopted
+**8 elmos = 1 m applied at import** (Option A, decided 2026-08-27). Unit
+models in `data/games/metalstorm/models/` must carry
+`SPRINGRTS_geometry.units="elmos"` and be exactly 8× the metre baseline in
+`world_scale_baseline.json`; map features stay ×1. The gate is
+`python3 tools/scripts/check_model_scale.py` — a hand-copied forge gltf
+(still in metres) FAILS it. Import with `modelimporter --metres`, which
+scales geometry and metadata together. Impostor framing constants are
+scale-invariant but must be re-baked after a rescale.

@@ -55,13 +55,23 @@ is not a clean-Linux-container recipe.
 # First-time only (configures CMake preset + installs client deps): make setup
 # Build/refresh the C++ servers + tools (fast when up-to-date):
 cmake --build build/debug
+# IMPORTANT: the lobby forks build/release/spring-server WHEN IT EXISTS
+# (rts/lobby_main.cpp GetServerBinary), and it usually exists. After any
+# rts/ change that game servers must pick up, ALSO rebuild release:
+cmake --build build/release --target spring-server
 ```
 
-`make build` wraps `cmake --build build/debug`. Client has no build step in dev
-(Vite serves on demand). Re-build a single tool, e.g.:
-`cmake --build build/debug --target modelimporter gameconverter`.
-A clean machine needs: CMake 3.25+, Ninja, a C++ toolchain, Node, and `mprocs`
-(`brew install mprocs`).
+`make build` wraps `cmake --build build/debug` (it first runs
+`export-metalstorm-specs`, which shells out to a system `lua` — a missing
+`lua` fails the make target before compiling; the raw `cmake --build` skips
+that step). A debug-only rebuild is **invisible to lobby-spawned rooms**
+while `build/release/spring-server` exists — either rebuild release too, or
+delete the release binary to force the debug path. `list_stack
+{probeHashes:true}` proves which binary a live server is running.
+Client has no build step in dev (Vite serves on demand). Re-build a single
+tool, e.g.: `cmake --build build/debug --target modelimporter gameconverter`.
+A clean machine needs: CMake 3.25+, Ninja, a C++ toolchain, Node, `lua`, and
+`mprocs` (`brew install mprocs`).
 
 ## Stack lifecycle
 
@@ -131,7 +141,7 @@ if (document.getElementById('login-user') && lobby.currentScreen==='login') {
   document.getElementById('login-btn').click();
 }
 // ...wait for lobby.currentScreen==='browser', then:
-const map=lobby.availableMaps[0].id;
+const map=lobby.maps[0].id;   // public accessor (availableMaps is private)
 await lobby.createRoom('drive', map);
 await lobby.addAI('null',1); await lobby.ready(true); await lobby.startGame();
 // ...wait for window.test && window.__gp, then for the client's own readiness:
@@ -141,6 +151,26 @@ await lobby.addAI('null',1); await lobby.ready(true); await lobby.startGame();
 ```
 
 When the drive is done, stop the room you started: `end_game {"roomId": <id>}`.
+
+## Headless runs (no lobby, no browser)
+
+For sim-only verification (determinism gates, batch scenario sweeps,
+hibernate/resume checks) the game server runs standalone:
+
+```bash
+# from the repo root; distinct --port and --db per concurrent instance
+build/release/spring-server --headless-run cfg.json --port 19100 \
+  --db /tmp/run.sqlite --max-wall-min 5
+```
+
+It **self-terminates with exit code 0** when the config's stop condition is
+met (fixed 2026-08-27) — a non-zero exit is a real failure, safe to gate on.
+Gate on `frame` stop conditions, not `stopAt.luaCondition`. See
+`rts/Server/HeadlessRun.*`, `tools/headless-batch/`,
+[docs/debugging-tools.md](../../../docs/debugging-tools.md#headless-run-mode),
+and `make test-headless-batch | test-headless-determinism | determinism-gate`.
+A bare `build/release/spring-server --game metalstorm --map <map>` also
+self-stages a room for quick self-tests.
 
 ## Run (human path)
 

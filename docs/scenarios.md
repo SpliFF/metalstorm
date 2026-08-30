@@ -1,5 +1,7 @@
 # Scenario files — the war template format
 
+Last updated: 2026-08-29
+
 A **scenario** is one Lua file that declares a whole war: the staged world, the
 armies, the civilian population, the AI slates, the objectives, and the one
 condition that ends it. `data/games/<gameId>/scenarios/<id>.lua`.
@@ -471,6 +473,7 @@ behaviour the rule reproduces.
 | `ai-region` | warning | sim `validate` (live graph) | A slate region key the map's **on-disk** graph does not declare. The live graph is authoritative, so this is advisory. |
 | `objective-phases` | error | sim `validate` | `phases` is not a non-empty array of non-empty arrays of typed child tables, or a child declares its own `phases` (one level only). A mis-shaped chain is *skipped*, so the parent silently becomes an ordinary objective. |
 | `objective-chain-id` | error | sim `validate` | `parentId`/`linkedId`/`phase` is not a number. They take runtime ids a file cannot know — author chains with `phases`. |
+| `objective-populate` | error | sim `validate` (frame-30 sweep) | A malformed population marker (`_populateTargetsFrom` / `_populatePayloadFrom` / `_populateUnitsFrom`): not a table, missing numeric `x`/`z`/`r` (payload may instead name a string convoy `route`), an unknown `into` field, an empty or unknown-def `defs` list, a `team` that is neither a number nor `'neutral'`, or a `kill` objective populated `into` a plural field. A bad marker otherwise errors inside the frame-30 sweep or hands the type module params it refuses at init — after the war booted clean. |
 | `standing-orders-noop` | warning | sim loader | A non-empty top-level `orders` block — ignored entirely. |
 | `ephemeral` | info | — | `ephemeral = true` on what looks like an authored file. |
 | `gen-prefix` | warning | `ScenarioDb::ValidateId` | The id starts `gen_`, which the DB owns and its sweep deletes. |

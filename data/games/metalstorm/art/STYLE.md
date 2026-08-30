@@ -4,29 +4,71 @@ Authored 2026-07-09 (PLAN-metalstorm-beta-units.md, Concrete task 1). Everything
 downstream — Option A/B sourcing (§3/§4), the normalisation script (§6) — keys off
 this page + the class-scale table below.
 
-## Silhouette-first, flat-shaded low-poly
+**Revised 2026-08-29.** This revision supersedes the 2026-07-09 text's
+flat-shading/no-weathering mandates: the shipped corpus is painted by the
+fable-model-forge pipeline (`tools/fable-model-forge/`, ASSETS.md rows from
+2026-07-11 on), which bakes normal maps, applies full PBR texture sets, and
+paints physically-placed weathering. The aesthetic principles (silhouette-first,
+kinetic sci-fi, functional greebles, class-scale/tri-budget tables) still hold
+as written.
+
+## Silhouette-first, textured low-poly
 
 - **Read at strategic zoom, not up close.** Most on-screen time is spent as a camera-
-  facing impostor quad (§2.1's impostor ladder), not the 3D model. Silhouette and flat
-  colour blocking carry the read; surface detail does not survive the distance.
-- **Flat shading, no baked lighting.** No baked AO, no hand-painted grime/gradients.
-  Colour comes from the shared palette atlas (below), assigned per-face/per-material.
-  Team colour is a *separate* runtime mask — never baked into diffuse (engine path:
-  `SPRINGRTS_team_color` glTF material extension, R channel of `maskTexture`,
-  `client/src/core/entity-renderer.ts`).
-- **Bevel rule:** every hard edge gets a small bevel (2 segments, ~2–4% of the piece's
-  smallest dimension) so edges catch light without normal-map detail. Skip the bevel
-  entirely on edges too small for the tri budget rather than adding a sliver.
+  facing impostor quad (§2.1's impostor ladder), not the 3D model. Silhouette and
+  large colour blocking carry the read; fine surface detail does not survive the
+  distance — texture work supports the mid-zoom and selected/hero read, it never
+  substitutes for silhouette.
+- **PBR texture set per model.** Each forge model ships `_diffuse` / `_orm`
+  (occlusion-roughness-metallic) / `_emissive` / `_team` (+ `_normals` for
+  everything except the shared-flat-swatch infantry family), painted procedurally
+  by its `paint_*.py` in `tools/fable-model-forge/` and encoded UASTC+Zstd+mips
+  by `encode.mjs` (sRGB oetf on diffuse/emissive, linear on ORM/team/normals).
+  Team colour is still a *separate* runtime mask — never baked into diffuse
+  (engine path: `SPRINGRTS_team_color` glTF material extension, R channel of
+  `maskTexture`, `client/src/core/entity-renderer.ts`).
+- **Normal maps are baked, and kept soft.** Heights are authored in atlas space
+  (zone rects from the layout modules) plus detail derived from the painted maps
+  (crevices → grooves, bolts → domes, rust → pitting), then Sobel-baked to a
+  tangent-space map (`normals.py`). Target is "soft normal maps on low-poly RTS
+  units" — panel/bolt relief, not sculpted detail.
+- **Bevel rule still holds:** every hard edge gets a small bevel (2 segments,
+  ~2–4% of the piece's smallest dimension) so edges catch light in geometry;
+  the normal map adds panel-line/bolt relief on top, it does not replace bevels.
+  Skip the bevel entirely on edges too small for the tri budget rather than
+  adding a sliver.
+- **Weathering is painted, physically placed, and map-consistent**
+  (`weathering.py`): crevice grime, height-graded mud/spatter, rust around
+  logged bolt heads with gravity streaks, shiny oil on joints (roughness DOWN),
+  soot at muzzles/exhausts (dims emissive). Dirt/rust/soot raise roughness,
+  kill metallic, darken AO, and punch through the team mask so team colour never
+  paints over grime. Weathering serves the read — grit, not noise.
+- **Camo where the flavour warrants it:** subtle large angular two-tone blocks
+  (`paint.py`) up to full splinter schemes (the `ms_bombers_*` strike-grey
+  splinter polygons). Tones stay within the unit's palette register.
+- **Palette register: warm olive-drab military** (post-nuclear scavenger —
+  `paint.py`'s shared palette + `enrich()` pass, 2026-08-20 enrichment sweep),
+  with hazard yellow, worn steel, rust, and emissive cyan/orange accents.
+- **Resolution ladder:** 1024² standard; 2048² on hero/large paints (heavy,
+  colossus, factory, capital ships, shared civkit/train sets — texel density
+  matched to the 1024² standard so wear/seams read at the same world scale);
+  512² shared flat-swatch set for the humanoid infantry family (impostor-first,
+  no normals).
 - **Greeble budget: functional only.** Vents, hatches, antennae, weapon mounts — never
   decorative dressing. Nothing smaller than ~0.3 m real-world (invisible past gameplay
   zoom, wasted tris). Test: if it doesn't change the silhouette or read as a functional
   part from ~15 m, cut it.
-- **Kinetic, not clean-sci-fi.** Weathering is a palette-swatch choice (a "worn steel"
-  swatch, not a dirt gradient); weapons show exposed mechanical form (autocannon
-  receivers, howitzer breeches) so they read as guns, matching PLAN-metalstorm.md §6
-  ("explosive/projectile weapons dominate; lasers are rare").
+- **Kinetic, not clean-sci-fi.** Weathering (above) is standard, not optional;
+  weapons show exposed mechanical form (autocannon receivers, howitzer breeches)
+  so they read as guns, matching PLAN-metalstorm.md §6 ("explosive/projectile
+  weapons dominate; lasers are rare").
 
-## Shared palette atlas
+## Shared palette atlas (legacy — normalisation path only)
+
+The flat-swatch atlas below served the 2026-07-09 flat-shaded direction and the
+`tools/scripts/normalize_model.py` import path. It is still shipped and still
+what a *normalised external import* UVs onto, but forge-generated models (the
+shipped standard) paint their own per-model PBR sets instead and do not use it.
 
 `unittextures/atlas_palette.ktx2` — one flat-colour swatch sheet, 4×4 grid of 64 px
 cells (256×256 source), generated by `tools/scripts/make_palette_atlas.py` (the PNG
@@ -96,4 +138,4 @@ Infantry/civilian-person ≤ 800 tri *if modelled at all* (impostor-first is the
 default, §2.1 — sprite atlas, no 3D model required); vehicles (tanks, artillery,
 fighters, bombers, mechs, static defense, radar, civilian truck/bus) ≤ 2,000 tri;
 scale-4 hero ≤ 8,000 tri. Buildings are unbudgeted here — footprint-driven, not
-tri-driven; flat shading keeps them cheap by construction.
+tri-driven; low-poly construction keeps them cheap.

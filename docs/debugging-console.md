@@ -1,5 +1,7 @@
 # Browser Debug Console & Interactive Lua Debugging
 
+Last updated: 2026-08-29
+
 Part of the [Debugging & Logging Guide](debugging.md) family. This page covers the in-game browser debug console, the `Spring.*` Lua debug API, the interactive Lua debugger (breakpoints/stepping), and the Babylon.js scene inspector.
 
 ## Table of Contents
@@ -241,7 +243,7 @@ Available when scope is `server`:
 
 ### Network Inspector
 
-Toggle the **Net** checkbox in the console header to enable the network message inspector. When enabled, all inbound and outbound game-connection messages (WebRTC data channels today; → WebTransport, PLAN-game-worker.md) are decoded and logged:
+Toggle the **Net** checkbox in the console header to enable the network message inspector. When enabled, all inbound and outbound game-connection messages (WebTransport streams/datagrams — HTTP/3 / QUIC; WebRTC was removed, see `client/src/core/transport.ts`) are decoded and logged:
 
 ```
 [INFO] [client:net] <- [FlatBuffers] AuthResponse (128 bytes)

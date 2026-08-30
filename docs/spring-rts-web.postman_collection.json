@@ -423,18 +423,6 @@
 							"raw": "{\"scope\":\"LuaRules\",\"code\":\"local t={} for i=1,5 do t[i]=i*i end return t\"}"
 						}
 					}
-				},
-				{
-					"name": "WebRTC: Offer",
-					"request": {
-						"method": "POST",
-						"url": "{{game_url}}/api/rtc/offer",
-						"header": [{"key": "Content-Type", "value": "application/json"}],
-						"body": {
-							"mode": "raw",
-							"raw": "{\"sdp\":\"v=0\\r\\no=- 0 0 IN IP4 127.0.0.1\\r\\n\"}"
-						}
-					}
 				}
 			]
 		},

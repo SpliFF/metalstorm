@@ -1,5 +1,7 @@
 # Terrain Generation — the terragen pipeline
 
+Last updated: 2026-08-29
+
 How Spring RTS Web maps are procedurally generated: the `tools/mapgen/terragen/`
 library, the per-map generator scripts that compose it (`meridian2.py` is the
 reference), what the package contains, and how the result is rendered. For the
@@ -571,16 +573,23 @@ on — see the research record in PLAN-maps.md §1.2:
 
    **The architectural fix is now built, and a generated map takes it by
    default** (PLAN-maps.md §2n ruling 1, M7f option A). Beside the SMT, a map
-   ships `maps/ground.png` — one **2048² map-space albedo, 8 elmos/texel on a
-   16k map**, box-downsampled from the *same* full-resolution bake the tile
-   dictionary is clustered from, so both paths carry the same pixels. It is
+   ships `maps/ground.png` — one **4096² map-space albedo, 4 elmos/texel on a
+   16k map** (`GROUND_TEXTURE_SIZE_DEFAULT = 4096` in `terragen/bake.py`;
+   raised from the ruling's 2048² once page streaming landed — a map that
+   wants the old cost can still ship 2048), box-downsampled from the *same*
+   full-resolution bake the tile dictionary is clustered from, so both paths
+   carry the same pixels. It is
    declared as `resources.groundtex` (a DEVIATION: not a Recoil key), and
    `MapProcessor` converts it to `ground.ktx2` and then **does not extract the
    SMT tile dictionary for that map at all** — the client prefers the
    map-space texture over the tile atlas. Measured against the unquantized
    bake (M7f): reconstruction error 2.51 → 1.95 mean levels, texels >4 levels
    off 12.5 % → 7.5 %, seam ratio 15.74 → 1.20, delivered bytes 8.4 → 3.7 MB.
-   `--no-ground-texture` opts a generator run out.
+   `--no-ground-texture` opts a generator run out, and every generator
+   exposes `--ground-texture-size <texels>` to choose the edge (default
+   4096; the value is also the source the streamed page pyramid is cut from,
+   so it caps `finestLevel`; requests round down to the nearest tile-aligned
+   reduction of the bake).
 
    **Opt-in per map is part of the ruling, not a detail.** Real Spring maps
    (`scorched_crossing`, `green_flat`, `wanderlust`, `pools_of_ilys`) ship
@@ -810,6 +819,31 @@ answer first:
 Harness tests: `tools/mapgen/tests/test_ground_albedo_eval.py` (15), each
 metric with a positive control; a nearest-neighbour (blocky) upsample is
 checked to fail them.
+
+### Reachability intent (`terragen/reachability.py`)
+
+A map whose start positions lie in several disconnected components of the
+passability mask is **legal player content** (PLAN-maps §2k — archipelagos
+are the obvious case), so a "split" measurement is not a verdict on its own.
+`terragen/reachability.py` is the per-map INTENT declaration: the generator
+writes it into the map package's own `mapinfo.lua` (a `metalstorm` block the
+engine's `CMapInfo` never reads), so it travels with the map, and the module
+deliberately holds the vocabulary, emitter, *and* parser in one file so the
+two sides cannot drift. A map that declares nothing defaults to `connected` —
+a generator that strands its starts by accident still fails the gate. What no
+intent relaxes: a start position on ground nothing can stand on
+(`component -1`) is refused under both intents (same split as
+`scenariogen.gate_reachability`).
+
+### Running the test suite
+
+The tests are not auto-discoverable from the repo root — invoke them as
+modules from `tools/mapgen` with the venv interpreter:
+
+```
+cd tools/mapgen
+.venv/bin/python -m unittest tests.test_<name>
+```
 
 ## 8. Adding a new map
 

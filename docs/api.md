@@ -1,5 +1,7 @@
 # HTTP API Reference
 
+Last updated: 2026-08-29
+
 Spring RTS Web exposes HTTP APIs on three server types. All endpoints return JSON with `Access-Control-Allow-Origin: *` and an `X-Build-Stamp` header identifying the server build.
 
 For programmatic access from C++, Python, or CLI, see [libspringapi](../libspringapi/README.md).
@@ -94,6 +96,68 @@ Clients in a room should `POST /api/rooms/leave` **first**, while the token stil
 authenticates: a host who revokes first leaves their seat — and their room — occupied until
 the lobby reaps it.
 
+### POST /api/auth/validate
+
+Check whether the token (or Basic credentials) in the `Authorization` header is still good.
+Public route; the header is the thing being tested.
+
+**Response (200):** `{"valid":true,"user_id":5,"username":"test1","role":"player","faction":"compact","totp_enabled":false,"expires_in":86322}` — `expires_in` is the token's **remaining** life (Bearer only; a Basic-auth validate has just minted a session and carries no token to measure). **Errors:** 401 `{"valid":false,...}` (invalid/expired token, or user gone).
+
+### POST /api/auth/refresh
+
+Rotate a refresh token into a new access session. Public — the caller's access token has
+aged out by definition. Body: `{"refresh_token":"..."}`. Response is shaped exactly like
+login's, plus a new `refresh_token` and `expires_in` (the old refresh token is spent —
+reuse of a spent token kills the whole family).
+
+**Errors:** 400 (missing `refresh_token`), 401 (invalid/expired/reused — one message for all,
+deliberately), 403 (banned; all refresh tokens revoked), 429 (rate-limited failures)
+
+### POST /api/auth/logout-all
+
+**Token required.** Log out everywhere: revokes every session row AND every refresh family
+for the account. Kept separate from `/api/auth/logout` on purpose — one browser signing out
+must not evict the player's phone from a war.
+
+**Response (200):** `{"ok":true,"sessions_revoked":3,"refresh_revoked":2}`
+
+### Guest accounts
+
+**POST /api/auth/guest** — mint a provisional account with no credential chosen. Body:
+`{"faction"?:"compact"}` (optional — a factionless guest is a valid spectator, and an unknown
+faction is a 400). Rate-limited (429). **Response (201):** the usual login shape plus
+`"provisional":true` and a `device_token` — the guest's only long-lived credential (guests
+have an empty password hash and can never use `/api/auth/login` or Basic auth).
+
+**POST /api/auth/guest/resume** — the guest's login flow. Body: `{"device_token":"..."}` →
+200 with a fresh session (no refresh token — the device token IS the long-lived credential).
+**Errors:** 400 (missing token), 401 (invalid/expired, or the account has since upgraded),
+403 (banned).
+
+**POST /api/auth/upgrade** — **token required.** Become a full account in place (same
+`users.id`, progress kept). Body: `{"username"?, "password", "faction"?}` — username defaults
+to the guest name, faction is required if the account has none. Spends the device token, mints
+a fresh session + first refresh family. **Errors:** 400 (missing/weak password — min 8 chars,
+bad username, unknown/missing faction), 409 (`already a full account`, `username already
+taken`, or `name_in_use` — leave your current game before renaming).
+
+### Two-factor (TOTP)
+
+Optional second factor, all four verbs **token required** (POST). Guests must upgrade first
+(409 on enroll).
+
+| Endpoint | Body | Response / notes |
+|----------|------|------------------|
+| `POST /api/auth/totp/enroll` | | `{secret, uri, digits, period}` — pending until confirmed. 409 if already enabled or provisional |
+| `POST /api/auth/totp/confirm` | `{code}` | `{ok, enabled:true, recovery_codes:[...]}` — the only time the codes exist. 401 bad code, 409 no pending enrolment |
+| `POST /api/auth/totp/disable` | `{password, code}` | Needs the password AND a current/recovery code. `{ok, enabled:false}`. 401 on either failing |
+| `POST /api/auth/totp/status` | | `{enabled, pending, recovery_remaining}` |
+
+Once enabled, `/api/auth/login` requires a `totp_code` field (or a recovery code) — a login
+without one gets 401 `{"error":"two-factor code required","totp_required":true}`.
+`totp_enabled` rides on
+`/api/auth/validate` so returning sessions can render settings without a second call.
+
 ### Using Authentication
 
 Two methods are supported on all authenticated endpoints:
@@ -147,7 +211,6 @@ A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tool
 | Endpoint | Description | Cache |
 |----------|-------------|-------|
 | `GET /api/maps` | Map list with metadata, dimensions, start positions | 5 min |
-| `GET /api/maps/source/{mapId}/*` | Raw map source files (Lua, images) | 5 min |
 | `GET /api/maps/data/{mapId}/*` | Preprocessed assets (heightmap, tiles, feature .glb) | immutable |
 | `GET /api/maps/thumb/{mapId}` | Map thumbnail (WebP/PNG) | immutable |
 
@@ -155,7 +218,6 @@ A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tool
 
 | Endpoint | Description | Cache |
 |----------|-------------|-------|
-| `GET /api/vfs/game/{gameId}/*` | Game source files (Lua, images, JSON) | 5 min |
 | `GET /api/games/data/{gameId}/*` | Preprocessed game assets (unit .glb models) | immutable |
 
 #### GET /api/games/{gameId}/scenarios
@@ -409,6 +471,7 @@ All room endpoints require authentication.
 | `/api/rooms/ai/remove` | POST | `{slot_index}` | Remove AI slot |
 | `/api/rooms/ai/team` | POST | `{slot_index, team}` | Set AI slot's team (host only) |
 | `/api/rooms/ai/profile` | POST | `{slot_index, profile}` | Set (or, with `profile:""`, clear) an AI slot's personality/difficulty profile — host only. `profile` is opaque, game-specific text (e.g. Metalstorm strategos's `"aggressive"`/`"caretaker"`); see PLAN-metalstorm-ai.md §10 task 6. |
+| `/api/rooms/enlist` | POST | `{team?}` | Spectator → player in the caller's current room. Converts the lobby roster only — a running game server's roster is fixed at spawn; enlist before start (or rejoin) to fight. 403 `cannot enlist`, 404 `not in a room` |
 | `/api/rooms/start` | POST | | Start game (spawns server) |
 
 **Room lifecycle is leave-only.** There is no player-facing end/close endpoint —
@@ -492,6 +555,141 @@ Response — the same room object `/api/rooms/start` already returns, plus a `se
 `game_server_port` is already valid in the response (`state` is `3`/Loading — the room flips to `4`/Active asynchronously once the spawned game server publishes ready, same as a normal `/api/rooms/start` call). There is deliberately no `wtInfo` field: the lobby process links neither a WebTransport server nor an outbound HTTP client, so it has no way to fetch the spawned game server's own `/api/wt/info` without either a new dependency or blocking this single-threaded HTTP loop for the game server's full cold-boot time (observed up to 90s+ for a heavy game). The caller does its own `/api/wt/info` discovery against `game_server_port` instead — exactly what the client already does after a normal lobby-walk start.
 
 `--direct <manifest.json>` (lobby CLI flag) creates one standing room from a manifest file at lobby startup, driven through the same code path as the endpoint above. It is **not** gated by `--dev-direct-start` — it's supplied by whoever launches the process, not reachable remotely.
+
+### World layer
+
+The world layer is the persistent design-level metagame that sits above individual battles:
+wars (battles) are ordinary rooms keyed by `room_id`; force commitments settle through the
+**WorldEscrow** ledger (committed force leaves the faction's pool at commit, refunds on a
+pre-contact cancel); conquest is an **explicit claim act** (`world_poi_claims` — POI ownership
+changes at war end only through a filed, paid claim); and seasons produce digests with
+Discord webhook and Web Push (RFC 8291) offline notification channels.
+
+The GET routes take an optional `?world=<id>` query parameter; the POST routes always act on
+the lobby's **primary** world (the GETs default to it too). Shared errors: 503
+`{"error":"world_database_unavailable"}` (faulted DB handle — never a plausible empty world),
+404 `{"error":"no_world"}`. Reads are public; acts require a token. Most POST routes here
+require the caller to be in a world faction (403 `{"error":"not_in_a_faction"}`), and the
+acting faction is always read from the caller's membership, never from the body.
+
+| Endpoint | Method / auth | Description |
+|----------|---------------|-------------|
+| `/api/world` | GET, public | World clock + meta (`worldId`, `name`, `state`, `config`, `clock:{worldMs, paused, day, hour, label, ...}`) with the active season folded on. Read-only — never ticks the clock |
+| `/api/world/pois` | GET, public | The POI graph (nodes + edges), with battle markers, faction identities and gathering forces merged on. A young world answers 200 with empty arrays |
+| `/api/world/stats` | GET, public | Rates in force, every commander's Authority, and each faction's roster with derived Rank (rank is vote weight — auditable on purpose) |
+| `/api/world/factions` | GET, public | Faction roster + archetype catalogue + founding rules |
+| `/api/world/me` | POST, token | This account's standing: world authority, founding-gate check, membership, `sideKey` (the account's battle side, or null), plus commander/capacity/rank stats |
+| `/api/world/factions/found` | POST, token | Found a faction. Body `{name, archetype, governance?, colour?, seatPoi?}`. 403 `insufficient_authority` (with `have`/`need`), 409 `name_taken`/`already_member`/`seat_taken` |
+| `/api/world/factions/join` | POST, token | Body `{factionId}`. Enforces the side-key seam: adopts the faction's side if the account has none, 409 `side_mismatch` if both are set and differ. → `{ok, factionId, sideKeyAdopted}` |
+| `/api/world/factions/leave` | POST, token | Leave whatever faction this account is in. → `{ok, left}` — leaving nothing is a no-op, not an error. `users.faction_id` is never cleared |
+| `/api/world/claims` | GET, public | Every claim in the world plus the conquest rates (a filed claim is declared, priceable intent) |
+| `/api/world/claims/file` | POST, token | Body `{poi}`. Charges the caller's authority. 409 `already_owner`/`already_claimed`, 404 `no_poi`, 403 `insufficient_authority` (with `have`/`need`). → `{ok, claim}` |
+| `/api/world/claims/withdraw` | POST, token | Body `{claimId}`. Any member of the claiming faction may withdraw (403 `not_your_claim` otherwise; 404 `no_claim`). → `{ok, withdrawn}` |
+| `/api/world/staging/commit` | POST, token | Commit force at a POI (opens or joins a staging window; the war is created when the window ends). Body `{poi, transports?:1, squads?:1, origin?}`. Opens a WorldEscrow row. 409 `already_held`, 404 `no_poi`. → `{ok, joined, staging}` |
+| `/api/world/staging/cancel` | POST, token | Withdraw before contact — refunds the escrow. Body `{stagingId}`. 403 `not_your_commitment`, 404 `no_staging`. → `{ok, cancelled}` |
+| `/api/world/pause` | POST, **admin** | Global world-clock pause. Body `{action:"pause"\|"resume", reason?}`. Freezes world-clock progression only — running battles keep going. → `{ok, changed, clock}` (already-paused is a no-op, `changed:false`) |
+| `/api/world/seasons` | GET, public | Season archive index, newest first |
+| `/api/world/seasons/{n}` | GET, public | One season plus its archived digest rows. `{n}` is digits only (`/latest` is not a route); anything else — and any unknown number — is 404 `{"error":"no_such_season"}`. An active season answers 200 with empty `digests` |
+| `/api/world/push/key` | GET, public | Whether the world offers Web Push, and the VAPID public key for `pushManager.subscribe` → `{worldId, enabled, publicKey}` |
+| `/api/world/push/subscribe` | POST, token | Store this account's `PushSubscription.toJSON()` shape: `{endpoint, keys:{p256dh, auth}}`. Validated hard (https endpoint, 65-byte point, 16-byte secret) → 201, else 400 `bad_subscription` |
+| `/api/world/push/unsubscribe` | POST, token | Body `{endpoint}`. Scoped to the acting account |
+
+### Wars
+
+Player-facing routes for persistent wars (rooms with `sessionKind: PersistentWar`). All
+**token required** (POST — a GET handler never sees the `Authorization` header).
+
+**POST /api/wars/deploy** — "which war should I fight in?" Ranks every live war fielding the
+caller's faction (friends present, underdog side, stakes, freshness), reserves a slot before
+answering, and if everything is full **seeds** a new war from authored scenarios. Answers,
+never refuses:
+
+```json
+{"outcome":"join_war","faction":"compact","underdog_by":2,"room_id":7,"room_name":"...",
+ "reservation":"reserved","reservation_expires_in":60,"incentivised":true}
+```
+
+`outcome` is join/return/seed; `seeded:true` and `seed_error` appear on the seed path;
+`rejoin_fell_through:true` explains being sent somewhere other than your own front.
+
+**POST /api/wars/join-preview** — per-account preview for **every** live war in one response
+(body ignored): what side/team a join would land you on, `authority` and its source, live
+population vs `capacity_per_side`, `enlisted`/`returning`/`watching` flags, and for returning
+players the while-you-were-away `digest` (capped at 8 events, `digest_total` carries the true
+count, `away_sec` the absence).
+
+**POST /api/wars/reconnect-token** — mint a long-TTL single-purpose key back into ONE war.
+Body `{room_id}`. Only an account that already holds a seat (a `war_player_bindings` row) gets
+one — a token never grants a seat. → `{room_id, token, expires_in}`. **Errors:** 400 (bad
+`room_id`, or not a persistent war), 403 (`no seat held in this war`), 404 (no such room).
+
+### Friends
+
+Four routes, all **token required** (POST). Presence is published for **mutual** friends only
+— an unanswered request is never a tracker.
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `POST /api/friends/list` | | Array of `{account_id, username, faction?, edge, since, presence}`; fighting friends also carry `war_room_id`/`team`/`war_name` |
+| `POST /api/friends/add` | `{username}` | One verb for request AND accept — adding someone who already added you completes the friendship; response `edge` says which happened |
+| `POST /api/friends/remove` | `{username}` | Withdraw, decline or unfriend — all "no edge any more" |
+| `POST /api/friends/join` | `{username}` | "Take me to my friend's war." Answers (`outcome`, `room_id`, `team`, `friend_team`) — the client then calls the ordinary `/api/rooms/join`. 403 unless mutual |
+
+### Chat
+
+One store, one SSE stream. Every route is a POST + **token required** unless noted; scopes
+are `main`, named channels, rooms, and DMs.
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `POST /api/chat/ticket` | | Trade the real token for a short-lived stream ticket → `{ticket, ttl, stream}`; auto-joins `#main` |
+| `GET /api/chat/stream?ticket=…` | | The SSE message stream (EventSource cannot send an `Authorization` header — hence the ticket) |
+| `POST /api/chat/send` | `{scope, target, text}` | Send one message (validated, flood-limited) |
+| `POST /api/chat/history` | `{scope, target, before?, limit?}` | Backscroll, filtered by the caller's ignore list |
+| `POST /api/chat/ignore` | `{username, on}` | Personal ignore list |
+| `POST /api/chat/channel` | `{channel, join}` | Join/leave a named channel (`#main` cannot be left) |
+| `POST /api/chat/mute` | `{username?, scope?, target?, seconds?, reason?, on?}` | Moderation mute (admin for account-level; no `username` lists mutes in force) |
+| `POST /api/chat/kick` | `{channel, username, seconds?}` | Eject from a named channel (moderator/admin; pairs with a mute so it sticks) |
+| `POST /api/chat/broadcast` | `{text}` | **Admin only.** Server-wide announcement |
+
+### Command Presets
+
+Per-account saved NL command intents, all **token required**.
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `POST /api/presets/list` | | `{presets:[{name, updated_at, intent}]}` |
+| `POST /api/presets/save` | `{name, intent}` | Upsert by name. 400 (bad shape / name over 80 chars), 413 (body over 8 KB), 429 (over 50 presets — re-saving an existing name is always allowed) |
+| `POST /api/presets/delete` | `{name}` | `{ok:true}` / `{ok:false}` (nothing deleted) |
+
+### Replays
+
+Both **token required** (POSTs, for the auth-header reason above). 404 with a clear message
+when the lobby has no `--replay-dir`.
+
+- **POST /api/replays/list** → `{dir, replays:[...]}` — each entry carries the recording's
+  header summary plus `watching_room` when a live cast already exists.
+- **POST /api/replays/watch** `{file}` → the same room JSON every other room route returns
+  (spawns a replay server, or **joins the existing cast** for a file already being watched).
+  422 with the parser's own error for an unreadable recording. There is deliberately no
+  start-frame parameter — seeking travels as a `ReplayControl::Seek` after attach.
+
+### GM tools
+
+The per-game GM verbs (pause/rollback/grant/broadcast/inspect/kick) live on each game
+server's own `/api/gm/<verb>` plane; the lobby owns the fleet/timeline data and the `/admin`
+dashboard. See [gm-tools.md](gm-tools.md) for the full surface.
+
+### Admin: accounts and fleet
+
+All POST + **admin** role (GET can't carry a token). Audited.
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `POST /api/admin/ban` | `{username}` | Ban + immediate session revoke → `{ok, revoked:N}`. 404 no such user |
+| `POST /api/admin/unban` | `{username}` | → `{ok:true}` |
+| `POST /api/admin/fleet` | | Every game server + its latest sim-health metrics row (`frame`, `tick_p95_us`, `frames_behind`, `sim_fps`, `db_size_bytes`, ...) with lobby-evaluated `alarms` and growth counters |
+| `POST /api/admin/game` | `{roomId}` | Metric timeline + audit tail for one game |
 
 ### Command Execution
 
@@ -676,6 +874,29 @@ normally and still answers text; a converted verb's own errors come back as
 `unknown command:`); and a game server predating the prefix answers
 `unknown command: json <verb>`, which is the intended capability probe. Full
 per-verb shapes: [debugging-tools.md § Structured server verbs](debugging-tools.md#structured-server-verbs-json-prefix).
+
+### Natural-Language Commands
+
+**POST /api/nl/command** (token required)
+
+The NL command proxy: turns a player's `{utterance, context, history?}` body into a Claude
+parse and answers with the validated intent. Deferred — the only route in the process that is:
+the parse takes 1–3 s and is handed to a worker so the single network thread (which also
+flushes game-state SSE) is never parked. Cheap refusals (no API key configured, bad body,
+rate-limited, busy) still answer inline. Bodies are capped at 16 KB. Disabled (but registered)
+when `SPRING_NL_API_KEY` / `ANTHROPIC_API_KEY` is unset; **not** compiled out under
+`SPRING_PROD` — this is a player-facing feature.
+
+### Synced-Input Journal
+
+**GET /api/journal** (localhost, or admin — as a GET it degrades to loopback-only)
+
+The synced-input funnel's diagnostic view. Always registered: with no journal attached it
+reports the counters only (`enabled`, `frame`, `seen`, `recorded`, `appended`, `skipped`,
+per-kind counts) — the useful answer to "is anything bypassing the funnel". With
+`--journal-audit N` it also carries `ringSize`, `ringDropped` and the head/tail of the record
+ring (`seq`, `frame`, `phase`, `kind`, `subKind`, `playerId`, `bytes`; AI records name their
+`verb`). Diagnostic only — the export path is the replay packer.
 
 ### Browser-Eval Relay
 

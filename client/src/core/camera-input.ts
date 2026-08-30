@@ -106,12 +106,30 @@ export class CameraInput {
         return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     }
 
-    private onPointerMove = (e: PointerEvent): void => {
+    /** Latest unsent pointermove — a high-rate mouse (500–1000 Hz) must not post
+     *  one worker message per raw event: the worker runs the render loop, and a
+     *  queue of stale moves (each a terrain pick) is pure lag. Only the newest
+     *  position matters, so moves coalesce to one send per animation frame. */
+    private pendingMove: PointerEvent | null = null;
+    private moveRaf = 0;
+
+    private flushPendingMove(): void {
+        if (this.moveRaf) { cancelAnimationFrame(this.moveRaf); this.moveRaf = 0; }
+        const e = this.pendingMove;
+        this.pendingMove = null;
+        if (!e || this.disposed) return;
         const { x, y } = this.rel(e);
         this.send({ type: 'gp:pointermove', x, y, buttons: e.buttons, mods: packMods(e) });
+    }
+
+    private onPointerMove = (e: PointerEvent): void => {
+        this.pendingMove = e;
+        if (!this.moveRaf) this.moveRaf = requestAnimationFrame(() => { this.moveRaf = 0; this.flushPendingMove(); });
     };
 
     private onPointerDown = (e: PointerEvent): void => {
+        // A buffered move must not arrive after the press it preceded.
+        this.flushPendingMove();
         // Middle / right press starts a camera drag: capture the pointer so we
         // keep getting move/up off-canvas, and swallow the default behaviour.
         if (e.button === 1 || e.button === 2) {
@@ -124,6 +142,7 @@ export class CameraInput {
     };
 
     private onPointerUp = (e: PointerEvent): void => {
+        this.flushPendingMove();
         if (e.button === 1 || e.button === 2) {
             try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
         }
@@ -133,6 +152,7 @@ export class CameraInput {
 
     private onWheel = (e: WheelEvent): void => {
         e.preventDefault();
+        this.flushPendingMove();
         const { x, y } = this.rel(e);
         this.send({ type: 'gp:wheel', x, y, delta: e.deltaY, mods: packMods(e) });
         this.notifyCameraInput();
@@ -151,10 +171,16 @@ export class CameraInput {
     };
 
     private onPointerLeave = (): void => {
+        // Discard, don't flush: a buffered edge-parked move sent after the
+        // leave would restart edge-scroll with no event left to clear it.
+        if (this.moveRaf) { cancelAnimationFrame(this.moveRaf); this.moveRaf = 0; }
+        this.pendingMove = null;
         this.send({ type: 'gp:pointerleave' });
     };
 
     private onBlur = (): void => {
+        if (this.moveRaf) { cancelAnimationFrame(this.moveRaf); this.moveRaf = 0; }
+        this.pendingMove = null;
         this.send({ type: 'gp:blur' });
     };
 
@@ -168,6 +194,8 @@ export class CameraInput {
     dispose(): void {
         if (this.disposed) return;
         this.disposed = true;
+        if (this.moveRaf) { cancelAnimationFrame(this.moveRaf); this.moveRaf = 0; }
+        this.pendingMove = null;
         this.canvas.removeEventListener('pointermove', this.onPointerMove);
         this.canvas.removeEventListener('pointerdown', this.onPointerDown);
         this.canvas.removeEventListener('pointerup', this.onPointerUp);

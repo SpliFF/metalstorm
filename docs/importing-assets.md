@@ -1,5 +1,7 @@
 # Importing Assets
 
+Last updated: 2026-08-29
+
 How content authors bring 3D models (units, features, props) into Spring RTS Web, what gets transformed on the way in, and which sidecar flags control the transforms.
 
 All asset processing happens **offline at conversion time** (during `make build-content` / `gameconverter`). The browser client and the headless game server only consume the pre-baked outputs — `.gltf`, `.bin`, `.ktx2`. Nothing in this document changes runtime behaviour or requires the game to be restarted to take effect; rebuild content, restart the lobby, done.
@@ -124,8 +126,9 @@ A zero-byte file (or any file) named `<stem>1_invert.<ext>` next to the `tex1` r
 2. **Resolve sidecar overrides** by reading `<sourceModelPath>.lua` (e.g. `noruas.s3o.lua`).
 3. **Apply UV V-flip per material** via `GeometryExtractor::ShouldFlipUv`: each `aiMaterial`'s tex1 reference is resolved to an on-disk extension in `<gameRoot>/unittextures/`, combined with the effective `fliptextures` value, and the verdict is applied to every `aiMesh` whose `mMaterialIndex` points at that material. UVs from the original source (S3O / DAE / glTF) are passed through unchanged until this sweep runs.
 4. **Rewrite texture URIs** so the .gltf material references `.ktx2` siblings even though the source bound `.dds`/`.tga`/`.png`.
-5. **Export** through Assimp's glTF 2.0 exporter with `aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder` (Spring's LH source data → glTF spec-mandated RH).
-6. **Post-fix the .gltf JSON** to:
+5. **Apply the world-scale contract when asked** — the `--metres` CLI flag declares the source authored at 1 unit = 1 metre and scales the whole scene by 8 (8 elmos = 1 m, `GeometryExtractor::kElmosPerMetre`) before extraction/export, so geometry *and* `SPRINGRTS_geometry` extents land in elmos. Do **not** pass `--metres` for sources already in elmos — S3O/BAR models and map features pass through unscaled (see `tools/modelimporter/main.cpp`'s usage text).
+6. **Export** through Assimp's glTF 2.0 exporter with `aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder` (Spring's LH source data → glTF spec-mandated RH).
+7. **Post-fix the .gltf JSON** to:
     - Move texture `source` into `extensions.KHR_texture_basisu` per spec (Assimp's exporter writes the wrong location for KTX2 references).
     - Inject the `SPRINGRTS_geometry` document-level extension (bounds, pieces, attachments).
     - Inject `SPRINGRTS_team_color` with `invertMask` when `invertteamcolor` resolved to `true`.
@@ -147,9 +150,11 @@ Inputs decode via stb_image (TGA, PNG, JPEG, BMP) or a small DDS decoder (DXT1/3
 
 Sibling KTX2s share encoding across models — when two S3Os reference the same `3do2s3o_atlas_1.tga`, the four output KTX2s are emitted once and both `.gltf` files point at them.
 
-## Coordinate system summary
+## Coordinate system and scale summary
 
 Spring's source assets author in left-handed (LH) Y-up with Z forward. glTF 2.0 mandates right-handed (RH) Y-up with -Z forward. The modelimporter passes `aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder` to Assimp's exporter, which inverts Z (and compensates winding) on the way out. Numeric fields under `SPRINGRTS_geometry` (mins/maxs/midpos/piece offsets) are emitted in the same RH-canonical frame so engine and renderer agree on a single convention. See [`docs/coordinate-system.md`](coordinate-system.md) for the full LH↔RH migration story.
+
+Scale follows the world-scale contract: **8 elmos = 1 metre**, applied at import, never at runtime. Metre-authored sources (fresh Blender/forge content) are converted with `--metres`; elmo-native sources (S3O/BAR, map features) never are. `GeometryExtractor` stamps `SPRINGRTS_geometry.units = "elmos"` on emitted models so tooling can tell scaled output from unscaled. `tools/scripts/check_model_scale.py` gates the shipped corpus against the contract, and `tools/scripts/rescale_models_to_elmos.py` is the one-shot rescale helper for a corpus imported before the contract (it reads the `units` stamp to refuse double-scaling).
 
 ## Troubleshooting
 

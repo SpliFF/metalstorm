@@ -31,6 +31,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    /* the backdrop is the scroller: a panel taller than the viewport must
+       scroll here, not paint off-screen (body overflow is hidden for the canvas) */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 24px 0;
     font-family: system-ui, sans-serif;
     color: #e0e0e0;
 }
@@ -43,6 +48,9 @@
     min-width: 360px;
     max-width: 600px;
     width: 100%;
+    /* auto margins centre without clipping the top once the panel overflows
+       the flex-centred backdrop */
+    margin: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 

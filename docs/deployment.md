@@ -1,5 +1,7 @@
 # Production Deployment Checklist
 
+Last updated: 2026-08-29
+
 Everything an operator needs to take spring-lobby + spring-server from a dev
 checkout to a public deployment. This is the task-7 deliverable of
 [PLAN-security-hardening.md](../PLAN-security-hardening.md) — read that plan
@@ -196,7 +198,10 @@ expect.
 The SQLite databases hold real state, not just cache — back them up
 off-box on a schedule:
 
-- `data/spring-server.db` — accounts, sessions, rooms, and (once
+- `data/spring-server.db` — accounts, sessions, rooms, the world layer's
+  `world_*` tables (`worlds`, `world_pois`, `world_poi_claims`,
+  `world_push_subscriptions`, …) and the battle layer's `war*` tables —
+  these rows are the **only copy of the world** — and (once
   [PLAN-persistence.md](../PLAN-persistence.md) lands) `game_snapshots`,
   which can hold **campaigns worth weeks of play**. This is the one that
   matters most; losing it loses player progress, not just convenience state.
@@ -211,7 +216,57 @@ backends). Automate this on a cron/systemd timer; the admin audit table
 (`admin_audit`, append-only) and any snapshot retention policy are not a
 substitute for an off-box copy.
 
-## 6. Content-loader hardening sweep
+## 6. World-layer notification channels
+
+The world layer's offline notifications (`rts/Server/WorldOfflineChannels.{h,cpp}`,
+`rts/Server/WorldNotifications.h`) fan out world events to two optional
+channels: a **Discord webhook** and **Web Push** (RFC 8291/8292). Both are
+configured **per world** as JSON in the `worlds.config_json` column under a
+`notifications` key — there are no env vars or CLI flags for them; edit the
+row in `data/spring-server.db` (or seed it at world creation):
+
+```json
+"notifications": {
+  "discord": {"enabled": true, "webhookUrl": "https://…",
+              "events": ["opened","materialised"]},
+  "webPush": {"enabled": true, "vapidPublicKey": "…",
+              "vapidPrivateKey": "…", "subject": "mailto:ops@example.com",
+              "ttlSeconds": 3600, "jwtTtlSeconds": 43200,
+              "events": []}
+}
+```
+
+Both channels default **disabled** — an unconfigured world sends nothing
+anywhere. An empty/absent `events` list means *every* event kind.
+
+- **Discord**: create a webhook in your Discord server and put its URL in
+  `webhookUrl`. Treat the URL as a secret (anyone holding it can post to the
+  channel) — it lives in the database, so the §5 backups carry it too.
+- **Web Push**: provision a **VAPID P-256 keypair** per world
+  (`vapidPublicKey` = base64url uncompressed point, `vapidPrivateKey` =
+  base64url raw 32-byte scalar). `GenerateVapidKeys()` in
+  `rts/Server/WebPushCrypto.h` produces a pair in the right encoding (ops
+  convenience — nothing in the send path generates keys; it is not wired to
+  a CLI, so any standard VAPID generator emitting these encodings also
+  works). `subject` (a `mailto:` or `https:` contact) is **required by the
+  spec — sends are skipped without it**. The lobby serves the public key at
+  `GET /api/world/push/key`; browsers subscribe via
+  `POST /api/world/push/subscribe`, stored in `world_push_subscriptions`.
+
+Delivery is a bounded queue drained by one worker thread; a dead webhook or
+push endpoint costs one enqueue, never a lobby stall, and overflow posts are
+dropped with a log line (offline notifications are advisory). Push endpoints
+answering `410 Gone` are logged, not yet auto-pruned.
+
+Checklist:
+
+- [ ] Discord webhook created and its URL set in the world's
+      `notifications.discord` config (`enabled: true`)
+- [ ] VAPID keypair generated and set in `notifications.webPush`, with a
+      real `subject` contact (`enabled: true`)
+- [ ] `GET /api/world/push/key` returns the expected public key
+
+## 7. Content-loader hardening sweep
 
 Two items from the PLAN-security-hardening.md gap ledger that specifically
 touch the content-loading paths an operator's deployment exposes:
@@ -243,7 +298,7 @@ touch the content-loading paths an operator's deployment exposes:
   `package`) — that hardening is out of scope here and not currently
   planned; flagging it so it isn't rediscovered from scratch.
 
-## 7. Checklist
+## 8. Checklist
 
 - [ ] Built with `-DSPRING_PROD=ON`; `spring-tests` green on both configs
 - [ ] Every process launched with `--i-understand-this-is-a-dev-build` or a
@@ -265,6 +320,9 @@ touch the content-loading paths an operator's deployment exposes:
 - [ ] `GET /api/wt/info` returns the expected `certMode`; a real browser
       connects without warnings
 - [ ] `data/spring-server.db` backed up off-box on a schedule
-- [ ] Only trusted game packages installed under `data/games/` (§6, G21)
+- [ ] Only trusted game packages installed under `data/games/` (§7, G21)
+- [ ] World-layer notification channels configured per world if wanted —
+      Discord webhook URL + VAPID keypair with `subject` in
+      `worlds.config_json` `notifications` (§6)
 - [ ] Admin accounts provisioned via `--promote-admin` (spring-lobby), not
       left at whatever the first registered user happened to be

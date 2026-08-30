@@ -1,5 +1,7 @@
 # Unified Logging & Log Server
 
+Last updated: 2026-08-29
+
 Part of the [Debugging & Logging Guide](debugging.md) family. This page covers `libspringlog` (the shared logging library every process links), the dedicated `spring-logserver` process, game session tracking, and how to add a custom sink.
 
 ## Table of Contents
@@ -232,6 +234,29 @@ List recent game sessions.
 **GET /api/logs/sources**
 
 Returns `{"status":"ok"}` (health check).
+
+**GET /api/logs/stream** (SSE)
+
+Server-Sent Events channel for live log streaming — subscribe with a plain
+`EventSource`; entries arrive as `log` events with a JSON payload.
+
+**POST /api/logs/test-event** (dev builds only, loopback-only)
+
+Generates a synthetic log event and pushes it to `/api/logs/stream`
+subscribers — for testing the SSE plumbing. Body: optional
+`{"message": "..."}`.
+
+**POST /api/logs/restart** (dev builds only, loopback-only)
+
+Re-execs the log server in place (same pid) — used by the MCP
+`restart_logserver` tool after rebuilding the binary, so mprocs stays
+authoritative over the pid. Equivalent to `SIGHUP`.
+
+> The mutating routes (`/api/logs/ingest`, `/api/logs/test-event`,
+> `/api/logs/restart`) are compiled out entirely under `SPRING_PROD` and, in
+> dev builds, accepted only from a loopback peer (the log server links no
+> token validator, so the `LocalhostOrAdmin` tag degrades to a pure
+> loopback-peer check).
 
 ### WebSocket Protocol
 

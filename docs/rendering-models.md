@@ -1,5 +1,7 @@
 # Model Rendering Pipeline
 
+Last updated: 2026-08-29
+
 How 3D models go from game content to pixels in the browser.
 
 ## Pipeline Overview
@@ -42,6 +44,8 @@ The `modelimporter` tool converts any Assimp-supported format to glTF 2.0:
 | Blender | `.blend` | |
 | glTF | `.gltf`, `.glb` | Passed through with post-processing |
 | Others | `.3ds`, `.lwo`, `.stl`, `.ply`, `.x`, `.md2/.md3/.md5mesh`, ... | ~48 formats total |
+
+The shipped Metalstorm `ms_*` corpus is not produced by this Assimp path: those models come from the **forge pipeline** (`tools/forge` + `tools/fable-model-forge`), which authors glTF directly — including the `SPRINGRTS_geometry` sidecar extension and elmo-scaled extents — and replaced the earlier `wz_*` placeholder models. The Assimp/S3O path above remains for legacy imports (BAR/ZK content, map features).
 
 ### CLI Usage
 
@@ -250,13 +254,19 @@ Map features (trees, rocks, wrecks) use a simpler pipeline:
 
 | Context | Up Axis | Handedness |
 |---------|---------|------------|
-| Spring engine (sim) | Y-up | Left-handed |
+| Spring engine (sim) | Y-up | Right-handed (native; `legacyCoordSystem` is the per-game opt-in LH bridge) |
 | S3O models | Y-up | Right-handed |
 | COLLADA (.dae) from Blender | Z-up | Right-handed |
 | glTF 2.0 spec | Y-up | Right-handed |
-| Babylon.js | Y-up | Left-handed |
+| Babylon.js | Y-up | Right-handed (`scene.useRightHandedSystem = true`) |
+
+The engine speaks glTF's right-handed convention end to end — see [docs/coordinate-system.md](coordinate-system.md) for the full contract and the `legacyCoordSystem` bridge for LH-authored Lua content.
 
 The glTF Scene root node carries a rotation matrix for axis conversion (e.g. Z-up COLLADA to Y-up glTF). Babylon applies this automatically. The entity renderer preserves it in the rest-pose world matrices for each piece.
+
+### World scale
+
+The world-scale contract is **8 elmos = 1 metre**, applied at **import time** — the sim never converts. Metre-authored sources are scaled by `modelimporter --metres` (`kElmosPerMetre` in `tools/modelimporter/GeometryExtractor.h`; the sim-side constant is `ELMOS_TO_METERS` in `rts/Sim/Misc/GlobalConstants.h`), while elmo-native sources (S3O/BAR, map features) pass through unscaled. Emitted models are stamped `SPRINGRTS_geometry.units = "elmos"` so tooling can tell scaled from unscaled output. `tools/scripts/check_model_scale.py` gates the shipped corpus; `tools/scripts/rescale_models_to_elmos.py` is the one-shot rescale helper (it refuses to double-scale via the `units` stamp).
 
 ## HTTP Endpoints
 
@@ -275,7 +285,7 @@ The glTF Scene root node carries a rotation matrix for axis conversion (e.g. Z-u
 |------|---------|
 | `tools/modelimporter/main.cpp` | Model format converter (Assimp to glTF) |
 | `tools/modelimporter/S3OImporter.cpp` | Spring S3O format Assimp plugin |
-| `tools/modelimporter/JsonWriter.cpp` | Extracts engine metadata to .config.json |
+| `tools/modelimporter/GeometryExtractor.cpp` | Extracts engine metadata to .config.json |
 | `rts/Server/GameProcessor.cpp` | Discovers + converts models during game loading |
 | `rts/Sim/Objects/ModelConfigLoader.cpp` | Loads .config.lua/.config.json on server |
 | `client/src/core/entity-renderer.ts` | Per-piece thin-instanced unit rendering |

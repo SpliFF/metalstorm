@@ -127,6 +127,9 @@ export class WorkerSelection {
     /// Latest hovered entity under the cursor (-1 = none). Tracked for the c5c
     /// sceneState feed + the widget DefaultCommand dispatch; no highlight yet.
     private hoveredId = -1;
+    /// Render frame of the last hover pick — bounds terrain picks to one per
+    /// rendered frame regardless of the pointer event rate.
+    private lastHoverFrame = -1;
     /// Engine default command for the hovered target (friendly → GUARD,
     /// enemy → ATTACK, none → MOVE). Paired with hoveredId so onHoverTarget
     /// fires only on real transitions (old input-manager `hoveredEngineCmd`).
@@ -190,7 +193,7 @@ export class WorkerSelection {
     }
 
     /** Pointer move: grow the drag rectangle (if dragging) + track hover. */
-    pointerMove(x: number, y: number, _buttons: number, _mods: number, viewId = 0): void {
+    pointerMove(x: number, y: number, buttons: number, _mods: number, viewId = 0): void {
         if (this.dragActive) {
             this.dragCurX = x;
             this.dragCurY = y;
@@ -207,6 +210,15 @@ export class WorkerSelection {
             }
             return;
         }
+        // Middle-pan / right-orbit owns the pointer: the hover result is
+        // discarded during a camera drag, and each updateHover is a full
+        // terrain pick + O(entities) scan on the render thread.
+        if (buttons & 6) return;
+        // One pick per rendered frame — a high-rate pointer stream must not
+        // queue redundant picks; only the newest position matters.
+        const frame = this.scene.getFrameId();
+        if (frame === this.lastHoverFrame) return;
+        this.lastHoverFrame = frame;
         this.updateHover(x, y, viewId);
     }
 

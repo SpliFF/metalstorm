@@ -1,5 +1,7 @@
 # Client-Side Rendering Events
 
+Last updated: 2026-08-29
+
 Draw/Render events were removed from the C++ server event system (headless — no rendering) and migrated to the JS/TS browser client. This document tracks the migration status of each event.
 
 ## Implemented
@@ -8,8 +10,8 @@ These callins are dispatched by the client widget system:
 
 | Event | Dispatched by | Notes |
 |-------|---------------|-------|
-| DrawGenesis | `lua-widget-worker.ts` | Per-frame init hook |
-| DrawScreen | `lua-widget-worker.ts`, `lua-widget-host.ts` | 2D UI overlay, Y-up ortho projection |
+| DrawGenesis | `lua-ui-host.ts` | Per-frame init hook |
+| DrawScreen | `lua-ui-host.ts`, `lua-widget-host.ts` | 2D UI overlay, Y-up ortho projection |
 | DrawWorldPreUnit | `lua-widget-host.ts` | World-space rendering after Babylon terrain/units |
 | DrawWorld | `lua-widget.ts` | Defined, not actively dispatched yet |
 

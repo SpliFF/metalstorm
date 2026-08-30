@@ -1,5 +1,7 @@
 # JavaScript API Reference
 
+Last updated: 2026-08-29
+
 Runtime interfaces exposed on `window` for debugging, automation, and AI agent integration.
 
 ## `window.lobby` — Lobby UI
@@ -152,6 +154,8 @@ await test.damage(unitId, 250)
 await test.order(unitId, 10 /*CMD.MOVE*/, [x, y, z])
 await test.clear(0)                              // wipe team 0; omit for all
 await test.lua('return Spring.GetTeamUnitCount(0)')
+await test.reviveTeam(2)                         // reset team.isDead ('all' default) so
+                                                 // Spring.CreateUnit accepts the team again
 ```
 
 ### Debug logging toggles
@@ -388,6 +392,24 @@ await test.clientOrder([1], 20, [targetId])
 (`Connection.sendPlayerCommand`) — optimistic overlay, pending registry, wire
 encode. Contrast `order()`, which POSTs to the game server's `/api/exec`: the
 sim executes it but **no client code runs**.
+
+### Client-side toggles + org groups
+
+```js
+test.setForceLodTier('impostor')  // force every entity to one LOD tier
+                                  // ('full' | 'impostor' | 'icon'); null restores per-def thresholds
+test.netSimPreset('wan')          // named net-sim presets: 'lan' | 'wan' | 'intercont'
+test.entityFxFenceReset()         // clear the entity-FX fence's per-def stats + frame count
+test.setTrackingCamera(true)      // DEFERRED in GW8 — not yet ported to the worker
+                                  // camera; no-ops with a warning so scenarios don't throw
+test.orgGroupCreate('', [1, 2])   // create an org group (empty name = server
+                                  // assigns the next callsign)
+await test.orgGroups()            // the client's org-group snapshot
+```
+
+The client squad layer runs the **SoA squad engine by default** —
+`SquadManager` is constructed with `{ engine: 'soa' }`
+(`data/games/metalstorm/client/squads/config.js`).
 
 ### LuaUI widgets
 

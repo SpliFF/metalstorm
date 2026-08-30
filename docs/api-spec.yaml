@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: Spring RTS Web API
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     HTTP API for Spring RTS Web servers. All servers support HTTP/2 (h2c
     cleartext) and HTTP/1.1 on the same port, auto-detected from the
@@ -103,6 +103,22 @@ components:
       properties:
         error: { type: string }
 
+    SessionResult:
+      description: AuthResult plus session lifetime fields (refresh/guest/upgrade paths)
+      allOf:
+        - $ref: "#/components/schemas/AuthResult"
+        - type: object
+          properties:
+            faction: { type: string }
+            expires_in: { type: integer, description: Access-token lifetime in seconds }
+            refresh_token: { type: string }
+            provisional: { type: boolean }
+
+    OkResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+
 paths:
   /api/auth/login:
     post:
@@ -155,6 +171,492 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/validate:
+    post:
+      summary: Check whether the Authorization header's token is still valid
+      tags: [Auth]
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      responses:
+        "200":
+          description: "Valid — {valid, user_id, username, role, faction?, totp_enabled, expires_in? (remaining life, Bearer only)}"
+        "401":
+          description: Invalid or expired token
+
+  /api/auth/refresh:
+    post:
+      summary: Rotate a refresh token into a new access session
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: New session (login shape plus a rotated refresh_token)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResult" }
+        "401": { description: Invalid, expired or reused refresh token }
+        "403": { description: Account banned (all refresh tokens revoked) }
+        "429": { description: Too many failed refresh attempts }
+
+  /api/auth/logout-all:
+    post:
+      summary: Revoke every session and refresh family for the account
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: "{ok, sessions_revoked, refresh_revoked}"
+
+  /api/auth/guest:
+    post:
+      summary: Mint a provisional (guest) account and its device token
+      tags: [Auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                faction: { type: string, description: Optional — a factionless guest spectates }
+      responses:
+        "201":
+          description: "Session plus provisional:true and device_token (the guest's only long-lived credential)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResult" }
+        "400": { description: Unknown faction }
+        "429": { description: Rate limited }
+
+  /api/auth/guest/resume:
+    post:
+      summary: Trade a guest device token for a fresh session
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_token]
+              properties:
+                device_token: { type: string }
+      responses:
+        "200":
+          description: Fresh session (no refresh token — the device token is the long-lived credential)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResult" }
+        "401": { description: Invalid/expired device token, or the account has upgraded }
+        "403": { description: Account banned }
+
+  /api/auth/upgrade:
+    post:
+      summary: Upgrade a guest to a full account in place (progress kept)
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                username: { type: string, description: "Defaults to the guest name; cannot start with 'guest-'" }
+                password: { type: string, minLength: 8 }
+                faction: { type: string, description: Required if the account has none }
+      responses:
+        "200":
+          description: New session + first refresh family; device token spent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResult" }
+        "400": { description: Missing/weak password, bad username, unknown/missing faction }
+        "409": { description: Already a full account, name taken, or name in use (leave your game first) }
+
+  /api/auth/totp/enroll:
+    post:
+      summary: Begin TOTP enrolment (mint pending secret + otpauth URI)
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{secret, uri, digits, period}" }
+        "409": { description: Already enabled, or provisional account (upgrade first) }
+
+  /api/auth/totp/confirm:
+    post:
+      summary: Confirm the authenticator and enable TOTP
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200": { description: "{ok, enabled:true, recovery_codes:[...]} — the only time the codes exist" }
+        "401": { description: Invalid code }
+        "409": { description: No pending enrolment / already enabled }
+
+  /api/auth/totp/disable:
+    post:
+      summary: Disable TOTP (costs the password AND a current or recovery code)
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string }
+                code: { type: string }
+      responses:
+        "200": { description: "{ok, enabled:false}" }
+        "401": { description: Bad password or bad code }
+
+  /api/auth/totp/status:
+    post:
+      summary: TOTP status for the account
+      tags: [Auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{enabled, pending, recovery_remaining}" }
+
+  /api/world:
+    get:
+      summary: World clock + meta (with active season folded on)
+      description: >
+        The /api/world* GET routes take an optional `?world=<id>` query
+        parameter, defaulting to the primary world; the POST routes always act
+        on the primary world. Shared errors: 503 world_database_unavailable,
+        404 no_world.
+      tags: [World]
+      parameters:
+        - name: world
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: "{worldId, name, state, config, clock:{worldMs, paused, day, label, ...}, season}" }
+        "404": { description: No such world }
+        "503": { description: World database unavailable }
+
+  /api/world/pois:
+    get:
+      summary: POI graph (nodes + edges) with battle, faction and staging state merged on
+      tags: [World]
+      parameters:
+        - name: world
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: POI graph (empty arrays for a young world) }
+
+  /api/world/stats:
+    get:
+      summary: Rates in force, commander Authority, faction rosters with derived Rank
+      tags: [World]
+      responses:
+        "200": { description: Stats body }
+
+  /api/world/factions:
+    get:
+      summary: Faction roster + archetype catalogue + founding rules
+      tags: [World]
+      responses:
+        "200": { description: Factions body }
+
+  /api/world/me:
+    post:
+      summary: This account's standing in one world (authority, membership, sideKey, stats)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Per-account standing }
+
+  /api/world/factions/found:
+    post:
+      summary: Found a world faction (side key read from the account, never the body)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, archetype]
+              properties:
+                name: { type: string }
+                archetype: { type: string }
+                governance: { type: string }
+                colour: { type: string }
+                seatPoi: { type: string }
+      responses:
+        "200": { description: "{ok, factionId, authority}" }
+        "403": { description: "insufficient_authority (with have/need)" }
+        "409": { description: name_taken / already_member / seat_taken }
+
+  /api/world/factions/join:
+    post:
+      summary: Join an existing faction (enforces the account/faction side-key seam)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [factionId]
+              properties:
+                factionId: { type: string }
+      responses:
+        "200": { description: "{ok, factionId, sideKeyAdopted}" }
+        "404": { description: no_such_faction }
+        "409": { description: side_mismatch / already_member }
+
+  /api/world/factions/leave:
+    post:
+      summary: Leave the caller's faction in this world (no-op reported, never an error)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{ok, left}" }
+
+  /api/world/claims:
+    get:
+      summary: Every claim in the world plus the conquest rates in force
+      tags: [World]
+      responses:
+        "200": { description: Claims body }
+
+  /api/world/claims/file:
+    post:
+      summary: File a conquest claim on a POI (charges the caller's authority)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [poi]
+              properties:
+                poi: { type: string }
+      responses:
+        "200": { description: "{ok, claim}" }
+        "403": { description: not_in_a_faction / insufficient_authority }
+        "404": { description: no_poi }
+        "409": { description: already_owner / already_claimed }
+
+  /api/world/claims/withdraw:
+    post:
+      summary: Withdraw an open claim (any member of the claiming faction)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claimId]
+              properties:
+                claimId: { type: integer }
+      responses:
+        "200": { description: "{ok, withdrawn}" }
+        "403": { description: not_your_claim }
+        "404": { description: no_claim }
+
+  /api/world/staging/commit:
+    post:
+      summary: Commit force at a POI (opens/joins a staging window; escrows the force)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [poi]
+              properties:
+                poi: { type: string }
+                transports: { type: integer, default: 1 }
+                squads: { type: integer, default: 1 }
+                origin: { type: string }
+      responses:
+        "200": { description: "{ok, joined, staging}" }
+        "403": { description: not_in_a_faction }
+        "404": { description: no_poi }
+        "409": { description: already_held }
+
+  /api/world/staging/cancel:
+    post:
+      summary: Withdraw a commitment before contact (refunds the escrow)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stagingId]
+              properties:
+                stagingId: { type: integer }
+      responses:
+        "200": { description: "{ok, cancelled}" }
+        "403": { description: not_your_commitment }
+        "404": { description: no_staging }
+
+  /api/world/pause:
+    post:
+      summary: Admin global world-clock pause/resume (battles keep running)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: { type: string, enum: [pause, resume], default: pause }
+                reason: { type: string }
+      responses:
+        "200": { description: "{ok, changed, clock}" }
+        "403": { description: Admin role required }
+
+  /api/world/seasons:
+    get:
+      summary: Season archive index (newest first)
+      tags: [World]
+      responses:
+        "200": { description: Seasons index }
+
+  /api/world/seasons/{n}:
+    get:
+      summary: One season plus its archived digest rows
+      tags: [World]
+      parameters:
+        - name: n
+          in: path
+          required: true
+          schema: { type: integer }
+          description: Season number — digits only ("latest" is not a route)
+      responses:
+        "200": { description: Season + digests (an active season has an empty digests array) }
+        "404": { description: no_such_season }
+
+  /api/world/push/key:
+    get:
+      summary: Web Push availability + the VAPID public key
+      tags: [World]
+      responses:
+        "200": { description: "{worldId, enabled, publicKey}" }
+
+  /api/world/push/subscribe:
+    post:
+      summary: Store this account's browser push subscription (PushSubscription.toJSON shape)
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, keys]
+              properties:
+                endpoint: { type: string }
+                keys:
+                  type: object
+                  properties:
+                    p256dh: { type: string }
+                    auth: { type: string }
+      responses:
+        "201": { description: Stored (insert-or-replace on world/account/endpoint) }
+        "400": { description: bad_subscription }
+
+  /api/world/push/unsubscribe:
+    post:
+      summary: Drop one of this account's push subscriptions
+      tags: [World]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResult" }
+
+  /api/wars/deploy:
+    post:
+      summary: '"Which war should I fight in?" — ranks, reserves a slot, or seeds a new war'
+      tags: [Wars]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: >
+            {outcome, faction, underdog_by, room_id?, room_name?, seeded?,
+            seed_error?, reservation?, reservation_expires_in?, incentivised?,
+            rejoin_fell_through?} — answers, never refuses.
+
+  /api/wars/join-preview:
+    post:
+      summary: Per-account join preview for every live persistent war (body ignored)
+      tags: [Wars]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: >
+            Array of {room_id, watching, will_fight, reason, team, side,
+            humans_on_side, capacity_per_side, authority, authority_source,
+            returning, enlisted, seat, digest?, digest_total?, away_sec?}.
+
+  /api/wars/reconnect-token:
+    post:
+      summary: Mint a long-TTL single-war reconnect key (seat holders only)
+      tags: [Wars]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [room_id]
+              properties:
+                room_id: { type: integer }
+      responses:
+        "200": { description: "{room_id, token, expires_in}" }
+        "400": { description: Bad room_id, or not a persistent war }
+        "403": { description: No seat held in this war }
+        "404": { description: No such room }
 
   /api/exec:
     post:

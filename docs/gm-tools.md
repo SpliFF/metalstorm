@@ -1,5 +1,7 @@
 # GM Operations Runbook
 
+Last updated: 2026-08-29
+
 Game-Master operations for persistent games. When a bug or a griefer corrupts a
 day of a weeks-long campaign, "restart the game" is not an answer — GMs repair
 with a small, audited verb set from a browser dashboard. Design: **PLAN-gm-tools.md**.
@@ -69,6 +71,7 @@ server-constructed action, never client-supplied code.
 | **rollback** | `/api/gm/rollback` `{frame, reason}` | the flagship — restore the game to an earlier snapshot. **Reason is mandatory.** See below. |
 | **checkpoint** | `/api/gm/checkpoint` | take a manual snapshot |
 | **snapshots** | `/api/gm/snapshots` | list rollback targets |
+| **hibernate** | `/api/gm/hibernate` | checkpoint-then-exit process transition, owned by the lobby state machine. Audited, but currently returns `501` — the lifecycle is not built (PLAN-persistence §3 task 3). |
 
 Account-level verbs live on the **lobby**:
 
@@ -81,6 +84,14 @@ Account-level verbs live on the **lobby**:
 > they disconnect (the game connection was authenticated once at connect and isn't
 > re-checked per frame). To eject them **now**, `ban` them *and* `kick` them from
 > the game.
+
+World-layer actions also live on the **lobby** (see [api.md](api.md) for the
+full route reference):
+
+| Verb | Endpoint (lobby) | Effect |
+|---|---|---|
+| **world pause** | `/api/world/pause` `{action:"pause"\|"resume", reason?}` | admin-only global pause of the **world clock** (the durable pause ledger). In-flight battles keep running — battle orchestration is deliberately still a stub. |
+| **staging commit / cancel** | `/api/world/staging/commit`, `/api/world/staging/cancel` | not admin verbs — token-authenticated faction actions (instigate a war / withdraw before contact); listed for cross-reference because they drive the world state a GM may be asked to untangle. |
 
 ## The workflow
 

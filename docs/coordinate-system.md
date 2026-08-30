@@ -1,5 +1,7 @@
 # Coordinate system
 
+Last updated: 2026-08-29
+
 This engine speaks glTF 2.0's native right-handed (RH) coordinate system end
 to end — server simulation, wire format, .glb assets, sidecar files, and the
 client renderer all agree. A small per-game opt-in adapter (`legacyCoordSystem`)
@@ -8,7 +10,7 @@ working without per-script edits while the rest of the pipeline stays
 RH-native.
 
 The full migration history lives in
-[`PLAN-coordinate-system.md`](../PLAN-coordinate-system.md). This doc is
+[`PLAN-coordinate-system-option-a.md`](../PLAN-coordinate-system-option-a.md). This doc is
 the user-facing reference for game authors and tool writers who need to
 know what coords flow where.
 
@@ -30,8 +32,26 @@ Every layer adopts this convention internally:
 | Server sim (`spring-server`)  | RH         | `frontdir`, `rightdir`, `updir` form an RH basis.              |
 | Wire protocol (FlatBuffers + custom binary) | RH | `pos.z` is glTF-style forward-negative.    |
 | Client renderer (Babylon)     | RH         | `scene.useRightHandedSystem = true` on every scene.            |
-| Sidecar files (`.config.lua` / `.config.json` / `.meta.lua`) | RH | `configVersion = 5+`. |
+| Sidecar files (`.config.lua` / `.config.json` / `.meta.lua`) | RH | `configVersion = 8` (`tools/fable-model-forge/gltf_export.py`; `validate.py` gates `>= 8`). |
 | Lua API surface (default)     | RH         | `Spring.GetUnitDirection` / `Spring.GetVectorFromHeading` etc. |
+
+## World scale
+
+Alongside handedness, the corpus carries a scale contract: **8 elmos =
+1 metre** (Option A, USER-DECIDED 2026-08-27). The conversion is applied
+**at import** — the sim never converts, every model reaches it already in
+elmos:
+
+- Metre-authored sources are scaled by `modelimporter --metres`
+  (`kElmosPerMetre` in `tools/modelimporter/GeometryExtractor.h`,
+  `ELMOS_PER_METRE` in `tools/fable-model-forge/gltf_export.py`).
+- Elmo-native sources (S3O/BAR, map features) pass through unscaled —
+  never pass `--metres` for those.
+- The sim-side constant is `ELMOS_TO_METERS` in
+  [`rts/Sim/Misc/GlobalConstants.h`](../rts/Sim/Misc/GlobalConstants.h)
+  (lines 45–53 document the contract).
+- Emitted models are stamped `SPRINGRTS_geometry.units = "elmos"` so
+  rescale tooling can refuse to double-scale.
 
 ## `legacyCoordSystem` — the per-game opt-in bridge
 

@@ -23,9 +23,10 @@ The reference Recoil source is checked out read-only at `/Users/shannon/WarriorH
 - **PLAN-\*.md and AGENTS.md exist only in the main checkout** — they're gitignored, so git worktrees don't have them. Always read/edit them at the main repo path.
 - There are no existing games for this engine. Backwards compatibility is not important. Some capacity to use existing Spring engine assets is kept but not at the expense of extra complexity or hacks.
 - Don't try to commit PLAN-\*.md or AGENTS.md updates. They are ignored globally in Git. ARCHITECTURE.md _is_ committed — update it when making structural changes.
-- Active work is ordered by **[PLAN.md](PLAN.md)** (rev 2026-07-02: goal hierarchy, binding Work pattern + Code-session contract, Current queue with per-milestone model tags). Three active tracks: [PLAN-perf.md](PLAN-perf.md) (performance recovery + the Lua→native porting queue), [PLAN-bar.md](PLAN-bar.md) §7 (BAR LuaUI HUD repair — Track U queue at the top of §7), [PLAN-playable.md](PLAN-playable.md) (playable full games for BAR + ZK, the gate for all Stage-7/Metalstorm work). Completed/superseded plans live in `PLAN-archive/` (incl. the previous master as `PLAN-rendering-drive.md`).
+- Active work is ordered by **[PLAN.md](PLAN.md)** (rev 2026-08-02: **Metalstorm is the game** — the BAR/ZK port workstream is archived and G6a/G6b are cancelled, see PLAN-archive/ARCHIVED-2026-08-02-bar-zk.md; "Stage 7" and "the demo" are retired as milestones; there is no global gate — work runs as parallel taskherd lanes with disjoint file scopes). The two ultimate directions are end-to-end Metalstorm (match + platform loop) and Lua→native perf porting driven by profiler evidence. Completed/superseded plans live in `PLAN-archive/` (incl. the previous master as `PLAN-rendering-drive.md`).
 - Detailed learnings about implemented subsystems live in the relevant **PLAN-\*.md** files (content pipeline → PLAN-content.md, LuaUI worker → PLAN-archive/PLAN-widgets.md + ARCHITECTURE.md, etc.). Only the stable architecture lives in this file. Completed tactical plans are moved under `PLAN-archive/`.
 - **Developer documentation** lives in `docs/`:
+  - **[docs/metalstorm-manual.md](docs/metalstorm-manual.md)** — **The game manual.** Metalstorm as designed AND implemented: world layer, battles, authority economy, objectives/victory, unit roster, squads, interaction model (drill-down UI + NL commands + directives), parley, transports, maps, AI. Read this before touching gameplay.
   - **[docs/api.md](docs/api.md)** — HTTP API reference: auth, rooms, exec, logs, WebTransport discovery (`/api/wt/info`), springcli usage. The primary API documentation.
   - **[docs/api-spec.yaml](docs/api-spec.yaml)** — OpenAPI 3.1 machine-readable spec for all HTTP endpoints
   - **[docs/debugging.md](docs/debugging.md)** — Hub page (quick start, architecture). Split into: **[debugging-logging.md](docs/debugging-logging.md)** (libspringlog, log server, sessions), **[debugging-console.md](docs/debugging-console.md)** (browser debug console, Lua debug API, interactive debugger, Babylon inspector), **[debugging-tools.md](docs/debugging-tools.md)** (SQL proxy, process management, Claude/MCP, springcli, mprocs), **[debugging-performance.md](docs/debugging-performance.md)** (FrameProfiler `perfDump`, LuaUI widget profiler `uiProfileStart/Dump/Stop`, network simulator `netSim*`/`netStats`)
@@ -37,26 +38,26 @@ The reference Recoil source is checked out read-only at `/Users/shannon/WarriorH
 - **[libspringapi/](libspringapi/)** — Standalone client library for tools/lobbies. HTTP + FlatBuffers (WebRTC game-connect removed in GW7; `connectRtc` is an inert stub pending a WebTransport port). Own CMake, builds independently. Python bindings with `-DSPRINGAPI_PYTHON=ON`.
 - **Upstream reference: RecoilEngine** — the ZK-flavoured Spring fork our codebase derives from is checked out at `/Users/shannon/WarriorHut/Projects/RecoilEngine/`. Use it to look up behaviour we deleted in Phase-0 cleanup (rendering, audio, AI ABI), reference Lua post-processors (`cont/base/springcontent/gamedata/*.lua`), or compare WeaponDef/UnitDef parsing. **Read-only** — never edit it; just consult.
 
-## Current Status (2026-07-02)
+## Current Status (2026-08-29)
 
-The Phase 0–2 cleanup/foundation work is complete. Phase 3 (combat) and Phase 4 (scripting/AI) are partly in place: server combat works end-to-end, server-side LuaRules/LuaGaia and a client-side LuaUI runtime are running, the audio pipeline streams server SoundEvents through a 96-voice HRTF pool. The whole client game path (network + 3D render + LuaUI) runs in one game-processor worker over WebTransport (Stage 0, merged 2026-06-03). Both ZK and BAR boot and run; **neither is yet a playable full game** — the BAR LuaUI HUD is partly broken and rendering performance has regressed. Active focus ([PLAN.md](PLAN.md) rev 2026-07-02): performance recovery (PLAN-perf.md), BAR HUD repair (PLAN-bar.md §7), and the playable-full-game gate (PLAN-playable.md).
+**Metalstorm is the game** (user directive 2026-08-02). The BAR/ZK port workstream is archived (PLAN-archive/ARCHIVED-2026-08-02-bar-zk.md) — they were the engine's broadest correctness net and nothing yet replaces that coverage, a deliberate scope decision. The engine foundation (Phases 0–5 of the original roadmap) is complete and stable; work now runs as parallel taskherd lanes under [PLAN.md](PLAN.md).
 
 **What works (stable):**
 
-- Server sim at 30 Hz, entity state streaming, projectile streaming (envelope `0x04`), combat events, fog-of-war
-- Real `.glb` unit models loaded via on-demand `GameUnitDefs` + per-piece thin instances (fallback: procedural shapes)
-- Map feature rendering (`.glb`, thin-instanced)
-- Full lobby flow (rooms, AI slots, start positions, team assignment, end-game, player disconnect → `PlayerRemoved` Lua callin)
-- Minimap (with detachable window), HUD, build menu, economy bar, quit-to-lobby, game-over overlay
-- HTTP/2 (h2c via nghttp2) + HTTP/1.1 on the same port. Game traffic over WebTransport (QUIC/HTTP-3); WebRTC removed (GW7).
-- Unified logging (libspringlog) + dedicated `spring-logserver` + browser debug console + Lua execution engine + Lua debugger + MCP server (`tools/debug-mcp`)
+- Server sim at 30 Hz, entity/projectile state streaming (envelope `0x04`), combat events, fog-of-war; game traffic over WebTransport (QUIC/HTTP-3), WebRTC removed (GW7); HTTP/2 (h2c) + HTTP/1.1 on one port
+- The whole client game path (network + 3D render + LuaUI) in one game-processor worker; `.glb` models via thin instances; 96-voice HRTF audio pool
+- Full lobby flow (rooms, AI slots, factions, spectating, reconnect tokens), persistence + hibernate/resume with a re-capture idempotence gate (`--resume-verify`), replay re-execution, headless determinism gate (4-arm, green — headless runs exit 0 on success since 2026-08-27)
+- **The persistent world layer** (landed 2026-08-20 + closeout 2026-08-27): world map with POIs on a 24:1 world clock, factions (4 archetypes), staging → battle materialisation, WorldEscrow force ledger (arrivals are the only way force enters a battle), explicit-claim-act conquest (`world_poi_claims`, defender's shield), event-sourced economy, 14-world-day seasons with digests, Discord/WebPush (RFC 8291) offline notifications. Hard boundary: the world layer never touches sim state; a "war" is one battle = one room.
+- **Metalstorm gameplay**: authority economy (one resource, order-cost formula + escrowed objective rewards), six objective types + systemic generator, scenario-declared victory, regions with control hysteresis, parley (synced diplomacy), transports/arrivals, civilians, land trains, strategos strategic AI (directive-only — no micro verbs exist), SoA client squad engine (default), NL command surface (schema-constrained, 7 action kinds) with voice capture
+- **Content pipelines**: terragen procedural maps (tools/mapgen — erosion/rivers/biomes/roads/reachability contracts), forge model production (tools/forge — the shipped ms_* corpus replaced all wz_* placeholders), world scale **8 elmos = 1 m applied at import** (whole corpus ×8, `check_model_scale.py` gate)
+- Unified logging + `spring-logserver` + browser debug console + Lua debugger + MCP server (`tools/debug-mcp`)
 
-**Active work (July 2026 — [PLAN.md](PLAN.md) owns the queue):**
+**Binding rulings that shape all current work:**
 
-- **Track P — performance recovery** ([PLAN-perf.md](PLAN-perf.md)): measured baseline first, then ranked fixes (terrain decal-plugin fragment cost, DecalOverlay RTT re-bakes, FxLightPool StandardMaterial tax, per-draw uniform churn, LuaUI GL-state tax, deformable-terrain uploads). Hosts the Lua→native porting queue (N-track).
-- **Track U — BAR LuaUI HUD repair** ([PLAN-bar.md](PLAN-bar.md) §7): worker camera-pose/viewMatrix producer gap, magenta icon root-cause, remaining widget crashers, def `.sounds` shape.
-- **Track G — playable full games** ([PLAN-playable.md](PLAN-playable.md)): seven-step playable definition; ZK regression sweep, GameOver winners on the wire, worker build-placement/input port, ZK Phase D UI completeness, piece-transform/turret aim; ends in the G6 full-game verification gates.
-- **Deferred by directive (2026-07-02):** non-immersion-breaking shader/lighting/FX-fidelity work (weapon-fx gaps, GL4 substitutions, BAR light routing), latency Stage 6, all Stage-7 platform + Metalstorm work — see the PLAN.md Deferred ledger. The Stage-7 gate is now concrete: PLAN-playable G6a + G6b + PLAN-perf P7 green.
+- **2026-08-19 — no RTS production on battle maps.** In-battle construction is **field engineering only** (trenches, barricades, towers, repairs); base building and the economy live in the world layer. The four factory defs that cannot build in battle are intended, not a defect. Named focus after the ruling: **mission objectives and transports**.
+- **2026-08-29 — drill-down UI.** The battle UI stays out of the way until needed: summary affordances + click-to-drill (including camera travel), one access point for global battle data, NL commands interpreted against the current focus. Never "driving a spreadsheet". Governs all battle-UI briefs.
+
+**Player/game documentation:** [docs/metalstorm-manual.md](docs/metalstorm-manual.md) is the game manual — the current design + implemented mechanics in one place.
 
 ## Repository layout (quick reference)
 
@@ -117,16 +118,17 @@ Clients register one or more **viewports** with the server. Viewports drive what
 
 The primary game for this engine is **Metalstorm**, bundled with the engine for ease of packaging and testing. Other games may be supported in the future.
 
-**Design source of truth: [PLAN-metalstorm.md](PLAN-metalstorm.md)** (rev 2026-06-13). Core pillars:
+**Design source of truth: [PLAN-metalstorm.md](PLAN-metalstorm.md)**; the implemented game is documented in **[docs/metalstorm-manual.md](docs/metalstorm-manual.md)**. Core pillars (all landed):
 
-- **Strategy over CPS.** Larger scale than existing Spring games; army planning and missions, not precise unit control. The best strategy wins, never the fastest clicker.
-- **Teams own everything.** The game is between teams; players drop in/out mid-game; units and orders belong to the team, not the player — any team player commands any team unit.
-- **Objectives are the game.** Strategic AND tactical missions: area/resource control plus story-based types (kill, escort, protection, extraction). Objectives are the only primary income.
-- **One resource: authority.** Earned by completing objectives (allocatable to players directly or staked on objectives); spent issuing orders. Order costs are dynamic — unit strength, region control (cheap in friendly territory), order type.
-- **Units: 11 classes × 4 scales** (engineers, soldiers, mechs, tanks, artillery, fighters, bombers, ships, subs, static defenses, radar — plus civilians/civilian vehicles). Squad size shrinks as scale grows; scale 4 = single multi-piece super-heavy.
-- **Slow, persistent building** — factories take 1+ hour real time, buildings correctly scaled (much larger than Spring's); civilian and military building families.
-- **Kinetic sci-fi** — explosive/projectile weapons (autocannons, railguns, howitzers, missiles, torpedoes); minimal lasers.
-- **Native game**: lives at `data/games/metalstorm/`, never goes through gameconverter. RH coordinates, JavaScript UI (PLAN-native-ui.md), custom WebGL2 shaders, native asset formats (.glb/.ktx2/.webm).
+- **Strategy over CPS.** Army planning and missions, not precise unit control. The best strategy wins, never the fastest clicker. The strategos AI is held to the same floor: its actuator set has no micro verbs at all.
+- **Teams own everything.** Units and orders belong to the team, not the player; any team player commands any team unit; players drop in/out mid-game (a leaver's authority pool merges team-ward — no unit transfer exists).
+- **Objectives are the game.** Six implemented types (control, kill, escort, protect, extract, infra) plus a systemic generator; objectives are the only primary income; the scenario declares which objective is terminal (`victory = true`) — there is no last-team-standing fallback.
+- **One resource: authority.** `cost = ceil(base_k × authority_cost_base × regionMod × orderClassMod × costScale)` — cheap in friendly territory (0.5×), expensive in enemy (2×); micro orders cost 2× a directive; postures 0.25×.
+- **Units: 110 defs** — 11 classes × 4 scales via the `units/_builder.lua` generator (`ms_<class>_s1..s4`; squad size shrinks as scale grows, scale 4 = single super-heavy) plus buildings (military/support/civilian/sites), logistics, recon, civilians, transports, and the `fable_*` showcase set. Two battle factions (Meridian Compact, Foundry Union) — names/lore only, zero mechanical differentiation.
+- **Field engineering only in battle (ruling 2026-08-19).** No base building or economy on battle maps — trenches, barricades, towers, build-assist repair only; reclaim/resurrect/capture/heal are vetoed. Production, construction, and the economy live in the **world layer**; force enters a battle only via transport arrivals and leaves only via departures.
+- **The world layer is the metagame.** Persistent POI map on a 24:1 world clock, factions, staged attacks (the attacker's world-days in transit are the defender's real hours of warning), escrowed force, explicit-claim conquest, seasons. Design-level only — it never touches sim state.
+- **Kinetic sci-fi** — explosive/projectile weapons (32 weapon defs: autocannons, railguns, howitzers, missiles, torpedoes); no laser defs shipped.
+- **Native game**: lives at `data/games/metalstorm/`, never goes through gameconverter. RH coordinates, world scale 8 elmos = 1 m, JavaScript UI (drill-down directive 2026-08-29 + schema-constrained NL commands), custom WebGL2 shaders, native asset formats (.glb/.ktx2/.webm).
 
 ### Squad-Based Design
 
@@ -205,107 +207,31 @@ Detailed architecture and subsystem plans are documented in PLAN-\*.md files. Be
 | [PLAN-latency.md](PLAN-latency.md)                                          | Client/server drift & latency compensation. Central timing model (presentation cursor `P = E − D`, future window, scheduled-event timeline, two timelines: interpolate-past observation + optimistic control) + Part 2 survey of latency-sensitive subsystems. Sub-plans: [PLAN-latency-projectiles.md](PLAN-latency-projectiles.md) (two-tier cosmetic/synced projectiles, foreknown outcomes), [PLAN-latency-squads.md](PLAN-latency-squads.md) (squad-as-atom, client soldier fan-out). |
 | [PLAN-demo.md](PLAN-archive/PLAN-demo.md)                                   | Paper Tanks — minimalist demo game with cardboard cutout aesthetic for testing at scale (thousands of squads)                                                                                                                                                                                                                                                                                                                                                                              |
 
-#### Active work (July 2026)
+#### Active work (August 2026)
 
 | Plan                                       | Scope                                                                                                                                                                                                                                                                          |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [PLAN.md](PLAN.md)                         | **Master (rev 2026-07-02).** Goal hierarchy, binding Work pattern + Code-session contract for /work sessions, cross-track Current queue with per-milestone model tags, Deferred ledger, plan index                                                                             |
-| [PLAN-perf.md](PLAN-perf.md)               | Track P: performance recovery + scaling budget. Measured baseline → ranked fixes (terrain decal plugin, decal RTT re-bakes, light-pool tax, per-draw uniforms, LuaUI GL-state tax, terrain patch uploads) → standing frame budget. Hosts the Lua→native porting queue (goal A) |
-| [PLAN-bar.md](PLAN-bar.md)                 | BAR port; §7 = Track U (BAR LuaUI HUD repair, milestone queue at top of §7). §6 worklist mostly done; lighting/light-routing deferred                                                                                                                                          |
-| [PLAN-playable.md](PLAN-playable.md)       | Track G: playable full games. Seven-step playable definition, ZK regression sweep, GameOver winners, worker input port, ZK Phase D, piece transforms; G6 full-game gates for BAR + ZK                                                                                          |
-| [PLAN-convert-zk.md](PLAN-convert-zk.md)   | Zero-K gap catalogue (feeds Track G): Phase A complete (197/236 gadgets boot + combat verified); Phase C/D items flow into PLAN-playable G4/G5                                                                                                                                 |
-| [PLAN-performance.md](PLAN-performance.md) | Profiling methodology handbook (release-build guardrail, scenario ladder, tooling); actionable milestones live in PLAN-perf.md                                                                                                                                                 |
+| [PLAN.md](PLAN.md)                                     | **Master (rev 2026-08-02).** Metalstorm-only goal statement, work pattern, lane scheduling model (parallel taskherd lanes, no global gate), open backlog. Read it first — it owns cross-track ordering |
+| [PLAN-metalstorm.md](PLAN-metalstorm.md)               | The game's design plan (§8 records the field-engineering ruling); satellite PLAN-metalstorm-\*.md files hold per-subsystem detail (wars, squads, objectives, transports, economy, interaction, AI…)    |
+| [PLAN-maps.md](PLAN-maps.md)                           | The realistic-maps drive (terragen pipeline) — a standing HIGHEST-PRIORITY user directive                                                                                                              |
+| [PLAN-worldsim.md](PLAN-worldsim.md)                   | The persistent world layer (W1–W12 + phase-3 closeout landed; remaining queue inside)                                                                                                                  |
+| [PLAN-persistence.md](PLAN-persistence.md)             | Hibernate/resume, snapshots, `--resume-verify` re-capture idempotence                                                                                                                                  |
+| [PLAN-perf.md](PLAN-perf.md)                           | Performance track + the Lua→native porting queue (profiler-driven)                                                                                                                                     |
+| [PLAN-performance.md](PLAN-performance.md)             | Profiling methodology handbook; actionable milestones live in PLAN-perf.md                                                                                                                             |
+
+(BAR/ZK plans — PLAN-bar.md, PLAN-playable.md, PLAN-convert-zk.md — are archived under `PLAN-archive/`; do not cite them as active.)
 
 #### Archived
 
 `PLAN-archive/` (gitignored) holds completed tactical plans, superseded drafts, and the previous master plan (`PLAN-rendering-drive.md`, the 2026-05/06 AAA rendering drive: game-worker+WebTransport Stage 0, lighting, weapon-FX boot, decals, deformable terrain). See the PLAN.md plan index for the full archived list. The user-facing surface for debugging is documented in [docs/debugging.md](docs/debugging.md).
 
-### Implementation Order
+### Implementation Order (historical)
 
-Development is organised into phases. Each phase produces a testable milestone.
+The original phased roadmap (Phase 0 legacy cleanup → Phase 5 lobby/social) is **complete** and its ledger is retired from this file. Notes that still matter:
 
-**Status (2026-05-11):** Phases 0–2 are complete. Phase 3 is mostly complete (combat works, audio pipeline runs end-to-end). Phase 4 is partly complete (server-side LuaRules/LuaGaia + client LuaUI Web Worker run; server-side AI not yet wired). Phase 5 lobby is functional; spectator mode and Glicko-2 ratings not yet implemented. Phase 6 is untouched.
+- Phase 0's plan to delete `rts/System/FileSystem/` and `rts/System/creg/` was reversed — both are kept (see Resolved Design Decisions). creg is compiled with `-DNOT_USING_CREG` stubs.
+- Phase 6's "persistent world metagame layer" and "WebTransport" items both landed (the world layer 2026-08-20/27; WebTransport as the Stage-0 foundational change). Multi-host entity handoff and a WebGPU backend remain aspirations.
+- The lobby UI is plain TypeScript, not Svelte as originally planned.
+- Spectator mode, reconnection, replays, hibernate/resume, and admin/GM tooling — all originally "later-phase" items — are landed and documented in ARCHITECTURE.md and docs/.
 
-#### Phase 0: Legacy Cleanup & Build Modernisation — DONE (with revisions)
-
-_Goal: A clean, minimal, buildable C++ codebase with modern tooling._
-
-**Note:** The original Phase 0 plan to delete `rts/System/FileSystem/` and `rts/System/creg/` was reversed. Both subsystems are kept (see Resolved Design Decisions table above).
-
-1. **Set up new build system** (PLAN-development.md) — CMake 3.25+, CMakePresets.json, Ninja, FetchContent for deps. Get `make setup && make build` working on a stripped codebase.
-2. **Delete rendering** — remove `rts/Rendering/`, `rts/aGui/`, `rts/Menu/`, all GL/SDL dependencies, DevIL, FreeType. Remove rendering-related code from `Game/` (Camera, UI, LoadScreen, InMapDraw, etc.).
-3. **Delete legacy networking** — remove the P2P relay model, `NETMSG_*` protocol, client-side netcode. Keep `GameServer.cpp` logic as reference only.
-4. **Delete content/archive system** — remove `rts/System/FileSystem/` VFS, archive loaders, ArchiveScanner, RapidHandler. Remove `pr-downloader`, `unitsync`, the `AI/` directory, and `tools/` (except as reference).
-5. **Delete legacy AI** — remove `rts/ExternalAI/` (the entire C ABI, library loading, SkirmishAIWrapper, AICheats, SSkirmishAICallbackImpl). Move `EngineOutHandler.cpp` to a `reference/` directory before deletion — Phase 4 AI migration reuses its event-filtering patterns.
-6. **Delete audio** — remove `rts/System/Sound/` (server has no audio).
-7. **Strip simulation** — remove creg serialisation, remove streflop, remove AVI capturing, remove features only needed for P2P sync (sync debugging, sync checksums). Use standard IEEE floating-point.
-8. **Verify build** — the result should compile as a headless executable that can load a map, initialise the simulation, and run empty ticks. Write basic doctest tests for core sim types (Vec3, Matrix, CommandQueue, QuadField).
-9. **Set up client project** — `npm create vite@latest client`, install TypeScript, Babylon.js, Svelte. Verify `npm run dev` serves a blank page. Set up Vitest.
-10. **IDE configs** — check in `.code-workspace`, `.vscode/`, `CMakePresets.json`. Verify debugging works in VS Code (C++ server) and browser (client).
-
-#### Phase 1: Server Foundation — DONE
-
-_Goal: A headless server that accepts WebSocket connections and runs the sim._
-
-1. Integrate uWebSockets — connection lifecycle state machine (PLAN-server.md, PLAN-network.md)
-2. Basic authentication — JWT + SQLite accounts (PLAN-lobby.md)
-3. Simulation loop running at 30 Hz with command ingestion (PLAN-server.md)
-4. FlatBuffers protocol — define core message schemas (PLAN-network.md)
-5. Player command submission and validation (PLAN-orders.md)
-
-#### Phase 2: State Streaming & Rendering — DONE
-
-_Goal: A browser client that connects and renders the game world._
-
-1. Viewport registration and spatial filtering via QuadField + LOS (PLAN-network.md)
-2. Entity state serialisation with delta compression (PLAN-network.md)
-3. Babylon.js renderer — terrain heightmap, basic unit rendering with thin instances (PLAN-graphics.md)
-4. Asset pipeline — model conversion, HTTP delivery, browser caching (PLAN-content.md, PLAN-graphics.md)
-5. Snapshot interpolation on the client (PLAN-client.md)
-6. Paper Tanks demo game for visual testing (PLAN-demo.md)
-7. Client-side projectile rendering — `core/projectile-renderer.ts` (per-weapon-type meshes via thin instances)
-
-#### Phase 3: Combat & Gameplay — IN PROGRESS
-
-_Goal: Playable combat with the demo game._
-
-1. ✅ Weapon system — simplified combat + ballistic projectiles (PLAN-weapons.md)
-2. ✅ Command system — debouncing, grouped commands (PLAN-orders.md)
-3. ⏳ Standing orders — server-side evaluation, Lua API (PLAN-orders.md)
-4. ✅ Web Audio — 96-voice HRTF pool, server SoundEvent → buffer cache → spatial play, zoom attenuation, master limiter (PLAN-audio.md). Music streaming wired but no sim-side trigger logic yet.
-5. ✅ Combat event visualisation on client — tracers, explosions, muzzle flashes via `combat-fx.ts` (PLAN-weapons.md)
-6. ✅ Build animation — translucent build beams, per-tick build progress (PLAN-build-anim.md)
-
-#### Phase 4: Scripting & AI — IN PROGRESS
-
-_Goal: Game logic runs in Lua, AI factions work._
-
-1. ✅ Server-side Lua — LuaRules/LuaGaia running game logic (preserved from Spring); ScriptEventDispatcher bridges C++ events to language-agnostic IScriptContext instances
-2. ✅ Fengari Lua client runtime in a Web Worker with command buffer (PLAN-widgets.md)
-3. ✅ Widget system — `lua-widget-manager.ts` + worker host (PLAN-widgets.md). Chili UI integration in progress.
-4. ⏳ JS scripting API alongside Lua — `script-api.ts` exists; surface area still being filled out
-5. ⏳ Server-side AI runtime — `Server/AI/AIRuntimePool` and `AIDiscovery` exist but AI plugins are not yet booting reliably (PLAN-ai.md)
-6. ❌ Client-side AI assistant — not yet started
-7. ⏳ Restore removed Lua API functions — most Spring.\* functions are wired; gaps tracked per ZK gadget needs (PLAN-convert-zk.md)
-
-#### Phase 5: Lobby & Social — IN PROGRESS
-
-_Goal: Players can find and start games through the browser._
-
-1. ✅ Lobby UI — login, room browser, room setup (`client/src/lobby/lobby-ui.ts`). Note: implemented in plain TS rather than Svelte as originally planned.
-2. ✅ Room state machine — configuring → filling → ready → loading → active → ended
-3. ❌ Spectator mode (PLAN-lobby.md)
-4. ❌ Game history and rating system (PLAN-lobby.md)
-5. ⏳ Reconnection and state recovery (PLAN-network.md)
-6. ✅ Admin interface and console — debug console + LuaExecEngine + console commands (see [docs/debugging.md](docs/debugging.md))
-
-#### Phase 6: Scale & Polish — NOT STARTED
-
-_Goal: Production readiness._
-
-1. Multi-host entity handoff design (PLAN-architecture.md)
-2. ~~WebTransport as progressive enhancement~~ — **promoted to a foundational change that lands first**, no longer a Phase-6 enhancement (PLAN-game-worker.md, PLAN.md Stage 0)
-3. WebGPU renderer backend (PLAN-graphics.md)
-4. Queue-based matchmaking (PLAN-lobby.md)
-5. Persistent world metagame layer (PLAN-lobby.md)
-6. Performance profiling and optimisation at scale (thousands of squads)
+Current work is not phase-ordered: [PLAN.md](PLAN.md) (rev 2026-08-02) allocates parallel taskherd lanes with disjoint file scopes. See "Current Status" above for what is live and the binding rulings that shape new work.
