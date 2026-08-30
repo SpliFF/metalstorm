@@ -41,6 +41,7 @@ local function newWorld(opts)
 
     _G.Spring = {
         GetModOptions = function() return { scenario = 'towns_test' } end,
+        SetUnitNeutral = function() end,
         GetTeamList = function() return world.teams end,
         GetGaiaTeamID = function() return GAIA end,
         GetTeamInfo = function(teamID)

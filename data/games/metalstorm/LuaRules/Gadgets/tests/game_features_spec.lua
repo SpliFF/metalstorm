@@ -74,6 +74,7 @@ local function freshWorld()
 
     _G.Spring = {
         GetModOptions = function() return { scenario = SCENARIO } end,
+        SetUnitNeutral = function() end,
         GetTeamList   = function() return { 0, 1 } end,
         GetGaiaTeamID = function() return 2 end,
         GetGroundHeight = function() return world.groundHeight end,
