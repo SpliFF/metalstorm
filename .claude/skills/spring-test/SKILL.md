@@ -66,7 +66,11 @@ These run code **in the connected browser** over the game server's wire and retu
 
 | Tool | Purpose |
 |------|---------|
-| `client_screenshot({maxDim?, quality?, roomId?, clientId?})` | A real image you can **see** — relays `captureFrame({maxDim, stats:true})` and returns an MCP image block plus the capture metadata. `maxDim` clamped to 2048. This replaces the pause→focus→capture→copy-the-dataURL dance for a quick look. |
+| `capture_subject({unitId\|unitIds\|def\|position\|area, spawn?, angle?, pause?, reveal?, …})` | **Subject → usable image, in one call** — resolves the subject, frames it from its own model bounds, orders spawn/reveal → settle → pause correctly, captures a presented frame and checks the luminance before returning. Use this instead of assembling `pause_sim` + `browser_test focus` + `client_screenshot`; that version costs one relay hop each (seconds, during which the sim moves) and guesses the zoom. See the spring-debug skill. |
+| `capture_sequence({subject, frames?, everyNthSimFrame?, mode?, simSpeed?, name?, outDir?, …})` | **Film a manoeuvre → N images on disk, in one call.** Same subject selectors and auto-framing as `capture_subject`, re-framed before every shot. `mode:"step"` (default) advances the sim by `sim_step` between shots so the spacing is EXACT however long each capture took; `mode:"realtime"` slows the sim and bursts browser-side (hard ~6.5 s ceiling — the relay abandons an evaluation at 8 s). N shots of the same instant comes back `UNUSABLE`, not as a film. |
+| `order_and_film({unitId, move\|attack\|order, …})` | Give an order, poll until the unit is **genuinely moving** (rotation counts — a tank reversing course barely translates), then film it. The gap between order-acknowledged and unit-moving is where hand-driven tooling loses the subject. |
+| `step_sim({frames?, roomId?})` | Advance the sim by exactly N frames from a stop, and wait for it to land. Pauses first if it was running. Use it to interleave an order or a probe between filmed frames. |
+| `client_screenshot({maxDim?, quality?, roomId?, clientId?})` | A real image you can **see** — relays `captureFrame({maxDim, stats:true})` and returns an MCP image block plus the capture metadata. `maxDim` clamped to 2048. The raw shutter under `capture_subject`: use it when the camera is already where you want it. |
 | `client_ready({roomId?, clientId?})` | The **browser's** readiness (`readyState()`): renderer, defs, LuaUI, newest frame, feed age. `wait_for_game` is the server-side question — a game can be server-ready while the tab still ingests defs. |
 | `client_eval({code, target?, roomId?, clientId?, timeoutMs?})` | Arbitrary code in the browser. `target`: `js` (main globals) · `worker` (render-worker globals — `__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool`) · `widgets` (Lua in the LuaUI runtime) · `test` (an expression with the harness's members in scope, no `test.` prefix). |
 | `browser_test({method, args?})` | Call any `window.test.<method>(args…)` and return its result. Falls back to printing the chrome-devtools snippet when a gate refuses. **Refuses the server-bound methods by name** (`spawn`, `kill`, `damage`, `order`, `clear`, `state`, `units`, `unitState`, `frame`, `lua`, `server`, `simPause`, `simSpeed`, …) and names the server-side tool instead — see the deadlock note below. |
@@ -92,6 +96,10 @@ Exposed after `startGame()` finishes. Removed by `quitToLobby()`. Full shapes: [
 | Method | Purpose |
 |--------|---------|
 | `test.captureFrame({format?, quality?, maxDim?, region?, stats?, render?})` | **Deterministic capture** — the worker renders and reads pixels in ONE task, so it can never return a between-frames black frame. Returns `{dataUrl, width, height, frameId, gameFrame, stats?}`; `stats:true` adds worker-side `{min,max,mean}` luminance. The canonical screenshot. |
+| `test.captureSubject({unitId\|unitIds\|def\|position\|area, angle?, fill?, …})` | The browser half of `capture_subject`: resolve the subject → frame it from its own bounds through the orbit rig → dwell → hold the render loop → capture → judge the luminance → retry up and out if black → restore. Returns the capture plus `{subject:{sphere, metresAcross, hasModel}, framing, attempts, warnings, diagnosis, ok}`. Server-side work (spawn, sim pause, `set_los`) is NOT its job — from the browser those deadlock the game server's single HTTP thread; the MCP tool does them around this call. |
+| `test.captureSequence({subject, frames?, everyNthSimFrame?, simSpeed?, …})` | The browser half of `capture_sequence`'s **realtime** mode: one burst of N framed shots paced by the wall clock, all inside a single relay evaluation, re-framing on the subject between shots. Self-limits to ~6.5 s (the relay abandons a `test` evaluation at 8 s and the whole reply is lost). Step mode does NOT go through here — stepping the sim from the browser would deadlock the game server's single HTTP thread. |
+| `test.presentationSnap()` | Put the presentation cursor on the newest entity-snapshot frame this client holds. Needed after a `sim_step`: a paused clock has no rate for the PLL to close the gap with, so a shot would photograph the *previous* pose, silently. Capture-time escape hatch only — in a running game the display delay IS the jitter buffer. |
+| `test.entitiesByDef(defName)` | Live entity ids for a def name, newest first, as the **client mirror** knows them. `[]` means this client cannot show you that def — a different (and more useful) statement than the server's unit list. |
 | `test.readyState()` | One round-trip, **zero HTTP** readiness: `{worker:{alive,sceneStateAgeMs}, connection:{authenticated,authFailed,receivedState}, frame:{gameFrame,anchored,newestBaseFrame}, render:{frameId,meshCount,terrainMeshCount}}`. Never throws. Use this instead of polling room state. |
 | `test.lockInput(on)` / `test.cameraSettle()` / `test.withStableCamera(fn, {toleranceElmos?})` | Camera input lock (drops held keys — a CDP keydown never gets its keyup), transition-settle await, and a run-with-drift-report wrapper that always unlocks. Wrap every A/B and perf window in `withStableCamera`. |
 | `test.perfCapture(windowMs?, {squad?})` | Reset → wait a REAL window → dump. Closes the reset-then-dump-immediately trap. |
@@ -168,8 +176,26 @@ end_game({ roomId: <id> })
 
 ### Take a deterministic screenshot
 
+**Default to `capture_subject` (spring-debug MCP).** One call does the whole
+sequence below — and does it in ONE relay round trip, which the four-call
+version cannot: each hop costs seconds and the sim keeps running between them
+(a 2026-08-29 run lost 1,000+ frames between the camera call and the shot).
+It also frames from the subject's own model bounds instead of a guessed
+`height`, and refuses to hand back a black frame.
+
+```
+capture_subject({ def: "ms_subs_s4", angle: "side" })
+capture_subject({ def: "fable_tank", spawn: { x: 8704, z: 15360 }, angle: "low" })
+```
+
+⚠ If you do drive it by hand: **spawn BEFORE you pause.** A paused sim streams
+no fresh spawns, so `spawn → pause → capture` photographs empty ground.
+
+The manual sequence, for when you need a step `capture_subject` does not do:
+
 ```
 spawn_unit(...)
+# let the spawn stream to the browser BEFORE freezing the sim
 pause_sim({ paused: true })             # freeze sim state
 browser_test({ method: "pause" })       # freeze rendering
 browser_test({ method: "focus", args: [<id>, { durationMs: 0 }] })

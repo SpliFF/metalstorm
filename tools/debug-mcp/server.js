@@ -26,6 +26,17 @@ import {
     BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
 } from './browser.js';
 import {
+    DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
+    parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
+} from './capture-subject.js';
+import {
+    GAME_SPEED, MAX_STEP_FRAMES,
+    buildSequenceHarnessCall, describeSequencePlan, extForMime, formatSequenceMeta,
+    frameFileName, motionOnset, planSequence, realtimeBudgetError, sanitiseName,
+    sequenceRelayTimeoutMs, stepTimeoutMs, summariseShots, totalTurnDegrees,
+    validateSequenceArgs,
+} from './capture-sequence.js';
+import {
     classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
     probeSqliteAnnotations, dbDivergenceWarning,
 } from './sqlite-health.js';
@@ -37,7 +48,7 @@ import {
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
-    rmdirSync, statSync,
+    rmdirSync, statSync, mkdirSync,
 } from 'fs';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
@@ -563,6 +574,159 @@ async function execJsonVerb(verb, roomId) {
     }
     try { return { json: JSON.parse(output) }; }
     catch { return { legacy: output }; }
+}
+
+// --- V2: sim control + sequence helpers -------------------------------
+//
+// Shared by capture_subject, capture_sequence and order_and_film. They all
+// need the same three things: read the world's CURRENT pause/LOS/speed/cheat
+// state before touching it, execute a plan step, and put everything back
+// exactly as found — including the parts we did not change.
+
+/** Read the sim state a capture plan is built against. Every field that
+ *  cannot be read stays null, and `planCapture` then omits the restore rather
+ *  than guessing — un-pausing a sim somebody else froze is the failure this
+ *  whole ordering discipline exists to prevent. */
+async function observeSimState(roomId, wantCheats) {
+    const state = { simPaused: null, los: parseLosStatus(null), cheatsOn: null, simSpeed: null };
+    try {
+        const gs = await execJsonVerb('state', roomId);
+        if (gs.json && typeof gs.json.paused === 'boolean') state.simPaused = gs.json.paused;
+        if (gs.json && Number.isFinite(gs.json.speed)) state.simSpeed = gs.json.speed;
+    } catch { /* leave null */ }
+    try {
+        const los = await execOnGameServer('server', 'json los status', roomId);
+        state.los = parseLosStatus(los.success ? los.output : null);
+    } catch { /* leave unknown — the plan then leaves LOS alone, loudly */ }
+    if (wantCheats) {
+        try {
+            const c = await execOnGameServer('server', 'json cheats status', roomId);
+            if (c.success) {
+                try { state.cheatsOn = Boolean(JSON.parse(c.output).cheatEnabled); }
+                catch { state.cheatsOn = /cheatEnabled=on/.test(c.output); }
+            }
+        } catch { /* leave null — we then do not toggle cheats at all */ }
+    }
+    return state;
+}
+
+/** Execute one plan step. `ctx` collects what the step tells us
+ *  (`spawnedIds`, `revealed`, `notes`). */
+async function runPlanStep(step, roomId, ctx) {
+    switch (step.op) {
+        case 'cheats':
+            await execOnGameServer('server', step.enable ? 'cheats on' : 'cheats off', roomId);
+            return;
+        case 'spawn': {
+            const cmd = `spawn ${step.def} ${step.x} ${step.z} ${step.team} ${step.count}`;
+            const j = await execJsonVerb(cmd, roomId);
+            const reply = j.json ?? j.legacy;
+            if (j.json?.error) throw new Error(`spawn failed: ${j.json.error}`);
+            ctx.spawnedIds = parseSpawnIds(reply);
+            if (!ctx.spawnedIds.length) {
+                ctx.notes.push(`spawn reply carried no unit id (${String(reply).slice(0, 120)})`
+                    + ' — falling back to resolving the def by name');
+            }
+            return;
+        }
+        case 'los':
+            await execOnGameServer('server', step.enable ? 'los on' : 'los off', roomId);
+            ctx.revealed = step.enable;
+            return;
+        case 'settle':
+            await new Promise((r) => setTimeout(r, step.ms));
+            return;
+        case 'speed':
+            await execOnGameServer('server', `speed ${step.value}`, roomId);
+            return;
+        case 'pause':
+            await execOnGameServer('server', step.paused ? 'pause' : 'unpause', roomId);
+            return;
+        default:
+            return;
+    }
+}
+
+/** Current sim frame, or null when it cannot be read. */
+async function readSimFrame(roomId) {
+    try {
+        const j = await execJsonVerb('frame', roomId);
+        if (j.json && Number.isFinite(j.json.frame)) return j.json.frame;
+        const n = Number(String(j.legacy ?? '').trim());
+        return Number.isFinite(n) ? n : null;
+    } catch { return null; }
+}
+
+/**
+ * Advance the sim by exactly `frames` and WAIT for it to land.
+ *
+ * "Land" is the whole contract. `sim_step` grants a budget the tick loop then
+ * spends one frame at a time, paced by the current speed factor — so the verb
+ * returns long before the world has moved, and a caller that captures on the
+ * reply photographs the frame it was already on. Hence the poll.
+ */
+async function stepSim(frames, roomId, simSpeed = 1) {
+    const before = await readSimFrame(roomId);
+    let granted = frames;
+    let reply;
+    // The frame the STEP started from, as the verb itself saw it. Not the
+    // `before` read above: on the first step of a sequence the sim is still
+    // running, so the frame moves between that read and the grant landing, and
+    // `before + granted` then under-counts. Waiting on a stale target returns
+    // with budget still unspent — the sequence's very first interval is then
+    // silently short. The verb's own `frame` is stamped inside the tick that
+    // processes the grant, so `target` from it is exact.
+    let target = null;
+    try {
+        const j = await execJsonVerb(`sim_step ${frames}`, roomId);
+        if (j.json) {
+            if (j.json.error) return { ok: false, reason: j.json.error };
+            granted = Number(j.json.granted ?? frames);
+            if (Number.isFinite(j.json.target)) target = j.json.target;
+            reply = j.json;
+        } else if (j.legacy != null) {
+            reply = { text: j.legacy };
+        } else {
+            return {
+                ok: false,
+                reason: 'this game server has no `sim_step` verb — it predates'
+                    + ' ai-visual-debug V2. Rebuild spring-server (the lobby forks'
+                    + ' build/release/spring-server when it exists) and restart the room.',
+            };
+        }
+    } catch (e) {
+        return { ok: false, reason: e.message };
+    }
+
+    if (target == null) target = before == null ? null : before + granted;
+    const deadline = Date.now() + stepTimeoutMs(granted, simSpeed);
+    let landed = before;
+    while (target != null && Date.now() < deadline) {
+        landed = await readSimFrame(roomId);
+        if (landed != null && landed >= target) break;
+        await new Promise((r) => setTimeout(r, 25));
+    }
+    return {
+        ok: target == null || (landed != null && landed >= target),
+        from: before, to: landed, target, granted, reply,
+        timedOut: target != null && !(landed != null && landed >= target),
+    };
+}
+
+/** One `unit_state` read, stamped with the sim frame it was taken at. */
+async function sampleUnitMotion(unitId, roomId) {
+    const frame = await readSimFrame(roomId);
+    const j = await execJsonVerb(`unit_state ${unitId}`, roomId);
+    if (!j.json || j.json.error) return null;
+    return { frame: frame ?? 0, pos: j.json.pos ?? { x: 0, z: 0 }, heading: j.json.heading ?? 0 };
+}
+
+/** Where a sequence's frames go. Under data/ by default — a burst is working
+ *  material, and dropping a dozen JPEGs into a committed directory on every
+ *  call is how a shots/ folder stops being readable. */
+function sequenceOutDir(args) {
+    if (args.outDir) return resolve(args.outDir);
+    return join(projectRoot(), 'data', 'captures', sanitiseName(args.name));
 }
 
 // --- Browser lifecycle ----------------------------------------------------
@@ -1865,6 +2029,146 @@ const TOOLS = [
                 roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
                 clientId: { type: 'number', description: 'Address a specific admin client id.' },
             },
+        },
+    },
+
+    {
+        name: 'capture_subject',
+        description: '**Subject → usable image, in ONE call.** The tool to reach for whenever you want to LOOK at something in a running game; do not hand-roll camera math out of `browser_test focus` + `client_screenshot` again. '
+            + 'Pass ONE subject — `unitId`, `unitIds` (framed together), `def` (the newest live instance this client actually has, optionally spawned first), `position {x,z}` or `area {x1,z1,x2,z2}` — and it resolves the subject, frames it FROM ITS OWN MODEL BOUNDS (a 4 m rifleman and a 65 m submarine both fill the frame; `angle` presets front/rear/side/top/three-quarter/low), holds the world still, captures a presented frame, and checks the pixels before handing them back. '
+            + 'It exists because the two-call version does not work: each relay round trip costs seconds and the sim does not wait — a guided run on 2026-08-29 advanced 1,000+ sim frames between the camera call and the screenshot call and lost the engagement it was aiming at. Framing and capture therefore happen inside ONE relay evaluation. '
+            + 'Ordering is handled for you, including the trap that a PAUSED SIM STREAMS NO FRESH SPAWNS OR REVEALS: spawn/reveal → let the stream settle → pause → capture → restore. Restores are conditional — a sim that was already paused stays paused, global LOS that was already on stays on. '
+            + 'A black frame is a DIAGNOSIS, not a deliverable: mean luminance is checked, the camera re-frames up and out and retries, and a frame that is still black comes back `ok:false` with the candidate causes named (fog of war, night, subject never rendered). '
+            + RELAY,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId:   { type: 'number', description: 'Frame this unit.' },
+                unitIds:  { type: 'array', items: { type: 'number' }, description: 'Frame these units together (merged bounding sphere, static anchor).' },
+                def:      { type: 'string', description: 'Frame the newest live instance of this unit def known to the browser. With `spawn`, spawn it first.' },
+                position: { type: 'object', description: 'Frame a world point: {x, z, y?, radius?}. y defaults to the terrain height; radius defaults to 120 elmos.' },
+                area:     { type: 'object', description: 'Frame a ground rectangle: {x1, z1, x2, z2}. Framed from its centroid + half-diagonal.' },
+
+                spawn:    { type: 'object', description: 'Spawn `def` first, then frame it: {x, z, team?, count?}. Enables cheats if needed and turns them back off. Ordered spawn → stream settles → pause, because a paused sim never streams the new unit.' },
+
+                angle:    { type: 'string', enum: ['three-quarter', 'front', 'rear', 'side', 'top', 'low'], description: 'Viewpoint preset (default three-quarter). WORLD-relative, named for a unit at heading 0, which faces −Z. `low` frames loose and near-horizon — the shot for judging a model against the terrain it stands on.' },
+                yawDeg:   { type: 'number', description: 'Override the preset bearing (degrees around +Y from +X toward +Z).' },
+                pitchDeg: { type: 'number', description: 'Override the preset elevation (clamped 5–85).' },
+                fill:     { type: 'number', description: 'Fraction of the shorter viewport axis the subject should fill (0.25–0.95). Lower = more terrain context.' },
+
+                pause:    { type: 'boolean', default: true, description: 'Freeze the sim across the capture so the subject is still there when the shutter falls. A sim that was already paused is left paused.' },
+                simSpeed: { type: 'number', description: 'Slow (or speed) the sim across the capture, 0.05–100, restored afterwards. Asking for this DROPS the default pause — slow motion and a freeze are alternatives, not a pair — so it is how you photograph something that only exists while moving (a turret mid-slew, a tracer in flight). Pass pause:true as well to override. Applied AFTER the spawn/reveal settle, because the settle is measured in wall ms and 0.1× would shrink it to nothing.' },
+                reveal:   { description: 'true / "auto" (default) reveals global LOS when it is off and restores it after; false never touches LOS (a fogged subject then comes back as a black-frame diagnosis).' },
+
+                maxDim:   { type: 'number', description: 'Longest edge in pixels, 64–2048. Default 1280.' },
+                quality:  { type: 'number', description: 'JPEG quality 0–1.' },
+                retries:  { type: 'number', description: 'Extra framings to try when the frame comes back black. Default 2, max 5.' },
+                luminanceFloor: { type: 'number', description: 'Mean luminance (0–255) at or below which the frame is called black. Default 8.' },
+                streamSettleMs: { type: 'number', description: 'Dwell between a spawn/reveal and the pause, so the entity snapshot carrying it reaches the browser. Default 600.' },
+
+                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
+                clientId: { type: 'number', description: 'Address a specific admin client id.' },
+            },
+        },
+    },
+
+    {
+        name: 'step_sim',
+        description: '**Advance the sim by an EXACT number of frames, from a stop.** The primitive that makes frame-by-frame filming possible: pause freezes the thing you are trying to watch, and speed 1 moves it an unknown distance across a multi-second relay round trip — stepping moves it by the number of frames you asked for and by nothing else, however long your camera call took. '
+            + 'Pauses first if the sim was running (stepping from a moving sim is not a thing a caller can mean) and returns {from, to, landed}. It POLLS until the frame actually lands, so a successful reply means the sim really is at `to` — stepping is paced by the current speed factor, so 30 frames at 0.1× takes ~10 s of wall time. '
+            + 'The step-capture-step-capture loop is what `capture_sequence` mode:"step" does for you; reach for this directly when you want to interleave something else (an order, a Lua probe, a damage event) between frames.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                frames: { type: 'number', description: `Sim frames to advance (1–${MAX_STEP_FRAMES}). Default 1. 30 frames = 1 game-second.`, default: 1 },
+                roomId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'capture_sequence',
+        description: '**Film a manoeuvre → N images on disk, in one call.** The tool for anything that only exists WHILE MOVING: a tank\'s turn arc, a turret slew mid-motion, a walk clip mid-stride, a tracer in flight beside a hull. `capture_subject` gets you a pose; this gets you the motion. '
+            + 'Same subject selectors as `capture_subject` (`unitId` / `unitIds` / `def` / `position` / `area`, with the same auto-framing from the subject\'s own model bounds, re-framed before EVERY shot so a moving subject stays in frame). '
+            + 'TWO MODES, and the difference is what the frames are worth: '
+            + '**step** (default) stops the sim and advances it by `everyNthSimFrame` between shots (`sim_step`), so the spacing is EXACT however long each capture took — this is the mode to use when the frames are evidence. '
+            + '**realtime** slows the sim (`simSpeed`, default 0.1) and takes the whole burst browser-side inside ONE relay evaluation, so the spacing is wall-clock-nominal — use it when the thing you want to see is the client\'s own animation rather than sim state. '
+            + 'Frames are WRITTEN TO DISK and the reply carries paths plus per-frame numbers; the relay\'s 4 MB cap is per message, so returning a dozen images inline is a reply nobody receives. `inlineFrames` inlines the first few for a glance. '
+            + 'The failure it refuses to hide: N well-exposed, well-framed shots of the SAME sim frame — a still life wearing a film\'s clothes. That comes back `ok:false` with the causes named.'
+            + RELAY,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId:   { type: 'number', description: 'Film this unit.' },
+                unitIds:  { type: 'array', items: { type: 'number' }, description: 'Film these units together (merged bounds, static anchor — a subject that moves may leave frame).' },
+                def:      { type: 'string', description: 'Film the newest live instance of this def known to the browser.' },
+                position: { type: 'object', description: 'Film a world point: {x, z, y?, radius?}.' },
+                area:     { type: 'object', description: 'Film a ground rectangle: {x1, z1, x2, z2}.' },
+                spawn:    { type: 'object', description: 'Spawn `def` first, then film it: {x, z, team?, count?}.' },
+
+                frames:           { type: 'number', description: 'Shots to take (2–60). Default 6.', default: 6 },
+                everyNthSimFrame: { type: 'number', description: 'Sim frames between shots. Default 3 (=0.1 game-seconds). 30 = one second apart.', default: 3 },
+                mode:             { type: 'string', enum: ['step', 'realtime'], description: 'step = exact spacing on a stepped sim (default). realtime = wall-clock burst on a slowed sim.', default: 'step' },
+                simSpeed:         { type: 'number', description: 'Sim-speed multiplier to apply across the sequence (0.05–100). Defaults to 0.1 in realtime mode; in step mode it only matters if you also want the CLIENT\'s wall-clock animation to crawl. Restored afterwards.' },
+
+                name:     { type: 'string', description: 'Label for the output directory. Sanitised. Default "sequence".' },
+                outDir:   { type: 'string', description: 'Where to write the frames. Default <project>/data/captures/<name>/.' },
+                inlineFrames: { type: 'number', description: 'How many frames to also return as inline MCP images (0–4). Default 1 — the first shot, so you can see it worked without opening a file.', default: 1 },
+
+                angle:    { type: 'string', enum: ['three-quarter', 'front', 'rear', 'side', 'top', 'low'], description: 'Viewpoint preset (default three-quarter). WORLD-relative — see capture_subject.' },
+                yawDeg:   { type: 'number' },
+                pitchDeg: { type: 'number' },
+                fill:     { type: 'number' },
+                maxDim:   { type: 'number', description: 'Longest edge in pixels. Defaults DOWN with the frame count in realtime mode (the whole burst shares one 4 MB reply); step mode defaults to 1280.' },
+                quality:  { type: 'number', description: 'JPEG quality 0–1.' },
+
+                reveal:   { description: 'true / "auto" (default) reveals global LOS when off and restores it; false never touches LOS.' },
+                trackSubject: { type: 'boolean', description: 'Re-frame on the subject before every shot (default true).', default: true },
+                streamSettleMs: { type: 'number', description: 'Dwell after a spawn/reveal before the sequence starts. Default 600.' },
+
+                roomId:   { type: 'number' },
+                clientId: { type: 'number' },
+            },
+        },
+    },
+    {
+        name: 'order_and_film',
+        description: '**Give an order, wait for the motion to actually START, then film it — one call.** The composite the unit-motion work needs: the gap between "order acknowledged" and "the unit is moving" is real (pathing, spin-up, the command queue), and it is exactly where hand-driven tooling loses the subject. Start the burst on the ack and you photograph a stationary hull; start it after a fixed sleep and the interesting part is over. '
+            + 'So: issue the order, poll `unit_state` until the unit is genuinely moving, then hand off to `capture_sequence` with the same arguments. '
+            + 'ONSET COUNTS ROTATION, NOT JUST TRANSLATION — a tank executing a 180° course change barely translates, and heading is the only channel that shows the turn. Thresholds are `speedThreshold` (elmos/game-second) and `turnThreshold` (degrees/game-second); either one trips it. '
+            + 'A unit that never starts moving is filmed anyway, with `motion onset: … NEVER started moving` in the metadata — a still hull IS the finding when the order was supposed to move it.'
+            + RELAY,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number', description: 'The unit to order and film. Required.' },
+                order:  { type: 'object', description: 'What to do: {cmdId, params:[…], opts?} — the same shape as give_order (10=MOVE, 20=ATTACK, 15=PATROL, 16=FIGHT). Or use the shorthands below.' },
+                move:   { type: 'object', description: 'Shorthand for a MOVE order: {x, z, y?}. y defaults to the terrain height.' },
+                attack: { type: 'number', description: 'Shorthand for an ATTACK order on this target unit id.' },
+
+                frames:           { type: 'number', description: 'Shots to take. Default 8.', default: 8 },
+                everyNthSimFrame: { type: 'number', description: 'Sim frames between shots. Default 6.', default: 6 },
+                mode:             { type: 'string', enum: ['step', 'realtime'], default: 'step' },
+                simSpeed:         { type: 'number' },
+
+                speedThreshold: { type: 'number', description: 'Onset: elmos per game-second. Default 2.' },
+                turnThreshold:  { type: 'number', description: 'Onset: degrees per game-second. Default 5.' },
+                onsetTimeoutMs: { type: 'number', description: 'Give up waiting for motion after this long and film anyway. Default 8000.', default: 8000 },
+                onsetPollFrames: { type: 'number', description: 'Sim frames between onset samples. Default 3.', default: 3 },
+
+                name:     { type: 'string' },
+                outDir:   { type: 'string' },
+                inlineFrames: { type: 'number', default: 1 },
+                angle:    { type: 'string', enum: ['three-quarter', 'front', 'rear', 'side', 'top', 'low'] },
+                yawDeg:   { type: 'number' },
+                pitchDeg: { type: 'number' },
+                fill:     { type: 'number' },
+                maxDim:   { type: 'number' },
+                quality:  { type: 'number' },
+                reveal:   { },
+                roomId:   { type: 'number' },
+                clientId: { type: 'number' },
+            },
+            required: ['unitId'],
         },
     },
 
@@ -3336,6 +3640,385 @@ async function executeTool(name, args) {
                     { type: 'text', text: JSON.stringify(meta, null, 2) },
                 ],
             };
+        }
+
+
+        case 'capture_subject': {
+            const argError = validateCaptureArgs(args);
+            if (argError) return `Error: ${argError}`;
+
+            // 1. OBSERVE before touching anything. Every restore step below is
+            //    conditional on what we found, because "undo everything" would
+            //    un-pause a sim somebody else froze and un-reveal a map that
+            //    was revealed on purpose.
+            const state = await observeSimState(args.roomId, Boolean(args.spawn));
+
+            const plan = planCapture(args, state);
+            const notes = [...plan.notes];
+            const ctx = { spawnedIds: [], revealed: state.los.allOn === true, notes };
+            const runStep = (step) => runPlanStep(step, args.roomId, ctx);
+
+            let relayed;
+            try {
+                for (const s of plan.pre) await runStep(s);
+                // 2. THE ONE ROUND TRIP. Resolve → frame → dwell → hold →
+                //    capture → judge → retry, all browser-side. Splitting this
+                //    is the bug (see the tool description).
+                relayed = await clientEval(
+                    'test',
+                    buildHarnessCall({
+                        ...args,
+                        __revealed: ctx.revealed,
+                        // Whenever WE stopped the world, the presentation cursor
+                        // has no wall-clock rate left to close the gap to the
+                        // state the server is actually holding, so the shot must
+                        // be told to jump onto it.
+                        syncPresentation: args.syncPresentation
+                            ?? plan.pre.some((st) => st.op === 'pause'),
+                    }),
+                    args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+            } finally {
+                // 3. Restore even when the capture threw — a half-applied
+                //    capture that leaves the sim paused poisons the session.
+                for (const s of plan.post) {
+                    try { await runStep(s); }
+                    catch (e) { notes.push(`restore step ${s.op} failed: ${e.message}`); }
+                }
+            }
+
+            if (relayed.fallback) {
+                return `Relay unavailable: ${relayed.fallback}. `
+                    + 'capture_subject needs a CONNECTED admin browser — open one with '
+                    + '`open_client({roomId})`, or launch with `openBrowser:true`.';
+            }
+            if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+            const shot = clientEvalValue(relayed.output);
+            if (!shot || typeof shot !== 'object' || !shot.dataUrl) {
+                return `Unexpected captureSubject reply: ${String(relayed.output).slice(0, 400)}`;
+            }
+            const m = /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+            if (!m) return `captureSubject returned a non-data-URL image (${shot.dataUrl.slice(0, 60)}…)`;
+            if (ctx.spawnedIds.length) notes.push(`spawned unit id(s): ${ctx.spawnedIds.join(', ')}`);
+            return {
+                content: [
+                    { type: 'image', data: m[2], mimeType: m[1] },
+                    { type: 'text', text: formatCaptureMeta(shot, {
+                        notes, plan: describePlan(plan), clientId: relayed.clientId,
+                    }) },
+                ],
+            };
+        }
+
+        case 'step_sim': {
+            const frames = Math.max(1, Math.min(MAX_STEP_FRAMES,
+                Math.floor(Number(args.frames ?? 1))));
+            const st = await observeSimState(args.roomId, false);
+            const r = await stepSim(frames, args.roomId, st.simSpeed ?? 1);
+            if (!r.ok && r.reason) return `Error: ${r.reason}`;
+            const lines = [
+                r.timedOut
+                    ? `step: TIMED OUT — asked for ${r.granted} frame(s) from ${r.from},`
+                      + ` reached ${r.to}. The sim is paused with a step budget possibly`
+                      + ' still outstanding; pause_sim or unpause to clear it.'
+                    : `step: OK — ${r.from} → ${r.to} (${r.granted} frame(s))`,
+                `sim: paused${st.simPaused === false ? ' (it was running; step_sim paused it)' : ''}`
+                    + `, speed ${st.simSpeed ?? '?'}×`,
+                `game-seconds advanced: ${(r.granted / GAME_SPEED).toFixed(3)}`,
+            ];
+            return lines.join('\n');
+        }
+
+        case 'capture_sequence':
+        case 'order_and_film': {
+            const isOrder = name === 'order_and_film';
+            if (isOrder && !Number.isFinite(args.unitId)) {
+                return 'Error: order_and_film needs `unitId` — the unit to order and film.';
+            }
+            const seqArgs = isOrder
+                ? { ...args, frames: args.frames ?? 8, everyNthSimFrame: args.everyNthSimFrame ?? 6 }
+                : args;
+            const argError = validateSequenceArgs(seqArgs);
+            if (argError) return `Error: ${argError}`;
+
+            const state = await observeSimState(args.roomId, Boolean(args.spawn));
+            const plan = planSequence(seqArgs, state);
+            if (plan.mode === 'realtime') {
+                const budgetError = realtimeBudgetError(
+                    plan.frames, plan.stride, plan.simSpeed ?? 1,
+                    Number.isFinite(args.settleMs) ? args.settleMs : 250);
+                if (budgetError) return `Error: ${budgetError}`;
+            }
+            const notes = [...plan.notes];
+            const ctx = { spawnedIds: [], revealed: state.los.allOn === true, notes };
+            const runStep = (step) => runPlanStep(step, args.roomId, ctx);
+            const effSpeed = plan.simSpeed ?? state.simSpeed ?? 1;
+
+            // ── The order, and the wait for it to BECOME MOTION ──────────
+            //
+            // Before any of the capture plan runs: the order has to go in
+            // while the sim is still running, and the onset poll has to watch
+            // a running sim. Doing this after the plan's `pause` would mean
+            // waiting for motion from a stopped world — forever.
+            let onset = null;
+            if (isOrder) {
+                let cmdId = args.order?.cmdId;
+                let params = args.order?.params ?? [];
+                if (args.move) {
+                    cmdId = 10;
+                    const y = Number.isFinite(args.move.y) ? args.move.y : 0;
+                    params = [args.move.x, y, args.move.z];
+                } else if (Number.isFinite(args.attack)) {
+                    cmdId = 20;
+                    params = [args.attack];
+                }
+                if (!Number.isFinite(cmdId)) {
+                    return 'Error: order_and_film needs one of `move:{x,z}`, `attack:<unitId>`'
+                        + ' or an explicit `order:{cmdId, params}`.';
+                }
+                const cmd = `order ${args.unitId} ${cmdId} ${params.join(' ')} ${args.order?.opts ?? 0}`
+                    .replace(/\s+/g, ' ').trim();
+                const ordered = await execOnGameServer('server', cmd, args.roomId);
+                if (!ordered.success) return `Error: order refused: ${ordered.output}`;
+                notes.push(`order: ${cmd} → ${String(ordered.output).slice(0, 120)}`);
+
+                const timeoutMs = Math.max(0, Number(args.onsetTimeoutMs ?? 8000));
+                const pollFrames = Math.max(1, Math.floor(Number(args.onsetPollFrames ?? 3)));
+                const pollMs = Math.max(50, (pollFrames / (GAME_SPEED * effSpeed)) * 1000);
+                const started = Date.now();
+                let prev = await sampleUnitMotion(args.unitId, args.roomId);
+                let polls = 0;
+                let last = { speed: 0, turnRateDegPerSec: 0, moving: false };
+                while (Date.now() - started < timeoutMs) {
+                    await new Promise((r) => setTimeout(r, pollMs));
+                    const cur = await sampleUnitMotion(args.unitId, args.roomId);
+                    polls++;
+                    if (!cur) { notes.push(`unit ${args.unitId} vanished while waiting for motion`); break; }
+                    if (prev) {
+                        last = motionOnset(prev, cur, {
+                            speedThreshold: args.speedThreshold,
+                            turnThreshold: args.turnThreshold,
+                        });
+                        if (last.moving) break;
+                    }
+                    prev = cur;
+                }
+                onset = {
+                    waitedMs: Date.now() - started, polls,
+                    moving: last.moving === true,
+                    speed: last.speed ?? 0,
+                    turnRateDegPerSec: last.turnRateDegPerSec ?? 0,
+                };
+                if (!onset.moving) {
+                    notes.push('the unit never crossed the motion threshold before the'
+                        + ' onset timeout — filming anyway, because a hull that did not'
+                        + ' move IS the finding when the order was supposed to move it');
+                }
+            }
+
+            // ── Setup: spawn / reveal / settle / speed / (pause in step mode) ──
+            const shots = [];
+            const headingSamples = [];
+            let relayed = null;
+            let subject = null;
+            let framing = null;
+            let sequenceWarnings = [];
+            let stepReport = null;
+            try {
+                for (const st of plan.pre) await runStep(st);
+
+                if (plan.mode === 'realtime') {
+                    // ONE relay evaluation for the whole burst: the wall-clock
+                    // interval between shots has to be paced browser-side or it
+                    // is relay latency wearing a stopwatch.
+                    relayed = await clientEval(
+                        'test',
+                        buildSequenceHarnessCall({ ...seqArgs, __revealed: ctx.revealed }, plan),
+                        args.roomId, args.clientId,
+                        sequenceRelayTimeoutMs(plan.frames, plan.stride, effSpeed));
+                    if (relayed.fallback) {
+                        return `Relay unavailable: ${relayed.fallback}. `
+                            + 'capture_sequence needs a CONNECTED admin browser — open one '
+                            + 'with `open_client({roomId})`.';
+                    }
+                    if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                    const burst = clientEvalValue(relayed.output);
+                    if (!burst || !Array.isArray(burst.shots)) {
+                        return `Unexpected captureSequence reply: ${String(relayed.output).slice(0, 400)}`;
+                    }
+                    subject = burst.subject;
+                    framing = burst.framing;
+                    sequenceWarnings = burst.warnings ?? [];
+                    if (burst.truncated) notes.push('the burst was cut short by the relay wire cap');
+                    for (const sh of burst.shots) shots.push(sh);
+                } else {
+                    // STEP MODE. capture → sim_step → capture → …  The sim is
+                    // stopped between shots, so the seconds each relay call
+                    // costs buy exactly nothing of sim time: the spacing is the
+                    // step size and only the step size.
+                    let resolvedUnitId = Number.isFinite(seqArgs.unitId) ? seqArgs.unitId : null;
+                    const steps = [];
+                    const t0 = Date.now();
+                    // The SERVER's frame is the spacing axis, not the client's.
+                    // `captureFrame().gameFrame` comes from GameInfo, which is
+                    // broadcast once a game-second, so it quantises to 30 and a
+                    // 9-frame step reads as 0 or 30 — the spacing would look
+                    // wrong when it was exact. We know the true frame: the step
+                    // reply says where it landed.
+                    let serverFrame = await readSimFrame(args.roomId);
+                    for (let i = 0; i < plan.frames; i++) {
+                        if (i > 0) {
+                            const r = await stepSim(plan.stride, args.roomId, effSpeed);
+                            steps.push(r);
+                            if (Number.isFinite(r.to)) serverFrame = r.to;
+                            if (!r.ok && r.reason) {
+                                notes.push(`sim_step failed at shot ${i}: ${r.reason}`);
+                                break;
+                            }
+                            if (r.timedOut) {
+                                notes.push(`sim_step ${plan.stride} timed out before shot ${i}`
+                                    + ` (reached ${r.to} of ${r.target})`);
+                            }
+                        }
+                        const shotArgs = {
+                            ...seqArgs,
+                            // Resolve the def ONCE: after the first shot we know
+                            // which entity we are filming, and re-resolving would
+                            // let a newer instance steal the camera mid-sequence.
+                            ...(resolvedUnitId != null
+                                ? { unitId: resolvedUnitId, def: undefined, unitIds: undefined }
+                                : {}),
+                            // A sequence is a dozen images, not one: JPEG at a
+                            // readable-not-lavish size, or ten 1.8 MB PNGs land
+                            // on disk and nobody can commit the evidence.
+                            maxDim: seqArgs.maxDim ?? 1000,
+                            format: seqArgs.format ?? 'jpeg',
+                            quality: seqArgs.quality ?? 0.72,
+                            syncPresentation: true,
+                            // Keep the rig alive between shots; one orbitStop at
+                            // the end instead of a teardown per frame.
+                            restore: false,
+                            // The retry ladder re-frames up and out, which would
+                            // silently change the viewpoint mid-sequence. Only
+                            // the first shot is allowed to hunt for a framing.
+                            retries: i === 0 ? 2 : 0,
+                            __revealed: ctx.revealed,
+                        };
+                        const one = await clientEval('test', buildHarnessCall(shotArgs),
+                            args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+                        if (one.fallback) {
+                            return `Relay unavailable: ${one.fallback}. `
+                                + 'capture_sequence needs a CONNECTED admin browser.';
+                        }
+                        if (!one.success) {
+                            notes.push(`shot ${i} failed: ${String(one.output).slice(0, 200)}`);
+                            break;
+                        }
+                        relayed = one;
+                        const shot = clientEvalValue(one.output);
+                        if (!shot || !shot.dataUrl) {
+                            notes.push(`shot ${i} returned no image`);
+                            break;
+                        }
+                        if (!subject) { subject = shot.subject; framing = shot.framing; }
+                        if (resolvedUnitId == null && Number.isFinite(shot.subject?.unitId)) {
+                            resolvedUnitId = shot.subject.unitId;
+                        }
+                        for (const w of shot.warnings ?? []) {
+                            if (!sequenceWarnings.includes(w)) sequenceWarnings.push(w);
+                        }
+                        shots.push({
+                            index: i,
+                            gameFrame: serverFrame ?? shot.gameFrame,
+                            // What the CLIENT was actually showing: the freshest
+                            // entity snapshot it holds. Judged separately, because
+                            // a sim that stepped while the client stayed put is a
+                            // still life with correct-looking metadata.
+                            clientFrame: shot.presentation?.newestFrame,
+                            frameId: shot.frameId,
+                            atMs: Date.now() - t0,
+                            dataUrl: shot.dataUrl,
+                            width: shot.width, height: shot.height,
+                            stats: shot.stats,
+                            verdict: shot.attempts?.[shot.attempts.length - 1]?.verdict,
+                        });
+                        if (resolvedUnitId != null) {
+                            const sample = await sampleUnitMotion(resolvedUnitId, args.roomId);
+                            if (sample) headingSamples.push(sample);
+                        }
+                    }
+                    stepReport = steps;
+                    // The rig was left standing on purpose; put the camera back.
+                    await clientEval('test', 'orbitStop()', args.roomId, args.clientId)
+                        .catch(() => undefined);
+                }
+            } finally {
+                for (const st of plan.post) {
+                    try { await runStep(st); }
+                    catch (e) { notes.push(`restore step ${st.op} failed: ${e.message}`); }
+                }
+            }
+
+            if (ctx.spawnedIds.length) notes.push(`spawned unit id(s): ${ctx.spawnedIds.join(', ')}`);
+            if (shots.length === 0) {
+                return 'Error: the sequence captured no frames.\n'
+                    + notes.map((n) => `note: ${n}`).join('\n');
+            }
+
+            // ── Write the frames to disk ────────────────────────────────
+            const outDir = sequenceOutDir({
+                ...args,
+                name: args.name ?? (isOrder ? `order-${args.unitId}` : 'sequence'),
+            });
+            mkdirSync(outDir, { recursive: true });
+            const files = [];
+            for (const sh of shots) {
+                const m = /^data:([^;]+);base64,(.*)$/s.exec(sh.dataUrl ?? '');
+                if (!m) continue;
+                const path = join(outDir, frameFileName(sh.index, sh.gameFrame, extForMime(m[1])));
+                writeFileSync(path, Buffer.from(m[2], 'base64'));
+                files.push({
+                    index: sh.index,
+                    gameFrame: sh.gameFrame,
+                    deltaFrames: files.length ? sh.gameFrame - files[files.length - 1].gameFrame : 0,
+                    mean: sh.stats?.mean,
+                    black: sh.verdict?.black === true,
+                    path,
+                    mimeType: m[1],
+                    data: m[2],
+                });
+            }
+
+            const summary = summariseShots(shots, plan);
+            const result = {
+                ok: summary.ok,
+                mode: plan.mode,
+                requested: {
+                    frames: plan.frames,
+                    everyNthSimFrame: plan.stride,
+                    simSpeed: plan.simSpeed,
+                },
+                subject, framing, shots, summary, files,
+                warnings: sequenceWarnings,
+                onset,
+                turnDegrees: headingSamples.length > 1
+                    ? totalTurnDegrees(headingSamples) : undefined,
+            };
+            notes.push(`frames written to ${outDir}`);
+            if (stepReport?.some((r) => r.timedOut)) {
+                notes.push('at least one step did not land inside its budget — the'
+                    + ' spacing in `deltas` above is what actually happened');
+            }
+
+            const inline = Math.max(0, Math.min(4, Number(args.inlineFrames ?? 1)));
+            const content = [];
+            for (const f of files.slice(0, inline)) {
+                content.push({ type: 'image', data: f.data, mimeType: f.mimeType });
+            }
+            content.push({ type: 'text', text: formatSequenceMeta(result, {
+                notes, plan: describeSequencePlan(plan),
+                clientId: relayed?.clientId,
+            }) });
+            return { content };
         }
 
         // --- Scenario authoring (S3) -----------------------------------

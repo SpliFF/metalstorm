@@ -243,6 +243,10 @@ condition and keeps the ordinary per-tool error paths.
 | `client_eval` | `code` (required), `target` (`js`\|`worker`\|`widgets`\|`test`, default `js`), `roomId`, `clientId`, `timeoutMs` (default `10000`, clamped 500–60000) | Run code **inside a connected browser** and get the result back, over [`POST /api/client/eval`](api.md#browser-eval-relay). Targets: `js` = main-thread globals (`document`, `window.test`, `window.lobby`); `worker` = render-worker globals (`__entityRenderer`, `__csm`, `__renderPipeline`, `__fxLightPool` — the hooks the render-core move stranded there); `widgets` = Lua in the in-worker LuaUI runtime; `test` = an expression with the `window.test` harness's members in scope (`readyState()`, `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. See the three gates + the deadlock warning below |
 | `client_ready` | `roomId`, `clientId` | The **browser's** readiness (`window.test.readyState()`): renderer up, defs ingested, LuaUI booted, newest game frame, feed age. Different question from `wait_for_game`, which is server-side — a game can be server-ready while the tab is still ingesting defs |
 | `client_screenshot` | `maxDim` (default `1280`, clamped 64–2048), `quality`, `roomId`, `clientId` | Relays `window.test.captureFrame({maxDim, stats:true})` and returns a real **MCP image content block** (a Claude session can see it) plus a text block of `{clientId, width, height, frameId, gameFrame, stats, bytes}`. `captureFrame` waits for a presented frame rather than grabbing a stale backbuffer. A 640px capture is ~600 KB — the wire cap is 4 MB |
+| `capture_subject` | ONE of `unitId` \| `unitIds[]` \| `def` \| `position{x,z,y?,radius?}` \| `area{x1,z1,x2,z2}`; plus `spawn{x,z,team?,count?}`, `angle` (`three-quarter`\|`front`\|`rear`\|`side`\|`top`\|`low`), `yawDeg`, `pitchDeg`, `fill`, `pause` (default `true`), `reveal` (default auto), `maxDim`, `quality`, `retries`, `luminanceFloor`, `streamSettleMs`, `roomId`, `clientId` | **Subject → usable image, in one call.** Resolves the subject, frames it from its own model bounds, holds the world still, captures a presented frame and *checks the pixels* — see [Looking at something](#looking-at-something-capture_subject) below. Returns an MCP image block plus a metadata block whose first line is the verdict. This is the tool to reach for; `client_screenshot` is the raw shutter under it |
+| `step_sim` | `frames` (1-3000, default 1), `roomId` | **Advance the sim by an exact number of frames, from a stop.** Pauses first if it was running, then polls until the frame actually lands — a successful reply means the sim really is there. The primitive under `capture_sequence` mode `step`; use it directly to interleave an order, a Lua probe or a damage event between frames |
+| `capture_sequence` | ONE of `unitId` \| `unitIds[]` \| `def` \| `position` \| `area`; plus `frames` (2-60, default 6), `everyNthSimFrame` (default 3), `mode` (`step`\|`realtime`), `simSpeed`, `name`, `outDir`, `inlineFrames`, `spawn`, `angle`, `yawDeg`, `pitchDeg`, `fill`, `maxDim`, `quality`, `reveal`, `trackSubject`, `streamSettleMs`, `roomId`, `clientId` | **Film a manoeuvre → N images on disk, in one call.** Same subject selectors and auto-framing as `capture_subject`, re-framed before every shot so a moving subject stays in frame — see [Filming motion](#filming-motion-capture_sequence--step_sim--order_and_film). Frames are written to disk (the 4 MB wire cap is per message); the metadata's first line is the verdict, and N shots of the same instant is `UNUSABLE`, not a film |
+| `order_and_film` | `unitId` (required); `move{x,z,y?}` \| `attack:<id>` \| `order{cmdId,params[],opts?}`; plus every `capture_sequence` argument and `speedThreshold`, `turnThreshold`, `onsetTimeoutMs`, `onsetPollFrames` | **Give an order, wait for the motion to actually start, then film it.** Closes the gap between order-acknowledged and unit-moving — the gap where hand-driven tooling loses the subject. Onset counts **rotation as well as translation**, because a tank reversing course barely translates. A unit that never moves is filmed anyway and labelled |
 | `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md). Since P7 these **relay for real** over `/api/client/eval` and return the answer; the paste-into-chrome-devtools snippet is now only the fallback when a gate refuses |
 
 **The three gates on every relayed tool.** All of them fall back to printing a
@@ -304,6 +308,194 @@ Claude: [uses get_logs with level=4 (ERROR), section="lua"]
 Found 3 Lua errors:
   [142] [ERROR] [spring-server:lua:LuaRules] runtime error in 'GameFrame': ...
 ```
+
+### Looking at something (`capture_subject`)
+
+**Do not hand-roll camera math to take a screenshot.** `capture_subject` is one
+MCP call from a *subject* to an *image you can trust*, and it exists because the
+hand-rolled version does not work. Three failures, each of which has cost whole
+sessions:
+
+- **Height and zoom guessed against unknown bounds.** `focus(id, {height:800})`
+  frames a 4 m rifleman and a 65 m submarine identically — one shot is an empty
+  field, the other a texture close-up. Verified numbers from a real run: the
+  same call put the camera **43 elmos** from a 2.0 m subject and **905 elmos**
+  from a 66.9 m one. No constant does that.
+- **Camera and capture were two round trips.** Each relay hop costs seconds and
+  the sim does not wait. A guided playthrough on 2026-08-29 advanced **1,000+
+  sim frames** between "look here" and "take the shot" and lost the engagement
+  it was aiming at. Resolve → frame → hold → capture → judge therefore all run
+  inside ONE relay evaluation.
+- **A black frame came back as a deliverable.** Fog of war, night lighting and
+  a camera inside terrain all produce a perfectly valid PNG of nothing.
+
+```
+capture_subject {"def": "ms_subs_s4", "angle": "side"}
+capture_subject {"unitIds": [16366, 6227, 28378, 26175], "angle": "top", "fill": 0.9}
+capture_subject {"def": "fable_tank", "spawn": {"x": 8704, "z": 15360}, "angle": "low"}
+capture_subject {"area": {"x1": 6000, "z1": 1200, "x2": 7000, "z2": 2000}}
+```
+
+**What it does, and the order it does it in.** The ordering is the load-bearing
+part; three of these steps are in the sequence because doing them anywhere else
+silently produces a picture of empty ground.
+
+1. **Resolve.** `unitId`/`unitIds` → live bounding spheres (merged); `def` →
+   the newest instance **this client actually has streamed** (not the server's
+   unit list, which is capped at 100 rows and can name units the browser cannot
+   draw); `position`/`area` → a ground anchor, heightmap-sampled. A subject that
+   never arrives is an error naming the reason, never a blind shot.
+2. **Frame from the subject's own radius** through the orbit rig — the
+   ground-anchored path (the rig ignores a free `setCameraPose`). `angle`
+   presets are world-relative and named for a unit at heading 0, which faces
+   **−Z**: `front` is yaw −90°, `side` yaw 0°, `top` pitch 85°, `low` a loose
+   near-horizon shot for judging a model against the terrain it stands on.
+3. **Spawn/reveal BEFORE the pause.** ⚠ **A paused sim streams no fresh spawns
+   and no fresh LOS reveals** — the unit exists in the sim but the entity
+   snapshot that would carry it to the browser is something the tick does. So
+   the plan is always `spawn → los on → wait ~600 ms → pause → capture`, and it
+   is printed back to you in the `plan:` line.
+4. **Restore only what it changed.** A sim that was *already* paused stays
+   paused; global LOS that was *already* on stays on; cheats it enabled it
+   disables. Restores run in reverse order, in a `finally`, so a capture that
+   throws never leaves the sim frozen.
+5. **Judge the pixels.** Mean luminance is checked against a floor; a black
+   frame re-frames **up and out** and retries (up to `retries`, default 2). A
+   frame that is still black returns `ok:false` with the candidate causes named
+   in the order worth checking.
+
+**Read the first line of the metadata block.** It is either `capture: OK` or
+`capture: UNUSABLE — read `diagnosis` below, do not trust the image`. After it:
+
+```
+subject: def ms_subs_s4 — 66.9 m across (r=268 elmos) at 2168, -19, 8192, model=loaded
+framing: side yaw=0° pitch=12° fill=0.75 distance=845 elmos
+plan: los on → wait 600ms for the stream → pause sim → capture → resume sim → los off
+```
+
+`metresAcross` is the subject's real extent at the project's **8 elmos = 1 m**
+contract (PLAN-world-scale §2), so a scale regression shows up in the numbers
+and not only by eyeballing the picture. `model=FALLBACK` means you are looking
+at a procedural placeholder, not the art — that warning has saved a "the model
+loaded fine" claim more than once.
+
+Worked examples with committed output, including both acceptance debts this
+tool was built to close, are in
+[`tools/debug-mcp/shots/README.md`](../tools/debug-mcp/shots/README.md).
+
+**When to reach past it.** `client_screenshot` for the raw shutter with the
+camera exactly where it already is; `browser_test` + `test.orbit` when you want
+to keep the rig and step around a model interactively; chrome-devtools
+`take_screenshot` for DOM/HUD overlays (it cannot see the WebGL2 canvas).
+
+### Filming motion (`capture_sequence` / `step_sim` / `order_and_film`)
+
+`capture_subject` gets you a **pose**. A tank's turn arc, a turret slew
+mid-motion, a walk clip mid-stride, a tracer in flight beside a hull — none of
+those is a pose, and none of the obvious ways to photograph one works:
+
+- **Speed 1, one shot per relay call.** Each round trip costs seconds and the
+  sim does not wait, so the frames are real and their spacing is noise. Nothing
+  can be measured from them.
+- **A hard pause.** Freezes the very thing under inspection. You get one pose,
+  N times.
+- **Slow motion alone.** Better, and still not a controlled interval — it
+  narrows the window without closing it.
+
+```
+capture_sequence {"unitId": 15976, "frames": 18, "everyNthSimFrame": 12, "angle": "top"}
+capture_sequence {"def": "fable_mech", "mode": "realtime", "simSpeed": 0.25, "frames": 10, "everyNthSimFrame": 1}
+order_and_film   {"unitId": 15976, "move": {"x": 6525, "z": 2527}, "frames": 18, "everyNthSimFrame": 12}
+step_sim         {"frames": 30}
+capture_subject  {"unitId": 15976, "simSpeed": 0.1}
+```
+
+**Two modes, and the difference is what the frames are worth.**
+
+| | `step` (default) | `realtime` |
+|---|---|---|
+| how the world advances | `sim_step N` between shots, from a stop | the sim runs, slowed by `simSpeed` |
+| where the loop lives | the MCP (capture → step → capture) | the browser, inside ONE relay evaluation |
+| spacing | **exact** — camera latency buys no sim time | **nominal** — wall-clock paced, delivered deltas reported |
+| wall-clock ceiling | none | **~6.5 s**, hard (see below) |
+| use it for | anything the frames are evidence for | client-side animation, which has no sim clock |
+
+`step` mode rests on a server verb added for it: `sim_step N` grants a budget of
+N frames that the tick loop spends one per tick, as the single exception to the
+pause gate (`rts/Server/SimStep.h`, `server_main.cpp`). Both `pause` and
+`unpause` clear an outstanding grant, so a stale budget can never leak frames
+into a later stop. Measured on a live `meridian_basin` run: 18 shots came back
+`deltas 12, 12, 12, …` with no exception, across 15 s of wall clock.
+
+**The realtime ceiling is hard, and an overrun loses everything.** The
+worker→main relay abandons a `test` evaluation that has not answered in 8 s
+(`client/src/core/game-processor.ts` ~1237 — it is 8 s so the game server's own
+10 s waiter always gets a structured answer). A browser-side burst lives
+entirely inside one such call, so an overrun does not come back short: the reply
+is dropped and every frame with it. A burst that would overrun is refused
+*before* the shoot, with the arithmetic shown and `step` mode named.
+
+**Four things that are easy to get wrong, and are handled:**
+
+1. ⚠ **`gameFrame` is not the frame you are looking at.** It comes from
+   GameInfo, broadcast once a game-second, so it quantises to 30: a 9-frame
+   step reads as 0 or 30, and six genuinely different shots report as one
+   instant. The sequence tools report the **server** frame the step landed on
+   for spacing, and the client's freshest **entity-snapshot** frame for "did
+   the picture change" — two clocks, two different questions.
+2. ⚠ **A stopped sim needs the presentation cursor told to catch up.** The
+   cursor's phase-locked loop corrects by 10% per snapshot and hard-snaps only
+   past 15 frames, and when paused `framesPerMs` is 0 so `tick()` cannot close
+   the gap at all. A shot after a `sim_step 12` therefore photographs the
+   *previous* pose, silently. `capture_subject` passes `syncPresentation`
+   whenever it paused or stepped the sim itself
+   (`PresentationClock.snapToNewest`, `test.presentationSnap()`).
+3. ⚠ **Slow motion applies AFTER the spawn/reveal settle, not before.** The
+   settle is measured in wall milliseconds; at 0.1× a 600 ms settle is under
+   two sim frames, i.e. no settle at all, and you photograph the empty ground
+   the settle exists to prevent.
+4. **`simSpeed` and `pause` are alternatives, not a pair.** Slow motion exists
+   to keep the subject *moving* through the capture; pausing is how you stop
+   it. Asking `capture_subject` for `simSpeed` therefore drops the default
+   pause and says which won; `pause:true` overrides.
+
+**⚠ The client's authored-clip clock is WALL-CLOCK, not sim-linked.** Measured
+2026-08-30 against `fable_mech`'s 1.2 s `walk` loop (72 key-frames at the glTF
+loader's 60 fps timebase), sampled at ~150 ms so the loop cannot alias:
+
+| sim speed | clip advance | unit travel |
+|---|---|---|
+| 1× | 56.3 key-frames / wall-second | 76 elmo/wall-s |
+| 0.1× | **55.6** key-frames / wall-second | 6.7 elmo/wall-s |
+| ratio | **0.99** | 0.09 |
+
+`ClipPlayer` is constructed with the default `now = () => performance.now()`
+(`game-processor.ts:568`), and the auto policy's speed estimate is derived from
+sim-frame deltas (`clip-auto-policy.ts:303`) so it is speed-invariant by
+construction and does not compensate either. **Consequence for callers:**
+`simSpeed` slows the world, not the legs — pace a clip sequence off the clip's
+own timebase. The committed `mech-walk-slowmo` sequence does exactly that: 10
+shots 133 ms apart is one full walk loop while the sim advances only 9 frames.
+**This is a finding, not a fix** — whether the animation driver *should* follow
+sim speed belongs to whoever owns it.
+
+**Read the first line of the metadata block**, as with `capture_subject`. Here
+the verdict that matters is not "is it dark" but "did anything MOVE":
+
+```
+sequence: OK — 18 frames
+delivered: 18 distinct server frames spanning 204 sim frames (6.80 game-seconds) over 15.0 s wall; deltas 12, 12, 12, …
+heading: turned 192.2° across the sequence
+motion onset: waited 234 ms / 1 poll(s) — moving at 7.8 elmo/s, turning 62.6°/s
+frame  0: server frame 222 (+0) lum 65.1 → …/f000-frame222.jpg
+```
+
+N well-exposed, well-framed shots of the same instant is a still life wearing a
+film's clothes, and comes back `sequence: UNUSABLE` with the causes named — as
+does a sim that stepped perfectly while the client received no snapshots.
+
+Committed sequences are in
+[`tools/debug-mcp/shots/README.md`](../tools/debug-mcp/shots/README.md).
 
 ### Reliable live game-drive verification
 

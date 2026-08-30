@@ -4671,6 +4671,7 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                 gpOrbitRig.set(obj(1, {}));
             }
             gpOrbitRig.frame(gpCamera.fov, gpAspect());
+            gpOrbitCommit();
             return gpOrbitRig.state();
         }
         case 'orbitStop': {
@@ -4683,11 +4684,13 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         }
         case 'orbitSet':
             gpOrbitRig?.set(obj(0, {}));
+            gpOrbitCommit();
             return gpOrbitRig?.state() ?? null;
         case 'orbitFrame':
             if (gpOrbitRig && gpCamera) {
                 gpOrbitRig.frame(gpCamera.fov, gpAspect(), num(0, 0.7));
             }
+            gpOrbitCommit();
             return gpOrbitRig?.state() ?? null;
         case 'orbitState':
             return gpOrbitRig?.state() ?? null;
@@ -4739,6 +4742,28 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — PLAN-model-harness: world bounding sphere + E1 fallback probe —
         case 'entityBounds':
             return gpCtx.entityRenderer?.getEntityBounds(num(0)) ?? null;
+        // — capture-subject: def name → live entity ids, newest first —
+        case 'entitiesByDef':
+            return gpCtx.entityRenderer?.findEntitiesByDef(String(args[0] ?? '')) ?? [];
+        // — capture-sequence (ai-visual-debug V2): put the presentation cursor
+        //   ON the newest received frame. The filming path only; see
+        //   PresentationClock.snapToNewest for why the PLL cannot be relied on
+        //   to close a `sim_step`-sized gap, and why this is not the default. —
+        case 'presentationSnap': {
+            const c = gpPresentationClock;
+            if (!c) return { ok: false, reason: 'no presentation clock' };
+            const jumped = c.snapToNewest();
+            return {
+                ok: c.isAnchored,
+                jumpedFrames: jumped,
+                E: c.E,
+                P: c.P,
+                newestFrame: c.newestObservedFrame,
+                gameFrame: gpGameFrame,
+                paused: gpPaused,
+                simSpeed: gpSimSpeed,
+            };
+        }
         // — PLAN-model-harness: render-group toggles for the F8 panel —
         case 'setWireframe':
             if (gpScene) gpScene.forceWireframe = Boolean(args[0]);
@@ -5015,6 +5040,22 @@ function gpEnsureSunRig(): SunRig | null {
 /// Resolve a test-harness orbit target: a unit id tracks that entity's live
 /// bounding sphere; an {x, z, radius?} point is a static ground anchor
 /// (wreck inspection etc.).
+/**
+ * Push the rig's pose onto the Babylon camera NOW, instead of waiting for the
+ * next render-loop tick.
+ *
+ * The render loop early-returns while `gpRenderPaused` is set, and
+ * `gpOrbitRig.tick()` lives after that gate — so under `test.pause()` the
+ * sequence "aim the rig, then capture" used to capture the camera pose from
+ * BEFORE the aim, silently. `captureFrame` renders the scene itself when
+ * paused, which made it look like the framing call had simply been ignored.
+ * Ticking on every rig mutation costs two vector writes and makes rig ops
+ * synchronously effective whether or not rendering is paused.
+ */
+function gpOrbitCommit(): void {
+    gpOrbitRig?.tick();
+}
+
 function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
     if (typeof spec === 'number') {
         const unitId = spec;

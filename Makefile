@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -46,6 +46,19 @@ test-client:
 	cd client && npx vitest run
 
 test-all: test-cpp test-client
+
+# spring-debug MCP pure unit tests (no stack needed): the tool-arg validator,
+# the direct/scenario manifest merges, the stack census, the room-end
+# classifier, the sqlite-health probe, the scenario validator and the
+# capture_subject ordering rules. Its own `npm install` is a precondition —
+# node_modules there is gitignored and a fresh clone has none.
+#
+# NOT in test-all on purpose: two scenario-validate cases read baked def
+# caches (`data/games/<id>/cache/defs`) and a map's region graph, so they need
+# a game to have been run once in this tree and fail loudly otherwise. Running
+# them from a gate that has never booted a server would be a permanent red.
+test-debug-mcp:
+	cd tools/debug-mcp && npm install --silent && node --test
 
 # headless-batch pure unit tests (no server build needed): matrix expansion
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity

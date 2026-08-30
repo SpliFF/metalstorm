@@ -87,3 +87,45 @@ TEST_CASE("the capability probe string is what an old binary answers") {
     CHECK(outer["success"] == false);
     CHECK(outer["output"].get<std::string>().rfind("unknown command: json", 0) == 0);
 }
+
+// ── sim_step's frame budget (Server/SimStep.h) ──────────────────────────
+//
+// The verb itself needs a running sim, but the budget it grants is a pure
+// header and is where the whole contract lives: grant REPLACES (two racing
+// grants must not sum), pause/unpause clear, and Consume() spends exactly one
+// frame per call and then stops letting ticks through. Filming N frames
+// depends on that last property being exact.
+#include "Server/SimStep.h"
+
+TEST_CASE("sim_step budget spends exactly the frames it was granted") {
+    simstep::Clear();
+    CHECK(simstep::Pending() == 0);
+    CHECK_FALSE(simstep::Consume());          // a stop with no grant stays stopped
+
+    CHECK(simstep::Grant(3) == 3);
+    CHECK(simstep::Consume());
+    CHECK(simstep::Consume());
+    CHECK(simstep::Pending() == 1);
+    CHECK(simstep::Consume());
+    CHECK_FALSE(simstep::Consume());          // and stops again, on the nose
+    simstep::Clear();
+}
+
+TEST_CASE("sim_step grants replace rather than accumulate") {
+    simstep::Clear();
+    simstep::Grant(5);
+    simstep::Grant(2);
+    CHECK(simstep::Pending() == 2);
+    simstep::Clear();
+    CHECK(simstep::Pending() == 0);
+}
+
+TEST_CASE("sim_step clamps a grant to the ceiling and refuses a negative one") {
+    simstep::Clear();
+    CHECK(simstep::Grant(simstep::kMaxStepFrames * 10) == simstep::kMaxStepFrames);
+    CHECK(simstep::Pending() == simstep::kMaxStepFrames);
+    CHECK(simstep::Grant(-4) == 0);
+    CHECK(simstep::Pending() == 0);
+    CHECK_FALSE(simstep::Consume());
+    simstep::Clear();
+}
