@@ -1,7 +1,43 @@
 # mcp-control — review report (lane 7, 2026-09-10)
 
 ## STATUS
-in-progress: review fixes in server.js committed; next = new world/ai/nl tool modules, self-check, docs/mcp-tools.md generator.
+complete (wrapped early — session limit). Landed: all server.js review fixes
+(findings 1–11), the TOOLS split, and the tested building blocks for the new
+tools (guidance wire encoder, SSE parser, fengari-tested Lua snippets for
+ai_list / ai_health / ai_directives / ai_guidance / nl context). NOT landed:
+the tool handlers themselves (world-tools.js / ai-tools.js / nl-tools.js are
+empty stubs wired into tools.js + the dispatcher), self-check.mjs, gen-docs +
+docs/mcp-tools.md, the docs/debugging-tools.md MCP-section refresh.
+
+### Not done (in priority order, everything else is in place for it)
+1. `world-tools.js`: `WORLD_TOOLS` schemas + `worldHandlers` (world_status,
+   world_pause/resume, world_factions, world_stage_commit/cancel, world_claims,
+   world_seasons, world_pois, world_notifications) — thin over the routes in
+   docs/api.md §World layer (`GET /api/world[/pois|/stats|/factions|/claims|
+   /seasons[/n]]`, `POST /api/world/{pause,factions/found|join|leave,
+   staging/commit|cancel,claims/file|withdraw,me}`); notifications = open
+   `POST /api/chat/ticket` → `GET /api/chat/stream?ticket=` for `listenMs`
+   and collect `world-staging` events with `sse.js`. Handlers take
+   `(args, io)`; `io` (`toolIo` in server.js) has lobbyUrl, fetch,
+   authedFetch, resolveServer, getGameServers, execLua, execJsonVerb.
+2. `ai-tools.js`: `ai_list`/`ai_health`/`ai_directives`/`ai_guidance` =
+   `io.execLua('LuaRules', <snippet from lua-snippets.js>, roomId)` then
+   `JSON.parse(output)`; `ai_guidance` builds the wire with
+   `encodeGuidance` (guidance-wire.js) and sends `guidanceSendLua(wire,
+   {playerId, team})`. Test with `fakeExecLua()` from lua-fake-env.js.
+3. `nl-tools.js`: `nl_command({utterance, roomId, team, context?, focus?,
+   history?})` → `POST <game>/api/nl/command` (TokenRequired, on the GAME
+   server, body `{utterance, context, history?}`; 503 `nl-disabled` when
+   `SPRING_NL_API_KEY` is unset, 429 rate-limited). Context from
+   `nlContextLua(team)` when not supplied. Returns the envelope only —
+   execution is client-side (nl-executor.ts); no `window.test` hook exists
+   to execute an utterance in a live client (out-of-lane ask, lane 10).
+4. `self-check.mjs` (`npm run check`): for each tool, diff
+   `inputSchema.properties` against `args.<key>` reads in its `case` block
+   (server.js) or handler (modules), including the capture helper modules.
+5. `gen-docs.mjs` + `tool-meta.js` → `docs/mcp-tools.md`; refresh the MCP
+   table in docs/debugging-tools.md (timeouts, revealTokens, api_request
+   timeoutMs, roomId refusal semantics).
 
 Scope: `tools/debug-mcp/**`, `docs/mcp-tools.md` (new), the MCP section of
 `docs/debugging-tools.md`. Branch `worktree-agent-a342a8e190187a5d5`.
@@ -89,13 +125,31 @@ Same 7 fail on `main`'s tip in a fresh worktree; not touched by this lane.
 - `tools/debug-mcp/server.js`: findings 1–11; dispatch to module-hosted
   handlers with an injected `toolIo` (fetch/authedFetch/execLua/resolveServer).
 
+- `guidance-wire.js` + test: the RecvLuaMsg codec in JS, pinned byte-for-byte
+  against `parley/tests/wire-fixtures.tsv` (the same fixture the TS and Lua
+  suites use), plus `encodeGuidance` (op → gadget field names).
+- `sse.js` + test: incremental SSE parser for the chat-channel notifications.
+- `lua-snippets.js` + `lua-fake-env.js` + test: the synced-Lua programs for
+  ai_list / ai_health / ai_directives / ai_guidance / nl context, each
+  returning JSON via an in-snippet encoder, run under fengari against a fake
+  `Spring` (roster, rulesParams, GetDirectives/GetOrgGroups, gadgetHandler).
+  Documents the rulesParam names ai_health feature-detects; there is no
+  `ai_health` param in the tree.
+
 ## Proposed C++ patches (UNCOMPILED)
 
-(none yet)
+None.
 
 ## Out-of-lane findings
 
-(see below as they accrue)
+- client/src/native-widgets/command-console.js: no programmatic entry to run
+  an utterance through the live console (`runUtteranceText` is file-local),
+  so an MCP `nl_command` can only fetch the envelope, never execute it in the
+  client. Suggest exposing `window.test.nl(utterance)` in the TestHarness
+  (lane 10 / lane 9).
+- The 7 baseline-failing debug-mcp tests depend on uncommitted bake output
+  (`cache/defs/*/unitdefs.lua.br`, `green_flat_x34_v3` region graph); they
+  should `t.skip` when the artefacts are absent (scenario-validate.test.js).
 
 ## Assumptions / decisions
 
