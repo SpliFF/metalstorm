@@ -47,6 +47,18 @@ local Ledger                       = VFS.Include("LuaRules/Gadgets/authority/led
 local Metrics                      = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
 local CostSpec                     = VFS.Include("LuaRules/Configs/authority_cost.lua")
 local Tick                         = VFS.Include("LuaRules/Gadgets/tick.lua")
+-- Field engineering gate (manual §6/§12, review 2026-09-10): the policy is a
+-- pure module, the tier list is a Config file, the callins are below.
+local FieldEng                     = VFS.Include("LuaRules/Gadgets/authority/field_engineering.lua")
+local FieldEngSpec                 = VFS.Include("LuaRules/Configs/field_engineering.lua")
+
+-- Pool accessors are DEFINED further down (with the LOS notes that explain
+-- them) but USED by GG.Authority.ExportMetrics / IsOverflowing above that
+-- point. Without these forward declarations those two functions compiled
+-- against GLOBALS of the same name — nil at call time — and raised on first
+-- use (review 2026-09-10; neither had a caller yet, which is how it hid).
+local getTeamPool, getPlayerPool
+local publishMetrics
 
 local STARTING_TEAM_AUTHORITY      = 500
 local EVENT_RING_SIZE              = 8
@@ -218,7 +230,7 @@ local ALLIED_LOS = { allied = true }
 local function setTeamPool(teamID, v)
     Spring.SetTeamRulesParam(teamID, 'authority_pool', v, ALLIED_LOS)
 end
-local function getTeamPool(teamID)
+function getTeamPool(teamID)
     return Spring.GetTeamRulesParam(teamID, 'authority_pool') or 0
 end
 local function playerTeam(playerID)
@@ -244,7 +256,7 @@ local function setPlayerPool(playerID, v)
     if not teamID then return end
     Spring.SetTeamRulesParam(teamID, pkey(playerID), v, ALLIED_LOS)
 end
-local function getPlayerPool(playerID)
+function getPlayerPool(playerID)
     local teamID = playerTeam(playerID)
     if not teamID then return 0 end
     return Spring.GetTeamRulesParam(teamID, pkey(playerID)) or 0
@@ -727,6 +739,75 @@ function GG.Authority.ChargeStandingOrder(playerID, teamID, orderType)
 end
 
 -- ============================================================
+-- Field engineering gate (manual §6/§12 — closes "convention, not a code
+-- gate"). Policy: authority/field_engineering.lua; data:
+-- LuaRules/Configs/field_engineering.lua. Two callins, one decision:
+--
+--   * AllowCommand on a BUILD order (cmdID < 0 — the Spring convention
+--     authority/classify.lua already relies on). Refusing here means the
+--     order is never queued and, because this gadget sits at layer -100 and
+--     the charging gate at +100 (see game_authority_charge.lua's r_ipairs
+--     proof), never billed: "a vetoed order is never charged" holds for this
+--     veto exactly as it does for squad.lua's.
+--   * AllowUnitCreation, the backstop, fired by Factory.cpp for factory
+--     output and by BuilderCAI.cpp for a placed building — it catches a
+--     build that reached the sim without an AllowCommand (a queue restored
+--     from a snapshot, a def whose buildoptions changed under a live
+--     factory). `Spring.CreateUnit` does NOT pass through it, which is what
+--     keeps transport arrivals, scenario staging and civilians unaffected.
+--
+-- Why this gadget and not a gadget of its own: LuaRules/main.lua loads
+-- gadgets from an allow-list, and the spend gate is already the one place
+-- that classifies every order a team may issue — the build class it prices
+-- at 3.0× is the class this vetoes. The modoption `battle_production` is the
+-- playtest escape hatch; it is read where the other modoptions are and
+-- published so the client can show it.
+-- ============================================================
+local battleProduction = false
+local vetoEchoed = {}   -- "<team>:<def>" -> true; one log line per pair, not per click
+
+local function publishBattleProduction()
+    Spring.SetGameRulesParam('battle_production', battleProduction and 1 or 0)
+end
+
+local function fieldEngineeringVerdict(unitDefID, teamID)
+    local ud = unitDefID and UnitDefs[unitDefID]
+    local def = ud and { name = ud.name, isBuilding = ud.isBuilding, customParams = ud.customParams }
+    local ok, why = FieldEng.verdict(FieldEngSpec, def, battleProduction)
+    if not ok then
+        local k = tostring(teamID) .. ':' .. tostring(def and def.name or unitDefID)
+        if not vetoEchoed[k] then
+            vetoEchoed[k] = true
+            Spring.Echo(string.format(
+                '[Authority] field engineering only: team %s may not build %s in battle (%s) — '
+                .. 'see LuaRules/Configs/field_engineering.lua; modoption battle_production=1 lifts this',
+                tostring(teamID), tostring(def and def.name or unitDefID), tostring(why)))
+        end
+    end
+    return ok, why
+end
+
+--- Exposed so tests and other gadgets (a HUD publisher, a scenario validator)
+--- can ask the same question the callins ask. Returns allow, reason.
+function GG.Authority.MayBuildInBattle(unitDefID, teamID)
+    return fieldEngineeringVerdict(unitDefID, teamID)
+end
+
+function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions,
+                              cmdTag, playerID, fromSynced, fromLua)
+    if not cmdID or cmdID >= 0 then return true end
+    local ok = fieldEngineeringVerdict(-cmdID, unitTeam)
+    return ok
+end
+
+function gadget:AllowUnitCreation(unitDefID, builderID, builderTeam, x, y, z, facing)
+    local ok = fieldEngineeringVerdict(unitDefID, builderTeam)
+    -- Second value: drop the order that asked for it — a refused build must
+    -- not sit at the head of a factory queue re-asking every frame.
+    return ok, true
+end
+
+-- ============================================================
 -- Lifecycle
 -- ============================================================
 
@@ -780,7 +861,9 @@ function gadget:Initialize()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
+    battleProduction = FieldEng.escapeFromModOption(mo.battle_production)
     publishCostScale()
+    publishBattleProduction()
 
     -- E1 load-time assert (§5): ceiling must be ≥ 2× the priciest single decision
     local econ  = CostSpec.economy
@@ -803,7 +886,9 @@ function gadget:GameStart()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
+    battleProduction = FieldEng.escapeFromModOption(mo.battle_production)
     publishCostScale()
+    publishBattleProduction()
 
     local gaia  = Spring.GetGaiaTeamID()
     for _, teamID in ipairs(Spring.GetTeamList()) do
@@ -888,6 +973,37 @@ function gadget:Load(state)
     Tick.load(ledgerPublishGate, state.ledgerPublishGate)
 end
 
+-- PLAN-economy-grid.md §3.1 (T3): the health metrics were computed every frame
+-- and read by nobody — `ExportMetrics` existed, nothing called it, and the
+-- headless dump can only see rulesParams. Published alongside the ledger
+-- counters on the same 30 s cadence, allied-visible like the pools: a team's
+-- own velocity is coordination information, an enemy's is not.
+local METRICS_LOS = { allied = true }
+local TYPICAL_ARMY_COST = 1000
+local CHEAPEST_ORDER_COST = 10
+
+publishMetrics = function()
+    local gaia = Spring.GetGaiaTeamID()
+    for _, teamID in ipairs(Spring.GetTeamList()) do
+        if teamID ~= gaia then
+            local totalPools = getTeamPool(teamID)
+            for _, playerID in ipairs(Spring.GetPlayerList(teamID)) do
+                totalPools = totalPools + getPlayerPool(playerID)
+            end
+            local mintRate, burnRate = Metrics.rates(metricsState, teamID)
+            Spring.SetTeamRulesParam(teamID, 'econ_velocity',
+                Metrics.velocity(metricsState, teamID), METRICS_LOS)
+            Spring.SetTeamRulesParam(teamID, 'econ_mint_rate', mintRate, METRICS_LOS)
+            Spring.SetTeamRulesParam(teamID, 'econ_burn_rate', burnRate, METRICS_LOS)
+            Spring.SetTeamRulesParam(teamID, 'econ_pool_ratio',
+                Metrics.poolRatio(totalPools, TYPICAL_ARMY_COST), METRICS_LOS)
+            Spring.SetTeamRulesParam(teamID, 'econ_dead_frames',
+                math.floor(Metrics.deadTimeMinutes(metricsState, teamID) * STIPEND_PERIOD_FRAMES),
+                METRICS_LOS)
+        end
+    end
+end
+
 function gadget:GameFrame(frame)
     -- Stipend distribution (§2)
     -- The gate is stepped unconditionally: short-circuiting it on `teamStipend`
@@ -929,19 +1045,29 @@ function gadget:GameFrame(frame)
             end
             -- Cheapest order = smallest posture cost (orderMod 0.25 × base_k × smallest unit base)
             -- For now, use a conservative estimate (10) — task 3 will pin the real constants
-            local cheapestCost = 10
-            Metrics.recordDeadFrame(metricsState, teamID, totalPools, cheapestCost)
+            Metrics.recordDeadFrame(metricsState, teamID, totalPools, CHEAPEST_ORDER_COST)
         end
     end
 
-    -- Overflow decay (§3.1, Lever 1): pools above ceiling decay toward it
+    -- Overflow decay (§3.1, Lever 1): pools above ceiling decay toward it.
+    --
+    -- `overflow_decay_pct` is PER MINUTE (the spec's "~2 %/min of the excess",
+    -- and what the manual §3 says out loud); `overflow_decay_period` is merely
+    -- how often the sweep runs. The first cut applied the whole percentage on
+    -- every period — 2 % per 30 s tick, i.e. ~4 %/min, double the documented
+    -- rate — so the per-tick fraction is derived from the two here. Pools stay
+    -- INTEGERS (§1 "values are integers"): the player's decayed pool is floored
+    -- and the exact remainder is what moves to the team, so nothing is lost to
+    -- rounding; the team's own overflow is likewise floored away.
     local econ = CostSpec.economy
     if econ and econ.soft_ceiling_C_base and econ.overflow_decay_period then
         local decayPeriods = Tick.count(decayGate, frame, econ.overflow_decay_period)
         if decayPeriods > 0 then
             -- Compounded over the elapsed periods: skipping the decay would
             -- hand a hoarding team free headroom for being on a busy server.
-            local decayFactor = (1 - (econ.overflow_decay_pct / 100)) ^ decayPeriods
+            local perPeriod = (econ.overflow_decay_pct / 100)
+                            * (econ.overflow_decay_period / STIPEND_PERIOD_FRAMES)
+            local decayFactor = (1 - perPeriod) ^ decayPeriods
             for _, teamID in ipairs(Spring.GetTeamList()) do
                 if teamID ~= gaia then
                     -- Player pools: decay to team pool first (§3.1: "use it or share it")
@@ -950,10 +1076,11 @@ function gadget:GameFrame(frame)
                         local ceiling = econ.soft_ceiling_C_base
                         if pool > ceiling then
                             local excess = pool - ceiling
-                            local decayed = ceiling + excess * decayFactor
-                            local overflowed = excess - (excess * decayFactor)
+                            local decayed = math.floor(ceiling + excess * decayFactor)
+                            local overflowed = pool - decayed
                             setPlayerPool(playerID, decayed)
                             setTeamPool(teamID, getTeamPool(teamID) + overflowed)
+                            Ledger.tagCharge(ledgerState, teamID, overflowed, 'overflow_share')
                         end
                     end
                     -- Team pool: decay to nothing (§3.1)
@@ -962,8 +1089,9 @@ function gadget:GameFrame(frame)
                     local teamPool = getTeamPool(teamID)
                     if teamPool > teamCeiling then
                         local excess = teamPool - teamCeiling
-                        local decayed = teamCeiling + excess * decayFactor
+                        local decayed = math.floor(teamCeiling + excess * decayFactor)
                         setTeamPool(teamID, decayed)
+                        Ledger.tagCharge(ledgerState, teamID, teamPool - decayed, 'overflow_decay')
                     end
                 end
             end
@@ -975,6 +1103,7 @@ function gadget:GameFrame(frame)
     -- planned scoreboard refresh)
     if Tick.due(ledgerPublishGate, frame) then
         Ledger.publish(ledgerState)
+        publishMetrics()
     end
 end
 

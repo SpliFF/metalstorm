@@ -27,6 +27,8 @@ describe("authority ledger", function()
         assert.are.equal('burn', Ledger.classify('build'))
         assert.are.equal('burn', Ledger.classify('posture'))
         assert.are.equal('burn', Ledger.classify('proposal_fee'))
+        assert.are.equal('burn', Ledger.classify('overflow_decay'))
+        assert.are.equal('move', Ledger.classify('overflow_share'))
 
         assert.are.equal('move', Ledger.classify('stake_escrow'))
         assert.are.equal('move', Ledger.classify('leaver_merge'))
