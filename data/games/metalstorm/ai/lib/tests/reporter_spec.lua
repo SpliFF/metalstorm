@@ -1,0 +1,51 @@
+-- lib/tests/reporter_spec.lua — run from data/games/metalstorm/ai.
+package.path = './?.lua;' .. package.path
+
+local Reporter = require('lib.reporter')
+local Actuator = require('lib.actuator')
+local FE       = require('lib.testing.fake_engine')
+local Wire     = require('lib.vendor.wire')
+
+describe("lib.reporter", function()
+    local fe
+    before_each(function() fe = FE.new({}):install() end)
+    after_each(function() FE.uninstall() end)
+
+    it("emits a greppable health line on the first tick and every Nth after", function()
+        local r = Reporter.new({ name = 'g', every = 3 })
+        assert.is_true(r:tick(10, { tier = 0, issued = 2 }))
+        assert.is_false(r:tick(20, { tier = 0 }))
+        assert.is_true(r:tick(30, { tier = 1, spent = 4.5 }))
+        assert.are.equal(2, #fe.log)
+        assert.are.equal('[g] health frame=10 issued=2 tick=1 tier=0', fe.log[1])
+        assert.are.equal('[g] health frame=30 spent=4.500 tick=3 tier=1', fe.log[2])
+        assert.are.equal(3, r:lastFields().tick)
+    end)
+
+    it("also sends the fields as an ai.health message when an actuator is given", function()
+        local act = Actuator.new({ name = 'g' })
+        act:beginTick(10, {})
+        local r = Reporter.new({ name = 'g', every = 1, actuator = act })
+        r:tick(10, { tier = 2 })
+        fe:drain()
+        assert.are.equal(1, #fe.messages)
+        local cmd, fields = Wire.decode(fe.messages[1].text)
+        assert.are.equal('ai.health', cmd)
+        assert.are.equal('2', fields.tier)
+        assert.are.equal('10', fields.frame)
+    end)
+
+    it("events always emit", function()
+        local r = Reporter.new({ name = 'g', every = 50 })
+        local line = r:event('withdraw', { region = 'north_ridge', ratio = 0.4 })
+        assert.are.equal('[g] withdraw ratio=0.400 region=north_ridge', line)
+        assert.are.equal(line, fe.log[#fe.log])
+    end)
+
+    it("never raises without an engine", function()
+        FE.uninstall()
+        local r = Reporter.new({ name = 'g' })
+        assert.is_true(r:tick(1, {}))
+        r:event('boot', {})
+    end)
+end)
