@@ -1,7 +1,13 @@
 # Lane 5 — ai-actuation review (2026-09-10)
 
 ## STATUS
-in-progress: main.lua parley/health/backoff landed; next = main.lua specs, guidance gadget `ai.health` publish + stale funding spec, caretaker fuse, docs.
+complete (wrapped early) — coordinator directive; see "Not done".
+
+## Not done
+- F13 caretaker timed fuse (`game_ai_caretaker.lua` `requested[team]` should hold a frame and re-arm after ~900 frames when `GG.Teams.AIPlayers(team)` is still empty; the spec mock needs `Spring.GetGameFrame`). Hand-back RULE is documented below and tested AI-side (`main_parley_spec.lua` "hand-back"), not gadget-side.
+- ROE (F10) and asset locks (F9): exposed in the Picture, proposals filed below; no core/engine consumer written.
+- `docs/ai-actuation.md` reference page not written; everything is in this report + code headers. README status paragraph in `ai/strategos/README.md` still says the parley verbs are stubs (not touched — merge hotspot with lane 4): coordinator may replace that sentence with "parley verbs LIVE over `AI.sendMessage` (2026-09-10)".
+- Originate-proposals policy in the pure core (`Planner.originateProposals`) — hook wired in main.lua, absent in planner (lane 4).
 
 Branch: `worktree-agent-ac31eaa93bc09c5f8` (cut from `main` 88d257bce2, merged main tip before work).
 Scope: `ai/strategos/{actuators,picture,main,wire,ai.config}.lua` + their specs; `game_ai_guidance.lua`, `game_ai_caretaker.lua`, `game_parley.lua` (AI-facing parts) + `parley/**` + their specs.
@@ -38,14 +44,35 @@ All names verified present with the exact spelling/shape in the producer.
 - 92ad089973 actuators.lua: real `respondProposal`/`propose`; deference rule; propose rate limit; `idleOnly` on the spec; health counters.
 - (this commit) main.lua: parley ledger + poll, originate hook, backoff, boot gate, `ai.health`.
 
+Status updates: F4/F8 FIXED 93d2b921b7 (+ spec a9ff4c2f5d); F7 FIXED 070c2de859; `ai.health` publish landed 070c2de859.
+
+## The rules this lane decided (design of record until overruled)
+**Parley deference (co-commander).** A pact binds the whole team (ROE veto on every unit, team-pool tribute, widened objective eligibility). A guidance-bound role (`role.readsGuidance`, i.e. co_commander = humans present) therefore never proposes and never answers — not even reject, which would start the 2 min E6 cooldown in the humans' name. It leaves the proposal pending and narrates the deferral once. Sole exception: ACCEPTING an `intel` offer (the proposer reveals, we owe nothing). Enforced structurally in `Actuators:respondProposal/:propose` (`parleyAuthority()`), not in the core. Bounded response: ≤ 150 frames after the proposal appears on the board (`PARLEY_POLL_FRAMES`) + the AI command drain, regardless of LOD/backoff.
+**Caretaker hand-back.** When a human rejoins: (1) `game_teams.lua` republishes `team_active_humans>0` and `SetOwnPoolOnly(ai,true)` in the same PlayerAdded; (2) the AI's next tick derives co_commander (idle-only, guidance-binding, own-pool, parley-deferring; deferred ledger reset), narrated `role -> co_commander`; (3) caretaker directives are mortal (2 tick periods ≤ 10 s at LOD 0) and are never re-stated under the new policy; (4) the human's first directive to a group touch-locks it 3 min (`game_ai_guidance.lua TouchGroup`). Pacts the caretaker made stay in force (synced team state). Engine gap: F5 — until P1 lands an AI directive still recruits non-idle units.
+
 ## Proposed C++ patches (UNCOMPILED — needs a build session)
-(see bottom of file; filled in as each is written)
+**P1 — honour `spec.idleOnly` (F5).** `rts/Server/AI/AICommandCodec.h`/`AICommandQueue.h`: add `bool idleOnly = false;` to `AICommand`. `AIScriptContext.cpp` `l_issueDirective`, after `expiresInFrames`: `lua_getfield(L, 2, "idleOnly"); cmd.idleOnly = lua_toboolean(L, -1) != 0; lua_pop(L, 1);`. `OrgGroups.h/.cpp` `AIDirectiveConditions(float withinX, float withinZ, float withinRadius, bool idleOnly)` → `conds.idleOnly = idleOnly;`. `StateStreamer.cpp:831`: pass `cmd.idleOnly`. `test_ai_runtime.cpp`: a co-commander spec with `idleOnly=true` must not recruit a unit with a non-empty queue.
+**P2 — retire `AI.issueCommand` (F6).** `AIScriptContext.cpp:325-326`: delete the two `l_issueCommand` registration lines (keep the function or delete it + `AICommandKind` per-unit drain in `StateStreamer::TickAI`). The manual's "strategic floor is structural" then holds engine-side. `tests/test_ai_runtime.cpp`: assert `AI.issueCommand == nil`.
+**P3 — LOS-filter game params in the snapshot (F11).** `AIStateSnapshot.cpp` `CopyRulesParams`: take the AI's allyTeam and skip entries whose `p.los` is not public / not readable by that allyteam (mirror `LuaRulesParams` mask semantics used by `LuaSyncedRead` GetGameRulesParams). No behaviour change today (all game params are PUBLIC), closes the "no cheating channel" comment.
 
 ## Out-of-lane findings
-(filled in below)
+- lane 4 `planner.lua:311` (F9): `guidance.assetLocks[pkg.id]` can never match (`'pkg:'..regionKey` vs group ids). Suggest: until AI2 squad views exist, treat a lock as "exclude the region containing the locked group" via a new Picture field the engine would have to supply (group→centroid), OR drop the dead lookup and document locks as synced-only (they are not enforced synced-side either — `game_authority_charge.lua` only records touch locks).
+- lane 4 `planner.lua` (F10): `guidance.roe` unread. Proposal: `observed_only` excludes ASSAULT/TAKE_AND_HOLD/SECURE goals outside regions we own or painted priority; `deny_area` restricts them to painted-priority regions; `free` = today. Report the exclusion reason like `veto`.
+- lane 4 `planner.lua evaluateOne`: ceasefire/safe_passage ignore relative strength; add `ledger` vs `intel` totals (reject standing down when we dominate ≥ 2:1, accept when ≤ 1:2) and a `counter` decision for tribute above `amount > trust*TRUST_VALUE_WEIGHT` (counter with the affordable amount; main.lua passes `r.extra` through).
+- lane 4 `planner.lua`: `Planner.originateProposals(picture, profile, role)` hook is wired (main.lua handleParley) but absent.
+- lane 11 `game_authority_charge.lua:151-163`: touch locks are recorded but nothing synced-side refuses an AI directive that recruits a locked group's units (relies on P1 + the planner).
+- ARCHITECTURE.md "Macro directives" hunk (coordinator, if wanted): "AI directives now state `idleOnly` on the spec; the engine ignores it until P1."
 
 ## Assumptions / decisions
-(filled in below)
+- Deference keys on `role.readsGuidance` (not the role id) so a future guidance-bound role inherits it; roles.lua is lane 4's, no field added.
+- `ai.health` is allied-LOS (a status label), unlike the private guidance store.
+- A demand's inner terms = the outer flat field set (F2/F12) — chosen over a second `inner_*` field family; both ends documented.
+- `idleOnly` is emitted on the spec today although the engine ignores it (documented at the call site).
+- Deferred proposals are left to EXPIRE if the humans never act (their decision by omission), not rejected.
 
 ## Next milestones
-(filled in below)
+1. Build session: P1 (idleOnly) — the real hand-back protection; then P2.
+2. lane 4: relative-strength + counter in `evaluateOne`, `originateProposals` (tribute-for-peace when losing, ceasefire when both bleeding), ROE exclusions.
+3. HUD/MCP: read `ai_health_<pid>_*` (an "AI status" drill-down chip; `get_game_state` tool field).
+4. Caretaker timed fuse (F13) + gadget-side hand-back spec.
+5. Live verification on the player path: a human offers a ceasefire to a headless full-side AI and sees the answer within 5 s; a co-commander leaves it pending.
