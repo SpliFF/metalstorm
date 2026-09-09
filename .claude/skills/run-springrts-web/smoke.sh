@@ -2,7 +2,7 @@
 # smoke.sh — bring up / verify the Spring RTS Web stack and prove the HTTP
 # plane is live. This is the lifecycle + server-smoke half of the run harness;
 # game launch + browser driving is done with the spring-debug / chrome-devtools
-# MCP tools (see SKILL.md "Run (agent path)").
+# MCP tools (see SKILL.md "Quick start").
 #
 # Usage:
 #   .claude/skills/run-springrts-web/smoke.sh          # verify (don't start)
