@@ -12,8 +12,12 @@ return {
 
     aggression    = 1.3,   -- opportunistic aggression toward weak neighbours
     confidence    = 1.1,
-    pSuccessFloor = 0.0,
+    pSuccessFloor = 0.5,
     opportunism   = 0.5,   -- indifferent to the team bounty economy
+    pressure      = 0.0,   -- an NPC's targets come from its script, never the frontier
+    deny          = 0.0,
+    garrisonFraction = 0.3,
+    withdrawRatio = 0.0,   -- a raider has no departure zone; it never withdraws
     doctrine      = 'raider',
 
     -- The scripted slate itself is the `npc` ROLE's (roles.lua binds
