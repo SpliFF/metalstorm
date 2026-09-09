@@ -1,7 +1,13 @@
 # world-screen lane — review report (2026-09-10)
 
 ## STATUS
-in-progress: screen rewrite written; running tsc, rewriting world-staging.test.ts, then pure-module tests.
+complete (wrapped early) — commit `0ab2df11eb`; client gate green (tsc 0 errors; vitest 186 files, 3785 passed, 1 skipped; baseline was 3770).
+
+## Not done
+- Dedicated unit-test files for `world-claims.ts` and `world-ledger.ts` (the modules are exercised through `world-staging.test.ts`'s POI panel and the screen's claims section, but `parseClaims` edge cases, `claimQueue` tie-break, `parseSeasonArchive` ordering, `parseFactionCatalogue`, `joinSideConflict` have no direct tests yet).
+- A `world-screen.test.ts` for the faction / ledger / alerts drawers (chip toggling, tabs, mark-read/clear-read, admin pause gating, `on('select')` / `poi-selected` / `attachMap` seam). The POI drawer, confirmations, countdown ticking and focus-deferral ARE covered.
+- The three out-of-lane hooks below (world-poi + world-season subscribers, `isAdmin` wiring) — proposals only.
+- Trimming the superseded `.world-*` block from lobby.css and the W2 inner markup from browser.html (both out of lane).
 
 ## Findings (ranked)
 
