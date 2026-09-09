@@ -58,6 +58,16 @@ function M.new()
         world.unitDefs[defID] = { customParams = { authority_cost_base = baseCost } }
     end
 
+    --- Register a unit DEF by id (the field-engineering gate classifies the
+    --- BUILDEE, which is a def, not a unit): `opts` = { name, isBuilding,
+    --- customParams }.
+    function world.setDef(defID, opts)
+        world.unitDefs[defID] = {
+            name = opts.name, isBuilding = opts.isBuilding == true,
+            customParams = opts.customParams or {},
+        }
+    end
+
     --- Register an org group's current roster for a team.
     function world.setOrgGroup(teamID, groupID, memberUnitIDs)
         world.orgGroups[teamID] = world.orgGroups[teamID] or {}
@@ -135,6 +145,7 @@ function M.new()
         end,
         GetUnitRulesParam = function(unitID, key) return world.urp(unitID, key) end,
         Log = function() end,
+        Echo = function() end,
     }
     _G.UnitDefs = world.unitDefs
     _G.LOG = { ERROR = 'ERROR', WARNING = 'WARNING' }
@@ -155,7 +166,33 @@ function M.new()
     _G.GG = {}
 
     dofile('./game_authority.lua')
+    -- game_authority.lua (layer -100) and game_authority_charge.lua (+100)
+    -- both define AllowCommand, and the real handler keeps them on SEPARATE
+    -- gadget tables and runs them lowest layer first. This mock shares one
+    -- table (every existing spec reaches GameStart/GameFrame and
+    -- AllowDirectiveCreate through the same handle), so the -100 callins are
+    -- captured here before the +100 file overwrites AllowCommand, and
+    -- `world.allowCommand` below replays the handler's order.
+    world.authorityCallins = {
+        AllowCommand = _G.gadget.AllowCommand,
+        AllowUnitCreation = _G.gadget.AllowUnitCreation,
+    }
     dofile('./game_authority_charge.lua')
+
+    --- The AllowCommand chain as gadgets.lua runs it: lowest layer first,
+    --- first veto wins. Returns the chain's verdict.
+    function world.allowCommand(...)
+        local g = _G.gadget
+        if world.authorityCallins.AllowCommand
+           and not world.authorityCallins.AllowCommand(g, ...) then
+            return false
+        end
+        return g.AllowCommand(g, ...)
+    end
+
+    function world.allowUnitCreation(...)
+        return world.authorityCallins.AllowUnitCreation(_G.gadget, ...)
+    end
 
     return world, _G.gadget
 end

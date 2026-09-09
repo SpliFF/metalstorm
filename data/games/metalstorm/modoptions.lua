@@ -55,6 +55,14 @@ return {
         section = 'objectives',
     },
     {
+        key     = 'battle_production',
+        name    = 'Battle production (playtest)',
+        desc    = 'Lift the field-engineering gate: factories may produce and any building may be placed in battle. OFF is the game (manual §6); ON is a playtest lever only. See LuaRules/Configs/field_engineering.lua.',
+        type    = 'bool',
+        def     = false,
+        section = 'world',
+    },
+    {
         key     = 'ai_caretaker',
         name    = 'Caretaker AI',
         desc    = 'When a side empties (its last human leaves), hand it to a caretaker AI so the world keeps ticking (PLAN-metalstorm-teams §4.5, PLAN-metalstorm-ai §5). Off = the side just idles, no AI takes over.',

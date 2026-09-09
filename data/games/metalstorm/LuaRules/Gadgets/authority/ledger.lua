@@ -45,6 +45,10 @@ local REASON_CLASS = {
     -- entry dead while the thing it names was being emitted under another name.
     proposal_fee     = 'burn',
     standing         = 'burn',   -- GG.Authority.ChargeStandingOrder
+    -- Soft-ceiling overflow (PLAN-metalstorm-economy.md §3 lever 1): the team
+    -- pool's excess above its ceiling is DESTROYED — the sink of last resort,
+    -- so a burn.
+    overflow_decay   = 'burn',
     -- endtoend D43 census: this is the reason the ORDINARY per-unit order path
     -- actually emits, and it was unmapped. `GG.Authority.ChargeOrder` tags with
     -- `Classify.orderClass(cmdID)`, whose default branch returns 'micro'.
@@ -81,6 +85,9 @@ local REASON_CLASS = {
     -- this table and was firing the unmapped warn on every funding attempt.
     ai_funding       = 'move',
     ai_allowance     = 'move',
+    -- A player pool's overflow above its ceiling moves to the TEAM pool ("use
+    -- it or share it") — pool-to-pool, net zero.
+    overflow_share   = 'move',
 }
 
 -- endtoend D13. game_objectives.lua's distributeAward does NOT send
