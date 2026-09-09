@@ -25,7 +25,7 @@ describe('parseWorldStagingEvent', () => {
         expect(ev).toEqual({
             world: 'earth', poi: 'randtown', poiName: 'Randtown', kind: 'opened',
             attackerFaction: 'iron-order', defenderFaction: 'dust-legion',
-            stagingId: 42, worldMs: 5_000_000, headline: 'Staging has opened at Randtown.',
+            stagingId: 42, claimId: 0, worldMs: 5_000_000, headline: 'Staging has opened at Randtown.',
         });
     });
 
@@ -46,7 +46,7 @@ describe('parseWorldStagingEvent', () => {
         const ev = parseWorldStagingEvent(JSON.stringify({ poi: 'randtown', kind: 'cancelled' }));
         expect(ev).toEqual({
             world: '', poi: 'randtown', poiName: 'randtown', kind: 'cancelled',
-            attackerFaction: '', defenderFaction: '', stagingId: 0, worldMs: 0, headline: '',
+            attackerFaction: '', defenderFaction: '', stagingId: 0, claimId: 0, worldMs: 0, headline: '',
         });
     });
 
@@ -69,14 +69,14 @@ describe('stagingNoticeClass', () => {
 describe('pushNotice', () => {
     const ev: WorldStagingNoticeEvent = {
         world: 'earth', poi: 'randtown', poiName: 'Randtown', kind: 'opened',
-        attackerFaction: 'iron-order', defenderFaction: '', stagingId: 1, worldMs: 1000,
+        attackerFaction: 'iron-order', defenderFaction: '', stagingId: 1, claimId: 0, worldMs: 1000,
         headline: 'Staging has opened at Randtown.',
     };
 
     it('prepends the new notice, newest first', () => {
         const list = pushNotice([], ev, 1, 5000);
         expect(list).toHaveLength(1);
-        expect(list[0]).toEqual({ ...ev, id: 1, receivedAt: 5000 });
+        expect(list[0]).toEqual({ ...ev, id: 1, receivedAt: 5000, read: false });
     });
 
     it('does not mutate the list handed in', () => {
