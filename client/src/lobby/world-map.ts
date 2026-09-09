@@ -28,7 +28,24 @@
  * Everything else (zoom at the cursor, drag, clamping, hit-testing) is that
  * one line solved for a different unknown, which is why they cannot drift
  * apart.
+ *
+ * ── Layers (review sweep 2026-09-10) ───────────────────────────────────────
+ * The strategic map is drawn bottom-up: basemap → territory halos → transit
+ * edges → markers (glyph by kind, fill by owner/state, rings by war state,
+ * pennants for claims, a star for the viewer's commanders) → labels. Each
+ * layer is a boolean in `WorldLayers` so the screen can thin the picture
+ * (drill-down: summary first) without this module knowing why. The DOM half
+ * — pointer/keyboard handling, the hover chip, the legend, animated focus —
+ * is `world-map-controller.ts`; nothing here touches the DOM.
  */
+
+import {
+    assignFactionColours, withAlpha,
+} from './world-map-palette.js';
+import {
+    glyphKindFor, glyphRadiusScale, traceGlyph, traceClaimFlag, traceCommanderStar,
+    type GlyphKind,
+} from './world-map-glyphs.js';
 
 /// Map space. Height 1, width 2 — the aspect the basemap must have.
 export const MAP_HEIGHT = 1;
@@ -39,6 +56,56 @@ export const MAP_WIDTH = 2;
 /// full zoom, i.e. blurry but still recognisable — past that the image adds
 /// nothing and the POI graph is the only thing left worth looking at.
 export const MAX_ZOOM_FACTOR = 16;
+
+/// The drawable layers. Every one defaults ON except `graticule` (the grid
+/// is the no-basemap fallback, not decoration over a photograph) and
+/// `safeColours` (which REPLACES faction-chosen colours with the
+/// colour-blind-safe palette — an accessibility switch, not a default).
+export interface WorldLayers {
+    basemap: boolean;
+    graticule: boolean;
+    territory: boolean;
+    edges: boolean;
+    /// Thickness/brightness cue from transit time (short = bold). Off, every
+    /// edge is one weight.
+    edgeWeights: boolean;
+    markers: boolean;
+    labels: boolean;
+    /// The expanding rings on staging/active POIs. Needs `timeMs` in
+    /// `DrawOptions` to animate; without it the static ring still draws.
+    pulses: boolean;
+    claims: boolean;
+    viewer: boolean;
+    safeColours: boolean;
+}
+
+export const DEFAULT_LAYERS: Readonly<WorldLayers> = Object.freeze({
+    basemap: true, graticule: false, territory: true, edges: true, edgeWeights: true,
+    markers: true, labels: true, pulses: true, claims: true, viewer: true, safeColours: false,
+});
+
+export function resolveLayers(partial?: Partial<WorldLayers> | null): WorldLayers {
+    return { ...DEFAULT_LAYERS, ...(partial ?? {}) };
+}
+
+/// Who is looking at the map: their world faction (from `/api/world/me`'s
+/// `membership.factionId` / `rank.factionId`) and where their commanders
+/// stand. Both optional — a spectator sees a map with no "you" on it.
+export interface WorldViewer {
+    factionId: string | null;
+    commanderPoiIds: string[];
+}
+
+/// One open conquest claim, as `GET /api/world/claims` carries it
+/// (WorldConquest::ClaimJson). Only OPEN claims are ever drawn — a resolved
+/// claim is history, and the POI's `owner` already says how it ended.
+export interface WorldClaim {
+    claimId: number;
+    poiId: string;
+    factionId: string;
+    state: string;
+    filedAtWorldMs: number;
+}
 
 /// One node of the world graph, as `GET /api/world/pois` carries it
 /// (WorldDirector::WorldPoisJson).
@@ -256,6 +323,52 @@ export function wheelZoomFactor(deltaY: number): number {
     return Math.exp(-deltaY / 400);
 }
 
+/// The view that puts map point `p` at the centre of the canvas at `scale`,
+/// clamped. `focus()` and keyboard navigation are both this.
+export function viewCentredOn(p: MapPoint, scale: number, viewport: Viewport): MapView {
+    return clampView({
+        scale,
+        offsetX: viewport.width / 2 - p.x * scale,
+        offsetY: viewport.height / 2 - p.y * scale,
+    }, viewport);
+}
+
+/// Where a click on a POI travels to: the POI centred, `zoomFactor` × the
+/// fit scale (clamped to the zoom rules). Four times fit is "a continent",
+/// which is the right amount of context for one place — the marker is big
+/// enough to read and its neighbours are still on screen.
+export function focusView(
+    poi: { lat: number; lon: number }, viewport: Viewport, zoomFactor = 4,
+): MapView {
+    const scale = fitScale(viewport) * Math.max(1, Math.min(MAX_ZOOM_FACTOR, zoomFactor));
+    return viewCentredOn(mapFromLatLon(poi.lat, poi.lon), scale, viewport);
+}
+
+/// Smooth-step easing for camera travel. Symmetric, so a reversed flight
+/// looks like the same flight played backwards.
+export function easeInOut(t: number): number {
+    const x = Math.max(0, Math.min(1, t));
+    return x * x * (3 - 2 * x);
+}
+
+/**
+ * The view `t` of the way from `a` to `b`. Scale interpolates geometrically
+ * (a zoom is a ratio, and a linear blend of 480 and 7680 spends most of the
+ * flight nearly arrived), the CENTRE map point interpolates linearly, and
+ * the offset is solved from those two — so at t = 1 this is exactly `b`
+ * and at no intermediate frame does the map jump.
+ */
+export function interpolateView(a: MapView, b: MapView, t: number, viewport: Viewport): MapView {
+    const x = Math.max(0, Math.min(1, t));
+    if (x <= 0) return a;
+    if (x >= 1) return b;
+    const scale = a.scale * Math.pow(b.scale / a.scale, x);
+    const cx = viewport.width / 2, cy = viewport.height / 2;
+    const ca = screenToMap(cx, cy, a), cb = screenToMap(cx, cy, b);
+    const c = { x: ca.x + (cb.x - ca.x) * x, y: ca.y + (cb.y - ca.y) * x };
+    return clampView({ scale, offsetX: cx - c.x * scale, offsetY: cy - c.y * scale }, viewport);
+}
+
 // ─────────────────────────── the graph ───────────────────────────
 
 /// Parse `GET /api/world/pois`, dropping anything unusable rather than
@@ -360,6 +473,253 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
     return {
         worldId: typeof raw.worldId === 'string' ? raw.worldId : '',
         pois, edges, factions,
+    };
+}
+
+/// Parse `GET /api/world/claims`, keeping only OPEN claims with a usable id,
+/// POI and faction. Same posture as `parseWorldGraph`: a malformed row is
+/// dropped, never defaulted — a pennant on the wrong POI is a lie about who
+/// is about to take it.
+export function parseWorldClaims(json: unknown): WorldClaim[] {
+    if (!json || typeof json !== 'object') return [];
+    const raw = (json as Record<string, unknown>).claims;
+    if (!Array.isArray(raw)) return [];
+    const out: WorldClaim[] = [];
+    for (const item of raw as Record<string, unknown>[]) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.state !== 'open') continue;
+        const id = Number(item.claimId);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        if (typeof item.poi !== 'string' || !item.poi) continue;
+        if (typeof item.faction !== 'string' || !item.faction) continue;
+        out.push({
+            claimId: id,
+            poiId: item.poi,
+            factionId: item.faction,
+            state: 'open',
+            filedAtWorldMs: typeof item.filedAtWorldMs === 'number' && Number.isFinite(item.filedAtWorldMs)
+                ? item.filedAtWorldMs : 0,
+        });
+    }
+    return out;
+}
+
+/// Per-graph derived data, computed once per graph object rather than per
+/// frame: the id index, the transit-time range for the weight cue, and the
+/// two colour maps. Keyed weakly on the graph, so a fresh fetch (a new
+/// object) recomputes and the old one is collected with its graph.
+interface GraphIndex {
+    byId: Map<string, WorldPoi>;
+    edgeMinMs: number;
+    edgeMaxMs: number;
+    colours: Record<string, string>;
+    safeColours: Record<string, string>;
+}
+
+const INDEX = new WeakMap<WorldGraph, GraphIndex>();
+
+export function graphIndex(graph: WorldGraph): GraphIndex {
+    let idx = INDEX.get(graph);
+    if (idx) return idx;
+    const byId = new Map(graph.pois.map(p => [p.id, p]));
+    let edgeMinMs = Infinity, edgeMaxMs = -Infinity;
+    for (const e of graph.edges) {
+        if (e.transitWorldMs > 0) {
+            edgeMinMs = Math.min(edgeMinMs, e.transitWorldMs);
+            edgeMaxMs = Math.max(edgeMaxMs, e.transitWorldMs);
+        }
+    }
+    if (!Number.isFinite(edgeMinMs)) { edgeMinMs = 0; edgeMaxMs = 0; }
+    idx = {
+        byId, edgeMinMs, edgeMaxMs,
+        colours: factionColours(graph, false),
+        safeColours: factionColours(graph, true),
+    };
+    INDEX.set(graph, idx);
+    return idx;
+}
+
+/// Every faction id the map can be asked to colour: the badge list, plus
+/// any owner or attacker the badges have never heard of.
+function factionIdsIn(graph: WorldGraph): Set<string> {
+    const ids = new Set<string>(Object.keys(graph.factions));
+    for (const p of graph.pois) {
+        if (p.owner) ids.add(p.owner);
+        for (const s of p.staging) ids.add(s.attackerFaction);
+    }
+    return ids;
+}
+
+/**
+ * id → `#rrggbb` for every faction the graph mentions. With `safe` false a
+ * faction's own validated badge colour wins and only the colourless (no
+ * badge, or a badge that failed validation) draw from the palette; with
+ * `safe` true everybody draws from the palette, so two factions that both
+ * chose red are told apart. Palette slots are assigned over the WHOLE set
+ * either way, so a palette colour never collides with another palette
+ * colour on the same map (it can still resemble a badge colour — the halo,
+ * glyph and name carry the rest).
+ */
+export function factionColours(graph: WorldGraph, safe = false): Record<string, string> {
+    const ids = factionIdsIn(graph);
+    const assigned = assignFactionColours(ids);
+    const out: Record<string, string> = {};
+    for (const id of ids) {
+        const badge = graph.factions[id]?.colour;
+        out[id] = (!safe && badge) ? badge : assigned[id];
+    }
+    return out;
+}
+
+/// The colour for a faction id on this graph, honouring the safe-colours
+/// switch. Unknown ids (a claim by a faction the graph does not list) hash
+/// into the palette on their own.
+export function factionColour(id: string, graph: WorldGraph, safe = false): string {
+    const idx = graphIndex(graph);
+    const map = safe ? idx.safeColours : idx.colours;
+    return map[id] ?? assignFactionColours([id])[id];
+}
+
+/**
+ * The screen-space segments of one edge, given both endpoints in MAP space.
+ * Usually one segment. When the two ends are more than half the world apart
+ * the short way round crosses the antimeridian, and a plate carrée has no
+ * wrap — so the edge is drawn as two pieces, one leaving each side of the
+ * map at the same latitude it re-enters on the other. Without this a route
+ * Honolulu→Tokyo is painted the long way round through Africa, which on a
+ * strategic map is a wrong fact about transit, not a cosmetic slip.
+ */
+export function edgeSegments(a: MapPoint, b: MapPoint): [MapPoint, MapPoint][] {
+    const dx = b.x - a.x;
+    if (Math.abs(dx) <= MAP_WIDTH / 2) return [[a, b]];
+    // Order so `left` is the west endpoint; the short path goes left off
+    // x=0 from `left` and right off x=MAP_WIDTH from `right`.
+    const [left, right] = a.x < b.x ? [a, b] : [b, a];
+    const virtualRight = { x: right.x - MAP_WIDTH, y: right.y };   // right, shifted one world west
+    const span = left.x - virtualRight.x;                           // > 0, < MAP_WIDTH / 2
+    const t = span > 0 ? left.x / span : 0;                         // where the line hits x = 0
+    const yc = left.y + (virtualRight.y - left.y) * t;
+    return [
+        [left, { x: 0, y: yc }],
+        [{ x: MAP_WIDTH, y: yc }, right],
+    ];
+}
+
+/// Line width and alpha for an edge from its transit time, on a log scale
+/// between the graph's fastest and slowest link: the fastest route is the
+/// boldest. A graph with one edge weight (or none) draws everything at the
+/// middle weight rather than at an extreme.
+export function edgeWeightCue(
+    transitWorldMs: number, minMs: number, maxMs: number,
+): { width: number; alpha: number } {
+    if (!(transitWorldMs > 0) || !(maxMs > minMs) || !(minMs > 0)) return { width: 1.5, alpha: 0.5 };
+    const lo = Math.log(minMs), hi = Math.log(maxMs);
+    const u = Math.max(0, Math.min(1, (Math.log(transitWorldMs) - lo) / (hi - lo)));   // 0 fast … 1 slow
+    return { width: 2.5 - 1.5 * u, alpha: 0.75 - 0.45 * u };
+}
+
+/// Zoom factor (× fit) above which every POI carries its label. Relative to
+/// fit rather than an absolute pixels-per-map-unit: on a 4K canvas the fit
+/// scale alone passes any absolute threshold and the whole world labels at
+/// once, which is the wall of text the threshold exists to prevent.
+export const LABEL_ZOOM_FACTOR = 2;
+
+export function labelsVisible(view: MapView, viewport: Viewport): boolean {
+    return view.scale >= fitScale(viewport) * LABEL_ZOOM_FACTOR;
+}
+
+/// A candidate label box in screen pixels. `priority` is higher for the
+/// labels that must survive (selected, hovered, at war).
+export interface LabelBox { x: number; y: number; w: number; h: number; priority: number }
+
+/// Greedy placement: highest priority first, and a box that overlaps one
+/// already placed is dropped. Returns the indices into `boxes` to draw, in
+/// placement order. O(n²) over tens of POIs, which is nothing.
+export function placeLabels(boxes: readonly LabelBox[]): number[] {
+    const order = boxes.map((_, i) => i).sort((i, j) =>
+        boxes[j].priority - boxes[i].priority || i - j);
+    const placed: number[] = [];
+    for (const i of order) {
+        const b = boxes[i];
+        let clear = true;
+        for (const j of placed) {
+            const o = boxes[j];
+            if (b.x < o.x + o.w && b.x + b.w > o.x && b.y < o.y + o.h && b.y + b.h > o.y) {
+                clear = false;
+                break;
+            }
+        }
+        if (clear) placed.push(i);
+    }
+    return placed;
+}
+
+/// 0 → 1 → 0-again phase of a pulse with period `periodMs`. Pure in
+/// `timeMs`, so two markers with the same status beat together and a test
+/// can pick the frame.
+export function pulsePhase(timeMs: number, periodMs: number): number {
+    if (!(periodMs > 0) || !Number.isFinite(timeMs)) return 0;
+    const t = ((timeMs % periodMs) + periodMs) % periodMs;
+    return t / periodMs;
+}
+
+/// The hover chip's contents: name, owner, state, and ONE number — the one
+/// that matters for the POI's state. Pure so the chip's text can be tested
+/// without a DOM, and so a panel can show the same line the chip does.
+export interface PoiSummary {
+    id: string;
+    name: string;
+    kind: GlyphKind;
+    kindLabel: string;
+    owner: { id: string; name: string; colour: string } | null;
+    state: WorldPoi['battleStatus'];
+    stateLabel: string;
+    stat: { label: string; value: string };
+    /// Held by the viewer's faction.
+    mine: boolean;
+    /// One of the viewer's commanders stands here.
+    hasCommander: boolean;
+    /// Open claims on this POI.
+    claims: number;
+}
+
+export function poiSummary(
+    poi: WorldPoi, graph: WorldGraph, viewer?: WorldViewer | null,
+    claims?: readonly WorldClaim[] | null, safeColours = false,
+): PoiSummary {
+    const kind = glyphKindFor(poi);
+    const owner = poi.owner ? {
+        id: poi.owner,
+        name: graph.factions[poi.owner]?.name ?? poi.owner,
+        colour: factionColour(poi.owner, graph, safeColours),
+    } : null;
+    let stat: PoiSummary['stat'];
+    if (poi.battleStatus === 'active') {
+        stat = { label: 'Battle room', value: poi.warRoomId !== null ? `#${poi.warRoomId}` : '—' };
+    } else if (poi.battleStatus === 'staging') {
+        // The soonest window, in WORLD time: the number the defender is
+        // counting down and the attacker is racing.
+        const soonest = poi.staging.reduce((m, s) => Math.min(m, s.remainingWorldMs), Infinity);
+        stat = { label: 'Lands in', value: Number.isFinite(soonest) ? formatWorldDuration(soonest) : '—' };
+    } else {
+        const links = edgesFor(graph.edges, poi.id).length;
+        stat = { label: 'Transit links', value: String(links) };
+    }
+    const claimCount = claims ? claims.reduce((n, c) => n + (c.poiId === poi.id ? 1 : 0), 0) : 0;
+    return {
+        id: poi.id,
+        name: poi.name,
+        kind,
+        kindLabel: poi.kind || (poi.mapId ? 'battleground' : 'region'),
+        owner,
+        state: poi.battleStatus,
+        stateLabel: poi.battleStatus === 'active' ? 'Battle in progress'
+            : poi.battleStatus === 'staging' ? 'War staging'
+            : poi.mapId ? 'Quiet' : 'World only',
+        stat,
+        mine: !!viewer?.factionId && poi.owner === viewer.factionId,
+        hasCommander: !!viewer && viewer.commanderPoiIds.includes(poi.id),
+        claims: claimCount,
     };
 }
 
@@ -498,6 +858,9 @@ export const WORLD_COLORS = {
     graticuleMajor: 'rgba(120, 170, 220, 0.35)',
     edge: 'rgba(120, 200, 255, 0.45)',
     edgeOneWay: 'rgba(255, 190, 120, 0.55)',
+    /// The edge hue the weight cue modulates, as [r, g, b].
+    edgeRgb: [120, 200, 255] as const,
+    edgeOneWayRgb: [255, 190, 120] as const,
     poi: '#8ad2ff',
     poiPlayable: '#ffd479',
     /// PLAN-worldsim.md W5's other two marker states. Staging keeps the
@@ -507,22 +870,27 @@ export const WORLD_COLORS = {
     /// uses, so a live battle is never mistaken for a plain POI colour.
     poiStaging: '#ffd479',
     poiStagingRing: 'rgba(255, 212, 121, 0.85)',
+    poiStagingRgb: [255, 212, 121] as const,
     poiActive: '#ff5c5c',
     poiActiveRing: 'rgba(255, 92, 92, 0.85)',
-    /// PLAN-worldsim.md W7: an owned POI whose faction sent no usable colour.
-    /// Distinct from `poi` so "held by somebody" still reads differently from
-    /// "unclaimed" when the colour is missing.
-    poiOwnedFallback: '#b39ddb',
+    poiActiveRgb: [255, 92, 92] as const,
+    poiOutline: 'rgba(0, 0, 0, 0.55)',
     poiHover: '#ffffff',
     poiSelected: '#ffffff',
     poiLabel: 'rgba(233, 242, 250, 0.92)',
     poiLabelShadow: 'rgba(0, 0, 0, 0.85)',
+    /// The viewer's own things: the commander star and the "yours" dot.
+    viewer: '#ffffff',
+    viewerOutline: 'rgba(0, 0, 0, 0.7)',
+    claimOutline: 'rgba(0, 0, 0, 0.7)',
 } as const;
 
 /// The subset of CanvasRenderingContext2D this module uses. Stated as an
 /// interface so the drawing can be exercised against a recording double in
 /// vitest without a real canvas — the screenshot proves it LOOKS right, this
-/// proves it is called at all.
+/// proves it is called at all. `measureText` and `createRadialGradient` are
+/// optional: without them labels are placed on an estimated width and halos
+/// are flat discs, which is what the recording double gets.
 export type WorldCtx = Pick<CanvasRenderingContext2D,
     'save' | 'restore' | 'beginPath' | 'moveTo' | 'lineTo' | 'arc' | 'fill' | 'stroke' |
     'fillRect' | 'fillText' | 'drawImage' | 'setLineDash' | 'closePath'> & {
@@ -534,6 +902,8 @@ export type WorldCtx = Pick<CanvasRenderingContext2D,
     textBaseline: CanvasTextBaseline;
     shadowColor: string;
     shadowBlur: number;
+    measureText?(text: string): { width: number };
+    createRadialGradient?(x0: number, y0: number, r0: number, x1: number, y1: number, r1: number): CanvasGradient;
 };
 
 export interface DrawOptions {
@@ -546,27 +916,59 @@ export interface DrawOptions {
     basemap: CanvasImageSource | null;
     hoveredId?: string | null;
     selectedId?: string | null;
+    layers?: Partial<WorldLayers> | null;
+    /// Animation clock for the pulses (any monotonic ms, e.g.
+    /// `performance.now()`). Omit for a static frame.
+    timeMs?: number;
+    viewer?: WorldViewer | null;
+    claims?: readonly WorldClaim[] | null;
 }
+
+/// Marker radius by state. Selected/hovered grow so the change is felt.
+export function markerRadius(selected: boolean, hovered: boolean): number {
+    return selected ? 7 : hovered ? 6 : 4.5;
+}
+
+/// Territory halo radius in screen px: grows with the square root of the
+/// zoom so it reads as "an area" at every zoom without swallowing the
+/// continent at fit or the marker at 16×.
+export function haloRadius(view: MapView, viewport: Viewport): number {
+    const zoom = Math.max(1, view.scale / fitScale(viewport));
+    return Math.max(14, Math.min(60, 14 * Math.sqrt(zoom)));
+}
+
+/// Pulse periods. Active beats faster than staging: a fight in progress is
+/// the more urgent fact.
+export const PULSE_PERIOD_MS = { active: 1200, staging: 2000 } as const;
 
 /// Repaint the whole canvas. Cheap enough to do on every pointer move: a world
 /// is tens of POIs, not the thousands of units the battle renderer deals with,
 /// so there is no dirty-rect machinery here and should not be.
 export function drawWorld(ctx: WorldCtx, opts: DrawOptions): void {
     const { view, viewport, graph } = opts;
+    const layers = resolveLayers(opts.layers);
+    const idx = graphIndex(graph);
+    const colours = layers.safeColours ? idx.safeColours : idx.colours;
     ctx.save();
     ctx.fillStyle = WORLD_COLORS.ocean;
     ctx.fillRect(0, 0, viewport.width, viewport.height);
 
     const w = MAP_WIDTH * view.scale;
     const h = MAP_HEIGHT * view.scale;
-    if (opts.basemap) {
+    if (opts.basemap && layers.basemap) {
         ctx.drawImage(opts.basemap, view.offsetX, view.offsetY, w, h);
+        if (layers.graticule) drawGraticule(ctx, view);
     } else {
         drawGraticule(ctx, view);
     }
 
-    drawEdges(ctx, graph, view);
-    drawPois(ctx, graph, view, opts.hoveredId ?? null, opts.selectedId ?? null);
+    if (layers.territory) drawTerritory(ctx, graph, view, viewport, colours);
+    if (layers.edges) drawEdges(ctx, graph, idx, view, layers.edgeWeights);
+    if (layers.markers) {
+        drawPois(ctx, graph, view, viewport, layers, colours,
+            opts.hoveredId ?? null, opts.selectedId ?? null,
+            opts.timeMs, opts.viewer ?? null, opts.claims ?? null);
+    }
     ctx.restore();
 }
 
@@ -597,20 +999,58 @@ function drawGraticule(ctx: WorldCtx, view: MapView): void {
     }
 }
 
-function drawEdges(ctx: WorldCtx, graph: WorldGraph, view: MapView): void {
-    const byId = new Map(graph.pois.map(p => [p.id, p]));
+/// Territory: a soft halo in the owner's colour under every held POI. A
+/// gradient when the context can make one, a flat translucent disc when it
+/// cannot. Drawn UNDER the edges so a route is never hidden by a holding.
+function drawTerritory(
+    ctx: WorldCtx, graph: WorldGraph, view: MapView, viewport: Viewport,
+    colours: Record<string, string>,
+): void {
+    const r = haloRadius(view, viewport);
+    for (const poi of graph.pois) {
+        if (!poi.owner) continue;
+        const colour = colours[poi.owner];
+        if (!colour) continue;
+        const s = poiToScreen(poi, view);
+        if (ctx.createRadialGradient) {
+            const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r);
+            g.addColorStop(0, withAlpha(colour, 0.32));
+            g.addColorStop(0.7, withAlpha(colour, 0.14));
+            g.addColorStop(1, withAlpha(colour, 0));
+            ctx.fillStyle = g;
+        } else {
+            ctx.fillStyle = withAlpha(colour, 0.16);
+        }
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawEdges(
+    ctx: WorldCtx, graph: WorldGraph, idx: GraphIndex, view: MapView, weights: boolean,
+): void {
     for (const e of graph.edges) {
-        const a = byId.get(e.from), b = byId.get(e.to);
+        const a = idx.byId.get(e.from), b = idx.byId.get(e.to);
         if (!a || !b) continue;
-        const pa = poiToScreen(a, view), pb = poiToScreen(b, view);
-        ctx.strokeStyle = e.bidirectional ? WORLD_COLORS.edge : WORLD_COLORS.edgeOneWay;
-        ctx.lineWidth = 1.5;
+        const rgb = e.bidirectional ? WORLD_COLORS.edgeRgb : WORLD_COLORS.edgeOneWayRgb;
+        if (weights) {
+            const cue = edgeWeightCue(e.transitWorldMs, idx.edgeMinMs, idx.edgeMaxMs);
+            ctx.strokeStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${cue.alpha.toFixed(3)})`;
+            ctx.lineWidth = cue.width;
+        } else {
+            ctx.strokeStyle = e.bidirectional ? WORLD_COLORS.edge : WORLD_COLORS.edgeOneWay;
+            ctx.lineWidth = 1.5;
+        }
         // A one-way edge is dashed rather than arrow-headed: at world zoom an
         // arrowhead is three pixels and reads as noise on the line.
         ctx.setLineDash(e.bidirectional ? [] : [6, 4]);
         ctx.beginPath();
-        ctx.moveTo(pa.x, pa.y);
-        ctx.lineTo(pb.x, pb.y);
+        for (const [p, q] of edgeSegments(mapFromLatLon(a.lat, a.lon), mapFromLatLon(b.lat, b.lon))) {
+            const pa = mapToScreen(p, view), pb = mapToScreen(q, view);
+            ctx.moveTo(pa.x, pa.y);
+            ctx.lineTo(pb.x, pb.y);
+        }
         ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -619,27 +1059,58 @@ function drawEdges(ctx: WorldCtx, graph: WorldGraph, view: MapView): void {
 /// The colour a POI should be painted in on behalf of its owner, or null when
 /// it is unowned. An owner id the `factions` map has never heard of (a faction
 /// dissolved between the two halves of one response, or a lobby that predates
-/// W7) still counts as OWNED — it falls back to a neutral held colour rather
-/// than rendering as unclaimed, because "somebody holds this" is the fact the
-/// player is reading and the id is proof of it.
-export function poiOwnerColour(poi: WorldPoi, graph: WorldGraph): string | null {
+/// W7) still counts as OWNED — it gets a palette colour derived from its id
+/// rather than rendering as unclaimed, because "somebody holds this" is the
+/// fact the player is reading and the id is proof of it.
+export function poiOwnerColour(poi: WorldPoi, graph: WorldGraph, safeColours = false): string | null {
     if (!poi.owner) return null;
-    const badge = graph.factions[poi.owner];
-    return badge?.colour || WORLD_COLORS.poiOwnedFallback;
+    return factionColour(poi.owner, graph, safeColours);
+}
+
+/// Label priority: what survives when labels collide.
+function labelPriority(poi: WorldPoi, selected: boolean, hovered: boolean): number {
+    if (selected) return 100;
+    if (hovered) return 90;
+    if (poi.battleStatus === 'active') return 80;
+    if (poi.battleStatus === 'staging') return 70;
+    if (poi.owner) return 40;
+    if (poi.mapId) return 30;
+    return 10;
+}
+
+const LABEL_FONT_PX = 12;
+const LABEL_FONT = `${LABEL_FONT_PX}px system-ui, sans-serif`;
+
+function labelWidth(ctx: WorldCtx, text: string): number {
+    if (ctx.measureText) return ctx.measureText(text).width;
+    return text.length * LABEL_FONT_PX * 0.56;
 }
 
 function drawPois(
-    ctx: WorldCtx, graph: WorldGraph, view: MapView,
+    ctx: WorldCtx, graph: WorldGraph, view: MapView, viewport: Viewport,
+    layers: WorldLayers, colours: Record<string, string>,
     hoveredId: string | null, selectedId: string | null,
+    timeMs: number | undefined, viewer: WorldViewer | null,
+    claims: readonly WorldClaim[] | null,
 ): void {
-    ctx.font = '12px system-ui, sans-serif';
+    ctx.font = LABEL_FONT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
+    const allLabels = labelsVisible(view, viewport);
+    const boxes: LabelBox[] = [];
+    const labelPois: WorldPoi[] = [];
+    const labelX: number[] = [];
+    const labelY: number[] = [];
+    const commanderAt = layers.viewer && viewer ? new Set(viewer.commanderPoiIds) : null;
+    const mine = layers.viewer && viewer?.factionId ? viewer.factionId : null;
+
     for (const poi of graph.pois) {
         const s = poiToScreen(poi, view);
         const selected = poi.id === selectedId;
         const hovered = poi.id === hoveredId;
-        const r = selected ? 7 : hovered ? 6 : 4.5;
+        const kind = glyphKindFor(poi);
+        const r = markerRadius(selected, hovered) * glyphRadiusScale(kind);
+        const ownerColour = poi.owner ? colours[poi.owner] ?? null : null;
         // A POI that stages a battle map is a place you can be sent to; one
         // that does not is scenery with a name. Two colours, because that
         // distinction is the first question a player asks of a marker — with
@@ -649,25 +1120,50 @@ function drawPois(
         // the more urgent fact, and it is the ring that carries the owner's
         // colour in that case (below).
         ctx.fillStyle = poi.battleStatus === 'active' ? WORLD_COLORS.poiActive
-            : poiOwnerColour(poi, graph) ?? (poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi);
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+            : ownerColour ?? (poi.mapId ? WORLD_COLORS.poiPlayable : WORLD_COLORS.poi);
+        traceGlyph(ctx, kind, s.x, s.y, r);
         ctx.fill();
+        // A dark outline so a light marker survives a light basemap (ice,
+        // desert) — and the hover outline replaces it in white.
+        ctx.strokeStyle = hovered ? WORLD_COLORS.poiHover : WORLD_COLORS.poiOutline;
+        ctx.lineWidth = hovered ? 1.5 : 1;
+        ctx.stroke();
+
+        // "Yours": a small inner dot on a POI the viewer's faction holds.
+        if (mine && poi.owner === mine && poi.battleStatus !== 'active') {
+            ctx.fillStyle = WORLD_COLORS.viewer;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, Math.max(1.2, r * 0.32), 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         // A live or gathering war gets its own ring, independent of
         // hover/select — the battle marker must read at a glance without the
         // player's cursor anywhere near it.
         if (poi.battleStatus !== 'quiet') {
-            ctx.strokeStyle = poi.battleStatus === 'active'
-                ? WORLD_COLORS.poiActiveRing : WORLD_COLORS.poiStagingRing;
+            const active = poi.battleStatus === 'active';
+            ctx.strokeStyle = active ? WORLD_COLORS.poiActiveRing : WORLD_COLORS.poiStagingRing;
             ctx.lineWidth = 1.5;
+            ctx.setLineDash(active ? [] : [4, 3]);
             ctx.beginPath();
             ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
             ctx.stroke();
+            ctx.setLineDash([]);
+            // The pulse: an expanding, fading ring. Only with a clock — a
+            // static frame (tests, a paused tab) draws the ring above alone.
+            if (layers.pulses && timeMs !== undefined) {
+                const phase = pulsePhase(timeMs, active ? PULSE_PERIOD_MS.active : PULSE_PERIOD_MS.staging);
+                const rgb = active ? WORLD_COLORS.poiActiveRgb : WORLD_COLORS.poiStagingRgb;
+                ctx.strokeStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${((1 - phase) * 0.8).toFixed(3)})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, r + 6 + phase * 12, 0, Math.PI * 2);
+                ctx.stroke();
+            }
         }
         // An owned POI that is currently a battlefield keeps its red fill and
         // gets its owner's colour as an outer band, so the map never has to
         // choose between "who holds it" and "is it on fire".
-        const ownerColour = poiOwnerColour(poi, graph);
         if (ownerColour && poi.battleStatus === 'active') {
             ctx.strokeStyle = ownerColour;
             ctx.lineWidth = 2;
@@ -675,30 +1171,70 @@ function drawPois(
             ctx.arc(s.x, s.y, r + 7, 0, Math.PI * 2);
             ctx.stroke();
         }
-        if (selected || hovered) {
-            ctx.strokeStyle = selected ? WORLD_COLORS.poiSelected : WORLD_COLORS.poiHover;
-            ctx.lineWidth = selected ? 2 : 1.5;
+        if (selected) {
+            ctx.strokeStyle = WORLD_COLORS.poiSelected;
+            ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(s.x, s.y, r + 3, 0, Math.PI * 2);
+            ctx.arc(s.x, s.y, r + 2.5, 0, Math.PI * 2);
             ctx.stroke();
         }
+
+        // Open claims: one pennant per POI (the count is the chip's job),
+        // in the EARLIEST claimant's colour — the one the tie-break favours.
+        if (layers.claims && claims && claims.length) {
+            let first: WorldClaim | null = null;
+            for (const c of claims) {
+                if (c.poiId !== poi.id) continue;
+                if (!first || c.filedAtWorldMs < first.filedAtWorldMs ||
+                    (c.filedAtWorldMs === first.filedAtWorldMs && c.claimId < first.claimId)) first = c;
+            }
+            if (first) {
+                ctx.fillStyle = colours[first.factionId] ?? factionColour(first.factionId, graph, layers.safeColours);
+                ctx.strokeStyle = WORLD_COLORS.claimOutline;
+                ctx.lineWidth = 1;
+                traceClaimFlag(ctx, s.x, s.y, Math.max(4, r));
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
+
+        // The viewer's commander(s): a star. Drawn last so nothing covers it.
+        if (commanderAt && commanderAt.has(poi.id)) {
+            ctx.fillStyle = WORLD_COLORS.viewer;
+            ctx.strokeStyle = WORLD_COLORS.viewerOutline;
+            ctx.lineWidth = 1;
+            traceCommanderStar(ctx, s.x, s.y, Math.max(4, r));
+            ctx.fill();
+            ctx.stroke();
+        }
+
         // Labels only once there is room for them. Every POI labelled at world
         // zoom is a wall of overlapping text; the hovered/selected one is
         // always labelled because that is the one being asked about.
-        if (view.scale > fitScaleLabelThreshold || selected || hovered) {
-            ctx.shadowColor = WORLD_COLORS.poiLabelShadow;
-            ctx.shadowBlur = 4;
-            ctx.fillStyle = WORLD_COLORS.poiLabel;
-            ctx.fillText(poi.name, s.x + r + 5, s.y);
-            ctx.shadowBlur = 0;
-            ctx.shadowColor = 'transparent';
+        if (layers.labels && (allLabels || selected || hovered)) {
+            const w = labelWidth(ctx, poi.name);
+            boxes.push({
+                x: s.x + r + 5, y: s.y - LABEL_FONT_PX / 2 - 1, w, h: LABEL_FONT_PX + 2,
+                priority: labelPriority(poi, selected, hovered),
+            });
+            labelPois.push(poi);
+            labelX.push(s.x + r + 5);
+            labelY.push(s.y);
         }
+    }
+
+    if (boxes.length) {
+        ctx.shadowColor = WORLD_COLORS.poiLabelShadow;
+        ctx.shadowBlur = 4;
+        ctx.fillStyle = WORLD_COLORS.poiLabel;
+        for (const i of placeLabels(boxes)) ctx.fillText(labelPois[i].name, labelX[i], labelY[i]);
+        ctx.shadowBlur = 0;
+        ctx.shadowColor = 'transparent';
     }
 }
 
-/// Above this scale (pixels per map unit) every POI carries its label. Chosen
-/// against the basemap's own width: 1400px per map unit ≈ a 2800px-wide world,
-/// i.e. the player has zoomed past "whole Earth" on any ordinary window.
+/// @deprecated Absolute px-per-map-unit threshold, replaced by
+/// `labelsVisible` (relative to the fit scale). Kept exported for callers.
 export const fitScaleLabelThreshold = 1400;
 
 // ─────────────── the player stat panel (PLAN-worldsim.md W8) ───────────────
