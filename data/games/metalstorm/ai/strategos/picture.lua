@@ -343,8 +343,9 @@ end
 
 --- Parley board + trust ledger (interaction §1/§2). Read-only here; the
 -- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
--- the actuator responds (Actuators:respondProposal — an unimplemented runtime
--- verb, not an engine ask; see actuators.lua:173).
+-- the actuator responds (Actuators:respondProposal — a `parley.respond` wire
+-- message over AI.sendMessage, the same RecvLuaMsg funnel a human's panel
+-- uses; main.lua bounds the latency with Picture.pendingProposals below).
 --
 -- rulesParam names match game_parley.lua's publish() exactly
 -- (parley_count high-water + parley_<id>_* fields, GAME-scoped/public — a
@@ -371,9 +372,41 @@ local function readParley(c, role)
         local state = get(p .. 'state')
         if state then
             local fromTeam, toTeam = tonumber(get(p .. 'from')), tonumber(get(p .. 'to'))
+            -- The TERMS are what the evaluator prices (planner.lua evaluateOne:
+            -- `terms.payer`/`terms.amount` decide whether a tribute is money in
+            -- or money out; `terms.regionKey` is what a demand's credibility is
+            -- measured at). They were never read here until 2026-09-10, so a
+            -- live proposal reached the planner with `terms == nil`, the
+            -- `terms.payer or 'from'` default read every tribute as "they pay
+            -- us", and the AI would have ACCEPTED any tribute demanded of it.
+            -- Field names mirror game_parley.lua's PUBLISHED_FIELDS exactly.
+            local perMinute = get(p .. 'perMinute')
+            local terms = {
+                duration    = tonumber(get(p .. 'duration')),
+                regionKey   = get(p .. 'regionKey'),
+                amount      = tonumber(get(p .. 'amount')),
+                perMinute   = (perMinute == 1 or perMinute == '1') or nil,
+                payer       = get(p .. 'payer'),
+                corridor    = splitList(get(p .. 'corridor')),
+                unitClass   = get(p .. 'unitClass'),
+                objectiveId = tonumber(get(p .. 'objectiveId')),
+                split       = tonumber(get(p .. 'split')),
+                innerKind   = get(p .. 'innerKind'),
+                orElse      = get(p .. 'orElse'),
+                regionKeys  = splitList(get(p .. 'regionKeys')),
+            }
+            if #terms.corridor == 0 then terms.corridor = nil end
+            if #terms.regionKeys == 0 then terms.regionKeys = nil end
+            -- A demand's wrapped terms ride the SAME published fields as the
+            -- outer ones (game_parley.lua's wire parser builds innerTerms from
+            -- the one flat field set), so the inner view is the outer view.
+            if terms.innerKind then terms.innerTerms = terms end
             proposals[#proposals + 1] = {
                 id = id, kind = get(p .. 'kind'), fromTeam = fromTeam, toTeam = toTeam,
                 state = state, deadline = tonumber(get(p .. 'deadline')),
+                counterOf = tonumber(get(p .. 'counterOf')),
+                escrow = tonumber(get(p .. 'escrow')) or 0,
+                terms = terms,
             }
             if teamID and (fromTeam == teamID or toTeam == teamID) then
                 local other = (fromTeam == teamID) and toTeam or fromTeam
@@ -391,6 +424,29 @@ local function readParley(c, role)
         trust[other] = tonumber(get('trust_' .. lo .. '_' .. hi)) or 0
     end
     return { proposals = proposals, trust = trust }
+end
+
+--- Ids of proposals currently PENDING (offered|countered) and addressed to
+--- `teamId`, cheapest possible read (state + to per id, no terms, no trust).
+--- main.lua polls this between strategic ticks so a dormant (high-LOD) NPC
+--- still answers a proposal inside game_parley.lua's 60 s response window
+--- instead of sleeping through it. Returns {} whenever the surface is absent.
+function Picture.pendingProposals(teamId)
+    local out = {}
+    local AI = _G.AI
+    if teamId == nil or type(AI) ~= 'table' or type(AI.getRulesParam) ~= 'function' then
+        return out
+    end
+    local count = tonumber(AI.getRulesParam('game', 'parley_count')) or 0
+    for id = 1, count do
+        local p = 'parley_' .. id .. '_'
+        local state = AI.getRulesParam('game', p .. 'state')
+        if (state == 'offered' or state == 'countered')
+                and tonumber(AI.getRulesParam('game', p .. 'to')) == teamId then
+            out[#out + 1] = id
+        end
+    end
+    return out
 end
 
 --=============================================================================
