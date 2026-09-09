@@ -2,7 +2,66 @@
 
 ## STATUS
 
-in-progress: authority-side fixes + field-engineering gate committed; next = game_objectives.lua fixes (expiry-vs-completion, escrow with no payee, linked/phase war-end outcome, live bounty cap, dying-unit ctx, reward scale at Initialize), generator cap fix, gameover Tick, economy harness, two gameplay rules.
+complete (wrapped early) — coordinator wrap-up directive. Commit `2155f33cd8` is the landed
+work (authority side + field-engineering gate, all gates green). The objectives-side fixes
+below were designed and reviewed but NOT applied (the edit batch was refused by the sandbox
+before it ran); they are listed under "Not done" with exact intent so the next session can
+land them in under an hour.
+
+## Not done (in priority order, all with the fix designed — see the finding text)
+
+1. `game_objectives.lua` — six fixes, none applied:
+   - **completion beats expiry on the same tick** (F6): on the expiry tick call `module.check`
+     first; only if it answers nil fall through to `onExpire`/'expired'. Mirrors the war-end sweep.
+   - **completion with no payee destroys stakes** (F7): `awardObjective` returns early when
+     `completingTeam or o.forTeam` is nil, but `SettleEscrow(id,'complete')` still clears the
+     escrow → staked authority vanishes for a scoped type authored without `forTeam`. Fix:
+     settle as 'expired' (refund) + Echo, skip the award.
+   - **linked partner ignores the war-end escrow outcome** (F8): `resolveObjective(partner,
+     'expired', nil, ctx)` should pass `escrowOutcome` through; the sweep's snapshot then skips the
+     partner as already resolved, so its stakes went to connected stakers, not team pools.
+   - **a parent that expires/fails leaves phase children active** (F9): after the linked block,
+     expire every still-active `o.phaseChildren` entry with the same `escrowOutcome`.
+   - **bounty cap counts lifetime, not LIVE, bounties** (F10): record `o.bountyPlayer` in
+     `CreateBounty`, decrement `bountyCountByPlayer` in `resolveObjective` for `source=='bounty'`.
+   - **`authority_reward_scale` ignored for scripted objectives** (F11): `game_scenario` (layer
+     -90) stages from its GameStart before objectives' (-50) reads the modoption. Add
+     `gadget:Initialize()` reading it too (same pattern as game_authority.lua).
+   - **UnitDestroyed sees the dying unit as alive** (F12): `buildCtx(frame, dyingUnitID)` and
+     `unitAlive` returns false for it — every module's "immediate re-evaluation" is otherwise ≤3 s
+     late. Safe for outbound escorts: game_transports increments the withdrawal counter before
+     `DestroyUnit` (:579-589).
+   - **reward normalisation is dead code**: `GG.Authority.NormaliseReward` is never called. Apply
+     it in `awardObjective`/`awardPeriodic` for `o.source=='systemic'` only, to `o.reward` (never
+     the escrow). Keep the lever OFF until F1's fixed velocity is validated by a harness.
+2. `objectives/generator.lua` — **linked pair double-decrements the rule cap** (F13): both halves
+   share a `systemicKey` and both call `onResolved` → `ruleCounts` drops by 2 per pair. Make
+   `onResolved` a no-op when `state.systemicActive[dedupKey]` is already nil.
+3. `objectives/{escort,protect,extract,infra}.lua` — **quorum unvalidated** (F14): 0/negative makes
+   protect/infra unfailable, > roster makes them unwinnable. Add `validQuorum(q, n)` (whole number
+   in 1..n) to each `validateParams`. Spec already written and left UNTRACKED (red until the modules
+   change): `objectives/tests/quorum_spec.lua`.
+4. `game_gameover.lua:` `frame % FOOTHOLD_PERIOD` violates ARCHITECTURE "never gate on frame %
+   PERIOD" — replace with `Tick.due(footholdGate, frame)`, save/load the gate, add a `_G.VFS` mock
+   to `tests/game_gameover_spec.lua`'s `load()` (it has none; `tests/game_snapshot_spec.lua:161`
+   already carries one to copy).
+5. Economy harness (task 3): not started. Design: pure-Lua `authority/economy_sim.lua` driving the
+   real `formula/metrics/escrow` + generator DENSITY constants over scripted outcomes for six types
+   × three densities; `tools/economy-validation.js` becomes a thin runner (spawn `lua`, print the
+   table, exit on bands: velocity ∈ [0.6,1.5], escrow float 0 at war end, time-to-broke > 10 min);
+   replace `scenarios/economy_validation_grid.json` with a pointer stub (its map/AI ids are dead —
+   PLAN-economy-grid.md autopsy B1–B7 all still true).
+6. Gameplay rules (task 4): not started. Designed: (a) **chain rule** in the generator — a
+   completed `control` spawns a follow-up control for the same team on a `GG.Regions.Neighbors`
+   region it does not own, +25 % reward, 3-min expiry, dedup `chain:<region>`; (b) **comeback
+   valve** — `world.deficit(team)` from owned-region counts scales team-scoped systemic rewards
+   ×(1 + deficit) clamped ≤ 1.5 and drops the trailing team's liveness threshold to 1 tick;
+   publish `objective_comeback_<team>`.
+7. Manual proposed text (lane 3/15): §12 first bullet becomes "**Enforced** since 2026-09-10:
+   `LuaRules/Configs/field_engineering.lua` + `game_authority.lua` veto factory production and
+   non-support structures (`AllowCommand` on build orders, `AllowUnitCreation` backstop);
+   modoption `battle_production` lifts it for playtests." §11 adds `battle_production`. §3 decay
+   line is now true as written (2 %/min).
 
 Branch: `worktree-agent-ac47314f74f5a4b8f` (cut from `main` `88d257bce2`, merged to tip before work).
 
@@ -49,7 +108,16 @@ PLAN-economy-grid T3 asked for `econ_velocity` etc. **FIXED**: published at the 
 
 ## Changes (by commit)
 
-(filled in per commit below)
+`2155f33cd8` — authority: field-engineering gate, velocity metric, decay rate, metrics publish.
+Files: `LuaRules/Gadgets/game_authority.lua`, `authority/{metrics,ledger,field_engineering}.lua`,
+`authority/ledger_spec.lua`, `authority/tests/{field_engineering,metrics}_spec.lua`,
+`LuaRules/Configs/{field_engineering,authority_cost}.lua`, `modoptions.lua`,
+`tests/authority_charge_mock.lua`, `tests/game_authority_{field_engineering,decay}_spec.lua`.
+Gates after: `authority/` 71/0/0 (was 50), `objectives/` 139/0/0, charge 22, cost_scale 4,
+roster_seed 3, stipend 6, ai_etiquette 13, field_engineering 12 (new), decay 8 (new),
+snapshot 25, gameover 42, publication 7, teams 34, parley 26, scenario_objectives 13 — all green.
+
+Uncommitted, deliberately: `objectives/tests/quorum_spec.lua` (red until Not-done item 3 lands).
 
 ## Proposed C++ patches (UNCOMPILED)
 
