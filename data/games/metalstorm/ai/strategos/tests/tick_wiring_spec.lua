@@ -110,7 +110,11 @@ describe("main tick -> engine verbs (D68 wiring)", function()
             -- The cap is the package priced in hitpoints. Three 1 200 hp tanks
             -- is 3 600 — and emphatically not 3, which is what the head count
             -- would have sent and what shut the cap on the first recruit.
-            assert.are.equal(3600, d.spec.requestedStrength)
+            -- The region is the side's ONLY owned ground, so the planner's
+            -- posture floor keeps the default profile's 25 % garrison there
+            -- (planner.lua buildPackages, 2026-09-10) and the mobile package
+            -- on the wire is the other 75 %: 2 700.
+            assert.are.equal(2700, d.spec.requestedStrength)
             -- Mortal: 2 x the LOD-0 tick period (150), never 0 = forever.
             assert.are.equal(300, d.spec.expiresInFrames)
         end

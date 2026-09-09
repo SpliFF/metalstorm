@@ -136,7 +136,11 @@ describe("budget governor", function()
         local p = makePicture({
             _role = role,
             regions = {
-                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin' } },
+                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin', 'yard' } },
+                -- A second owned region: with only ONE the posture floor splits
+                -- a garrison off `home` (planner buildPackages) and the package
+                -- on the wire is 75 % of the bucket — tested on its own below.
+                yard  = { owner = 0, value = 1.0, neighbors = { 'home' } },
                 front = { owner = 1, value = 1.0, neighbors = { 'home' } },
                 basin = { owner = nil, value = 2.0, neighbors = { 'home' } },
             },
@@ -237,7 +241,10 @@ describe("commitment hysteresis (anti-thrash)", function()
 
     it("keeps the current package when the challenger doesn't clear the bar", function()
         local commitments = {
-            ['def:home'] = { packageId = 'pkg:home', sinceFrame = 1000, score = 145 },
+            -- 250 × 1.4 = 350 > the challenger's ~271 (300 × pSuccess 0.91 −
+            -- the flat 2-authority directive fee). Was 145 under the old
+            -- force-scaled cost model, which no charge site ever applied.
+            ['def:home'] = { packageId = 'pkg:home', sinceFrame = 1000, score = 250 },
         }
         local out = plan(twoPackageFixture(), commitments)
         assert.are.equal('pkg:home', commitments['def:home'].packageId)
@@ -579,11 +586,17 @@ describe("guidance stance re-weights the slate (binding, §6.2)", function()
         })
     end
 
+    -- `home` is the sole owned region, so the posture floor splits a garrison
+    -- off it (pkg:home:garrison) that may only DEFEND home. The stance decides
+    -- what the MOBILE package (pkg:home) does; the garrison's own DEFEND is
+    -- not the stance's doing and is filtered out here.
     local function outcome(out)
         local defend, expand = false, false
         for _, d in ipairs(out.directives) do
-            if d.goalId == 'def:home' then defend = true end
-            if d.goalId == 'exp:plains' then expand = true end
+            if d.groupId == 'pkg:home' then
+                if d.goalId == 'def:home' then defend = true end
+                if d.goalId == 'exp:plains' then expand = true end
+            end
         end
         return defend, expand
     end
@@ -714,7 +727,9 @@ describe("terminal objective is contested (Q-E1 / D47)", function()
     end)
 
     it("and is taken anyway once the holder is about to bank the war", function()
-        local p = warFixture(1, 0.9, 1)
+        -- 0.95: the floor decays to 0.35 × 0.05 = 0.0175, under the mobile
+        -- package's ~0.022 (750 after the garrison split, against 5000).
+        local p = warFixture(1, 0.95, 1)
         p.intel.raven.strength = 5000
         assert.is_truthy(directiveFor(plan(p), 'obj:1'))
     end)

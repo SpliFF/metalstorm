@@ -17,9 +17,16 @@ return {
 
     -- Conservative brain — advice should be safe, legible moves.
     aggression    = 0.8,
-    confidence    = 0.9,
-    pSuccessFloor = 0.15,
+    -- 1.0, not 0.9: the no-intel prior is 0.65 × confidence and the floor is
+    -- 0.6, so 0.9 put every move into unknown ground under the floor and the
+    -- mentor could never suggest one (a pre-existing inertness, see review).
+    confidence    = 1.0,
+    pSuccessFloor = 0.6,
     opportunism   = 0.8,
+    pressure      = 0.3,   -- will suggest a push when the odds are plainly good
+    deny          = 0.0,
+    garrisonFraction = 0.4,
+    withdrawRatio = 0.6,
     doctrine      = 'balanced',
 
     -- Mentor pacing: at most one suggestion per this many seconds; don't
