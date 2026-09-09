@@ -183,10 +183,10 @@
     },
 
     {
-      "name": "a route verb has no sentence form yet",
+      "name": "a route verb aimed at a place walks a ring around it (contract v2)",
       "utterance": "Chimera Squad patrol Northgate",
       "context": "basin",
-      "note": "`patrol` and `screen` accept shape 'route' alone and the envelope has no multi-point target. Refused by name rather than silently downgraded to a one-point patrol, which would look like a patrol and behave like a move.",
+      "note": "`patrol` and `screen` accept shape 'route' alone and a sentence cannot draw one. Until contract v2 this refused ('use the composer's map arm'), which made 2 of the 11 verbs dead from voice. Now a named place becomes a closed ring route (nl-resolver PATROL_RING_RADIUS) compiled through the same patrol:route case the map arm uses — a real patrol, not a move dressed as one.",
       "expected": {
         "actions": [{
           "kind": "command",
@@ -197,7 +197,7 @@
           }
         }]
       },
-      "expect": { "sends": [], "refusals": 1, "saysLike": ["needs a route"] }
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }], "saysLike": ["directive issued"] }
     },
 
     {

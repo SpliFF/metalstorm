@@ -52,6 +52,14 @@ import type { ClassVocabulary } from './class-vocabulary.js';
 import type { NamedEntity, EntityType } from './named-entity-index.js';
 import type { OrgGroupSummary, DirectiveSummary } from './ui-store.js';
 import type { NLQuery, NLScale } from './nl-envelope.js';
+import type { BattleMoment } from '../../core/battle-events.js';
+
+/** How far from a named place "what's happening AT X" reaches (elmos). A
+ *  region's worth, like the order path's `DEFAULT_AREA_RADIUS`. */
+export const EVENTS_NEAR_RADIUS = 1024;
+/** How many moments one answer reads out. It is spoken aloud (M6); five is a
+ *  sitrep, ten is a log. */
+export const EVENTS_MAX_LINES = 5;
 
 /** Which side of the war a mirrored unit is on, from the local player's seat. */
 export type CensusSide = 'own' | 'ally' | 'enemy';
@@ -128,6 +136,13 @@ export interface QueryEngineDeps {
      * degradation, not a silent no-op.
      */
     focusCamera?(x: number, z: number): void;
+    /**
+     * The battle history the rung-4 Events tab reads
+     * (`uiStore.getBattleMoments()`, oldest first) — what `events` answers
+     * from. Optional: absent ⇒ "what's happening" refuses by name rather than
+     * answering "nothing", which is the same LOS-honesty rule as `noMirror`.
+     */
+    battleMoments?(): readonly BattleMoment[];
 }
 
 const ok = (text: string): Resolution<string> => ({ kind: 'ok', value: text });
@@ -159,7 +174,54 @@ export class QueryEngine {
             case 'status':     return this.status(query);
             case 'resources':  return this.resources();
             case 'objectives': return this.objectives();
+            case 'events':     return this.events(query);
         }
+    }
+
+    // ───────────────────────────── events ─────────────────────────────
+
+    /**
+     * "What's happening?" — the most recent battle moments, newest first,
+     * optionally only those near a named place (contract v2).
+     *
+     * Reads the SAME record the Events tab renders, so the spoken answer and
+     * the drilled-down list can never disagree about what happened. Ages are
+     * from the census frame when one is available (30 sim frames = 1 s); with
+     * no census the moments are still listed, just without "N s ago".
+     */
+    private events(query: Extract<NLQuery, { op: 'events' }>): Resolution<string> {
+        const read = this.deps.battleMoments;
+        if (!read) return refuse("I can't read the battle log yet — nothing is recording events.");
+
+        let anchor: NamedEntity | null = null;
+        if (query.near !== undefined) {
+            const found = this.deps.resolveEntity(query.near, { types: PLACE_TYPES });
+            if (found.kind !== 'ok') return found as Resolution<string>;
+            anchor = found.value;
+        }
+
+        const all = read();
+        const chosen = (anchor
+            ? all.filter((m) => (m.x - anchor!.x) ** 2 + (m.z - anchor!.z) ** 2 <= EVENTS_NEAR_RADIUS ** 2)
+            : [...all])
+            .slice(-EVENTS_MAX_LINES)
+            .reverse();
+
+        if (chosen.length === 0) {
+            return ok(anchor
+                ? `Nothing has happened near ${anchor.name} yet.`
+                : 'Nothing has happened yet — no contact, no losses, no arrivals.');
+        }
+
+        const frame = this.deps.census.snapshot()?.frame;
+        const lines = chosen.map((m) => {
+            const where = anchor ? '' : ` ${this.near({ x: m.x, z: m.z })}`;
+            const age = typeof frame === 'number' && frame >= m.frame
+                ? ` (${Math.round((frame - m.frame) / 30)} s ago)` : '';
+            return `${describeMoment(m)}${where}${age}`;
+        });
+        const head = anchor ? `Near ${anchor.name}: ` : 'Latest: ';
+        return ok(`${head}${lines.join(' · ')}.`);
     }
 
     // ───────────────────────────── count ─────────────────────────────
@@ -446,6 +508,26 @@ export class QueryEngine {
     private noMirror(): string {
         return "I can't read your units right now — the client mirror hasn't answered. " +
                'Ask again in a moment.';
+    }
+}
+
+/**
+ * One moment as a spoken clause. DATA in, words out — the same division
+ * `battle-moment-phrasing.ts` keeps for the HUD notices, but shorter, because
+ * five of these are read in one breath.
+ */
+export function describeMoment(m: BattleMoment): string {
+    const n = m.count > 1 ? `${m.count} ` : '';
+    const what = m.className ? `${m.className}` : (m.squads ? 'squads' : 'units');
+    switch (m.kind) {
+        case 'first-contact':        return 'first contact';
+        case 'under-fire':           return `${n}${what} under fire`;
+        case 'losses':               return `lost ${n}${what}`;
+        case 'kills':                return `destroyed ${n}enemy ${what}`;
+        case 'enemy-crippled':       return 'an enemy force is nearly finished';
+        case 'reinforcements':       return `${n}${what} arrived`;
+        case 'enemy-reinforcements': return `${n}enemy ${what} arrived`;
+        default:                     return String(m.kind);
     }
 }
 

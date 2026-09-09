@@ -126,7 +126,7 @@ function describe(action: NLAction, deps: InterpretDeps): string | null {
 
 function describeCommand(intent: NLCommandIntent, deps: InterpretDeps): string | null {
     const subject = describeSubject(intent.subject, deps);
-    const place = intent.target ? describeTarget(intent.verb, intent.target, deps) : null;
+    const place = describeTarget(intent.verb, intent.target, intent.subject, deps);
     if (!place) return null;
 
     const { participle, preposition } = VERB_PHRASING[intent.verb]
@@ -195,16 +195,25 @@ function describeSubject(subject: NLSubject, deps: InterpretDeps): string {
     }
 }
 
-/** Where, by the name the resolver actually landed on. */
+/**
+ * Where, by the name the resolver actually landed on.
+ *
+ * An ABSENT target is only ever a reading for `withdraw` (contract v2: pull
+ * back to the nearest departure zone), and only when the resolver can name
+ * that zone — "Chimera Squad pulling back to Departure Zone" is the sentence
+ * the player needs to see before it happens. Every other absent target is
+ * null: the executor refuses it by name and there is nothing to echo.
+ */
 function describeTarget(
-    verb: CommandVerb, target: NLTarget, deps: InterpretDeps,
+    verb: CommandVerb, target: NLTarget | undefined, subject: NLSubject, deps: InterpretDeps,
 ): string | null {
-    if (target.type === 'point') return null;   // a coordinate is not a reading
+    if (target?.type === 'point') return null;   // a coordinate is not a reading
 
-    const resolved = deps.resolver?.resolveTarget(verb, target);
+    const resolved = deps.resolver?.resolveTarget(verb, target, subject);
     if (resolved?.kind === 'ok' && resolved.value.entity?.name) {
         return resolved.value.entity.name;
     }
+    if (!target) return null;
     // Unresolved: quote the phrase rather than assert a name. This echo is only
     // ever PRINTED after something succeeded, so in practice the executor has
     // already turned this into a question or a refusal by the time it matters.
