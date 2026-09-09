@@ -139,6 +139,7 @@ describe("the client's guidance messages, through the real gadget", function()
     before_each(function()
         world, gadgetObj = mock.new('./game_ai_guidance.lua')
         world.setPlayer(1, 10)
+        world.setAIPlayer(8, 10)   -- the funding recipient (D32: no AI → refused)
         world.setPlayerPool(1, 1000)
         world.setTeamPool(10, 1000)
     end)
@@ -150,6 +151,7 @@ describe("the client's guidance messages, through the real gadget", function()
             if fixture.cmd == cmd then
                 world, gadgetObj = mock.new('./game_ai_guidance.lua')
                 world.setPlayer(1, 10)
+                world.setAIPlayer(8, 10)   -- the funding recipient (D32: no AI → refused)
                 world.setPlayerPool(1, 1000)
                 world.setTeamPool(10, 1000)
                 gadgetObj:RecvLuaMsg(fixture.wire, 1)
@@ -216,11 +218,15 @@ describe("the client's guidance messages, through the real gadget", function()
                 assert.are.equal(tonumber(fields.rateCap), funding.rateCap, wire)
             end
             if fields.amount then
-                -- setFunding charges the player then awards the team pool; the
-                -- charge log is the observable proof it went through Authority
-                -- rather than minting authority out of nothing.
-                assert.are.equal(1, #world.chargeLog, wire)
-                assert.are.equal(tonumber(fields.amount), world.chargeLog[1].cost, wire)
+                -- setFunding is a net-zero MOVE (D32): the funder's own pool
+                -- → the team's AI pool via GG.Authority.Transfer, never a
+                -- ChargeOrder + Award (that pair charged the human and paid
+                -- the team pool the co-commander may not spend). The transfer
+                -- log is the observable proof it went through Authority.
+                assert.are.equal(0, #world.chargeLog, wire)
+                assert.are.equal(1, #world.transferLog, wire)
+                assert.are.equal(tonumber(fields.amount), world.transferLog[1].amount, wire)
+                assert.are.equal(8, world.transferLog[1].dst.player, wire)
             end
         end)
     end)

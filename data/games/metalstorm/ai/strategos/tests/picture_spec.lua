@@ -645,3 +645,97 @@ describe("Picture.refresh — scenario-authored AI slot config", function()
         assert.is_nil(Picture.readProfileHint(0))
     end)
 end)
+
+--=============================================================================
+-- readParley — the proposal board + trust ledger (interaction §1/§2). Names
+-- mirror game_parley.lua's publish() exactly: parley_count high-water,
+-- parley_<id>_* fields (GAME scope), trust_<lo>_<hi> at top level.
+--=============================================================================
+describe("Picture.refresh — parley board (terms + trust)", function()
+    local function boardAI(over)
+        local rp = {
+            ['game:parley_count']       = 2,
+            -- id 1: a tribute DEMANDED of us (payer='to' means the recipient pays).
+            ['game:parley_1_kind']      = 'tribute',
+            ['game:parley_1_from']      = 5,
+            ['game:parley_1_to']        = 0,
+            ['game:parley_1_state']     = 'offered',
+            ['game:parley_1_deadline']  = 4000,
+            ['game:parley_1_amount']    = 400,
+            ['game:parley_1_payer']     = 'to',
+            ['game:parley_1_perMinute'] = 0,
+            ['game:parley_1_escrow']    = 0,
+            -- id 2: a scoped ceasefire we offered team 5 (pending on THEIR side).
+            ['game:parley_2_kind']      = 'ceasefire',
+            ['game:parley_2_from']      = 0,
+            ['game:parley_2_to']        = 5,
+            ['game:parley_2_state']     = 'offered',
+            ['game:parley_2_deadline']  = 4200,
+            ['game:parley_2_duration']  = 1800,
+            ['game:parley_2_regionKey'] = 'north_ridge',
+            ['game:parley_2_corridor']  = 'a,b',
+            ['game:trust_0_5']          = 3,
+        }
+        for k, v in pairs(over or {}) do rp[k] = v end
+        return makeAI({ rulesParams = rp })
+    end
+
+    it("reads every published term field with its published name and type", function()
+        local Picture = freshPicture()
+        local p = refresh(Picture, boardAI())
+        assert.are.equal(2, #p.parley.proposals)
+        local tribute, cease = p.parley.proposals[1], p.parley.proposals[2]
+        assert.are.equal('tribute', tribute.kind)
+        assert.are.equal(400, tribute.terms.amount)
+        assert.are.equal('to', tribute.terms.payer)
+        assert.is_nil(tribute.terms.perMinute)          -- published 0 → not per-minute
+        assert.are.equal(0, tribute.escrow)
+        assert.are.equal(1800, cease.terms.duration)
+        assert.are.equal('north_ridge', cease.terms.regionKey)
+        assert.are.same({ 'a', 'b' }, cease.terms.corridor)
+        assert.is_nil(cease.terms.regionKeys)            -- absent list → nil, not {}
+    end)
+
+    it("keys trust by counterparty off the canonical trust_<lo>_<hi> param", function()
+        local Picture = freshPicture()
+        local p = refresh(Picture, boardAI())
+        assert.are.equal(3, p.parley.trust[5])
+    end)
+
+    it("a demand's inner terms are the same flat field set (innerTerms view)", function()
+        local Picture = freshPicture()
+        local p = refresh(Picture, boardAI({
+            ['game:parley_1_kind']      = 'demand',
+            ['game:parley_1_innerKind'] = 'tribute',
+            ['game:parley_1_orElse']    = 'we raid north_ridge',
+        }))
+        local d = p.parley.proposals[1]
+        assert.are.equal('tribute', d.terms.innerKind)
+        assert.are.equal(400, d.terms.innerTerms.amount)
+        assert.are.equal('to', d.terms.innerTerms.payer)
+    end)
+
+    -- The defect this block was written for: before the terms were read, a
+    -- live tribute reached the evaluator as `terms == nil`, the `payer or
+    -- 'from'` default made every tribute look like money IN, and the AI would
+    -- have accepted paying 400 authority to a team it barely trusts.
+    it("a demanded tribute now reaches the real planner as money OUT and is rejected", function()
+        local Picture = freshPicture()
+        local Planner = require('planner')
+        local profile = require('profiles.default')
+        local p = refresh(Picture, boardAI())
+        local results = Planner.evaluateProposals(p, profile, role())
+        assert.are.equal(1, #results)                    -- only id 1 is addressed to us
+        assert.are.equal(1, results[1].id)
+        assert.are.equal('reject', results[1].decision)
+    end)
+
+    it("pendingProposals lists only pending ids addressed to the given team", function()
+        local Picture = freshPicture()
+        _G.AI = boardAI({ ['game:parley_2_to'] = 0, ['game:parley_2_state'] = 'active' })
+        assert.are.same({ 1 }, Picture.pendingProposals(0))
+        assert.are.same({}, Picture.pendingProposals(5))
+        _G.AI = {}
+        assert.are.same({}, Picture.pendingProposals(0))  -- no AI1 surface → nothing pending
+    end)
+end)

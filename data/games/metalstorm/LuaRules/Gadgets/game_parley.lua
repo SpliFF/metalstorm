@@ -784,9 +784,31 @@ function gadget:RecvLuaMsg(msg, playerID)
             orElse = fields.orElse,
             regionKeys = fields.regionKeys and Wire.list(fields.regionKeys) or nil,
         }
+        -- A demand wraps another kind (§4: "a demand is just an offered
+        -- proposal; once accepted it IS that pact"), and validateDemand checks
+        -- the WRAPPED kind's terms. The wire is one flat field set, so the
+        -- inner terms are the same fields — `cmd=parley.propose&kind=demand&
+        -- innerKind=tribute&amount=200&payer=to` is "pay me 200". Until
+        -- 2026-09-10 innerTerms was never built here, so every wire demand
+        -- with an inner kind failed validation ('amount required') and only a
+        -- bare, effect-less demand could ever be sent. The AI's propose verb
+        -- (ai/strategos/actuators.lua) and picture.lua's innerTerms view both
+        -- rely on this one-flat-set convention.
+        if terms.innerKind then
+            local inner = {}
+            for k, v in pairs(terms) do
+                if k ~= 'innerKind' and k ~= 'orElse' then inner[k] = v end
+            end
+            terms.innerTerms = inner
+        end
         GG.Parley.Propose(fromTeam, playerID, Wire.num(fields.toTeam) or fields.toTeam, fields.kind, terms)
     elseif cmd == 'parley.respond' then
-        GG.Parley.Respond(Wire.num(fields.id), fromTeam, playerID, fields.decision,
+        -- 'counterTerms' is the name PLAN-metalstorm-interaction §6.2 used for
+        -- the third decision; GG.Parley.Respond spells it 'counter'. Accept
+        -- both on the wire so neither sender has to know the other's spelling.
+        local decision = fields.decision
+        if decision == 'counterTerms' then decision = 'counter' end
+        GG.Parley.Respond(Wire.num(fields.id), fromTeam, playerID, decision,
             fields.kind and { kind = fields.kind } or nil)
     elseif cmd == 'parley.withdraw' then
         GG.Parley.Withdraw(Wire.num(fields.id), fromTeam)
