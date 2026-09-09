@@ -2,7 +2,7 @@
 
 ## STATUS
 
-in-progress: next = `world-map-controller.ts` (DOM half: pointer/keyboard, hover chip, legend, animated focus, `WorldMap` API), its happy-dom tests, `world-preview.ts?v2` mode, then this report's API section.
+complete (wrapped early) — coordinator directive; see "Not done".
 
 Branch: `worktree-agent-a6e04ca095cbecba2` (cut from `main` at `88d257bce2`, merged `main` tip before starting).
 
@@ -46,6 +46,37 @@ None. `GET /api/world/pois` and `GET /api/world/claims` carry everything the map
 - Only the EARLIEST open claim per POI gets a pennant (the tie-break rule the server applies); the chip carries the count.
 - The pulse is off in a static frame (no `timeMs`) so the recording-ctx tests are deterministic.
 
+### `caaa68ceb7` — `world-map-controller.ts` + `world-map.css` (tsc clean; NO unit tests yet — see Not done)
+`WorldMap` class, the DOM half of the map. API for lane 2 (all backward compatible; `WorldScreen` is untouched and still works):
+
+```ts
+import { WorldMap } from './world-map-controller.js';
+const map = new WorldMap(canvas, { basemapUrl?, overlayRoot?, layers?, hitRadius?, tools?, chip?, travelMs?, focusZoom? });
+map.setGraph(graph); map.setViewer({ factionId, commanderPoiIds }); map.setClaims(parseWorldClaims(json));
+map.setLayers({ territory:false }); map.getLayers();
+map.select(poiId | null, { emit? }); map.getSelected(); map.activate(poiId);
+map.focus(poiId, { animate?: true, zoom?, select? }); map.home({ animate? }); map.zoomBy(f, anchor?); map.panBy(dx, dy);
+map.getView(); map.setView(v); map.resize(); map.redraw(); map.toggleLegend(open?); map.destroy();
+const off = map.on('select' | 'hover' | 'activate' | 'view' | 'layers', handler);
+// DOM events on the canvas (bubbling): 'poi-selected' {poiId, poi}, 'poi-activated' {poiId, poi}
+```
+Behaviour: pointer events (mouse + touch, pinch zoom), wheel zoom at cursor, drag threshold (4px) so a pan never selects, click = select + animated camera travel to 4× fit, double-click / Enter = `activate` (the drill), keyboard (arrows pan, +/− zoom, Home/0 fit, N/P step west→east through POIs, Esc clears, L legend), `tabindex`/`role=application`/`aria-label` on the canvas, `aria-live` announcer for selection, hover chip (name · owner swatch · state · one number · "your commander is here"), legend collapsed by default with glyph rows (SVG from the same point table), faction swatches, layer checkboxes and key hints, `⌂ Fit` button. Pulse rAF loop runs only while a staging/active POI exists, the tab is visible and the pulses layer is on. Stylesheet injected once (`#world-map-style`).
+
+**Exact edit for lane 2 (`world-screen.ts`)** to adopt it, when the coordinator merges: in `wire()`, replace the wheel/mousedown/mousemove/mouseup/mouseleave/click listeners and the ResizeObserver with
+`this.map = new WorldMap(c, { basemapUrl: this.deps.basemapUrl }); this.map.on('select', id => { this.selected = id ? this.graph.pois.find(p => p.id === id) ?? null : null; this.renderDetail(); });`
+and in `refresh()` add `this.map?.setGraph(graph); this.map?.setViewer({ factionId: this.myFactionId, commanderPoiIds: this.stats?.commanders.map(c => c.poiId).filter(Boolean) ?? [] });`; `selectPoi(id)` becomes `this.map?.select(id); this.map?.focus(id)`; `#world-reset-btn` → `this.map?.home()`; `destroy()` → `this.map?.destroy()`. Drop `paint()`/`resize()`/tooltip methods. Optionally fetch `GET /api/world/claims` in `refresh()` and `setClaims(parseWorldClaims(json))`.
+
+## Not done
+
+- **Unit tests for `world-map-controller.ts`** (happy-dom: select/hover/activate events, keyboard, drag-threshold, legend toggle, chip text). The class typechecks and the full `src/lobby` vitest run is green (533/533), but the controller itself is untested. Highest priority follow-up.
+- `world-preview.ts` `?v2` mode mounting `WorldMap` on the fixture (screenshot harness for the new chrome).
+- Lane 2 call-site adoption (above) — proposal only, by design.
+- Basemap layer variants (night lights / political) — not started.
+
 ## Next milestones
 
-(filled at the end)
+- Controller tests + preview `?v2` (above).
+- Adopt `WorldMap` in `world-screen.ts` (lane 2) and delete its duplicated pointer code.
+- Territory as real regions once the server asserts polygons (Voronoi over POIs is a client invention — do not).
+- Edge kind styling (sea/road/air) once the seeder emits kinds other than `transit`.
+- Basemap zoom pyramid (2 tiles at ≥4×) if the 1920px image reads blurry at 16×.
