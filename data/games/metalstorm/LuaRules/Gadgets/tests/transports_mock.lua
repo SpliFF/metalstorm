@@ -89,6 +89,8 @@ function M.new(scenario)
     }
 
     function world.rp(key) return world.gameRulesParams[key] end
+    world.heightAt = function() return 0 end       -- flat dry map by default
+    function world.setWater(depth) world.heightAt = function() return -depth end end
     function world.trp(team, key)
         local t = world.teamRulesParams[team]
         return t and t[key]
@@ -178,7 +180,9 @@ function M.new(scenario)
         GetGameFrame = function() return world.frame end,
         GetGaiaTeamID = function() return world.gaiaTeam end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
-        GetGroundHeight = function() return 0 end,
+        -- Terrain-vs-kind validation (2026-09-10) reads the heightmap; a spec
+        -- that stages a SEA wave sets `world.heightAt` to answer under water.
+        GetGroundHeight = function(x, z) return world.heightAt(x, z) end,
 
         GetTeamList = function()
             local out = {}
