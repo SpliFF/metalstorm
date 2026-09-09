@@ -10,7 +10,7 @@ JS-managed lifecycles, effects referenced by name).
 | File | Role |
 |---|---|
 | `library.json` | Named effect definitions → emitter configs (fx-offload **X3** source of truth). 46 effects: every weapon family, plus unit deaths per class/scale, damage states, movement/ambient emitters, ricochet, and the Model-3 suppression field. |
-| `weapon-fx.json` | Weapon def → `{muzzle, projectile, trail, impact, fireSound, impactSound}`. The data analogue of `client/src/core/weapon-fx-dispatch.ts`. 30 weapons + type defaults + fallback. |
+| `weapon-fx.json` | Weapon def → `{muzzle, projectile, trail, impact, fireSound, impactSound}`. The data analogue of `client/src/core/weapon-fx-dispatch.ts`. 32 weapons (every weapons.lua def) + type defaults + fallback. |
 | `unit-fx.json` | Unit def → `{death, damageSmoke, damageSmokeHeavy, burning, moveDust, contactPlant, wake, thruster, buildFx}` — the unit-side sibling of weapon-fx for effects no weapon owns. Resolution: exact `units[def]` → `scaleOverrides[class][scale]` → `byClass[class]` (class/scale from the `ms_<class>_s<n>` def convention). Bindings reference these as `slot:` names. |
 | `bindings.example.json` | Per-unit binding template (fx-offload **§2** format) for `weapon_fired`/`killed`/damage-state/loop-sound choreography, resolving unit slots via `slot:` refs. |
 
