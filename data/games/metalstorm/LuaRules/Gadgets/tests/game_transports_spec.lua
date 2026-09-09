@@ -152,6 +152,7 @@ describe("§7.7 heavy costs more slots than light", function()
                                    cargo = { { def = 'ms_mech_s3', count = 1 } } }) },
         }))
         local gOK = _G.gadget
+        ok.setWater(20)          -- a sea wave needs water at both ends
         gOK:GameStart()
         assert.are.equal(0, ok.rp('war_arrival_invalid'))
 
@@ -160,8 +161,51 @@ describe("§7.7 heavy costs more slots than light", function()
                                    cargo = { { def = 'ms_tank_s2', count = 2 } } }) },
         }))
         local gOver = _G.gadget
+        over.setWater(20)
         gOver:GameStart()
         assert.are.equal(1, over.rp('war_arrival_invalid'))
+    end)
+
+    it("refuses a SEA wave whose entry or drop zone is dry ground", function()
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea' }) },
+        }))
+        g:GameStart()          -- flat dry map
+        assert.are.equal(1, world.rp('war_arrival_invalid'))
+        assert.is_true(world.echoed('sea entry point is on dry ground'))
+    end)
+
+    it("refuses an AIR wave that would set ground cargo down in open water", function()
+        local world, g = mock.new(scenario({ arrivals = { arrival() } }))
+        world.setWater(20)
+        g:GameStart()
+        assert.are.equal(1, world.rp('war_arrival_invalid'))
+        assert.is_true(world.echoed('air dropZone is over water'))
+    end)
+
+    it("gives a SEA wave the offshore unload radius and records extracted strength", function()
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',
+                                   entry = { x = 500, z = 500 },
+                                   dropZone = { x = 9000, z = 9000 } }) },
+        }))
+        world.setWater(20)
+        g:GameStart()
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+        world.run(g, 320)
+        local transportID
+        for id, u in pairs(world.units) do
+            if u.defID == mock.LANDING_SHIP then transportID = id end
+        end
+        -- 400 elmos out is "arrived" for a ship (200 would not be).
+        world.moveTo(transportID, 9000 - 400, 9000)
+        world.run(g, 400)
+        local unload
+        for _, o in ipairs(world.ordersFor(transportID)) do
+            if o.cmdID == CMD.UNLOAD_UNITS then unload = o end
+        end
+        assert.is_not_nil(unload)
+        assert.are.equal(450, unload.params[4])
     end)
 end)
 
