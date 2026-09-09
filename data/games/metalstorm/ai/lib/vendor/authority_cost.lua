@@ -57,8 +57,10 @@ return {
     economy = {
         -- Lever 1: soft ceiling with overflow decay (§3.1, default-on)
         soft_ceiling_C_base   = 6000,  -- per-player pool soft cap (team ceiling = C_base × teamPlayerCount). 6000 satisfies game_authority's own E1 load-time assert (C_base ≥ 2×maxOrderCost=6000: a team must be able to save for a scale-4 build without the ceiling capping them); the prior 2000 placeholder violated that rule. Retune with balance data.
-        overflow_decay_pct    = 2,     -- decay % per minute above ceiling
-        overflow_decay_period = 900,   -- frames between decay ticks (30 s at GAME_SPEED 30 = 1800 s/60 min × 2% = 0.6%/tick)
+        overflow_decay_pct    = 2,     -- decay % PER MINUTE of the excess above the ceiling (manual §3 "2%/min")
+        overflow_decay_period = 900,   -- frames between decay sweeps (30 s); the per-sweep fraction is
+                                       -- pct/100 × period/1800 (1 % per sweep here) — game_authority.lua derives it,
+                                       -- so changing the period never changes the rate
 
         -- Lever 2: reward normalisation (§3.2, default-off until validated)
         reward_normalisation_enabled = false,  -- toggle for systemic objective reward scaling by 1/velocity
