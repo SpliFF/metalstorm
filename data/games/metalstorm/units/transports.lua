@@ -28,7 +28,13 @@ return {
         -- (PLAN-metalstorm-transports.md §3.6/§7.9).
         maxdamage = 2600, mass = 2200,
         maxvelocity = 2.0, acceleration = 0.08, brakerate = 0.1, turnrate = 220,
-        footprintx = 4, footprintz = 8,
+        -- 4 x 17 cells = 8 x 34 m: the shipped hull is 8.6 x 34.3 m and the
+        -- single-hull rule is footprint metres = cells x 2 (_builder.lua;
+        -- ms_ships_s3 at 55 m carries 28). It was 4 x 8 = 16 m, so half the
+        -- ship blocked nothing (units-assets review 2026-09-10). Pathing is
+        -- unaffected — the SHIP MoveDef's own 4 x 4 is what the pathfinder
+        -- clears; this is the ground-blocking yardmap only.
+        footprintx = 4, footprintz = 17,
         sightdistance = 600,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
         canguard = true,

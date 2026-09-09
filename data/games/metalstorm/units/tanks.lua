@@ -10,6 +10,11 @@ return mk{
     -- used as a circumscribed circle so two hulls never interpenetrate at any
     -- relative heading. s1/s3 are the measured forge models (4.5 m tankette,
     -- 12 m tracked heavy); s2/s4 are the table.
+    -- PROPOSED (units-assets review 2026-09-10, not applied): the shipped
+    -- hulls measure 4.8 / 9.9 / 13.2 / 20.3 m, so s2 members clip and s4
+    -- over-reserves a 13-cell footprint. Changing these moves the golden
+    -- radii pinned by tests/squad_extents_spec.lua AND
+    -- client/squads/member-spacing.test.js — update both ports together.
     sizes = { 4.5, 8.5, 12, 26 },
     -- Turn RATES are left alone: at 8 elmos = 1 m the four scales already turn
     -- in 0.6-1.3 hull lengths, which is right for a tracked vehicle. What was

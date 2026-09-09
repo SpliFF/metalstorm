@@ -4,7 +4,7 @@
 -- game's ~0.25× HP scale): s1 ≈ Pawn-class recon (370 hp, 87 e/s),
 -- s2 ≈ Warrior/Thug line bot (1100–1600 hp, 45 e/s), s3 ≈ Zeus-plus T2
 -- heavy, s4 ≈ Korgoth/Bantha territory scaled to this game (tank s4 is
--- 11200 aggregate; the colossus walker sits above it, glass-lighter on
+-- 30000 aggregate since the 2026-08-20 retune; the colossus walker sits below it, glass-lighter on
 -- armour than the tracked dreadnought would be at equal tonnage).
 --
 -- Walkers turn on the spot: baseTurn 1200 (BAR bots run 885–1264 vs
@@ -23,9 +23,14 @@ return mk{
     baseSquad = 8,
     baseFootprint = 2, formation = 'wedge',
     -- M2 member spacing (metres). The DESIGN-GUIDE mechs row is HEIGHT
-    -- (3/5/7.5/11 m); a walker's ground extent is its stance, about 0.6 of
-    -- that. Spacing them by height would leave a squad of light mechs three
+    -- (3/5/7.5/11 m); a walker's ground extent is its stance, NOT its height —
+    -- spacing them by height would leave a squad of light mechs three
     -- body-widths apart.
+    -- PROPOSED (units-assets review 2026-09-10, not applied): the shipped glTF
+    -- ground extents are s1 2.8 x 3.0 (members clip at 1.8), s2 2.5 x 2.5,
+    -- s3 3.4 x 4.1, s4 fable_colossus 8.8 x 8.3 — i.e. { 3.0, 3.0, 4.5, 8.8 }.
+    -- Pinned by tests/squad_extents_spec.lua + client member-spacing.test.js;
+    -- change both golden tables with it.
     sizes = { 1.8, 3.0, 4.5, 6.6 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S2' } },
@@ -50,7 +55,7 @@ return mk{
                 -- Aggregates aligned to the fable_colossus showcase def
                 -- (same 15 m model): the builder curve's 7200 hp / 2400 mass
                 -- read as a heavy, not a flagship — tank s4 already fields
-                -- 11200 aggregate. Slower accel/brake than the curve stub;
+                -- 30000 aggregate. Slower accel/brake than the curve stub;
                 -- turnrate stays walker-quick (BAR Korgoth: 437).
                 maxdamage = 14000, mass = 3200,
                 maxvelocity = 1.3, acceleration = 0.15, brakerate = 0.15,
