@@ -30,9 +30,13 @@ return mk{
     -- baseSpeed 1.4 e/f = 42 e/s at s1 — same walking-pace fix as soldiers.lua.
     baseHp = 300, baseMass = 80, baseSpeed = 1.4, baseSquad = 8,
     baseFootprint = 2,
-    -- Shares the soldiers body plan (gen_infantry.py) — same ground extent,
-    -- plus a hard hat and a wrench. See soldiers.lua for the derivation.
-    sizes = { 0.7, 0.75, 0.8, 0.95 },
+    -- s1-s3 share the soldiers body plan (gen_infantry.py) — same ground
+    -- extent, plus a hard hat and a wrench. See soldiers.lua for the
+    -- derivation. s4 is NOT a person: ms_engineers_s4.gltf is a 10.5 x 19.9 m
+    -- tracked fabrication crawler (2026-08-20), so its clearance is that hull
+    -- length — the old 0.95 gave a 20 m crawler a 4-elmo clearance and a
+    -- 10 m footprint (units-assets review 2026-09-10).
+    sizes = { 0.7, 0.75, 0.8, 19.9 },
     scales = {
         [1] = { -- 60 HP per member × 8 (builder default 300 gave 37.5/member).
                 maxdamage = 480,
