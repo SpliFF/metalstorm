@@ -284,6 +284,12 @@ void ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
     // row-order cursor is used instead of a world-ms window.
     for (const auto& s : WorldDirector::SettlementsFor(db, closing.worldId)) {
         if (s.settlementId <= closing.settlementCursorStart) continue;
+        // REVIEW 2026-09-10 (world-design.md F2): `s.factions` holds SIDE
+        // keys, so these bucket keys are sides ("compact") while the economy
+        // loop below keys by world faction id — one digest, two id spaces.
+        // Proposed: count `settlementsWon` per world faction from
+        // `world_poi_claims` rows resolved `won` by this settlement, and keep
+        // a per-side count under a separate `side:<key>` bucket.
         const auto winners = SplitFactions(s.factions);
         if (winners.empty()) {
             buckets[""].settlementsWon += 1;  // unclaimed — no in-sim winner
@@ -360,6 +366,13 @@ WorldSeasons::TickResult WorldSeasons::Tick(sqlite3* db, const std::string& worl
     // paused world's worldMs does not move at all, so `elapsed` would be 0,
     // already caught above) — no separate pause guard is needed.
 
+    // REVIEW 2026-09-10 (world-design.md F3): three separate transactions. A
+    // crash between CloseSeason and InsertSeason leaves NO active season; the
+    // next Tick then takes the `!current` branch and tries to insert season 1
+    // again, which the UNIQUE(world_id, season_number) index refuses forever —
+    // the world has no season from then on. Proposed: wrap the three writes
+    // in one SqliteWriteTransaction (they are re-entrant), and make the
+    // `!current` branch open MAX(season_number)+1 rather than 1.
     ArchiveSeason(db, *current, nowWorldMs, nowRealMs);
     CloseSeason(db, worldId, current->seasonNumber, nowWorldMs);
 

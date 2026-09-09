@@ -433,6 +433,12 @@ WorldConquestSettlementResult WorldConquest::SettleWar(
     if (!ResolveClaim(db, *claim, WorldClaimState::Won, 0.0,
                       settlement.settlementId, nowRealMs))
         return r;  // raced with a withdrawal — the withdrawal stands
+    // REVIEW 2026-09-10 (world-design.md F8): the `won` flip and
+    // SetPoiOwner are two transactions. If SetPoiOwner fails (busy retries
+    // exhausted) the claim is already `won` and a replay finds nothing open —
+    // the POI never transfers. Proposed: one SqliteWriteTransaction around
+    // both (both helpers are re-entrant), returning SQLITE_ERROR from the
+    // body when SetPoiOwner fails so the flip rolls back with it.
     if (claim->factionId != poi->ownerFactionId) {
         if (WorldDirector::SetPoiOwner(db, settlement.worldId, settlement.poiId,
                                        claim->factionId)) {

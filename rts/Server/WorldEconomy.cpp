@@ -249,6 +249,11 @@ int WorldEconomy::Tick(sqlite3* db, const std::string& worldId,
     // the balance again after the income loop would see this call's own
     // uncommitted inserts (same connection, same open transaction) and decay
     // income that is seconds old.
+    // REVIEW 2026-09-10 (world-design.md F11): read OUTSIDE the write
+    // transaction below, so a `war_spoils` row appended by the lifecycle
+    // sweep between this read and the BEGIN IMMEDIATE is priced by the next
+    // tick's decay but not this one's — harmless today (decay is 1%/day),
+    // worth moving inside the transaction when a treasury sink lands.
     std::map<std::string, double> balanceBefore;
     for (const auto& factionId : allFactionIds)
         balanceBefore[factionId] = TreasuryFor(db, worldId, factionId);
