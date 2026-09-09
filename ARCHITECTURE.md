@@ -274,6 +274,12 @@ side). Arrivals via `game_transports` are the only way forces enter a battle;
 departures through the same seam are the only way out — nothing else moves
 force between the two layers.
 
+**Design-of-record for the world layer as a player experiences it:**
+[docs/world-layer.md](docs/world-layer.md) (rules with numbers and config
+keys, state machines, API per step, the W13–W18 proposals). The lobby's World
+screen is `client/src/lobby/world-screen.ts` (one drawer: POI / faction /
+ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
+
 ### Simulation (`rts/Sim/`)
 
 | Subsystem | Key files | Notes |
@@ -963,7 +969,13 @@ subtrees each gadget family delegates to (with their own `tests/`).
 | `client/squads/` | The **SoA squad engine** (default, `config.engine:'soa'`): `soa-kernel`, `steering`, cohesion modules, `formation`, `governor`, `squad-transport.js` (the world↔battle seam's client half). Plain-ESM `*.test.js`, in the client vitest gate. |
 | `ui/widgets/` + `ui/lib/` | The game's native-UI widgets and shared display libs (e.g. `authority-format.js`, `authority-cost.js`), loaded via `metalstorm.ui.json`. **Separate vitest root** — the client gate never runs it. |
 | `scenarios/` | Authored + generated battle scenarios (`*.lua`, `economy_validation_grid.json`). |
-| `ai/strategos/` | The game's server-side Lua AI. |
+| `ai/strategos/` | The game's server-side Lua AI (strategic, directive-only; parley verbs real since 2026-09-10). |
+| `ai/lib/` | Reusable, engine-agnostic AI-player library (picture/regions/authority/directives/actuator/scheduler/reporter + `testing/fake_engine.lua`); `vendor/` holds byte-identical copies of the synced cost/wire specs, pinned by `lib/tests/vendor_drift_spec.lua` — re-copy after editing an original. Not an AI itself (AIDiscovery skips it). |
+| `ai/garrison/` | A second, simpler AI player (defender/NPC) built on `ai/lib` — proves the library; `lib` is a tracked symlink because the AI sandbox cannot `require` across plugins. |
+
+Review reports from the 2026-09-10 fifteen-lane sweep (findings, fixes,
+uncompiled C++ proposals, not-done lists) live under `docs/reviews/2026-09-10/`
+with an index in its `README.md`.
 
 ### Map generation (`tools/mapgen` + `terragen/`)
 
