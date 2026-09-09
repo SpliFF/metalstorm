@@ -24,6 +24,7 @@ import { parseRevealPredicate } from './reveal-predicate.js';
 import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
 import { uiActionRegistry } from './ui-action-registry.js';
 import { globalSurface, parseMenuMount } from './global-surface.js';
+import { focusModel, type NLFocusView } from './focus-model.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -131,6 +132,37 @@ export interface WidgetContext {
      *  while the panel is collapsed, so a collapsed panel can still report
      *  "3 pending". Pass null/'' to clear. No-op for untitled widgets. */
     setBadge?: (text: string | number | null) => void;
+    /**
+     * Read-only view of the session focus (DESIGN-DRILLDOWN.md §3), for
+     * game-dir widgets that cannot import `focus-model.ts` — the same
+     * kinds-and-labels projection the NL layer reads, plus the two surface
+     * verbs a widget with its own open/closed panel needs so "close that" has
+     * something to bind to. `data/games/metalstorm/ui/lib/focus.js` documents
+     * the shape and ships the helpers that read it.
+     */
+    focus?: WidgetFocusPort;
+}
+
+/** The focus slice a game-dir widget may read. Ids never cross this seam. */
+export interface WidgetFocusPort {
+    get(): NLFocusView;
+    /** Fires on every focus change (selection, drill, surfaces). Not hover. */
+    subscribe(listener: (view: NLFocusView) => void): () => void;
+    /** Record a widget-owned panel as open/closed by its manifest id. */
+    openSurface(id: string): void;
+    closeSurface(id: string): void;
+    isSurfaceOpen(id: string): boolean;
+}
+
+/** One port per session, built over the singleton model. */
+function createFocusPort(): WidgetFocusPort {
+    return {
+        get: () => focusModel.nlFocus(),
+        subscribe: (listener) => focusModel.subscribe(() => listener(focusModel.nlFocus())),
+        openSurface: (id) => focusModel.openSurface(id),
+        closeSurface: (id) => focusModel.closeSurface(id),
+        isSurfaceOpen: (id) => focusModel.isSurfaceOpen(id),
+    };
 }
 
 export interface Widget {
@@ -182,6 +214,10 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // game-dir module.
     'focus-hud': () => import('./focus-hud.js'),
     'objective-hud': () => import('./objective-hud.js'),
+    // The co-commander AI's rung-1 chip (hud-drilldown 2026-09-10): reads the
+    // same `guidance_<team>_*` params the Reports-tab panel does, drills into
+    // a what-is-it-doing view, and hands off to that panel for the controls.
+    'ai-hud': () => import('./ai-hud.js'),
     // battle-clarity U3. `moment-hud` is the decaying awareness layer;
     // `event-log` and `objective-board` are the rung-4 tabs behind the one
     // access point, and each shares a module with the rung-1 surface it mirrors
@@ -722,6 +758,7 @@ export class WidgetLoader {
             sendCommand: this.createSendCommand(),
             strategicMap: this.createStrategicMapStub(),
             setBadge: panel ? panel.setBadge : () => {},
+            focus: createFocusPort(),
         };
 
         // Initialize widget

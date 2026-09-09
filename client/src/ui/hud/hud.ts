@@ -48,20 +48,47 @@ export function hideHUD(): void {
     if (hud) hud.style.display = 'none';
 }
 
+/**
+ * Last text written to each readout. `updateHUD` is called from the render
+ * loop's scene-state message (main.ts), i.e. at frame rate, and every readout
+ * it touches is `display:none` by default (see hud.html) — so before this
+ * cache it was three `textContent` writes per frame into elements nobody
+ * could see. A write is now made only when the string actually changes,
+ * which for the selection readout is "when the player clicks" and for the
+ * frame counter is never, because that element is hidden and its text is
+ * only interesting to a debugger who can read `window.test`.
+ */
+const lastWritten = { entities: '', frame: '', selected: '' };
+
+/** Write `text` to `#<id>` only if it differs from the last write. */
+function writeIfChanged(id: string, key: keyof typeof lastWritten, text: string): void {
+    if (lastWritten[key] === text) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    lastWritten[key] = text;
+}
+
+/** Testable formatting of the selection readout. Exported for hud tests. */
+export function selectionReadout(selectedIds: readonly number[]): string {
+    if (selectedIds.length === 0) return 'No selection';
+    if (selectedIds.length === 1) return `Selected: unit ${selectedIds[0]}`;
+    return `Selected: ${selectedIds.length} units`;
+}
+
 export function updateHUD(
     entityCount: number, frame: number, selectedIds: readonly number[],
 ): void {
-    const elEntities = document.getElementById('hud-entities');
-    const elFrame = document.getElementById('hud-frame');
-    const elSelected = document.getElementById('hud-selected');
+    writeIfChanged('hud-entities', 'entities', `Entities: ${entityCount}`);
+    writeIfChanged('hud-frame', 'frame', `Frame: ${frame}`);
+    writeIfChanged('hud-selected', 'selected', selectionReadout(selectedIds));
+}
 
-    if (elEntities) elEntities.textContent = `Entities: ${entityCount}`;
-    if (elFrame) elFrame.textContent = `Frame: ${frame}`;
-    if (elSelected) {
-        if (selectedIds.length === 0) elSelected.textContent = 'No selection';
-        else if (selectedIds.length === 1) elSelected.textContent = `Selected: unit ${selectedIds[0]}`;
-        else elSelected.textContent = `Selected: ${selectedIds.length} units`;
-    }
+/** Test hook: forget the write cache (a rebuilt HUD has fresh elements). */
+export function resetHUDWriteCache(): void {
+    lastWritten.entities = '';
+    lastWritten.frame = '';
+    lastWritten.selected = '';
 }
 
 /**

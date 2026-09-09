@@ -58,7 +58,7 @@ import {
 } from './drilldown.js';
 import {
     MAX_OBJECTIVE_CHIPS, URGENT_FRAMES,
-    createObjectiveAnnouncer, framesRemaining, isResolved, parseObjectives,
+    createObjectiveAnnouncer, disambiguateTitles, framesRemaining, isResolved, parseObjectives,
     rankObjectives, resolvePlace, visibleTo,
     type ObjectiveEvent, type ObjectivePlace, type ObjectiveRecord,
 } from './objective-model.js';
@@ -105,6 +105,24 @@ export interface Board {
     delegated: ReadonlySet<number>;
     /** id → wall-clock ms at which its announcement highlight expires. */
     announcedUntil: Map<number, number>;
+    /** id → qualifier for a title that collides with another on this board
+     *  (`disambiguateTitles`). Empty for unique titles. */
+    qualifiers?: Map<number, string>;
+}
+
+/** The chip title: the short name, qualified only when another row shares it. */
+export function chipTitle(board: Board, o: ObjectiveRecord, place: ObjectivePlace | null): string {
+    const q = board.qualifiers?.get(o.id);
+    const name = shortName(o, place);
+    return q ? `${name} ${q}` : name;
+}
+
+/** Fill `board.qualifiers` for the records about to be drawn. */
+function qualifyBoard(board: Board, records: readonly ObjectiveRecord[]): void {
+    board.qualifiers = disambiguateTitles(
+        records,
+        (o) => shortName(o, board.placeById.get(o.id) ?? null),
+    );
 }
 
 /** The ref an objective is addressed by — here, and (U2) on its world marker. */
@@ -251,6 +269,10 @@ function mount(ctx: WidgetContext): void {
         const ranked = rankObjectives(mine, {
             frame: board.frame, playerId: ctx.identity?.playerId, changedIds,
         });
+        // Qualify against the WHOLE board, not the visible slice: a title that
+        // is unique among three chips and duplicated in the tab must read the
+        // same in both, or a player opening the tab sees a chip rename itself.
+        qualifyBoard(board, ranked);
         const visible = showAll ? ranked : ranked.slice(0, MAX_OBJECTIVE_CHIPS);
         const wanted = new Set(visible.map((o) => o.id));
 
@@ -385,7 +407,7 @@ export function summaryFor(board: Board, id: number): DrilldownSummary {
     }
 
     return {
-        title: shortName(o, place),
+        title: chipTitle(board, o, place),
         state: stateWord(o, { frame: board.frame, teamId: board.teamId }),
         stats,
     };
@@ -546,6 +568,7 @@ function mountBoard(ctx: WidgetContext): void {
         const ranked = rankObjectives(mine, {
             frame: board.frame, playerId: ctx.identity?.playerId, changedIds: new Set(),
         });
+        qualifyBoard(board, ranked);
         const wanted = new Set(ranked.map((o) => o.id));
         for (const [id, handle] of handles) {
             if (!wanted.has(id)) { handle.dispose(); handles.delete(id); }

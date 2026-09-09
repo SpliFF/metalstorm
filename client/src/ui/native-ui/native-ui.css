@@ -1120,3 +1120,43 @@
 @media (prefers-reduced-motion: reduce) {
     .nui-edge { animation: none; opacity: 1; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   hud-drilldown review (2026-09-10) — the authority ledger and the AI chip
+   ══════════════════════════════════════════════════════════════════════
+   Both are rung-0/1 affordances in the top-left dock that DRILL. Neither is
+   open by default; the ledger holds no DOM while closed (authority-bar.js),
+   the AI chip is absent from the DOM while no AI guides the team (ai-hud.ts).
+   ────────────────────────────────────────────────────────────────────── */
+
+/* The authority pill is a <button> now, so it needs the button reset the
+   panel frame never had; everything else about it is the game skin's. */
+.ms-authority { display: flex; flex-direction: column; gap: 4px; position: relative; }
+button.ms-authority-bar { cursor: pointer; text-align: left; }
+button.ms-authority-bar:hover { border-color: var(--nui-accent-dim); }
+button.ms-authority-bar:focus-visible { outline: 1px solid var(--nui-accent); outline-offset: 1px; }
+.ms-authority.is-open > .ms-authority-bar { border-color: var(--nui-accent-dim); }
+.ms-authority > .nui-toasts { top: auto; }
+.ms-authority > .ms-auth-ledger { min-width: 240px; }
+.ms-auth-ledger__head {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--nui-border);
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.ms-auth-ledger__row--award .nui-dd__fact-value,
+.ms-auth-ledger__row--refund .nui-dd__fact-value { color: var(--nui-good); }
+.ms-auth-ledger__row--refusal .nui-dd__fact-value { color: var(--nui-bad); }
+
+/* The AI chip stacks under the pill, left-aligned with it, chip-width. */
+.nui-ai { display: flex; flex-direction: column; align-items: flex-start; max-width: min(420px, 40vw); }
+.nui-ai[hidden] { display: none; }
+
+/* An enemy force's chip is TITLED "Enemy …" (the word is the signal — never
+   colour alone); the red edge is reinforcement for sighted players. */
+.nui-focus .nui-dd[data-focus-key^="enemy-force:"] > .nui-dd__row > .nui-dd__chip {
+    border-left: 3px solid var(--nui-bad);
+}
