@@ -19,6 +19,13 @@ export type MapListStatus =
     /// The call succeeded and there are maps to render.
     | { kind: 'ok' };
 
+/// The thumbnail the lobby serves for a map, or '' for no map. One spelling
+/// for the map picker, the war cards and the scenario cards — three surfaces
+/// that used to be one and would otherwise drift into three URLs.
+export function mapThumbUrl(mapId: string): string {
+    return mapId ? `/api/maps/thumb/${encodeURIComponent(mapId)}` : '';
+}
+
 export function mapListStatus(mapCount: number, loadError: string): MapListStatus {
     // Error wins over emptiness: a faulted read yields zero maps too, and
     // reporting that as "no maps installed" is the bug this guards.

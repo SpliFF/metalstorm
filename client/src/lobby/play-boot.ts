@@ -154,8 +154,34 @@ export function pickAttachIdentity(roomJson: any, user: string): { playerId: num
     return { playerId: row.player_id };
 }
 
-/// Room states: 5 = Ended. An ended room cannot be attached to — the caller
-/// falls through to a fresh launch so a play link never dangles.
+/// Attach mode wants the room the MCP already LAUNCHED — one that is Loading
+/// (3, the port may still be pending) or Active (4). Anything else falls
+/// through to a fresh launch so a play link never dangles: an Ended room (5)
+/// has no server, and a recycled room (the lobby resets a finished room to
+/// Filling, 1) has none either. Attaching to the latter was the dead end this
+/// used to have — `?play` suppresses the lobby, so a session parked in an
+/// idle room rendered as a permanently blank page.
 export function isAttachableRoom(roomJson: any): boolean {
-    return !!roomJson && roomJson.state !== 5;
+    return !!roomJson && (roomJson.state === 3 || roomJson.state === 4);
+}
+
+/// Why `?play=<scenarioId>` must NOT build a manifest for this scenario, or
+/// null when it may.
+///
+/// The `/api/rooms/direct` route deliberately does not refuse a retired war
+/// (it is the MCP's path, and the MCP may need to stage one for a test), so
+/// the refusal a player would get from the Create Game route has to be made
+/// here, before the manifest is built — a `?play=meridian_basin` link would
+/// otherwise stage a war whose armies cannot reach each other and that ends
+/// uncontested (PLAN-metalstorm-wars.md §7.6).
+export function playRefusal(
+    scenario: ScenarioInfo | undefined, scenarioId: string,
+): string | null {
+    if (!scenario)
+        return `?play: scenario "${scenarioId}" is not one this game ships.`;
+    if (scenario.retired)
+        return `?play: the war "${scenario.displayName ?? scenario.id}" is retired — ` +
+               `its armies cannot cross its map, so it would end uncontested. ` +
+               `Pick another scenario.`;
+    return null;
 }
