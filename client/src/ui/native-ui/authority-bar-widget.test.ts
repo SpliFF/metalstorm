@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 /**
  * authority-bar-widget.test.ts — the shipped Metalstorm authority bar paints
  * once at init, from whatever the store already holds.
@@ -10,12 +11,12 @@
  * indefinitely against a store that already held the right values (measured
  * live: store `authority_player_1 = 92` / `authority_pool = 620`, bar `—/—`).
  *
- * jsdom is not installed in this project (see command-composer.test.ts), so the
- * DOM the widget touches during `init` is faked here: createElement, className,
- * innerHTML and querySelector over the three classes its own markup declares.
+ * Runs under happy-dom since the 2026-09-10 hud-drilldown review (the pill is a
+ * <button> that drills into the ledger, so it needs a real DOM); the mount is
+ * still a hand-fake, which is all the widget asks of it.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 interface FakeNode {
     className: string;
@@ -77,18 +78,6 @@ async function loadWidget() {
 }
 
 describe('metalstorm authority-bar widget', () => {
-    const originalDocument = (globalThis as { document?: unknown }).document;
-
-    beforeEach(() => {
-        (globalThis as { document?: unknown }).document = {
-            createElement: () => makeNode(),
-        };
-    });
-
-    afterEach(() => {
-        (globalThis as { document?: unknown }).document = originalDocument;
-    });
-
     it('paints both pools at init, with no store update after mount', async () => {
         const widget = await loadWidget();
         const reads: FakeStoreReads = {
@@ -138,18 +127,6 @@ describe('metalstorm authority-bar widget', () => {
 });
 
 describe('metalstorm authority-bar legibility (D49)', () => {
-    const originalDocument = (globalThis as { document?: unknown }).document;
-
-    beforeEach(() => {
-        (globalThis as { document?: unknown }).document = {
-            createElement: () => makeNode(),
-        };
-    });
-
-    afterEach(() => {
-        (globalThis as { document?: unknown }).document = originalDocument;
-    });
-
     // The pools are float32 rulesParam reads and were written to the DOM with a
     // bare String(): measured live as `YOU 202.5500030517578` /
     // `TEAM 614.5499877929688`. D44 fixed the bar so it painted; it never made
@@ -193,7 +170,7 @@ describe('metalstorm authority-bar legibility (D49)', () => {
 
         const el = (widget as unknown as { el: FakeNode }).el;
         const toasts = el.querySelector('.ms-auth-toasts')!;
-        const texts = toasts.children.map((c) => c.textContent);
+        const texts = Array.from(toasts.children as unknown as ArrayLike<{ textContent: string }>).map((c) => c.textContent);
         expect(texts).toEqual(['+114.6 authority (objective_control)']);
     });
 });

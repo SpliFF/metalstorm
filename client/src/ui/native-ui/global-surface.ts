@@ -75,12 +75,16 @@ class GlobalSurface {
     private summary: HTMLButtonElement | null = null;
     private panel: HTMLElement | null = null;
     private tabStrip: HTMLElement | null = null;
+    private overlayHost: HTMLElement | null = null;
     private panes = new Map<GlobalTabId, HTMLElement>();
     private tabButtons = new Map<GlobalTabId, HTMLButtonElement>();
     private active: GlobalTabId = 'events';
     private open_ = false;
     private onKeyDown: ((e: KeyboardEvent) => void) | null = null;
     private unregister: Array<() => void> = [];
+    /** Where keyboard focus was when the surface opened, so closing it puts
+     *  the player back where they were rather than on <body>. */
+    private returnFocusTo: HTMLElement | null = null;
 
     /** True once `mount` has run for this session. */
     get mounted(): boolean { return this.root !== null; }
@@ -119,11 +123,16 @@ class GlobalSurface {
         const panel = document.createElement('div');
         panel.className = 'nui-global';
         panel.hidden = true;
+        // A dialog the battle stays visible behind — not modal, so assistive
+        // tech does not trap the player in it either.
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-label', 'Battle');
 
         const header = document.createElement('div');
         header.className = 'nui-global__header';
         const strip = document.createElement('div');
         strip.className = 'nui-global__tabs';
+        strip.setAttribute('role', 'tablist');
         const close = document.createElement('button');
         close.type = 'button';
         close.className = 'nui-global__close';
@@ -142,6 +151,8 @@ class GlobalSurface {
             btn.dataset.tab = tab.id;
             btn.textContent = tab.label;
             btn.hidden = true;                   // until something mounts here
+            btn.setAttribute('role', 'tab');
+            btn.setAttribute('aria-selected', 'false');
             btn.addEventListener('click', () => this.open(tab.id));
             strip.append(btn);
             this.tabButtons.set(tab.id, btn);
@@ -150,6 +161,7 @@ class GlobalSurface {
             pane.className = 'nui-global__pane';
             pane.dataset.tab = tab.id;
             pane.hidden = true;
+            pane.setAttribute('role', 'tabpanel');
             body.append(pane);
             this.panes.set(tab.id, pane);
         }
@@ -158,12 +170,19 @@ class GlobalSurface {
         overlayHost.append(panel);
         this.panel = panel;
         this.tabStrip = strip;
+        this.overlayHost = overlayHost;
         this.root = cluster;
 
         // Tab opens/closes; Esc closes. Both in the CAPTURE phase and both
         // consumed, for the reason drilldown.ts documents: main.ts has a global
         // Escape handler that opens the quit dialog, and a surface that closes
         // AND quits is worse than one that does neither.
+        //
+        // Tab is ALSO the browser's focus-traversal key, and the loader made
+        // every panel header a real <button> precisely so a keyboard-only
+        // player can reach it. So Tab is taken only while keyboard focus is on
+        // the game itself (body / the canvas): once focus is anywhere inside
+        // the HUD or this surface, Tab walks the controls as it always did.
         this.onKeyDown = (e: KeyboardEvent) => {
             const target = e.target as HTMLElement | null;
             const typing = target
@@ -171,6 +190,7 @@ class GlobalSurface {
                     || target.isContentEditable);
             if (typing) return;
             if (e.key === 'Tab') {
+                if (this.focusIsInsideHud()) return;
                 e.preventDefault();
                 e.stopPropagation();
                 this.toggle();
@@ -224,25 +244,54 @@ class GlobalSurface {
         if (this.button) this.button.hidden = !any;
     }
 
+    /** True when keyboard focus is on a HUD control (any `#ui-root` content,
+     *  which includes this surface) rather than on the game. */
+    private focusIsInsideHud(): boolean {
+        const active = document.activeElement as HTMLElement | null;
+        if (!active || active === document.body) return false;
+        if (this.panel?.contains(active)) return true;
+        return this.overlayHost?.contains(active) ?? false;
+    }
+
     open(tab?: GlobalTabId): void {
         if (!this.panel) return;
+        const wasOpen = this.open_;
         if (tab) this.active = tab;
         this.open_ = true;
         this.panel.hidden = false;
         for (const [id, pane] of this.panes) pane.hidden = id !== this.active;
         for (const [id, btn] of this.tabButtons) {
-            btn.classList.toggle('is-active', id === this.active);
+            const on = id === this.active;
+            btn.classList.toggle('is-active', on);
+            btn.setAttribute('aria-selected', String(on));
         }
         this.button?.classList.add('is-open');
         focusModel.openSurface(GLOBAL_SURFACE_ID);
+
+        // Move keyboard focus INTO the surface on open (and remember where it
+        // came from). A dialog that opens without taking focus is one a
+        // keyboard player has to hunt for; one that closes without giving it
+        // back drops them on <body>.
+        if (!wasOpen) {
+            const from = document.activeElement as HTMLElement | null;
+            this.returnFocusTo = from && from !== document.body ? from : null;
+        }
+        this.tabButtons.get(this.active)?.focus();
     }
 
     close(): void {
         if (!this.panel) return;
+        const focusWasInside = this.panel.contains(document.activeElement);
         this.open_ = false;
         this.panel.hidden = true;
         this.button?.classList.remove('is-open');
         focusModel.closeSurface(GLOBAL_SURFACE_ID);
+        if (focusWasInside) {
+            const back = this.returnFocusTo;
+            if (back && back.isConnected) back.focus();
+            else (document.activeElement as HTMLElement | null)?.blur?.();
+        }
+        this.returnFocusTo = null;
     }
 
     toggle(): void { this.open_ ? this.close() : this.open(); }
@@ -276,6 +325,8 @@ class GlobalSurface {
         this.button = null;
         this.summary = null;
         this.tabStrip = null;
+        this.overlayHost = null;
+        this.returnFocusTo = null;
         this.panes.clear();
         this.tabButtons.clear();
         this.open_ = false;

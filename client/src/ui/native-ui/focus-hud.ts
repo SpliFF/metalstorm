@@ -39,8 +39,10 @@ import { censusCacheHolder, SCALE_WORDS, type Census } from './query-engine.js';
 import { cameraPortHolder } from './camera-port.js';
 import { namedEntityIndex } from './named-entity-index.js';
 import {
-    focusModel, focusRefKey, type FocusRef, type FocusState,
+    focusModel, focusRefKey, refocusSelection, type FocusRef, type FocusState,
 } from './focus-model.js';
+import { uiStore } from './ui-store.js';
+import { DirectiveType, OrderShape } from './compile-table.js';
 import {
     createDrilldown, detailRow, detailReference,
     type DrilldownAction, type DrilldownHandle, type DrilldownStat, type DrilldownSummary,
@@ -123,7 +125,14 @@ function mount(ctx: WidgetContext): void {
     let overflowEl: HTMLElement | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
 
-    const refreshCensus = (): void => { void censusCacheHolder.current?.refresh(); };
+    // After a snapshot lands, re-resolve the selection: the census is what
+    // tells the focus model whose units these are (enemy-force vs unit), and
+    // it arrives after the selection it describes.
+    const refreshCensus = (): void => {
+        const cache = censusCacheHolder.current;
+        if (!cache) return;
+        void cache.refresh().then(() => refocusSelection());
+    };
 
     const render = (state: FocusState): void => {
         const subjects = state.subjects.slice(0, MAX_SUMMARIES);
@@ -251,13 +260,18 @@ export function summaryFor(ref: FocusRef, facts = factsFor(ref)): DrilldownSumma
  * the `selection` subject, a count — see nl-context.ts's `self.selection`).
  */
 function titleFor(ref: FocusRef, facts: SquadFacts): string {
-    if (ref.kind !== 'unit' || !facts.className) return ref.label;
+    const hostile = ref.kind === 'enemy-force';
+    if ((ref.kind !== 'unit' && !hostile) || !facts.className) return ref.label;
     const scaleWord = facts.scale !== null
         ? SCALE_WORDS[facts.scale as 1 | 2 | 3 | 4]
         : undefined;
     const phrase = scaleWord ? `${scaleWord} ${facts.className}` : facts.className;
     const count = ref.unitIds?.length ?? 0;
-    return count > 1 ? `${count} × ${phrase}` : phrase;
+    const body = count > 1 ? `${count} × ${phrase}` : phrase;
+    // "Enemy" is a qualifier the chip supplies once, up front — the same
+    // rule U3 applied to the moment headlines. Never coloured-only: a red
+    // border is not something a colour-blind player can read.
+    return hostile ? `Enemy ${body}` : body;
 }
 
 function stateWord(ref: FocusRef, facts: SquadFacts): string {
@@ -265,6 +279,9 @@ function stateWord(ref: FocusRef, facts: SquadFacts): string {
     // vision. Saying "idle" here would be a claim about units we cannot see.
     if (facts.mirrored && facts.seen === 0) return 'out of contact';
     if (facts.moving) return 'moving';
+    // An enemy we can see but that is not moving is "spotted", not "idle" —
+    // idle is a claim about its orders, which we cannot know.
+    if (ref.kind === 'enemy-force') return 'spotted';
     // "tasked" beats "idle": a stationary squad with a directive is holding,
     // not doing nothing, and the difference is what a player acts on.
     if (ref.data?.tasked === true) return 'tasked';
@@ -286,6 +303,8 @@ function renderDetail(host: HTMLElement, ref: FocusRef): void {
         const scaleWord = facts.scale !== null ? SCALE_WORDS[facts.scale as 1 | 2 | 3 | 4] : undefined;
         host.append(detailRow('Class', scaleWord ? `${scaleWord} ${facts.className}` : facts.className));
     }
+
+    if (ref.kind === 'enemy-force') host.append(detailRow('Side', 'enemy — takes no orders from you'));
 
     if (facts.strength === null) {
         // Say which of the three it is. "Unknown", "not visible" and "0%" must
@@ -324,12 +343,58 @@ function renderDetail(host: HTMLElement, ref: FocusRef): void {
 
 // ────────────────────────────── rung 3 ──────────────────────────────────
 
+/**
+ * What you can DO about a selected force.
+ *
+ * Every button here has a verb behind it that the client can actually send
+ * today, or renders disabled and SAYS why (drilldown.ts rule 5). The census
+ * of order verbs this was built against (2026-09-10):
+ *
+ *   Halt          `PlayerCommand` STOP                  — always
+ *   Fall back     `GroupDirective` Withdraw → a point   — a named group, and a
+ *                                                          friendly region to go to
+ *   Reserve / Release   `guidance.lock`                 — a named group, with an AI
+ *   Form a squad  `OrgGroup` create                     — loose own units
+ *   Follow        camera                                — anything visible
+ *
+ * NOT offered, and why: a POSTURE toggle — `GroupPosture` carries a free-form
+ * JSON the server stores and echoes and NOTHING reads (no squad module or
+ * gadget consumes `postureJson`), so a posture button would be the dead
+ * control this framework forbids. "Select the whole squad" on a partial
+ * selection still needs the `SelectionPort` U0 filed.
+ */
 function actionsFor(ctx: WidgetContext, ref: FocusRef): DrilldownAction[] {
     const unitIds = [...(ref.unitIds ?? [])];
     const port = cameraPortHolder.current;
     const following = port?.followingLabel() === ref.label;
+    const hostile = ref.kind === 'enemy-force';
+    const groupId = ref.kind === 'squad' && typeof ref.id === 'number' ? ref.id : null;
+    const teamId = ctx.identity?.teamId;
 
-    return [
+    const follow: DrilldownAction = {
+        id: 'follow',
+        label: following ? 'Stop following' : 'Follow',
+        hint: following
+            ? 'Release the camera'
+            : 'Keep the camera on this force until you move it',
+        disabled: !port || unitIds.length === 0,
+        run: () => {
+            if (!port) return;
+            if (following) { port.stopFollow('stopped'); return; }
+            port.follow({
+                label: ref.label,
+                // Re-read every tick: a follow that captured one centroid
+                // tracks a photograph (see camera-port.ts's onFollowTick).
+                position: () => factsFor(ref).centroid,
+            });
+        },
+    };
+
+    // An enemy force takes no orders from us. Its rung 3 is camera only —
+    // offering Halt on someone else's tanks is the dead button rule 5 forbids.
+    if (hostile) return [follow];
+
+    const actions: DrilldownAction[] = [
         {
             id: 'halt',
             label: 'Halt',
@@ -343,25 +408,120 @@ function actionsFor(ctx: WidgetContext, ref: FocusRef): DrilldownAction[] {
                 });
             },
         },
-        {
-            id: 'follow',
-            label: following ? 'Stop following' : 'Follow',
-            hint: following
-                ? 'Release the camera'
-                : 'Keep the camera on this force until you move it',
-            disabled: !port || unitIds.length === 0,
+    ];
+
+    if (groupId !== null) {
+        // Fall back: a Withdraw directive to the nearest friendly region.
+        const facts = factsFor(ref);
+        const haven = facts.centroid ? nearestFriendlyRegion(facts.centroid, teamId) : null;
+        const partial = ref.data?.partial === true;
+        actions.push({
+            id: 'fall-back',
+            label: haven ? `Fall back to ${haven.name}` : 'Fall back',
+            hint: partial
+                ? 'Not available — only part of the squad is selected; a directive moves the whole group'
+                : !facts.centroid
+                    ? 'Not available — no position for this squad yet'
+                    : !haven
+                        ? 'Not available — no region your side holds is known'
+                        : `Withdraw ${ref.label} to ${haven.name}`,
+            disabled: partial || !haven || !ctx.sendCommand,
             run: () => {
-                if (!port) return;
-                if (following) { port.stopFollow('stopped'); return; }
-                port.follow({
-                    label: ref.label,
-                    // Re-read every tick: a follow that captured one centroid
-                    // tracks a photograph (see camera-port.ts's onFollowTick).
-                    position: () => factsFor(ref).centroid,
+                if (!haven) return;
+                ctx.sendCommand?.({
+                    type: 'GroupDirective',
+                    payload: {
+                        directiveId: 0, groupId, directiveType: DirectiveType.Withdraw,
+                        priority: 60, shape: OrderShape.Point, params: [haven.x, 0, haven.z],
+                        requestedStrength: 0,
+                    },
                 });
             },
-        },
-    ];
+        });
+
+        // Reserve from / release to the co-commander AI (`guidance.lock`).
+        const hasAi = teamId !== undefined && aiPresent(teamId);
+        const locked = teamId !== undefined && lockedGroups(teamId).has(groupId);
+        actions.push({
+            id: 'ai-lock',
+            label: locked ? 'Release to AI' : 'Reserve from AI',
+            hint: !hasAi
+                ? 'Not available — no AI is guiding this team'
+                : locked
+                    ? 'Let the co-commander AI task this squad again'
+                    : 'Keep the co-commander AI\'s hands off this squad',
+            disabled: !hasAi || !ctx.sendCommand,
+            run: () => {
+                ctx.sendCommand?.('guidance.lock', { groupId, locked: locked ? '0' : '1' });
+            },
+        });
+    } else if (ref.kind === 'unit' && unitIds.length > 0) {
+        // Loose units are real but nameless, and orders go to squads: the one
+        // thing a player can usefully do with a nameless selection is name it.
+        const facts = factsFor(ref);
+        const name = squadNameFor(facts.className, uiStore.getOrgGroups().map((g) => g.name));
+        actions.push({
+            id: 'form-squad',
+            label: 'Form a squad',
+            hint: `Group these ${unitIds.length} unit(s) as "${name}" so orders and sentences can address them`,
+            disabled: !ctx.sendCommand,
+            run: () => {
+                ctx.sendCommand?.({ type: 'OrgGroup', action: 'create', name, memberIds: unitIds });
+            },
+        });
+    }
+
+    actions.push(follow);
+    return actions;
+}
+
+/** A callsign for a new squad: the class word, numbered past existing names. */
+export function squadNameFor(className: string | null, existing: readonly string[]): string {
+    const base = className ? className.charAt(0).toUpperCase() + className.slice(1) : 'Squad';
+    const taken = new Set(existing.map((n) => n.toLowerCase()));
+    let n = 1;
+    while (taken.has(`${base} ${n}`.toLowerCase())) n++;
+    return `${base} ${n}`;
+}
+
+/** True when a co-commander AI publishes guidance for `teamId`, or the roster
+ *  seats an AI on it. Feature-detected: the chip must not promise an AI that
+ *  is not there. */
+export function aiPresent(teamId: number): boolean {
+    if (uiStore.teamRulesParam(teamId, `guidance_${teamId}_stance`) !== undefined) return true;
+    return uiStore.getPlayers().some((p) => p.isAI && p.teamId === teamId && !p.isSpectator);
+}
+
+/** Group ids under `guidance_<team>_lock_keys`. */
+export function lockedGroups(teamId: number): ReadonlySet<number> {
+    const raw = uiStore.teamRulesParam(teamId, `guidance_${teamId}_lock_keys`);
+    const out = new Set<number>();
+    if (raw === undefined || raw === null) return out;
+    for (const part of String(raw).split(',')) if (part) out.add(Number(part));
+    return out;
+}
+
+/**
+ * The nearest region owned by `teamId` — where "fall back" goes. Region
+ * ownership is `region_<key>_team` on the public wire (game_regions.lua);
+ * the index supplies the centre and the name.
+ */
+export function nearestFriendlyRegion(
+    at: { x: number; z: number },
+    teamId: number | undefined,
+    entities = namedEntityIndex.getByType('region'),
+    ownerOf: (key: string) => number = (key) => Number(uiStore.gameRulesParam(`region_${key}_team`) ?? -1),
+): { name: string; x: number; z: number } | null {
+    if (teamId === undefined) return null;
+    let best: { name: string; x: number; z: number } | null = null;
+    let bestDist = Infinity;
+    for (const e of entities) {
+        if (ownerOf(String(e.id)) !== teamId) continue;
+        if (e.x === 0 && e.z === 0) continue;
+        const dist = Math.hypot(e.x - at.x, e.z - at.z);
+        if (dist < bestDist) { bestDist = dist; best = { name: e.name, x: e.x, z: e.z }; }
+    }
+    return best;
 }
 
 // ───────────────────────────── census reads ─────────────────────────────

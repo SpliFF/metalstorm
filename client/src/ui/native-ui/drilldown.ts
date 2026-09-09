@@ -146,6 +146,10 @@ export function createDrilldown(spec: DrilldownSpec): DrilldownHandle {
     const panel = document.createElement('div');
     panel.className = 'nui-dd__panel';
     panel.hidden = true;
+    // The chip is a disclosure button; name what it discloses so a screen
+    // reader announces "3rd Tanks, collapsed" rather than a bare button.
+    panel.id = `nui-dd-panel-${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    chip.setAttribute('aria-controls', panel.id);
     const body = document.createElement('div');
     body.className = 'nui-dd__body';
     const actionRow = document.createElement('div');
@@ -244,12 +248,26 @@ export function createDrilldown(spec: DrilldownSpec): DrilldownHandle {
 
     chip.addEventListener('click', () => { expanded ? collapse() : expand(); });
 
+    // Hover is the weakest focus (focus-model.ts): reported so "this one" can
+    // mean the chip under the pointer, and scoped by ref on leave so a late
+    // `mouseleave` cannot clear a neighbour's hover. Keyboard focus counts as
+    // hover for the same reason a focused button is the one Enter acts on.
+    chip.addEventListener('mouseenter', () => model.hover(spec.ref));
+    chip.addEventListener('mouseleave', () => model.unhover(spec.ref));
+    chip.addEventListener('focus', () => model.hover(spec.ref));
+    chip.addEventListener('blur', () => model.unhover(spec.ref));
+
     // Esc, consumed in the capture phase — see rule 3 in the file header.
+    // Focus RETURNS to the chip that opened the panel: a player who tabbed into
+    // an action row and pressed Esc must not be dropped back on <body>, where
+    // the next Tab starts from the top of the document.
     const onKeyDown = (e: KeyboardEvent): void => {
         if (e.key !== 'Escape' || !expanded) return;
         e.preventDefault();
         e.stopPropagation();
+        const focusWasInside = root.contains(document.activeElement);
         collapse();
+        if (focusWasInside) chip.focus();
     };
     document.addEventListener('keydown', onKeyDown, true);
 
@@ -281,6 +299,7 @@ export function createDrilldown(spec: DrilldownSpec): DrilldownHandle {
             document.removeEventListener('keydown', onKeyDown, true);
             unsubscribe();
             if (model.isDrilled(spec.ref)) model.collapse();
+            model.unhover(spec.ref);
             root.remove();
         },
     };

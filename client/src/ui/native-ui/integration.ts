@@ -50,6 +50,23 @@ if (typeof window !== 'undefined') {
 import { WidgetLoader } from './widget-loader.js';
 import { startEntityIndexProducer } from './entity-index-producer.js';
 import { bindSelectionToFocus, focusModel } from './focus-model.js';
+import { censusCacheHolder } from './query-engine.js';
+
+/**
+ * Is `unitId` an enemy unit, per the last LOS-honest census snapshot?
+ *
+ * Read at resolve time, not captured: the snapshot the HUD pulls on selection
+ * change lands AFTER the selection it describes, and `focus-hud.ts` calls
+ * `refocusSelection()` when it does. Unknown (no snapshot, or a unit the
+ * mirror has not seen) reads as NOT hostile, so a stale census can never turn
+ * the player's own tanks into an "enemy force".
+ */
+function isHostileUnit(unitId: number): boolean {
+    const census = censusCacheHolder.current?.snapshot();
+    if (!census) return false;
+    for (const u of census.units) if (u.unitId === unitId) return u.side === 'enemy';
+    return false;
+}
 
 let widgetLoader: WidgetLoader | null = null;
 let activeConnection: CommandConnection | null = null;
@@ -103,7 +120,7 @@ export async function initializeNativeUI(
     // rather than an empty one.
     stopFocusBinding?.();
     focusModel.clear();
-    stopFocusBinding = bindSelectionToFocus(uiStore);
+    stopFocusBinding = bindSelectionToFocus(uiStore, focusModel, { isHostile: isHostileUnit });
 
     // Create new loader and load widgets
     widgetLoader = new WidgetLoader();
