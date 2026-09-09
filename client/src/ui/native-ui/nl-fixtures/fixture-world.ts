@@ -27,6 +27,8 @@ import { CameraPort, createNLCameraPort } from '../camera-port.js';
 import { UiActionRegistry, createNLUiActionPort } from '../ui-action-registry.js';
 import { QueryEngine, type Census, type CensusPort, type CensusUnit } from '../query-engine.js';
 import type { NLResponse } from '../nl-envelope.js';
+import type { NLContextFocus } from '../nl-focus.js';
+import type { BattleMoment } from '../../../core/battle-events.js';
 
 // ─────────────────────────── fixture shapes ───────────────────────────
 
@@ -115,6 +117,30 @@ export interface FixtureContext {
     noUnitClass?: boolean;
     /** Omit the `groupPosition` port, so nearest-to-target is skipped. */
     noGroupPosition?: boolean;
+    /**
+     * What the player is looking at, in the wire shape `nl-focus.ts` emits
+     * (kinds, labels, place names — no ids). Passed through to the model by
+     * `tools/nl-eval` and turned back into a `NLFocusView` for the offline
+     * path by `focusViewFromContext`. Omitted ⇒ no focus.
+     */
+    focus?: NLContextFocus;
+    /**
+     * The battle history the `events` query reads (contract v2), oldest first.
+     * Omitted ⇒ the port is absent and the query refuses by name; an empty
+     * list ⇒ "nothing has happened yet".
+     */
+    moments?: FixtureMoment[];
+}
+
+/** One recorded battle moment. `frame` defaults to the census frame minus 300
+ *  (10 s ago) so an age reads out without every fixture stating one. */
+export interface FixtureMoment {
+    kind: BattleMoment['kind'];
+    x: number;
+    z: number;
+    count?: number;
+    cls?: string;
+    frame?: number;
 }
 
 /** Test-side expectations that go beyond the envelope itself. The required trio
@@ -409,6 +435,19 @@ export function buildFixtureWorld(context: FixtureContext, vocabulary: ClassVoca
     const gameRulesParams = context.gameRulesParams ?? {};
     const teamRulesParams = context.teamRulesParams ?? {};
 
+    const censusFrame = census?.frame ?? 1200;
+    const moments: BattleMoment[] | null = context.moments
+        ? context.moments.map((m, i) => ({
+            id: i + 1,
+            kind: m.kind,
+            frame: m.frame ?? censusFrame - 300,
+            x: m.x, z: m.z,
+            count: m.count ?? 1,
+            unitIds: [],
+            ...(m.cls ? { className: m.cls } : {}),
+        }))
+        : null;
+
     const ports = {
         camera: createNLCameraPort({ port: cameraPort, resolver, groupPosition }),
         uiActions: createNLUiActionPort(registry),
@@ -423,6 +462,7 @@ export function buildFixtureWorld(context: FixtureContext, vocabulary: ClassVoca
             teamRulesParam: (key) => teamRulesParams[key],
             playerId: 0,
             focusCamera: (x, z) => cameraPort.focusOn(x, z),
+            ...(moments ? { battleMoments: () => moments } : {}),
         }),
     };
 

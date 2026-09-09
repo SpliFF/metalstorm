@@ -15,7 +15,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { NLResolver, FUZZY_SCORE_THRESHOLD, DEFAULT_AREA_RADIUS } from './nl-resolver.js';
+import {
+    NLResolver, FUZZY_SCORE_THRESHOLD, DEFAULT_AREA_RADIUS, PATROL_RING_RADIUS,
+} from './nl-resolver.js';
 import { buildFixtureWorld } from './nl-fixtures/fixture-world.js';
 import { loadContexts, loadVocabulary } from './nl-fixtures/load-fixtures.test-support.js';
 
@@ -454,11 +456,39 @@ describe('targets', () => {
         expect(found).toMatchObject({ kind: 'ok', value: { shape: 'entity', entity: { name: 'Randtown' } } });
     });
 
-    it('refuses a route verb — a sentence cannot draw a route yet', () => {
+    it('a route verb aimed at a place walks a ring around it (contract v2)', () => {
         for (const verb of ['patrol', 'screen'] as const) {
-            expect(resolver('basin').resolveTarget(verb, { type: 'entity-ref', name: 'Northgate' }))
-                .toMatchObject({ kind: 'refuse', reason: expect.stringContaining('needs a route') });
+            const found = resolver('basin').resolveTarget(verb, { type: 'entity-ref', name: 'Northgate' });
+            expect(found).toMatchObject({ kind: 'ok', value: { shape: 'route', entity: { name: 'Northgate' } } });
+            const route = (found as { value: { route: Array<{ x: number; z: number }> } }).value.route;
+            // Five points, closed, centred on Northgate (2000, 500).
+            expect(route).toHaveLength(5);
+            expect(route[0]).toEqual(route[4]);
+            expect(route[0]).toEqual({ x: 2000, z: 500 - PATROL_RING_RADIUS });
+            expect(route[1]).toEqual({ x: 2000 + PATROL_RING_RADIUS, z: 500 });
         }
+    });
+
+    it('a route verb handed to the AI is advice about a place, not a route', () => {
+        const found = resolver('basin').resolveTarget(
+            'patrol', { type: 'entity-ref', name: 'Northgate' }, { type: 'ai' });
+        expect(found).toMatchObject({ kind: 'ok', value: { shape: 'entity', entity: { name: 'Northgate' } } });
+    });
+
+    it('a place that is really one of your forces refuses by name', () => {
+        expect(resolver('basin').resolveTarget('defend', { type: 'entity-ref', name: 'Chimera Squad' }))
+            .toMatchObject({ kind: 'refuse', reason: expect.stringContaining('is one of your forces, not a place') });
+    });
+
+    it('withdraw with no target pulls back to the nearest departure zone, or refuses by name', () => {
+        expect(resolver('basin').resolveTarget('withdraw', undefined, { type: 'any' }))
+            .toMatchObject({ kind: 'refuse', reason: expect.stringContaining('No departure zone') });
+        expect(resolver('basin').resolveTarget('attack', undefined, { type: 'any' }))
+            .toMatchObject({ kind: 'refuse', reason: expect.stringContaining('needs a place') });
+        const found = resolver('basin-departure').resolveTarget(
+            'withdraw', undefined, { type: 'entity-ref', name: 'Chimera Squad' });
+        // Chimera stands at (900, 1100): the western zone is nearer than the eastern one.
+        expect(found).toMatchObject({ kind: 'ok', value: { entity: { name: 'West Departure Zone' } } });
     });
 
     it('area-around becomes a circle at the place, with a default radius', () => {

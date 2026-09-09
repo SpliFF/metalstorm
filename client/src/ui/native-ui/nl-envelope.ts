@@ -140,13 +140,23 @@ export type NLCameraAction =
  *  like any other untrusted string. */
 export type NLUiAction = { op: 'open' | 'close' | 'toggle' | 'fullscreen'; panelId: string };
 
-/** STUB in M1 — the LOS-honest query engine lands in M3. */
+/**
+ * A question the game answers locally (`query-engine.ts`). Queries never move
+ * anything.
+ *
+ * `events` (contract v2, 2026-09-10) is "what's happening" — the battle
+ * moments the HUD already records (`uiStore.getBattleMoments()`), most recent
+ * first, optionally narrowed to `near` a named place. `near` is a NAME like
+ * every other ref, so "what's happening there" binds through the focus the
+ * same way an order's target does.
+ */
 export type NLQuery =
     | { op: 'count'; class: string; scale?: NLScale; side: 'own' | 'enemy' | 'ally' }
     | { op: 'locate'; targetRef: string; side?: 'own' | 'enemy' }
     | { op: 'status'; subjectRef: string }
     | { op: 'resources' }
-    | { op: 'objectives' };
+    | { op: 'objectives' }
+    | { op: 'events'; near?: string };
 
 /**
  * "Name this group Hammerfall" → the existing OrgGroup update case.
@@ -200,6 +210,23 @@ export interface NLResponse {
 }
 
 // ─────────────────────── closed vocabularies ───────────────────────
+
+/**
+ * The contract version. Bumped on every ADDITIVE change to the envelope (a
+ * new op, a new optional field); never on a removal, because there are none —
+ * a kind or op the game stops supporting is refused by the executor, not
+ * deleted from the schema, so an older model prompt stays valid.
+ *
+ *   1 — M1..M8 (2026-08): seven kinds, five query ops.
+ *   2 — 2026-09-10: `query.events`; `withdraw` may omit its target (the
+ *       resolver picks the nearest departure zone); `patrol`/`screen` accept a
+ *       place (a ring route is drawn around it).
+ *
+ * Carried in the schema's `description` (the one keyword structured outputs
+ * is guaranteed to accept) and sent by the client as `contract` on every proxy
+ * request, which the proxy ignores today and may one day route on.
+ */
+export const NL_CONTRACT_VERSION = 2;
 
 export const NL_ACTION_KINDS = [
     'command', 'guidance', 'camera', 'ui', 'query', 'group', 'refuse',
@@ -261,7 +288,7 @@ export const NL_GUIDANCE_OPS: readonly NLGuidanceOp[] = [
  */
 export const CAMERA_OPS = ['focus', 'follow', 'fitMap', 'zoom', 'saveView', 'loadView'] as const;
 export const UI_OPS = ['open', 'close', 'toggle', 'fullscreen'] as const;
-export const QUERY_OPS = ['count', 'locate', 'status', 'resources', 'objectives'] as const;
+export const QUERY_OPS = ['count', 'locate', 'status', 'resources', 'objectives', 'events'] as const;
 export const SIDES = ['own', 'enemy', 'ally'] as const;
 export const GROUP_OPS = ['create', 'rename'] as const;
 export const SUBJECT_TYPES = ['entity-ref', 'class-count', 'idle-filter', 'selection', 'any', 'ai'] as const;
@@ -641,6 +668,12 @@ function validateQuery(q: unknown, path: string, opts: ValidateOptions, push: (m
             break;
         case 'resources':
         case 'objectives':
+            break;
+        case 'events':
+            // Optional, and an omitted `near` means "anywhere" — but a present
+            // one is a ref like any other, so a `near: ""` is an error rather
+            // than a synonym for omission.
+            if (q.near !== undefined) checkRef(q.near, `${path}.near`, push);
             break;
     }
 }

@@ -35,8 +35,8 @@
 
 import {
     CAMERA_OPS, COMMAND_VERBS, GROUP_OPS, GUIDANCE_VALUES, NL_ACTION_KINDS,
-    NL_GUIDANCE_OPS, NL_PRIORITIES, NL_SCALES, QUERY_OPS, SIDES, SUBJECT_TYPES,
-    TARGET_TYPES, UI_OPS, WHEN_TYPES,
+    NL_CONTRACT_VERSION, NL_GUIDANCE_OPS, NL_PRIORITIES, NL_SCALES, QUERY_OPS, SIDES,
+    SUBJECT_TYPES, TARGET_TYPES, UI_OPS, WHEN_TYPES,
 } from './nl-envelope.js';
 
 /** A JSON value, as it appears in a schema document. */
@@ -147,7 +147,15 @@ const WHEN: Record<string, JsonValue> = {
 function commandAction(classNames: readonly string[]): Record<string, JsonValue> {
     return variant('kind', 'command', {
         intent: obj({
-            verb: { enum: [...COMMAND_VERBS] },
+            verb: {
+                enum: [...COMMAND_VERBS],
+                description:
+                    'attack: assault a place or spotted force. secure: take and hold. '
+                    + 'defend/hold: stay and protect. patrol/screen: ring around a place. '
+                    + 'scout: look at. escort: move with. withdraw: pull back — omit `target` '
+                    + 'for the nearest departure zone. reinforce: add strength. build: field '
+                    + 'engineering (fortify) — there is no base building in a battle.',
+            },
             subject: subjectSchema(classNames),
             target: TARGET,
             priority: { enum: [...NL_PRIORITIES] },
@@ -230,6 +238,14 @@ function queryAction(classNames: readonly string[]): Record<string, JsonValue> {
         status: variant('op', 'status', { subjectRef: NAME }, ['subjectRef']),
         resources: variant('op', 'resources'),
         objectives: variant('op', 'objectives'),
+        events: variant('op', 'events', {
+            near: {
+                type: 'string',
+                description:
+                    'Optional place name from the context payload — "what\'s happening at '
+                    + 'Northgate". Omit for the whole battle.',
+            },
+        }),
     };
     return variant('kind', 'query', {
         query: {
@@ -310,8 +326,13 @@ export function buildNLResponseSchema(opts: SchemaOptions = {}): Record<string, 
     return {
         $schema: 'https://json-schema.org/draft/2020-12/schema',
         title: 'NLResponse',
+        // The version rides in `description` rather than `$id`/`$comment`:
+        // structured outputs accepts a documented keyword subset, and
+        // `description` is the one every object already uses. The validator
+        // exports the same number (`NL_CONTRACT_VERSION`).
         description:
-            'The one shape a natural-language command may take. Either `actions` '
+            `NLResponse contract v${NL_CONTRACT_VERSION}. `
+            + 'The one shape a natural-language command may take. Either `actions` '
             + 'is non-empty and `clarify` is absent, or `clarify` is present and '
             + '`actions` is empty — asking and acting are mutually exclusive.',
         ...obj({

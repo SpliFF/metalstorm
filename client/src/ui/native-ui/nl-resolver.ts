@@ -28,7 +28,7 @@
  */
 
 import {
-    PRIORITY_BANDS, getPriorityBand, TARGET_SHAPES_BY_VERB,
+    PRIORITY_BANDS, getPriorityBand, getAcceptedTargetShapes,
     type CommandVerb, type CommandTarget, type CommandSubject,
     type WhenCondition, type TargetShape,
 } from './compile-table.js';
@@ -55,6 +55,30 @@ export const FUZZY_SCORE_THRESHOLD = 100;
  *  region's worth of ground — the same order of magnitude as the composer's
  *  default circle. */
 export const DEFAULT_AREA_RADIUS = 512;
+
+/**
+ * "Patrol Osprey Fen" — the ring a route verb walks around a PLACE (elmos).
+ *
+ * `patrol` and `screen` compile only against a `route` (`TARGET_SHAPES_BY_VERB`),
+ * and a sentence cannot draw one, so until contract v2 both verbs were dead in
+ * the NL layer: every "patrol X" refused with "use the composer's map arm". A
+ * place is a perfectly good thing to patrol; what was missing was the route
+ * around it. Four waypoints on a square of this half-width, walked as a
+ * closed loop (the sim's PatrolRoute already cycles), is one. Same magnitude
+ * as `DEFAULT_AREA_RADIUS` so "patrol X" and "defend the area around X" cover
+ * the same ground.
+ */
+export const PATROL_RING_RADIUS = 512;
+
+/**
+ * Landmark names that mean "the way out". `withdraw` with no destination
+ * pulls back HERE (contract v2) — the transport gadget's departure zone is
+ * where value leaves a battle, and a player who says "pull them back" with no
+ * place in mind means exactly that. The gadget does not publish its zone as a
+ * landmark yet (see the lane report), so this matches by NAME against whatever
+ * a scenario or the gadget does publish; nothing matching ⇒ refuse by name.
+ */
+export const DEPARTURE_NAME = /\b(departure|extraction|exfil|evac(?:uation)?)\b/i;
 
 /** Where a player can be told to act. */
 const PLACE_TYPES: EntityType[] = ['region', 'district', 'city', 'objective', 'landmark', 'enemy-force'];
@@ -503,26 +527,57 @@ export class NLResolver {
     /**
      * Resolve a target into the shape the VERB actually compiles against
      * (`TARGET_SHAPES_BY_VERB` — the compile table stays the authority on
-     * verb:shape, this only picks among what it already allows).
+     * verb:shape, this only picks among what it already allows). Subject-aware
+     * for the same reason `compileIntent` is (D60): an order handed to the AI
+     * travels as advice with its own shape set, so `patrol Osprey Fen` to the
+     * AI is an entity, not a route.
      *
      * Preference order is entity → area → point: an entity target keeps the
      * name attached (so the echo and the AI-guidance region key survive), and a
      * bare point is the least informative form.
+     *
+     * `target` may be ABSENT for exactly one verb (contract v2): `withdraw`
+     * with no destination pulls back to the nearest departure zone. Every
+     * other verb without a target refuses here, by name, so the executor and
+     * the echo agree on what "attack" alone means (nothing).
      */
-    resolveTarget(verb: CommandVerb, target: NLTarget): Resolution<CommandTarget> {
-        const accepted = TARGET_SHAPES_BY_VERB[verb] ?? [];
+    resolveTarget(
+        verb: CommandVerb, target: NLTarget | undefined, subject?: NLSubject,
+    ): Resolution<CommandTarget> {
+        const accepted = getAcceptedTargetShapes(
+            verb, subject?.type === 'ai' ? { type: 'ai' } : undefined);
 
-        // Route verbs can't be expressed by this envelope at all (there is no
-        // multi-point target type — the map arm is where routes are drawn).
-        if (accepted.length === 1 && accepted[0] === 'route') {
-            return refuse(
-                `"${verb}" needs a route, which a sentence can't draw yet — ` +
-                `use the command composer's map arm.`);
+        if (!target) {
+            if (verb !== 'withdraw') {
+                return refuse(`"${verb}" needs a place I know — name a region or objective.`);
+            }
+            const zone = this.nearestDeparture(this.subjectPosition(subject));
+            if (zone.kind !== 'ok') return zone as Resolution<CommandTarget>;
+            const shape = pickShape(accepted, ['entity', 'point']);
+            if (!shape) return refuse(`"${verb}" can't be aimed at a place.`);
+            return ok({ shape, entity: zone.value });
+        }
+
+        // Route verbs: a sentence cannot draw a polyline, but it can name a
+        // place, and a ring around that place IS a route (see PATROL_RING_RADIUS).
+        const routeOnly = accepted.length === 1 && accepted[0] === 'route';
+        if (routeOnly) {
+            if (target.type === 'point') {
+                return ok({ shape: 'route', route: ringAround(target.x, target.z, PATROL_RING_RADIUS) });
+            }
+            const found = this.resolvePlace(target.name, verb);
+            if (found.kind !== 'ok') return found as Resolution<CommandTarget>;
+            const radius = target.type === 'area-around' && target.radius ? target.radius : PATROL_RING_RADIUS;
+            return ok({
+                shape: 'route',
+                route: ringAround(found.value.x, found.value.z, radius),
+                entity: found.value,
+            });
         }
 
         switch (target.type) {
             case 'entity-ref': {
-                const found = this.resolveEntity(target.name, { types: PLACE_TYPES });
+                const found = this.resolvePlace(target.name, verb);
                 if (found.kind !== 'ok') return found as Resolution<CommandTarget>;
                 const shape = pickShape(accepted, ['entity', 'area', 'point']);
                 if (!shape) return refuse(`"${verb}" can't be aimed at a place.`);
@@ -530,7 +585,7 @@ export class NLResolver {
             }
 
             case 'area-around': {
-                const found = this.resolveEntity(target.name, { types: PLACE_TYPES });
+                const found = this.resolvePlace(target.name, verb);
                 if (found.kind !== 'ok') return found as Resolution<CommandTarget>;
                 if (!accepted.includes('area')) {
                     // The verb takes no circle; fall back to the place itself
@@ -562,6 +617,68 @@ export class NLResolver {
                 return ok({ shape: 'point', point: { x: target.x, z: target.z } });
             }
         }
+    }
+
+    /**
+     * A place by name — and when the name is not a place but IS one of the
+     * player's own forces, say so.
+     *
+     * "defend Chimera Squad" used to answer "I don't know a place called
+     * 'Chimera Squad'", which is false (the game knows it perfectly well) and
+     * sends the player checking their spelling instead of fixing the sentence.
+     * The prompt's own golden fixture for this case words the refusal by name,
+     * and the offline path has to match it or the two producers disagree.
+     */
+    private resolvePlace(name: string, verb: CommandVerb): Resolution<NamedEntity> {
+        const found = this.resolveEntity(name, { types: PLACE_TYPES });
+        if (found.kind !== 'refuse') return found;
+        const force = this.resolveEntity(name, { types: FORCE_TYPES, strict: true, noun: 'group' });
+        if (force.kind === 'ok') {
+            return refuse(
+                `"${force.value.name}" is one of your forces, not a place — ` +
+                `name where you want them to ${verb}.`);
+        }
+        return found;
+    }
+
+    /**
+     * The nearest departure zone to `from`, or the first by name, or a refusal
+     * that says what to do instead. See `DEPARTURE_NAME`.
+     */
+    nearestDeparture(from?: { x: number; z: number }): Resolution<NamedEntity> {
+        const zones = this.deps.index.getAll()
+            .filter((e) => e.type === 'landmark' && DEPARTURE_NAME.test(e.name))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        if (zones.length === 0) {
+            return refuse(
+                'No departure zone is marked on this map — name where to pull back to.');
+        }
+        if (!from) return ok(zones[0]);
+        let best = zones[0];
+        let bestD = Number.POSITIVE_INFINITY;
+        for (const z of zones) {
+            const d = (z.x - from.x) ** 2 + (z.z - from.z) ** 2;
+            if (d < bestD) { bestD = d; best = z; }
+        }
+        return ok(best);
+    }
+
+    /** Where the subject stands, for the nearest-departure pick — a named or
+     *  selected group with a known position; undefined otherwise. */
+    private subjectPosition(subject?: NLSubject): { x: number; z: number } | undefined {
+        const position = this.deps.groupPosition;
+        if (!position || !subject) return undefined;
+        let groupId: number | null = null;
+        if (subject.type === 'entity-ref') {
+            const found = this.resolveGroupId(subject.name);
+            if (found.kind === 'ok') groupId = found.value;
+        } else if (subject.type === 'selection') {
+            const found = this.resolveSingleSubject(subject);
+            if (found.kind === 'ok' && found.value.type === 'group' && found.value.groupId) {
+                groupId = found.value.groupId;
+            }
+        }
+        return groupId ? position(groupId) : undefined;
     }
 
     /** Symbolic when-gate → the compile table's id-keyed `WhenCondition`. */
@@ -771,6 +888,20 @@ function clausesMatch(clauses: RoleMatch[], dominant: { className: string; scale
 function pickShape(accepted: readonly TargetShape[], preference: TargetShape[]): TargetShape | null {
     for (const shape of preference) if (accepted.includes(shape)) return shape;
     return null;
+}
+
+/** A closed square loop around a point — north, east, south, west, back to
+ *  north — for a route verb aimed at a place. Five points so the polyline
+ *  visibly closes; the sim cycles a PatrolRoute regardless. */
+export function ringAround(x: number, z: number, radius: number): Array<{ x: number; z: number }> {
+    const r = Math.max(1, radius);
+    return [
+        { x, z: z - r },
+        { x: x + r, z },
+        { x, z: z + r },
+        { x: x - r, z },
+        { x, z: z - r },
+    ];
 }
 
 function groupName(group: OrgGroupSummary): string {
