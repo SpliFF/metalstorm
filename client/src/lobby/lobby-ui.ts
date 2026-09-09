@@ -14,12 +14,12 @@ import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import { formatDigest } from './war-digest';
-import { noticeFor, parseWarStateEvent } from './war-notice';
-import { parseWorldStagingEvent, stagingNoticeClass, type WorldStagingNoticeEvent } from './world-notifications';
+import { noticeFor, parseWarStateEvent, shouldRestartRoomStream, roomStreamRetryDelayMs } from './war-notice';
+import { parseWorldStagingEvent, parseWorldSeasonEvent, stagingNoticeClass, type WorldStagingNoticeEvent } from './world-notifications';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
     warStateBadge, formatYourWar,
-    formatDeploy, WAR_FILTER_LABELS,
+    formatDeploy, deployIsEnterable, WAR_FILTER_LABELS,
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
 import {
@@ -302,6 +302,13 @@ export class LobbyUI {
         else browserTokenStore.remove(ACCESS_TOKEN_KEY);
     }
     private roomEventSource: EventSource | null = null;
+    /// A CLOSED EventSource never reconnects on its own (the browser only
+    /// retries from CONNECTING), so the room stream could silently stop for
+    /// the life of the page — the "SSE polling stall". `war-notice.ts`'s
+    /// `shouldRestartRoomStream` decides, this timer restarts (war-surfaces
+    /// review 2026-09-10, finding 6).
+    private roomStreamRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    private roomStreamAttempt = 0;
     /// Per-war pre-join preview for THIS account, keyed by room id (§2.4).
     private warPreviews = new Map<number, WarJoinPreview>();
     /// Which wars the browser is listing (§4). Defaults to the question §4
@@ -650,10 +657,21 @@ export class LobbyUI {
         const es = new EventSource(`${CONFIG.httpUrl}/api/rooms/stream`);
         this.roomEventSource = es;
         es.addEventListener('rooms', (e: MessageEvent) => {
+            this.roomStreamAttempt = 0;
             try {
                 const rooms = JSON.parse(e.data);
                 if (Array.isArray(rooms)) this.applyRoomList(rooms);
             } catch { /* ignore parse errors */ }
+        });
+        // Season rollover rides the room stream (lobby_main.cpp broadcasts
+        // `world-season` there, not on the chat stream). Same toast + World
+        // screen alerts drawer as a staging notice (world-screen review
+        // 2026-09-10, finding 2).
+        es.addEventListener('world-season', (e: MessageEvent) => {
+            const ev = parseWorldSeasonEvent(e.data);
+            if (!ev) return;
+            this.renderStagingNotice(ev);
+            this.worldScreen?.pushStagingNotice(ev);
         });
         // A war MOVED (PLAN-persistence task 4d). The list above carries the
         // state as a datum, which is enough for a badge and not enough for a
@@ -669,11 +687,26 @@ export class LobbyUI {
             if (notice) this.renderWarNotice(notice);
         });
         es.onerror = () => {
-            // EventSource auto-reconnects; no manual retry needed
+            // EventSource auto-reconnects only from CONNECTING. Once the
+            // browser gives up (readyState CLOSED) nothing would ever restart
+            // the stream; rebuild it after a backoff.
+            if (!shouldRestartRoomStream(es.readyState)) return;
+            if (this.roomStreamRetryTimer || this.roomEventSource !== es) return;
+            const delay = roomStreamRetryDelayMs(this.roomStreamAttempt++);
+            this.roomStreamRetryTimer = setTimeout(() => {
+                this.roomStreamRetryTimer = null;
+                if (this.roomEventSource !== es) return;
+                this.stopPolling();
+                this.startPolling();
+            }, delay);
         };
     }
 
     private stopPolling(): void {
+        if (this.roomStreamRetryTimer) {
+            clearTimeout(this.roomStreamRetryTimer);
+            this.roomStreamRetryTimer = null;
+        }
         if (this.roomEventSource) {
             this.roomEventSource.close();
             this.roomEventSource = null;
@@ -1723,7 +1756,10 @@ export class LobbyUI {
                     out.textContent = formatDeploy(d);
                     out.style.display = '';
                 }
-                if ((d.outcome === 'join' || d.outcome === 'return') && d.room_id) {
+                // Since demand-driven seeding a `seed` answer can carry the
+                // `room_id` of the war the server just built; walk into it
+                // like a join (war-surfaces review 2026-09-10, finding 1).
+                if (deployIsEnterable(d) && d.room_id) {
                     this.joinRoom(d.room_id, /*asSpectator=*/false);
                 } else if (d.outcome === 'seed') {
                     // Opened, not created: a war needs a map and a scenario,
@@ -2062,6 +2098,15 @@ export class LobbyUI {
         // faction, defender faction, garrisoned commanders), so an event
         // that arrives here has already been addressed to this account.
         es.addEventListener('world-staging', (e: MessageEvent) => {
+            const ev = parseWorldStagingEvent(e.data);
+            if (!ev) return;
+            this.renderStagingNotice(ev);
+            this.worldScreen?.pushStagingNotice(ev);
+        });
+        // POI ownership changes (`WorldNotificationSseEvent` names them
+        // `world-poi`, kind `ownership`) share the parser and the surfaces
+        // (world-screen review 2026-09-10, finding 1).
+        es.addEventListener('world-poi', (e: MessageEvent) => {
             const ev = parseWorldStagingEvent(e.data);
             if (!ev) return;
             this.renderStagingNotice(ev);

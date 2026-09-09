@@ -18,12 +18,20 @@ Runtime it targets: [`PLAN-ai.md`](../../../../../PLAN-ai.md).
 > `actuators.lua` writes for real since AI2/I1 landed: `AI.createGroup` /
 > `AI.issueDirective` / `AI.setPosture` issue engine directives through the
 > same charged path as a human's wire message, and `AI.sendMessage` carries
-> the `ai.intent` tag to the guidance gadget. Still feature-detected no-ops
-> on the runtime surface: the two parley verbs (`propose` /
-> `respondProposal` — buildable on the I1 message funnel, plan task 4(a)),
-> plus `initiateBuild` (later AI2 slice) and `stakeBounty`; `chat`/`marker`
-> fall back to `AI.log`/nothing. Remaining data gaps (composition counters;
-> I2 rulesParam privacy) are documented at their call sites, not guessed at.
+> the `ai.intent` tag to the guidance gadget. **Since the 2026-09-10 review
+> sweep the two parley verbs (`propose` / `respondProposal`) are REAL** —
+> they ride the same I1 message funnel `game_parley.lua` consumes for humans,
+> with a bounded response window, the co-commander deference rule (defer to
+> the human team's standing answer), and an `ai.health` line mirrored to
+> `ai_health_<pid>_*` rulesParams by the guidance gadget (see
+> `docs/reviews/2026-09-10/ai-actuation.md`). The same sweep gave the pure
+> core a threat map (`threat.lua`), a posture floor, split-map reachability
+> and an exact cost mirror (`docs/reviews/2026-09-10/ai-core.md`). Still
+> feature-detected no-ops: `initiateBuild` (later AI2 slice) and
+> `stakeBounty`; `chat`/`marker` fall back to `AI.log`/nothing. Remaining
+> data gaps (composition counters; I2 rulesParam privacy) are documented at
+> their call sites, not guessed at. A reusable AI-player library and a second
+> AI live beside this one in `ai/lib/` and `ai/garrison/`.
 
 ## Module map
 

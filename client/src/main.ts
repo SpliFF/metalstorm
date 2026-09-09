@@ -35,7 +35,7 @@ import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { parseDirectManifest } from './core/direct-manifest.js';
 import {
-    buildPlayManifest, parsePlayParams, pickAttachIdentity, isAttachableRoom,
+    buildPlayManifest, parsePlayParams, pickAttachIdentity, isAttachableRoom, playRefusal,
     type PlayParams, type ScenarioInfo,
 } from './lobby/play-boot.js';
 import { DEVICE_TOKEN_KEY, clearDeviceToken, storeDeviceToken } from './lobby/guest.js';
@@ -2286,6 +2286,15 @@ async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
         showBootError(`Unknown scenario "${params.scenarioId}"`,
             `Game "${params.gameId}" offers: ${scenarios.map((s) => s.id).join(', ') || '(none — is the lobby up?)'}`,
             'Newly authored scenario files need <code>POST /api/admin/scenarios/resync</code> — lobby scenario lists are a startup snapshot.');
+        return;
+    }
+    // `/api/rooms/direct` deliberately skips the retired check, so a
+    // `?play=<retired>` URL would stage a war the picker hides (war-surfaces
+    // review 2026-09-10, finding 3). Refuse it here, where the URL is parsed.
+    const refusal = playRefusal(scenario, params.scenarioId);
+    if (refusal) {
+        showBootError(refusal, `Scenario "${params.scenarioId}" is retired.`,
+            'Pick a current scenario from the lobby, or remove <code>retired = true</code> from the scenario file.');
         return;
     }
 
