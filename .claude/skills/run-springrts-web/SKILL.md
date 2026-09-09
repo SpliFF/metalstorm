@@ -122,67 +122,22 @@ order_and_film {"unitId": 15976, "move": {"x": 6525, "z": 2527}, "frames": 18, "
 slows the world, not the legs. See
 [docs/debugging-tools.md](../../../docs/debugging-tools.md#filming-motion-capture_sequence--step_sim--order_and_film).
 
-Everything below is the hand-rolled path, for when you need the camera somewhere
-`capture_subject`'s presets do not reach.
+Everything else — `test.cameraSnapToGround(x, z, {height, pitchDeg, durationMs:0})`
+via `client_eval {target:'test'}`, then `client_screenshot {maxDim}` or
+`test.captureFrame({stats:true})`, and the render-worker hooks
+(`window.__gp(expr)`, `__frameProfiler.dump()`, `__uiTextures.dump()`) — is the
+hand-rolled path in [hand-rolled-framing.md](hand-rolled-framing.md).
 
-Camera is client-side; no admin needed. Via the relay (`client_eval
-{target:'test'}`) or chrome-devtools `evaluate_script`:
-
-```js
-// angled, HUD-clear 3/4 view — aim a ground point offset from the unit
-await test.cameraSnapToGround(829, 1298, {height:150, pitchDeg:28, durationMs:0});
-```
-
-Then `client_screenshot {maxDim: 1280}` for a viewable image, or
-`await test.captureFrame({stats:true})` for the raw
-`{dataUrl, width, height, frameId, gameFrame, stats}` — deterministic, never a
-between-frames black. Use CDP `take_screenshot` only for DOM/HUD overlays (the
-canvas captures black under CDP — see game-browser-test). Inspect the render
-worker with:
-
-```js
-await window.__gp(`(()=>{const er=self.__entityRenderer; return er.scene.meshes.length;})()`);
-```
-
-`window.__gp(expr)` evaluates JS **inside the render worker** (where the Babylon
-scene / `__entityRenderer` / materials live) — the main introspection handle.
-Other worker hooks: `__frameProfiler.dump()`, `__uiTextures.dump()` (the LuaUI
-HUD texture cache — resolvedUrl/loadedUrl/loaded/lastError per entry).
-Example screenshot of a working drive: `.claude/skills/run-springrts-web/example-cuspbr-corcom.jpg`.
 
 ## Lobby-flow verification path
 
 Only when testing the lobby UI itself (login/register form, room browser,
-create/join). The self-contained browser flow that yields a **ticking** sim
-(run via chrome-devtools `evaluate_script` after navigating to
-`http://localhost:8012/`):
+create/join). The self-contained chrome-devtools `evaluate_script` block that
+registers a user (faction select is REQUIRED), creates+starts a room and waits
+on `test.readyState()` (never `lobby.currentRoom.state>=4`) is in
+[lobby-flow-verify.js.md](lobby-flow-verify.js.md). Stop the room you started
+with `end_game {"roomId": <id>}`.
 
-```js
-// register/login a non-admin user, then CREATE+START your own room
-// (a ticking sim needs the registered host to connect — see Gotchas).
-const set=(id,v)=>{const el=document.getElementById(id);const d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');d.set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));};
-if (document.getElementById('login-user') && lobby.currentScreen==='login') {
-  set('login-user','texdebug'); set('login-pass','texdebug123'); set('login-pass2','texdebug123');
-  // Registration REQUIRES a faction (immutable sign-up choice). Leave the
-  // select on its placeholder and the button refuses with "Choose a faction"
-  // and you sit on the login screen — verified 2026-08-10.
-  const f=document.getElementById('login-faction');
-  const d=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');
-  d.set.call(f,[...f.options].find(o=>o.value).value);
-  f.dispatchEvent(new Event('change',{bubbles:true}));
-  document.getElementById('login-btn').click();
-}
-// ...wait for lobby.currentScreen==='browser', then:
-const map=lobby.maps[0].id;   // public accessor (availableMaps is private)
-await lobby.createRoom('drive', map);
-await lobby.addAI('null',1); await lobby.ready(true); await lobby.startGame();
-// ...wait for window.test && window.__gp, then for the client's own readiness:
-//   (await test.readyState()).render.terrainMeshCount > 0
-// NOT lobby.currentRoom.state>=4 — an in-game client's cached room state never
-// reaches Active (it has left the lobby SSE feed).
-```
-
-When the drive is done, stop the room you started: `end_game {"roomId": <id>}`.
 
 ## Headless runs (no lobby, no browser)
 
@@ -197,7 +152,13 @@ build/release/spring-server --headless-run cfg.json --port 19100 \
 
 It **self-terminates with exit code 0** when the config's stop condition is
 met (fixed 2026-08-27) — a non-zero exit is a real failure, safe to gate on.
-Gate on `frame` stop conditions, not `stopAt.luaCondition`. See
+Gate on `frame` stop conditions, not `stopAt.luaCondition`. Two traps: a run
+that reaches its own stop condition **never writes a checkpoint** (drive a
+hibernate/resume arm with `pkill -TERM` on a far-away `stopAt`), and a seated
+human (`--player <user>:<team>:<pos>` + `client/wire/run-wire-client.mjs`) must
+wait for the `firing GameStart` log line — the server answers `/api/wt/info`
+minutes before the sim thread finishes precaching (~5 min on a loaded box, so
+budget `--max-wall-min 8+`). See
 `rts/Server/HeadlessRun.*`, `tools/headless-batch/`,
 [docs/debugging-tools.md](../../../docs/debugging-tools.md#headless-run-mode),
 and `make test-headless-batch | test-headless-determinism | determinism-gate`.
@@ -266,11 +227,16 @@ cd client && npx vitest run                        # client unit tests
   `launch_scenario`'s default host *is* admin, so its session clears the
   relay's gate too.
 - **Ports:** client `8012`, lobby `8011`, logserver `8010`; game servers are
-  dynamic (`9100`+). Game content (`data/games/*`, `content/games/*`) is
-  gitignored; the `data/` copy is runtime-authoritative.
+  dynamic (`9100`+). `data/games/metalstorm/` is **tracked** and runtime-authoritative;
+  `content/*` and `data/maps/*` are gitignored — shipped map assets were
+  force-added, so a NEW map file needs `git add -f` (and a fresh worktree has
+  no `data/maps/` at all: symlink the maps you need from the main checkout).
 - **defs cache** lives at `data/games/<id>/cache/defs/<hash>/`, keyed on game
   content (not the server binary). After changing the C++ defs serializer, clear
   it (`spring-debug` `clear_defs_cache`, or `rm -rf`) before a fresh room.
+- **`Wire schema mismatch (client X, server Y)` on a clean tree** = `build/release/spring-server`
+  predates a regenerated `rts/Server/ProtocolSchemaHash.h`; rebuild release
+  (the lobby forks the release binary), then relaunch the room.
 - **Zombie `spring-server` on `:9100` blocks auth.** A leftover game server from
   a crashed/killed earlier session holds the port; new rooms route to it and
   login/auth fails or hangs mysteriously (this burned most of the U8 session).

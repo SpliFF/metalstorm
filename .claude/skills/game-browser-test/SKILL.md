@@ -1,6 +1,6 @@
 ---
 name: game-browser-test
-description: Test the Spring RTS Web game client in Chrome. Use when verifying the lobby UI, game rendering, network traffic, debug console, or WebRTC connections in the browser.
+description: Test the Spring RTS Web game client in Chrome via the chrome-devtools MCP (never claude-in-chrome). Use when verifying the lobby UI, DOM overlays/HUD, network requests, the debug console, or the WebTransport connection in the browser — for a plain connected client use launch_scenario({openBrowser:true}) instead.
 when_to_use: Use when testing the browser client, verifying login flow, checking network requests, inspecting game state in Chrome, taking screenshots, or running Lighthouse audits.
 user-invocable: false
 ---
@@ -190,203 +190,28 @@ the lock drops them). Wrap **both** perf captures and screenshot A/Bs.
 
 ## Measurement traps (perf work in the browser)
 
-Full methodology: [docs/debugging-performance.md](../../../docs/debugging-performance.md). The traps below were each paid for:
+Eight paid-for traps — one-way render-resolution scaling, shader-recompile
+"wins", `isVisible` that does not stick, CDP async jobs that only advance
+while awaited, GPU cost invisible to CPU phase timers, idle-vs-load fillrate,
+`perfDump` returning immediately, the vsync cap, and the untrustworthy
+`EXT_disjoint_timer_query_webgl2` — live in
+**[perf-measurement-traps.md](perf-measurement-traps.md)**. Read it before
+quoting any frame-time number. Methodology:
+[docs/debugging-performance.md](../../../docs/debugging-performance.md).
 
-**⚠️ Changing the render resolution is one-way — read the buffer back.**
-`setHardwareScalingLevel` scales the *current* backing store rather than
-re-deriving it from a CSS size (the renderer runs on an OffscreenCanvas in the
-worker, which has no CSS size), so it does not round-trip **and it compounds**:
-960×600 → `(1.333)` → 720×450 → `(1)` → 720×450 → `(1.333)` → 540×337 (PLAN-perf
-M3/M4). To restore, set the level back to **1** *and* trigger a **real** page
-resize — a genuinely different size, then the one you want (the 1280→1281→1280
-nudge does not work). After ANY resolution change, confirm what you are
-actually measuring — only believe `getRenderWidth()`, never the level:
-
-```js
-await window.__gp(`(()=>{const e=__entityRenderer.scene.getEngine();
-  return [e.getRenderWidth(), e.getRenderHeight()];})()`);
-```
-
-Note `setHardwareScalingLevel` also **does not take effect within the same
-call** — re-read after a frame (~1.5 s) and loop until it matches the target.
-
-**⚠️ A toggle that recompiles a shader makes the frame look fast — it isn't.**
-Babylon skips drawing any mesh whose effect is not ready, so for several seconds
-after you flip a material plugin, re-enable a mesh, or detach a post pipeline,
-the frame is cheap *because half the scene is missing*. M4 hit this three times;
-the worst case reported a −11.7 ms "win" that a settled window showed to be
-**0.0 ms**. Two tells, both cheap: the distribution goes **bimodal** (`p50` far
-below `p95` where a settled window has p95 ≈ p50 + 2 ms), and **draw calls per
-frame** drop below what the scene should be issuing. After any such toggle,
-settle **12–20 s**, and gate the window on a draw-call count in the expected
-range. Draw calls are not per-frame anywhere obvious — `engine._drawCalls.current`
-is cumulative, so sample it twice against `engine.frameId` and divide.
-
-**⚠️ `mesh.isVisible = false` does not stick if something re-asserts it — use
-`setEnabled(false)`.** Per-frame flush code commonly re-derives visibility
-(`SquadRenderBackend.flushPool` does exactly this —
-`pool.mesh.isVisible = pool.highWater > 0` in
-`client/src/core/squad-render-backend.ts`), so an A/B that hides meshes that
-way measures **nothing while looking like it worked** (PLAN-perf M11). The tell
-was **draws/frame going UP** in the window that was supposed to remove geometry —
-carry draws/frame as the gate on any "I removed geometry" arm, and treat a draw
-count that moves the wrong way as proof the lever never engaged, not noise.
-
-**⚠️ A CDP async measurement job only advances while an `evaluate_script` is
-actively awaiting.** Kick a timing window off as a floating promise, then poll it
-by reading a result global, and it reports `state: 'running'` for **minutes**
-after it has actually finished. Poll with an awaited call — e.g.
-`async () => { await window.test.perfDump(500); return window.__winResult; }` —
-or the window looks hung.
-
-**⚠️ No CPU phase timer sees GPU fragment cost — on a fillrate A/B, quote frame
-time, not the `render` phase.** M8 removed the CSM depth-bounds readback (a GPU
-sync point), and with it the lane's only accidental view of GPU cost. When a
-lever moves several unrelated CPU phases by a little, you are reading
-**backpressure**, and the true cost is in frame time. A pre-M8 `render`-phase
-number for anything fillrate-bound is not comparable to a post-M8 one — the
-instrument changed, not the cost.
-
-**⚠️ A GPU cost measured on an idle scene is not that cost under load.** Load
-moves the bottleneck: PLAN-maps **M7c** took a terrain-splat toggle worth
-**≈1.8 ms idle** and measured **0.484 ms** under a real battle at the strategic
-pose (73 % absorbed) and **nothing** at the gameplay pose. Absorption falls as
-the buffer grows, so quote *both* the load and the buffer with any fillrate
-number.
-
-**⚠️ `window.test.perfDump(ms)` reads the ring buffer and returns immediately —
-it does not wait `ms`.** `perfReset()` followed straight by `await perfDump(20000)`
-returns a fully-populated table of **zeros**, which reads like a broken profiler
-rather than a missing sleep. **`test.perfCapture(windowMs)` exists precisely to
-close this trap** — it resets, waits a REAL window, then dumps. Use it.
-
-**⚠️ A vsync cap silently truncates the cheap arm, turning a delta into a lower
-bound.** On a 120 Hz display the cheap arm returned **exactly 2400 frames per
-20 s window (120.0 fps) every time** — a clamp, not a measurement. Exact-integer
-frame counts and an fps pinned to the refresh rate are the tells. Escape it by
-scaling the render buffer in the worker until **both** arms sit below the cap —
-subject to the one-way/compounding trap above (compute
-`level = currentWidth / targetWidth` and read `getRenderWidth()` back). And Δ is
-**not** linear in megapixels over a wide range, so normalise back to the
-reference buffer only from the nearest uncapped rung, never the biggest one.
-
-**⚠️ `EXT_disjoint_timer_query_webgl2` is available here and is not trustworthy
-as an absolute.** It charged **13.3 ms of "GPU time" inside a 9.29 ms wall-clock
-frame** on a saturated arm — it counts pipeline wait, not busy time, so the
-ratio between arms is inflated beyond use. Query overhead itself is negligible,
-so it is safe to leave installed; just don't quote it.
 
 ## Lobby-flow path (testing the lobby UI itself)
 
-> Everything from here down is for testing **the lobby UI** — login form, room
-> browser, `launch_game` regressions. For scenario/game testing,
-> `launch_scenario` + its `browserUrl` skips all of it.
+Everything about driving the login form, `window.lobby`, room creation, the
+roster/credential discipline and the network/console test flows lives in
+**[lobby-flow.md](lobby-flow.md)**. The six rules that matter most: own the
+`roomId` your launch returned; match the browser's login to the roster
+(`test1`/`test` vs `admin`/`admin` — both are admin-role now, the *account*
+is the discriminator); fresh credential login + `lobby.attachSession(token,
+user_id, username)` before the first join; launch then join immediately;
+`end_game` only your rooms (`await window.lobby.leave()` in-browser — the
+player lifecycle is leave-only); scope `get_logs`/`search_logs` with `roomId`.
 
-**Discipline — track your own game, every time:**
-
-1. **Own the roomId.** Capture the `roomId` that *your* `launch_game`
-   returns and only ever `joinRoom(thatId)`. Never `joinRoom` a room you
-   didn't create, and never assume "the first/only game" is yours —
-   `list_processes` may show several. Joining another session's room fails
-   the roster check (`Not in this room's roster`) and, worse, could attach
-   you to the wrong game.
-2. **Match credentials to the roster.** The browser auto-logs in as
-   `test1`; `launch_game` must run as the **same** user (`username:'test1',
-   password:'test'`). Don't mix an `admin` browser with a `test1` game or
-   vice-versa — the roster is per-account (note: `test1` now carries the
-   **admin** role too, so role isn't the discriminator — the account is).
-   Dev accounts: `test1`/`test`, `admin`/`admin`. These are known by
-   convention — `users.password_hash` holds a **scrypt** digest
-   (`scrypt$32768$8$1$…`), so don't try to read passwords out of the table.
-3. **Fresh-login before the first join.** The stale auto-login token in a
-   fresh isolated profile causes `[connection] auth failed: no valid
-   token`. Do a credential login and attach it *before* joining:
-   ```js
-   const r = await fetch(`${location.origin}/api/auth/login`, {
-     method:'POST', headers:{'Content-Type':'application/json'},
-     body: JSON.stringify({ username:'test1', password:'test' }) });
-   const d = await r.json();                 // note: snake_case user_id
-   lobby.attachSession(d.token, d.user_id, d.username);
-   ```
-4. **Launch, then join immediately — no churn.** `launch_game({...})` →
-   grab `roomId` → `lobby.joinRoom(roomId)` right away. A `leave()`/rejoin
-   dance after a failed attempt yields `Not in this room's roster`; start
-   clean instead. Pick one identity and one room-creation path and stick with
-   it — the most reliable browser flow is to create the room **in-browser as
-   the already-logged-in user** (`createRoom` → `addAI` → `ready(true)` →
-   `startGame`), where the host is always in the roster. Confirm the client
-   came up with `await test.readyState()`.
-5. **Clean up only your rooms.** `end_game(yourRoomId)` when done. Never kill
-   or restart a room you didn't launch — the verb *requires* the roomId and
-   refuses with a candidate list without one. In-browser,
-   `await window.lobby.leave()` — the player-facing lifecycle is leave-only.
-6. **Scope log reads to your room.** `get_logs` and `search_logs` default
-   to all rooms — with concurrent sessions that buries your entries. Always
-   pass `roomId: <yourRoomId>`.
-
-### Lobby JS API (`window.lobby`)
-
-The `LobbyUI` instance is exposed on `window.lobby`. All lobby actions can be called directly from JS (via `evaluate_script` or browser console) — full reference: [docs/javascript.md](../../../docs/javascript.md#windowlobby--lobby-ui):
-
-```js
-// Room lifecycle
-await lobby.createRoom('test', 'scorched_crossing_v2.4')  // name, mapId, scenarioId?
-await lobby.joinRoom(1)                                  // roomId
-await lobby.leave()
-
-// Game setup
-await lobby.addAI('null', 1)        // aiId, team (0-indexed)
-await lobby.teamSelect(0)           // team for self
-await lobby.ready(true)             // toggle ready state
-await lobby.startGame()             // host only, requires ready + 2 teams
-
-// Low-level
-await lobby.lobbyPost('/api/rooms/start')
-await lobby.lobbyGet('/api/rooms')
-```
-
-Quick-start a game from scratch in one script block:
-
-```js
-await lobby.createRoom('test', 'scorched_crossing_v2.4');  // or lobby.maps[0].id
-await lobby.addAI('null', 1);   // AI on team 2 (index 1) — game needs 2 teams
-await lobby.ready(true);         // host must ready up
-await lobby.startGame();         // launches the game server
-```
-
-### Test flow: Login and room creation
-
-```
-1. Navigate to http://localhost:8012 (Vite dev server)
-2. Fill #login-user with username, #login-pass with password
-3. Optionally fill #login-pass2 (and #login-faction — required) for registration
-4. Submit the login form
-5. Verify "Game Rooms" heading appears (browser screen)
-6. Use lobby JS API to create room, add AI, ready up, and start
-```
-
-### Test flow: Network verification (HTTP/2)
-
-```
-1. Navigate to the game client
-2. list_network_requests → find /api/version, /api/maps
-3. get_network_request → verify response headers:
-   - Access-Control-Allow-Origin: *
-   - X-Build-Stamp: <hash>
-   - Cache-Control: appropriate value
-4. After login, verify /api/rooms polling starts (2s interval)
-5. After game start, verify /api/rtc/offer WebRTC signaling request
-```
-
-### Test flow: Debug console + SSE
-
-```
-1. Press backtick (`) to open debug console
-2. Verify console panel appears
-3. list_network_requests → find /api/logs/stream (SSE)
-4. get_network_request → content-type: text/event-stream
-5. evaluate_script → check EventSource readyState === 1 (OPEN)
-```
 
 ## Prerequisites
 
