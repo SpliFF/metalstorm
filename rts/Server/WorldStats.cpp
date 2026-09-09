@@ -176,6 +176,14 @@ std::vector<WorldAuthorityAttribution> AttributeSettlement(
         // commander granted in the same millisecond a war settled (the
         // in-memory-test case, and a plausible real one) is included.
         if (settlement.recordedAt < c.createdAt) continue;
+        // REVIEW 2026-09-10 (docs/reviews/2026-09-10/world-design.md F1):
+        // `settlement.factions` is `war_outcome.winnerFactions` = SIDE keys
+        // ("compact"/"union"), while `c.factionId` is a WORLD faction slug
+        // ("house-verendi"). They never match in production, so every
+        // commander is awarded the DEFEAT rate. The test fixture passes
+        // faction ids as winners, which is why the suite is green. Fix:
+        // resolve each commander's faction -> side_key before comparing
+        // (patch in the report); leave this line until that lands.
         const bool won = SettlementNamesFaction(settlement.factions, c.factionId);
         const double delta = won ? rules.authorityPerVictory : rules.authorityPerDefeat;
         if (delta == 0.0) continue;

@@ -63,7 +63,16 @@
 //     refused by nothing yet: the force ledger opens NEGATIVE on the first
 //     commit, which is honest bookkeeping ("this faction owes the world a
 //     seeding of holdings") until a world-holdings milestone seeds opening
-//     balances.
+//     balances. (Designed as W13 in docs/world-layer.md §18.)
+//   - A no-winner ending. REVIEW 2026-09-10 (world-design.md F4): the sweep
+//     settles an expedition whose war ended with NO in-sim winner (`season_end`,
+//     operator retire — no `war_outcome` row) as `annihilated`, capturing a
+//     quarter for the POI owner. That is a punishment the player did not
+//     choose; the proposed rule is a fifth outcome `voided` = full return, no
+//     spoils, no capture (patch in the report).
+//   - The three escrow rates are NOT written by `WorldDefaults::ToJson()`
+//     (they default only here), so an operator tuning a world blob will not
+//     find them — world-design.md F12.
 //
 // ── Numbers are data (pillar 7) ─────────────────────────────────────────────
 // The capture fraction, the withdrew threshold and the held-spoils payment

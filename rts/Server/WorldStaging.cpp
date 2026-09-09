@@ -243,6 +243,11 @@ std::vector<WorldStagingRecord> WorldStaging::DueStagings(
         // The budget is re-read from the rules on every sweep rather than
         // frozen into the row, so lowering it in config retires a row that is
         // already spinning instead of only affecting future ones.
+        // REVIEW 2026-09-10 (world-design.md F7): a row skipped here because
+        // the budget was LOWERED below its `attempts` is never flipped to
+        // `failed` and its escrow is never released — it stays `staging` on
+        // the map and its force stays debited forever. Proposed: the sweep
+        // (or this read) flips such rows to `failed` + `WorldEscrow::Release`.
         if (rules.materialiseMaxAttempts > 0 &&
             r.attempts >= rules.materialiseMaxAttempts)
             continue;
@@ -303,6 +308,14 @@ WorldStagingCommitResult WorldStaging::Commit(sqlite3* db,
         const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_finalize(stmt);
         if (!ok) { res.error = "db_error"; return res; }
+        // REVIEW 2026-09-10 (world-design.md F5): `sqlite3_changes()` is not
+        // checked. If the staging sweep materialised this row between
+        // `OpenFor` above and this UPDATE, zero rows change, the reload
+        // returns a `materialised` row, the route answers ok/joined and then
+        // opens an escrow row that MarkEngaged has already passed — force
+        // debited, never engaged, never settled. Proposed: treat
+        // `changes == 0` as `window_closed` (409) and run the read + UPDATE +
+        // escrow Open inside one SqliteWriteTransaction.
         const auto reloaded = Load(db, open.stagingId);
         if (!reloaded) { res.error = "db_error"; return res; }
         res.ok = true;
@@ -317,6 +330,13 @@ WorldStagingCommitResult WorldStaging::Commit(sqlite3* db,
     // marches from wherever is nearest, and making the UI name an origin
     // before it can show a window would put the plumbing before the player.
     std::vector<std::string> origins;
+    // REVIEW 2026-09-10 (world-design.md F6): the named origin is not checked
+    // against what the faction holds (nor that it exists), so a committer can
+    // name the POI adjacent to the target and buy the minimum 1-hour warning
+    // from anywhere. Pricing is also single-edge: a two-hop march falls to the
+    // 12-hour default instead of the path sum. Proposed: refuse an origin the
+    // faction does not own (`bad_origin`) and price with Dijkstra over the
+    // edge list (patch in the report).
     if (!req.originPoiId.empty()) {
         origins.push_back(req.originPoiId);
     } else {
