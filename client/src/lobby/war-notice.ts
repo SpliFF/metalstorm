@@ -124,3 +124,180 @@ export function noticeFor(ev: WarStateEvent, rows: WarRow[]): WarNotice | null {
         canJoin: ev.kind === 'back' || ev.kind === 'hibernated',
     };
 }
+
+// ── The notice rail (review 2026-09-10; drill-down directive, item (c)) ─────
+//
+// One toast at a time, newest wins, was the original design — and it was
+// wrong for the one event that produces many notices at once: a deploy
+// hibernates every war in the theatre, so a player with three wars saw the
+// last one's toast for 30 s and never learned the other two had moved. The
+// rail keeps every notice, grouped by war, folds exact repeats into a count,
+// and lets the player mark them read instead of racing a timer.
+//
+// Pure state, functional updates: `lobby-ui` holds the state and re-renders
+// the rail from it. Nothing here is specific to WAR notices — a staging
+// notice (world-notifications.ts) is the same shape once it has a title and
+// a class — so the world lane can feed the same rail rather than a second
+// toast stack (see docs/lobby-war-surfaces.md).
+
+export interface RailNotice {
+    /// Monotonic within the rail; the DOM key.
+    id: number;
+    roomId: number;
+    kind: string;
+    title: string;
+    detail: string;
+    cls: WarNotice['cls'];
+    canJoin: boolean;
+    /// Unix seconds the notice arrived (its LATEST arrival when folded).
+    at: number;
+    read: boolean;
+    /// How many identical notices were folded into this one. 1 = no repeat.
+    count: number;
+}
+
+export interface NoticeRailState {
+    notices: RailNotice[];
+    nextId: number;
+}
+
+/// Kept so a rail can never grow without bound on a long lobby session; the
+/// oldest READ notice goes first, then the oldest unread.
+export const NOTICE_RAIL_CAP = 12;
+
+/// Identical repeats within this window fold into one entry with a count.
+/// The room-list SSE re-sends nothing on reconnect, so a repeat inside 10 s
+/// is the same transition observed twice (two tabs, a re-render race), not a
+/// war that moved twice.
+export const NOTICE_FOLD_WINDOW_SEC = 10;
+
+export function emptyRail(): NoticeRailState {
+    return { notices: [], nextId: 1 };
+}
+
+/// Push one notice. Returns a NEW state; the input is untouched.
+///
+/// Grouping rule: a war has at most one UNREAD notice on the rail. A newer
+/// transition for the same war replaces its unread predecessor — "your war
+/// is resuming" followed by "your war is back" is one story, and the second
+/// line is the one that is true. A READ notice is left alone: the player has
+/// seen it, and the new one is new.
+export function pushRailNotice(
+    rail: NoticeRailState, n: WarNotice, nowSec: number,
+): NoticeRailState {
+    const notices = [...rail.notices];
+    const prevIdx = notices.findIndex(x => x.roomId === n.roomId && !x.read);
+    if (prevIdx >= 0) {
+        const prev = notices[prevIdx];
+        const identical = prev.kind === n.kind && prev.detail === n.detail;
+        if (identical && nowSec - prev.at <= NOTICE_FOLD_WINDOW_SEC) {
+            notices[prevIdx] = { ...prev, at: nowSec, count: prev.count + 1 };
+            return { notices, nextId: rail.nextId };
+        }
+        notices.splice(prevIdx, 1);
+    }
+    notices.push({
+        id: rail.nextId, roomId: n.roomId, kind: n.kind, title: n.title,
+        detail: n.detail, cls: n.cls, canJoin: n.canJoin, at: nowSec,
+        read: false, count: 1,
+    });
+    // Trim: read first, oldest first.
+    while (notices.length > NOTICE_RAIL_CAP) {
+        const readIdx = notices.findIndex(x => x.read);
+        notices.splice(readIdx >= 0 ? readIdx : 0, 1);
+    }
+    return { notices, nextId: rail.nextId + 1 };
+}
+
+/// Mark one notice (or every notice) read. Reading does not remove: the
+/// rail is also the record of what moved while the player was looking away.
+export function markRailRead(
+    rail: NoticeRailState, id: number | 'all',
+): NoticeRailState {
+    return {
+        notices: rail.notices.map(x =>
+            (id === 'all' || x.id === id) && !x.read ? { ...x, read: true } : x),
+        nextId: rail.nextId,
+    };
+}
+
+/// Drop one notice (or every read notice) from the rail entirely.
+export function dismissRailNotice(
+    rail: NoticeRailState, id: number | 'read',
+): NoticeRailState {
+    return {
+        notices: rail.notices.filter(x => id === 'read' ? !x.read : x.id !== id),
+        nextId: rail.nextId,
+    };
+}
+
+export function unreadCount(rail: NoticeRailState): number {
+    return rail.notices.filter(x => !x.read).length;
+}
+
+/// The collapsed pill's text: '' when there is nothing to say at all (the
+/// rail hides), "2 new" while something is unread, "3 notices" once all are
+/// read. The unread count is the one number a player scanning for "did
+/// anything move" needs, so it is the whole label when it is non-zero.
+export function railSummary(rail: NoticeRailState): string {
+    const total = rail.notices.length;
+    if (total === 0) return '';
+    const unread = unreadCount(rail);
+    if (unread > 0) return `${unread} new`;
+    return `${total} notice${total === 1 ? '' : 's'}`;
+}
+
+export interface RailGroup {
+    roomId: number;
+    title: string;
+    /// Newest first.
+    notices: RailNotice[];
+    unread: number;
+}
+
+/// The rail's rows, one group per war, the war with the newest notice first.
+export function railGroups(rail: NoticeRailState): RailGroup[] {
+    const byRoom = new Map<number, RailGroup>();
+    for (const n of rail.notices) {
+        let g = byRoom.get(n.roomId);
+        if (!g) {
+            g = { roomId: n.roomId, title: n.title, notices: [], unread: 0 };
+            byRoom.set(n.roomId, g);
+        }
+        g.notices.push(n);
+        if (!n.read) g.unread++;
+    }
+    const groups = [...byRoom.values()];
+    for (const g of groups) g.notices.sort((a, b) => b.at - a.at || b.id - a.id);
+    groups.sort((a, b) => b.notices[0].at - a.notices[0].at || b.roomId - a.roomId);
+    return groups;
+}
+
+/// "×3" for a folded notice, '' for a single one.
+export function foldLabel(n: RailNotice): string {
+    return n.count > 1 ? `×${n.count}` : '';
+}
+
+// ── The room-list stream's stall (memory: "SSE can silently never start") ──
+//
+// `EventSource` retries on its own only while its `readyState` is
+// CONNECTING; a fatal failure (a non-200 answer, a lobby that restarted on a
+// new port, a proxy that closed the response) moves it to CLOSED and it never
+// tries again — and the browser then sits on a stale list for the rest of
+// the session with no error anywhere. `lobby-ui` calls `stopPolling();
+// startPolling()` when `shouldRestartRoomStream` says so, after
+// `roomStreamRetryDelayMs` of the attempt in question.
+
+/// `EventSource.CLOSED` — spelled as a number so this module needs no DOM.
+export const EVENT_SOURCE_CLOSED = 2;
+
+export function shouldRestartRoomStream(readyState: number): boolean {
+    return readyState === EVENT_SOURCE_CLOSED;
+}
+
+/// 1 s, 2 s, 4 s … capped at 30 s. Never 0: a synchronous restart on a lobby
+/// that is down would spin.
+export function roomStreamRetryDelayMs(attempt: number): number {
+    const a = Math.max(0, Math.floor(attempt));
+    return Math.min(30_000, 1000 * Math.pow(2, Math.min(a, 5)));
+}
