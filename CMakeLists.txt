@@ -597,6 +597,12 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/ReplayFile.cpp
     rts/Server/SyncedInputJournal.cpp
     rts/Server/FactionData.cpp
+    # PLAN-beta-broadcast.md lane L (cross-lane hunk, outside this lane's
+    # owned files): the lobby reads `.msb` headers the same way it reads
+    # `.msr` ones above, to list broadcasts and refuse an unreadable one
+    # before spawning a relay for it. spring-server links it via the
+    # rts/Server glob already; the lobby's own source list is explicit.
+    rts/Server/BroadcastLog.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
