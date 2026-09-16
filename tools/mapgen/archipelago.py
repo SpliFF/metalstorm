@@ -1579,11 +1579,20 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
 
 
 def main():
+    global MAP_SIZE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=None,
                     help="map package dir (default content/maps/<id>)")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--map-size", dest="map_size", type=float,
+                    default=MAP_SIZE,
+                    help="map edge in elmos (default %(default)s). The "
+                         "erosion/settlement grids keep their 8-elmo cell, so "
+                         "cost and memory scale with the square of this — and "
+                         "the ENGINE loads the heightmap monolithically "
+                         "(SQUARE_SIZE=8 is hardcoded server-side), so sizes "
+                         "past ~32768 produce packages nothing can open yet.")
     ap.add_argument("--landmass", type=float, default=0.34,
                     help="fraction of map area above the waterline (0..1)")
     ap.add_argument("--islands", type=int, default=9,
@@ -1765,6 +1774,8 @@ def main():
                          "fake it) and assert byte-identical packages; honours "
                          "--seed/--landmass/--islands/--fast/--with-features")
     args = ap.parse_args()
+
+    MAP_SIZE = float(args.map_size)
 
     if args.selftest:
         if args.preview_only or args.no_package:
