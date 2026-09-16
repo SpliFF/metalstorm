@@ -59,6 +59,7 @@ local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
 -- WALK is here in ExpireAllActive; the RULE is there.
 local WarEnd       = VFS.Include("LuaRules/Gadgets/objectives/warend.lua")
 local Tick         = VFS.Include("LuaRules/Gadgets/tick.lua")
+local Wire         = VFS.Include("LuaRules/Gadgets/parley/wire.lua")
 
 local TYPES = {
     control = Control, kill = Kill, escort = Escort,
@@ -390,7 +391,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
-    'victory', 'completed_by',
+    'victory', 'completed_by', 'player',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -430,6 +431,12 @@ local function publish(o, ctx)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
     if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor, PUBLIC) end
+    -- PLAN-beta-journey.md §(d) assigned tasks: the objective is one player's
+    -- to do, set by a mentor/Veteran through the verbs below. DIFFERENT from
+    -- `suggested`, which is a soft "yours to take" hint anyone may ignore —
+    -- `player` names whose task this IS, and objective-hud renders it as
+    -- "Task from <callsign>". Neither gates completion; both are labels.
+    if o.forPlayer then Spring.SetGameRulesParam(p .. 'player', o.forPlayer, PUBLIC) end
     -- source ∈ 'scripted'|'systemic'|'bounty' (§3.3). A staked bounty is
     -- publicly known (a commander visibly stakes authority on the objective),
     -- so surfacing the flag is fog-honest — it lets the co-commander AI apply
@@ -644,6 +651,7 @@ function GG.Objectives.Create(def)
     local o = {
         id = id, type = def.type, scope = def.scope or 'tactical',
         forTeam = def.forTeam, forTeam2 = def.forTeam2,
+        forPlayer = def.forPlayer,
         reward = (def.reward or 0) * rewardScale,
         bounty = def.bounty or 0,
         params = def.params or {},
@@ -1137,6 +1145,75 @@ function gadget:GameFrame(frame)
             table.remove(pendingClear, i)
         end
     end
+end
+
+-- ============================================================
+-- Wire verbs (PLAN-beta-journey.md §(d) assigned tasks)
+-- ============================================================
+-- Same RecvLuaMsg codec every other human/AI command rides (parley/wire.lua).
+-- Both verbs are TASKING, not authority: a Veteran (rank >= 2) or the target
+-- player's own mentor may point a teammate at work. Rank arrives as the
+-- PUBLIC `rank_<pid>` param game_teams.lua publishes from the lobby's `tier`
+-- custom option; absent (dev launch, old lobby) it reads as 1 and both verbs
+-- are simply denied to everyone but a mentor.
+local WIRE_MIN_RANK = 2
+local BOUNTY_HOLD_FRAMES = 900   -- 30s default hold for a wire-built control bounty
+
+local function rankOfPlayer(playerID)
+    return tonumber(Spring.GetGameRulesParam('rank_' .. math.floor(playerID))) or 1
+end
+
+local function mentorOfPlayer(playerID)
+    local m = tonumber(Spring.GetGameRulesParam('mentor_' .. math.floor(playerID)))
+    if not m or m < 0 then return nil end   -- -1 is the AI mentor: nobody's playerID
+    return math.floor(m)
+end
+
+local function mayTask(issuerID, targetID)
+    if rankOfPlayer(issuerID) >= WIRE_MIN_RANK then return true end
+    return targetID ~= nil and mentorOfPlayer(targetID) == issuerID
+end
+
+--- Build the bounty def for `objectives.createBounty`. Only `control` is
+--- wire-constructible: every other type is defined by unit IDs (kill/protect/
+--- infra) or areas the client has no vocabulary for yet, and inventing a
+--- mapping for them here would be a stand-in, not a feature. `region=` names
+--- the place directly; `x=&z=&r=` resolves to whichever region contains the
+--- point (GG.Regions.KeyAt) — the same place, said with coordinates.
+local function wireBountyDef(fields)
+    local kind = fields.type or 'control'
+    if kind ~= 'control' then return nil end
+    local key = fields.region
+    if (not key or key == '') and GG.Regions and GG.Regions.KeyAt then
+        local x, z = Wire.num(fields.x), Wire.num(fields.z)
+        if x and z then key = GG.Regions.KeyAt(x, z) end
+    end
+    if type(key) ~= 'string' or key == '' then return nil end
+    return {
+        type = 'control', scope = 'tactical',
+        params = { regionKey = key, holdFrames = Wire.num(fields.hold) or BOUNTY_HOLD_FRAMES },
+    }
+end
+
+function gadget:RecvLuaMsg(msg, playerID)
+    local cmd, fields = Wire.decode(msg)
+    if cmd ~= 'objectives.suggest' and cmd ~= 'objectives.createBounty' then return end
+    local issuer = math.floor(playerID)
+    local target = Wire.num(fields.player)
+    target = target and math.floor(target) or nil
+    if not mayTask(issuer, target) then return end
+
+    if cmd == 'objectives.suggest' then
+        local id = Wire.num(fields.id)
+        if id and target then GG.Objectives.SuggestFor(id, target) end
+        return
+    end
+
+    local stake = Wire.num(fields.stake)
+    local def = wireBountyDef(fields)
+    if not def or not stake or stake <= 0 then return end
+    def.forPlayer = target
+    GG.Objectives.CreateBounty(issuer, def, stake)
 end
 
 -- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
