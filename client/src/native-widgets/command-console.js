@@ -81,6 +81,7 @@ import { uiActionRegistry, createNLUiActionPort } from '../ui/native-ui/ui-actio
 import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js';
 import { answerLocally, isCancel, resubmissionText } from '../ui/native-ui/nl-clarify.js';
 import { focusModel } from '../ui/native-ui/focus-model.js';
+import { uiStore } from '../ui/native-ui/ui-store.js';
 import { focusContextFor } from '../ui/native-ui/nl-focus.js';
 import {
     isVoiceCaptureAvailable, createWebSpeechVoicePort, createPushToTalk,
@@ -177,6 +178,14 @@ function init(ctx) {
 
     setupVoice();
     bindSummonKey();
+
+    // `window.test.nl(utterance)` — the console path as a test hook, for the
+    // spring-debug `nl_command` tool, which can PARSE an utterance into an
+    // envelope but has no way to run one. Same sentence, same envelope, same
+    // executor as typing it: this forwards to `runUtteranceText` and changes
+    // nothing about it. Registered here (the harness is on `window` well
+    // before any widget mounts) and removed in dispose().
+    if (window.test) window.test.nl = (utterance) => runUtteranceText(utterance);
 
     console.log('[command-console] Initialized (summon with ' + SUMMON_LABEL + ')');
 }
@@ -539,9 +548,28 @@ function dispose() {
     state.greeted = false;
     state.pendingConfirm = null;
     focusModel.closeSurface('command-console');
+    if (window.test?.nl) delete window.test.nl;
     document.getElementById('command-console-style')?.remove();
 
     console.log('[command-console] Disposed');
+}
+
+/**
+ * Drop a transcript line that is outside a mentored player's scope
+ * (PLAN-beta.md "Mentorship": the console hides all-chat and enemy lines so
+ * the player can hear their mentor).
+ *
+ * Scope rides on the CALLER's `extra.scope` — `'all'` for all-chat, `'enemy'`
+ * for anything said by the other side — so the console never has to guess from
+ * the text. Every line the console itself produces (your orders, the game's
+ * answers, a mentor's direct line) carries no scope and is never hidden. The
+ * chat producer that would set it does not exist on the wire yet; this is the
+ * gate it lands into, and `uiStore.setShowEverything(true)` (the mentor card's
+ * toggle) opens it.
+ */
+function chatterHidden(scope) {
+    if (scope !== 'all' && scope !== 'enemy') return false;
+    return uiStore.isChatterFiltered();
 }
 
 /**
@@ -554,6 +582,7 @@ function dispose() {
  * refusal-copy discipline in this stack exists to prevent.
  */
 function say(kind, text, notes = [], extra = {}) {
+    if (chatterHidden(extra.scope)) return null;
     if (!state.visible) summon({ focusInput: false });
     const who = kind === 'you' ? 'you' : kind === 'system' ? '' : 'game';
     state.log.push({ who, kind, text, notes, chosen: [], ...extra });

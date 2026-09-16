@@ -51,6 +51,12 @@ uniform float uNow;        // seconds, same clock as birthTime
 uniform vec3  uCamPos;
 uniform float uAtlasCols;
 uniform float uAtlasRows;
+// Global wind drift (elmos/s), added to every particle's centre over its
+// age (PLAN-beta-presentation L-FX step 7 — "smoke that lingers and drifts
+// with a global wind vector"). One vector for the whole pass, not per-
+// effect: a short-lived spark barely moves under it, a long-lived smoke
+// puff visibly drifts. Set via NativeFxRenderer.setWind.
+uniform vec3  uWind;
 
 out vec2 vUV;
 out vec2 vFrameOffset;
@@ -78,6 +84,7 @@ void main() {
     // transform feedback needed for the birth-state model.
     vec3 center = iPosLife.xyz + vel * age;
     center.y   -= 0.5 * gravity * age * age;
+    center     += uWind * age;
 
     float size    = mix(iSize.x, iSize.y, t);
     float stretch = iSize.w;

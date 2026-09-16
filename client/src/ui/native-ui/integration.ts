@@ -48,6 +48,10 @@ if (typeof window !== 'undefined') {
     (window as unknown as { __msUiStore?: unknown }).__msUiStore = uiStore;
 }
 import { WidgetLoader } from './widget-loader.js';
+import { travelTo } from './camera-travel.js';
+import { uiActionRegistry } from './ui-action-registry.js';
+// Game-dir widgets (tutorial-guide.js "Show me") feature-detect this: camera travel + open-a-panel by name.
+(globalThis as any).__nativeUi = { travelTo: (x: number, z: number) => travelTo({ x, z }).ok, open: (name: string) => uiActionRegistry.apply('open', name).ok };
 import { startEntityIndexProducer } from './entity-index-producer.js';
 import { bindSelectionToFocus, focusModel } from './focus-model.js';
 import { censusCacheHolder } from './query-engine.js';
@@ -130,6 +134,10 @@ export async function initializeNativeUI(
         widgetLoader.setSendCommandProvider(createSendCommand(connection, role));
     }
 
+    // The store reads the journey layer's per-player params (assignments,
+    // standing, mentor) and so has to know which player it is.
+    uiStore.setLocalIdentity(playerId, teamId);
+
     // PLAN-metalstorm-onboarding.md §4: role gates which widgets mount
     // (command-composer / ai-command-panel carry `hideForSpectator` in the
     // manifest) — spectators get the same HUD minus every order-issuing
@@ -174,7 +182,13 @@ export function handleRulesParamUpdate(update: {
  * on exactly these verb strings, so the widget-side verb IS the wire command
  * name — no mapping table to keep in sync.
  */
-const WIRE_VERB_PREFIXES = ['guidance.', 'parley.'];
+const WIRE_VERB_PREFIXES = [
+    'guidance.', 'parley.',
+    // PLAN-beta.md: `game_objectives.lua` (suggest / createBounty … player=),
+    // `game_assignment.lua` (assign.set / assign.release) and the tutorial
+    // gadget dispatch on these, over the same wire.lua codec.
+    'objectives.', 'assign.', 'tutorial.',
+];
 
 /**
  * Encode a `cmd=name&key=value&…` payload for `gadget:RecvLuaMsg`.
@@ -237,8 +251,8 @@ export function createSendCommand(
                 return;
             }
             if (!WIRE_VERB_PREFIXES.some((p) => cmd.startsWith(p))) {
-                // objectives.createBounty and the map-marker verbs land here:
-                // the widgets exist, the gadgets do not (see wire.lua's header).
+                // The map-marker verbs land here: the widgets exist, the
+                // gadgets do not (see wire.lua's header).
                 console.warn('[native-ui] no wire target for verb:', cmd, fields);
                 return;
             }

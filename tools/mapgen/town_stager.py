@@ -60,8 +60,9 @@ THE ROSTER IS NOT THE ROSTER YET, AND THIS MODULE IS BUILT FOR THAT.
 Verified in this clone 2026-08-06: `ms_shanty_block`, `ms_meeting_hall`,
 `ms_market_stalls`, `ms_water_works`, `ms_grain_silo` and `ms_watchtower` have
 no unit def — model-integration's M2 landed them on its own branch, behind a
-manual land gate, so they are not readable from here. The eight featuredefs
-M3 landed (three wrecks, two bridges, three relics) are equally not here.
+manual land gate, so they are not readable from here. The featuredefs M3
+landed (three wrecks, two bridges, three relics — and the 2026-09-17 wave that
+grew them to 24) are equally not here.
 Nothing in this module names a def directly: content comes from
 `town_templates.role_options` / `resolve_props` / `resolve_landmarks`, each of
 which filters to what the caller's roster actually contains, so the same town

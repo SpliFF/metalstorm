@@ -13,7 +13,10 @@
 -- resolved "Show me" point. It also asserts the periodic gate is frame-skip
 -- safe (a skipped multiple must not lose the poll — D15).
 
-local GADGET = './LuaRules/Gadgets/game_tutorial.lua'
+-- Game root derived from this file's own path, so the spec passes from the
+-- game root AND from the plugin root (`make test-gadget-lua` runs both).
+local ROOT = (debug.getinfo(1, 'S').source:match('^@(.*)tests/game_tutorial_spec%.lua$') or '') .. '../../'
+local GADGET = ROOT .. 'LuaRules/Gadgets/game_tutorial.lua'
 
 local function newWorld(opts)
     opts = opts or {}
@@ -53,7 +56,7 @@ local function newWorld(opts)
     _G.UnitDefs = { [1] = { name = 'ms_soldiers_s1' }, [2] = { name = 'ms_tanks_s2' } }
     _G.gadgetHandler = { IsSyncedCode = function() return true end }
     _G.gadget = {}
-    _G.VFS = { Include = function(p) return dofile('./' .. p) end }
+    _G.VFS = { Include = function(p) return dofile(ROOT .. p) end }
     _G.GG = {
         Scenario = { name = 'tutorial_test', data = world.scenario },
         Objectives = {
@@ -98,7 +101,7 @@ local function newWorld(opts)
         for _ = 1, frames do world.frame = world.frame + 1; g:GameFrame(world.frame) end
     end
     function world.send(pid, cmd, fields)
-        local Wire = dofile('./LuaRules/Gadgets/parley/wire.lua')
+        local Wire = dofile(ROOT .. 'LuaRules/Gadgets/parley/wire.lua')
         g:RecvLuaMsg(Wire.encode(cmd, fields), pid)
     end
     function world.completeObjective(id)
@@ -321,6 +324,28 @@ describe('game_tutorial.lua', function()
             w.run(30); assert.equals('pause', w.beat())
             w.run(60); assert.equals('pause', w.beat())
             w.run(60); assert.equals('z', w.beat())
+        end)
+
+        it('pact: an accepted proposal involving the team, published since the beat began', function()
+            local w = newWorld({ scenario = tutorialScenario({
+                beat('deal', { kind = 'pact', pact = 'intel' },
+                     { parley = { kind = 'intel', toTeam = 1, regionKeys = { 'raven_basin' } } }),
+                beat('z', { kind = 'ack' }) }) })
+            w.rp.parley_count = 1                                  -- an old, pre-beat pact
+            w.rp.parley_1_kind, w.rp.parley_1_from, w.rp.parley_1_to, w.rp.parley_1_state = 'intel', 0, 1, 'fulfilled'
+            w.start()
+            assert.equals('intel', w.rp.tutorial_parley_kind)
+            assert.equals(1, w.rp.tutorial_parley_to)
+            assert.equals('raven_basin', w.rp.tutorial_parley_regions)
+            w.run(30); assert.equals('deal', w.beat())
+            w.rp.parley_count = 2
+            w.rp.parley_2_kind, w.rp.parley_2_from, w.rp.parley_2_to, w.rp.parley_2_state = 'intel', 0, 1, 'offered'
+            w.run(30); assert.equals('deal', w.beat())              -- offered is not agreed
+            w.rp.parley_2_kind = 'tribute'; w.rp.parley_2_state = 'active'
+            w.run(30); assert.equals('deal', w.beat())              -- wrong kind
+            w.rp.parley_2_kind = 'intel'
+            w.run(30); assert.equals('z', w.beat())
+            assert.is_nil(w.rp.tutorial_parley_kind)
         end)
     end)
 

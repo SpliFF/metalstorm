@@ -30,7 +30,7 @@ local MINIMUM_MASS, MAXIMUM_MASS = 1e-5, 1e6
 --- directory runs from. Listed explicitly rather than globbed: busted has no
 --- portable directory scan, and a spec that silently covered nothing when the
 --- glob broke would be worse than one that errors on a renamed file.
-M.DEF_FILES = { 'wrecks', 'bridges', 'ancient' }
+M.DEF_FILES = { 'wrecks', 'bridges', 'ancient', 'landmarks' }
 
 local function clamp(v, lo, hi)
     if v < lo then return lo end

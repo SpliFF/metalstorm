@@ -184,13 +184,15 @@ return {
     -- integrators placing single pieces to zero the root offset. The client has
     -- no per-piece visibility channel (same gap that landed ms_expedition_rig's
     -- §M1 deviation), so this def necessarily renders all three elements at
-    -- once as one 25 m run: corner, wall, gateway, left to right. That reads as
-    -- a coherent perimeter segment and blocks correctly, but town-planner §T3
-    -- (wall runs, corners at corners, gate on the main street) needs the
-    -- elements placeable INDIVIDUALLY. That needs either a piece-visibility
-    -- channel next to the clip/aim/wheel pose maps, or three regenerated forge
-    -- models with the root offset zeroed (the layout file's own instruction —
-    -- tools/forge/samples/ms_barricade_set/). §T3 is gated on one of the two.
+    -- once as one 25 m run: corner, wall, gateway, left to right.
+    --
+    -- RESOLVED 2026-09-17 (units-assets task 2(c)): the second of the two ways
+    -- out was taken — three regenerated forge models with the root offset
+    -- zeroed, wired as ms_barricade_wall / ms_barricade_corner /
+    -- ms_barricade_gate below. This kit def STAYS: it is a single cheap stamp
+    -- for a 25 m run and three placers already name it (tools/mapgen). Prefer
+    -- the split defs for anything that has to line up with a plan — a wall run,
+    -- a corner at a vertex, a gate on the main street.
     ms_barricade_set = building{
         name = 'Barricade Set',
         description = 'Perimeter kit — scrap-plate wall, corner, gateway',
@@ -202,5 +204,66 @@ return {
         footprintx = 13, footprintz = 3,
         sightdistance = 150,
         buildtime = 24000,
+    },
+
+    -- ── the same kit, one element per def (2026-09-17) ──────────────────
+    -- Split out of ms_barricade_set so the town planner can tile a wall run,
+    -- put a corner AT a vertex and a gate ON the street (town_templates.py
+    -- PERIMETER `defs`). Each is its own forge model with the root offset
+    -- zeroed, ≤400 tris, one shared 1024² set each; footprints are the
+    -- measured ground contact under the cells×2 = metres convention.
+    --
+    -- HP is the kit's 6000 divided across the run it used to cover: the wall
+    -- is one 8 m third of it, the gate the same with a weaker opening, the
+    -- corner stiffer because it is the hinge of two runs and a watch post.
+    ms_barricade_wall = building{
+        name = 'Barricade Wall',
+        description = 'Perimeter wall — 8 m scrap-plate run on an earth berm',
+        objectname = 'ms_barricade_wall',
+        maxdamage = 2000, mass = 2000,
+        footprintx = 4, footprintz = 2,      -- 8.0 x 3.2 m measured
+        sightdistance = 150,
+        buildtime = 8000,
+    },
+
+    -- Two 4 m arms about a corner post with a watch platform; place it with
+    -- the arms running +X and +Z (yaw the def to turn the corner).
+    ms_barricade_corner = building{
+        name = 'Barricade Corner',
+        description = 'Perimeter corner — two 4 m arms, corner post, platform',
+        objectname = 'ms_barricade_corner',
+        maxdamage = 2600, mass = 2400,
+        footprintx = 3, footprintz = 3,      -- 5.2 x 5.2 m measured
+        sightdistance = 250,                 -- the platform is a lookout
+        buildtime = 10000,
+    },
+
+    -- Two pylons + hazard lintel with a swinging leaf. Pieces body + `gate`;
+    -- the `open` clip is NON-LOOPING and is not an idle, so the client's idle
+    -- policy leaves the leaf in its rest pose (closed) until something drives
+    -- the clip. Opening between the pylon inner faces is 5.2 m.
+    ms_barricade_gate = building{
+        name = 'Barricade Gate',
+        description = 'Perimeter gateway — twin pylons, hazard lintel, leaf',
+        objectname = 'ms_barricade_gate',
+        maxdamage = 1600, mass = 1800,       -- the opening is the weak point
+        footprintx = 4, footprintz = 2,      -- 8.2 x 2.4 m measured
+        sightdistance = 150,
+        buildtime = 9000,
+    },
+
+    -- 8 m revetted trench length; tiles end-to-end along X, so a trench line
+    -- is N of these and a traverse is a 90° yaw. The engine has no terrain
+    -- cut: the piece reads from its spoil parapets, sandbag firing course and
+    -- duckboarded floor, all at or above Y=0. No team surface (earth, timber,
+    -- hessian — the model ships --no-team), and no clips.
+    ms_trench_segment = building{
+        name = 'Trench Segment',
+        description = 'Field trench — revetted parapet, firing step, duckboards',
+        objectname = 'ms_trench_segment',
+        maxdamage = 1200, mass = 900,        -- earthworks absorb, they do not resist
+        footprintx = 4, footprintz = 2,      -- 8.0 x 3.8 m measured
+        sightdistance = 120,
+        buildtime = 6000,                    -- the cheapest thing a sapper digs
     },
 }

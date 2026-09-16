@@ -23,7 +23,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import momentHud, { eventLog, contextFor, momentRefFor } from './moment-hud.js';
+import momentHud, { eventLog, contextFor, momentRefFor, momentInScope } from './moment-hud.js';
 import {
     momentBriefing, momentHeadline, momentState, momentTone, frameClock, placePhrase,
 } from './battle-moment-phrasing.js';
@@ -157,10 +157,16 @@ describe('manifest wiring', () => {
         // DESIGN-DRILLDOWN §7's target resting HUD: "Both rails are empty."
         // A panel that comes back to a rail is the resident-panel HUD the
         // directive rejects, and nothing else would catch it.
+        //
+        // The journey lane (PLAN-beta.md "Mentorship") docks two FIRST-MISSION
+        // cards on the left, and they are the named exception rather than a
+        // relaxation of the rule: both render nothing at all outside the state
+        // they exist for (no mentorship, no tutorial ⇒ no DOM), so the resting
+        // HUD of an ordinary mission still has both rails empty.
         const rails = manifest().widgets
             .filter((w: { mount: string }) => w.mount === 'left' || w.mount === 'right')
             .map((w: { id: string }) => w.id);
-        expect(rails).toEqual([]);
+        expect(rails).toEqual(['mentor-card', 'tutorial-guide']);
     });
 
     it('folds statistics, diplomacy and reports behind the access point', () => {
@@ -358,5 +364,20 @@ describe('a moment is a place you can go', () => {
         expect(ref.position).toEqual({ x: 4400, z: 4400 });
         expect(ref.kind).toBe('area');
         expect(ref.id).toBe('moment:1');
+    });
+});
+
+/** PLAN-beta.md "Mentorship" — a mentored player's notices are cut to the
+ *  squads they are responsible for. */
+describe('momentInScope', () => {
+    it('keeps everything when nothing is assigned', () => {
+        expect(momentInScope(moment({ unitIds: [5] }), new Set())).toBe(true);
+    });
+
+    it('keeps a moment about my squads and drops the rest', () => {
+        const mine = new Set([11, 12]);
+        expect(momentInScope(moment({ unitIds: [12, 30] }), mine)).toBe(true);
+        expect(momentInScope(moment({ unitIds: [30] }), mine)).toBe(false);
+        expect(momentInScope(moment({ unitIds: [] }), mine)).toBe(false);
     });
 });

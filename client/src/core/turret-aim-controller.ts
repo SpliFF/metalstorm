@@ -62,6 +62,8 @@
  * fallback for any frame where both ever coexist.
  */
 
+import { RecoilDriver } from './recoil-driver.js';
+
 /** Default turret slew cap when a def carries no override (deg/s). */
 export const DEFAULT_SLEW_DEG_PER_SEC = 120;
 
@@ -70,6 +72,27 @@ export const DISENGAGE_MS = 4000;
 
 /** Below this |angle| (radians) a releasing turret is treated as at rest. */
 const REST_EPS = 1e-3;
+
+/** Ratio of the yaw slew's angular-acceleration cap to its rate cap (1/s):
+ *  how fast the turret ramps up to (or brakes from) `slewRate` — reaches it
+ *  from rest in ~1/RATIO seconds. This is what reads as mechanical "turret
+ *  lag" instead of an instant velocity change, and it scales with any
+ *  per-unit rate override so a faster turret still spins up proportionally
+ *  faster. */
+const SLEW_ACCEL_RATIO = 5;
+
+/** Damping ratio of the accel-limited slew's spring-damper law (< 1 =
+ *  underdamped). Tuned so a large retarget — a target swinging past, or the
+ *  return to rest on disengage — overshoots by roughly a degree before
+ *  settling, instead of clamping dead-on the instant the barrel lines up. */
+const SLEW_DAMPING_RATIO = 0.75;
+
+/** Below this angle (rad) and rate (rad/s) together, snap the slew exactly
+ *  onto the target rather than let the spring's exponential tail creep
+ *  toward it forever — the same finite-settle guarantee the old constant-
+ *  rate slew had by construction. */
+const SLEW_SNAP_ANGLE = 0.3 * (Math.PI / 180);
+const SLEW_SNAP_RATE = 3 * (Math.PI / 180);
 
 export interface AimVec { x: number; y: number; z: number; }
 
@@ -192,6 +215,11 @@ export interface TurretAimDeps {
      *  omitted when the def isn't known yet — resolution falls back to
      *  muzzle-position matching. */
     weaponDefIds?(unitId: number): readonly number[] | null;
+    /** `aoe` (elmos) + `projectileSpeed` (elmos/sim-frame) for a weaponDefId,
+     *  or undefined when unknown — feeds the recoil kick (see
+     *  `recoil-driver.ts`). Omitted/undefined means no recoil is applied,
+     *  so existing callers/tests need not supply it. */
+    weaponAoeVelocity?(weaponDefId: number): { aoe: number; projectileSpeed: number } | undefined;
 }
 
 /** Where poses go — EntityRenderer.setAimPose. Returns false when the unit
@@ -244,6 +272,8 @@ interface Engagement {
     lastFireMs: number;
     /** Current slewed model-space turret yaw / barrel pitch (radians). */
     yaw: number;
+    /** Current yaw angular rate (rad/s) — accel-limited slew state. */
+    yawRate: number;
     pitch: number;
     /** True once disengaged and slewing back to rest. */
     releasing: boolean;
@@ -265,6 +295,40 @@ export function slewAngle(cur: number, target: number, maxStep: number): number 
     return wrapPi(cur + Math.sign(delta) * maxStep);
 }
 
+/** Angle + angular rate a `stepSlew` call advances by one tick. */
+export interface SlewState {
+    yaw: number;
+    rate: number;
+}
+
+/**
+ * Accel-limited step of an angular spring-damper toward `target`: turret lag
+ * (a ramp-up to `rateCap` instead of an instant velocity change) plus a
+ * small settle overshoot (see `SLEW_DAMPING_RATIO`). Pure and NaN-safe at
+ * `dtSec` = 0 (the integration step only ever scales by `dtSec`, never
+ * divides by it), and the acceleration is hard-clamped to
+ * `rateCap * SLEW_ACCEL_RATIO` regardless of how large the error is — a
+ * 180° retarget never produces an unbounded jolt.
+ */
+export function stepSlew(state: SlewState, target: number, dtSec: number, rateCap: number): SlewState {
+    const omega = SLEW_ACCEL_RATIO;
+    const accelCap = rateCap * SLEW_ACCEL_RATIO;
+    const error = wrapPi(target - state.yaw);
+    let accel = omega * omega * error - 2 * SLEW_DAMPING_RATIO * omega * state.rate;
+    accel = accel > accelCap ? accelCap : accel < -accelCap ? -accelCap : accel;
+
+    let rate = state.rate + accel * dtSec;
+    rate = rate > rateCap ? rateCap : rate < -rateCap ? -rateCap : rate;
+
+    let yaw = wrapPi(state.yaw + rate * dtSec);
+
+    if (Math.abs(wrapPi(target - yaw)) < SLEW_SNAP_ANGLE && Math.abs(rate) < SLEW_SNAP_RATE) {
+        yaw = wrapPi(target);
+        rate = 0;
+    }
+    return { yaw, rate };
+}
+
 export class TurretAimController {
     private deps: TurretAimDeps;
     private sink: AimPoseSink;
@@ -273,6 +337,8 @@ export class TurretAimController {
     private engaged = new Map<number, Map<number, Engagement>>();
     /** Wall clock of the previous tick, for the per-tick slew budget. */
     private lastTickMs: number | null = null;
+    /** Per-slot recoil kick, keyed by `recoilKey` — see recoil-driver.ts. */
+    private recoil = new RecoilDriver();
 
     constructor(deps: TurretAimDeps, sink: AimPoseSink) {
         this.deps = deps;
@@ -297,6 +363,13 @@ export class TurretAimController {
         const target = this.resolveSlot(unitId, pieces, ev, unitSlots);
         if (!target) return;
 
+        // Every real shot kicks, whether it refreshes an existing engagement
+        // or starts a new one — a Fired/VolleyOutcome event IS one shot.
+        if (ev.weaponDefId !== undefined) {
+            const wd = this.deps.weaponAoeVelocity?.(ev.weaponDefId);
+            if (wd) this.recoil.kick(this.recoilKey(unitId, target.slot), wd.aoe, wd.projectileSpeed);
+        }
+
         const existing = unitSlots?.get(target.slot);
         if (existing) {
             existing.targetId = ev.targetId;
@@ -314,10 +387,15 @@ export class TurretAimController {
             fallbackPos: ev.targetPos,
             lastFireMs: nowMs,
             yaw: 0,
+            yawRate: 0,
             pitch: 0,
             releasing: false,
         });
         if (!unitSlots) this.engaged.set(unitId, slots);
+    }
+
+    private recoilKey(unitId: number, slot: number): string {
+        return `${unitId}:${slot}`;
     }
 
     /**
@@ -412,9 +490,10 @@ export class TurretAimController {
      * sim-driven / disappeared).
      */
     tick(nowMs: number): void {
-        if (this.engaged.size === 0) { this.lastTickMs = nowMs; return; }
         const dtSec = this.lastTickMs === null ? 0 : Math.max(0, (nowMs - this.lastTickMs) / 1000);
         this.lastTickMs = nowMs;
+        this.recoil.tick(dtSec);
+        if (this.engaged.size === 0) return;
 
         for (const [unitId, slots] of this.engaged) {
             // The sim took over this unit's pieces (ZK/BAR turret, future
@@ -429,13 +508,14 @@ export class TurretAimController {
             if (!pose) {
                 // Unit vanished from the render set — release its bookkeeping;
                 // setAimPose reports the unknown id so we can also clean up.
-                if (!this.sink.setAimPose(unitId, this.buildPose(slots))) {
+                if (!this.sink.setAimPose(unitId, this.buildPose(unitId, slots))) {
                     this.engaged.delete(unitId);
                 }
                 continue;
             }
 
-            const rate = this.slewRate(unitId) * dtSec;
+            const rateCap = this.slewRate(unitId);
+            const pitchStep = rateCap * dtSec;
             for (const [slot, e] of slots) {
                 const disengaged = nowMs - e.lastFireMs > DISENGAGE_MS;
                 if (disengaged) e.releasing = true;
@@ -465,8 +545,10 @@ export class TurretAimController {
                     }
                 }
 
-                e.yaw = slewAngle(e.yaw, desiredYaw, rate);
-                if (e.barrel) e.pitch = slewAngle(e.pitch, desiredPitch, rate);
+                const slewed = stepSlew({ yaw: e.yaw, rate: e.yawRate }, desiredYaw, dtSec, rateCap);
+                e.yaw = slewed.yaw;
+                e.yawRate = slewed.rate;
+                if (e.barrel) e.pitch = slewAngle(e.pitch, desiredPitch, pitchStep);
 
                 if (e.releasing && Math.abs(e.yaw) < REST_EPS
                     && (!e.barrel || Math.abs(e.pitch) < REST_EPS)) {
@@ -480,23 +562,33 @@ export class TurretAimController {
                 continue;
             }
 
-            if (!this.sink.setAimPose(unitId, this.buildPose(slots))) {
+            if (!this.sink.setAimPose(unitId, this.buildPose(unitId, slots))) {
                 this.engaged.delete(unitId);
             }
         }
     }
 
     /** Merged turret (+ barrel) Spring-euler poses for every engaged slot on
-     *  a unit, from each slot's current slewed angles. */
-    private buildPose(slots: ReadonlyMap<number, Engagement>): Map<number, AimPiecePose> {
+     *  a unit, from each slot's current slewed angles plus its recoil kick
+     *  (see recoil-driver.ts) along the barrel's — or, absent a barrel, the
+     *  turret's, at 30% weight — local Z (the muzzle's forward axis, so a
+     *  kick along +Z is straight backward regardless of aim angle). */
+    private buildPose(unitId: number, slots: ReadonlyMap<number, Engagement>): Map<number, AimPiecePose> {
         const pose = new Map<number, AimPiecePose>();
         for (const e of slots.values()) {
+            const kick = this.recoil.offset(this.recoilKey(unitId, e.slot));
             // Preserve the rest mount offset (px,py,pz); yaw about Spring Y.
-            pose.set(e.turret.idx, { px: e.turret.px, py: e.turret.py, pz: e.turret.pz, rx: 0, ry: e.yaw, rz: 0 });
+            pose.set(e.turret.idx, {
+                px: e.turret.px, py: e.turret.py, pz: e.turret.pz + (e.barrel ? 0 : kick * 0.3),
+                rx: 0, ry: e.yaw, rz: 0,
+            });
             if (e.barrel) {
                 // Barrel inherits the turret's yaw through the parent chain; it
-                // only adds pitch about Spring X.
-                pose.set(e.barrel.idx, { px: e.barrel.px, py: e.barrel.py, pz: e.barrel.pz, rx: e.pitch, ry: 0, rz: 0 });
+                // only adds pitch about Spring X (plus the recoil kick on Z).
+                pose.set(e.barrel.idx, {
+                    px: e.barrel.px, py: e.barrel.py, pz: e.barrel.pz + kick,
+                    rx: e.pitch, ry: 0, rz: 0,
+                });
             }
         }
         return pose;
@@ -516,6 +608,7 @@ export class TurretAimController {
     reset(): void {
         this.engaged.clear();
         this.lastTickMs = null;
+        this.recoil.reset();
     }
 
     /** Debug/test view: a unit's per-slot state (default slot 1 — the sole

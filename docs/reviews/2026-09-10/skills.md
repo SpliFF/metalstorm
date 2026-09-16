@@ -2,7 +2,7 @@
 
 ## STATUS
 
-complete (wrapped early) — coordinator wrap-up directive received after commit 1. Existing-skill audit + fixes + splits landed; new skills, agents and claude-config NOT done (see `## Not done`).
+complete (wrapped early) — coordinator wrap-up directive received after commit 1. Existing-skill audit + fixes + splits landed; new skills, agents and claude-config NOT done (see `## Not done`). **FINISHED 2026-09-17** by the skills-agents lane (72a0c0ab03): five new skills, `.claude/agents/*`, `check-skills.sh`, `tools/claude-config` README + setup.sh, and `window.test.nl`.
 
 Branch: `worktree-agent-a49f17a50f181a73a` (cut from main `88d257bce2`, merged main tip on start).
 

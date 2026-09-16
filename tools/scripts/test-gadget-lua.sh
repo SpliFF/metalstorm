@@ -12,13 +12,17 @@
 # the map and why. This script is a census runner, not a fixer: it reports
 # each family's busted summary line and does not touch any spec.
 #
-# Two families carry KNOWN pre-existing red, recorded in gadget-baseline.json:
-#   - gadgets-mock: 149 errors — the scenario-cwd specs living in
-#     LuaRules/Gadgets/tests/ fail when that whole directory is run from the
-#     plugin root, which is the cwd every other spec in it needs.
+# One family carries KNOWN pre-existing red, recorded in gadget-baseline.json:
 #   - scenario: 3 failures / 1 error — needs baked unit-def caches from a game
 #     that has booted at least once in this tree (same precondition as
 #     test-debug-mcp's scenario-validate cases).
+#
+# gadgets-mock used to carry ~150 errors of its own: it swept every
+# `*_spec.lua` under LuaRules/Gadgets/tests/ from the plugin root, including
+# the scenario-cwd specs that SCENARIO_SPECS below already runs from the GAME
+# root (their own header comments say so). Running the same file from both
+# cwds only ever produced noise in the wrong one, so gadgets-mock's sweep now
+# excludes every basename SCENARIO_SPECS claims (see GADGETS_MOCK_SPECS).
 #
 # Baseline gate: each family's fail/error counts are compared against
 # tools/scripts/gadget-baseline.json. A family only fails the gate if its
@@ -46,7 +50,6 @@ FAMILIES=(
     "objectives  | $GADGETS/objectives | tests/"
     "parley      | $GADGETS/parley     | tests/"
     "regions     | $GADGETS/regions    | tests/"
-    "gadgets-mock| $GADGETS            | tests/"
 )
 # The scenario family dofile()s content by a game-root-relative path, so it
 # must run from data/games/metalstorm and cannot use `tests/` (that would pick
@@ -65,9 +68,23 @@ SCENARIO_SPECS=(
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_population_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_towns_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_tutorial_spec.lua"
+    "$GADGETS_FROM_GAME_ROOT/tests/tutorial_scenarios_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/meridian_basin_scenario_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/meridian_basin_soak_scenario_spec.lua"
+    "$GADGETS_FROM_GAME_ROOT/tests/pelagic_landing_scenario_spec.lua"
+    "$GADGETS_FROM_GAME_ROOT/tests/scenario_references_spec.lua"
 )
+
+# gadgets-mock runs every *_spec.lua directly under tests/ EXCEPT the ones
+# SCENARIO_SPECS already claims for the game-root cwd above — running those
+# from here is exactly the wrong-cwd trap this comment used to warn about.
+declare -A SCENARIO_SPEC_BASENAMES=()
+for f in "${SCENARIO_SPECS[@]}"; do SCENARIO_SPEC_BASENAMES["$(basename "$f")"]=1; done
+GADGETS_MOCK_SPECS=()
+for f in "$REPO_ROOT/$GADGETS"/tests/*_spec.lua; do
+    b="$(basename "$f")"
+    [[ -n "${SCENARIO_SPEC_BASENAMES[$b]:-}" ]] || GADGETS_MOCK_SPECS+=("tests/$b")
+done
 
 cd "$REPO_ROOT"
 
@@ -121,6 +138,7 @@ for entry in "${FAMILIES[@]}"; do
     name="$(echo "$name" | xargs)"; dir="$(echo "$dir" | xargs)"; args="$(echo "$args" | xargs)"
     run_family "$name" "$dir" $args
 done
+run_family "gadgets-mock" "$GADGETS" "${GADGETS_MOCK_SPECS[@]}"
 run_family "scenario" "data/games/metalstorm" "${SCENARIO_SPECS[@]}"
 
 if [[ -n "$FAMILY_FILTER" && "$any_ran" -eq 0 ]]; then

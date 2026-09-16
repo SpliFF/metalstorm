@@ -72,6 +72,20 @@ registration step.
   attached to `UnitDef` only and never consulted for features. See
   `bridges.lua` for what that forces.
 
+## The files
+
+| file | family | posture |
+| --- | --- | --- |
+| `wrecks.lua` | battlefield hulks | blocking, destructible, reclaimable |
+| `bridges.lua` | tileable spans (road, rail, ancient) | non-blocking, floating, permanent |
+| `ancient.lua` | ancient-tech sites — the three §M3 relics plus the batch-04 wave and the beached hulk (2026-09-17) | blocking, permanent, unsalvageable, selectable |
+| `landmarks.lua` | civilian landmarks (the lighthouse) | as ancient, `ms_feature_kind = 'landmark'` |
+
+`LuaRules/Gadgets/tests/feature_mock.lua` lists these files by name
+(`M.DEF_FILES`); a fifth file must be added there or the busted specs never
+see it. `scenarios/scenario_smoke_test.lua` must spawn every def once —
+`game_features_spec.lua` asserts it.
+
 ## Footprint convention
 
 Same as `units/`: **footprint metres = `footprintX` × 2**
