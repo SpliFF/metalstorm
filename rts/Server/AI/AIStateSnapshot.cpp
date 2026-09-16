@@ -17,9 +17,15 @@
 // AI1: copy a rulesParams store (game or team scope) into the snapshot's
 // AI-visible map, mirroring the wire producer's bool→number coercion.
 static void CopyRulesParams(const LuaRulesParams::Params& src,
-                            std::unordered_map<std::string, AIRulesParamValue>& dst) {
+                            std::unordered_map<std::string, AIRulesParamValue>& dst,
+                            int losMask = LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK) {
     dst.reserve(src.size());
     for (const auto& [key, p] : src) {
+        // Mirror LuaSyncedRead's mask semantics (ai-actuation F11): an entry
+        // the mask cannot read never reaches the snapshot — the AI sees what
+        // a player on its side could read, no cheating channel. All game
+        // params are PUBLIC today, so this is a guard, not a behaviour change.
+        if ((p.los & losMask) == 0) continue;
         AIRulesParamValue out;
         std::visit([&](auto&& v) {
             using T = std::decay_t<decltype(v)>;
@@ -66,7 +72,10 @@ AIStateSnapshot BuildAISnapshot(int teamId, int allyTeamId, int lodLevel) {
     // player sees). Team scope is this AI's own team params only (fog-limited:
     // never another team's private state). The picture builder reads these via
     // AI.getRulesParam('game'|'team', key).
-    CopyRulesParams(CSplitLuaHandle::GetGameParams(), snap.gameParams);
+    // Game params cross the side boundary, so only PUBLIC entries travel
+    // (F11); the AI's OWN team params are private-readable by their owner.
+    CopyRulesParams(CSplitLuaHandle::GetGameParams(), snap.gameParams,
+                    LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK);
     if (teamId >= 0 && teamId < teamHandler.ActiveTeams()) {
         if (const CTeam* team = teamHandler.Team(teamId))
             CopyRulesParams(team->modParams, snap.teamParams);

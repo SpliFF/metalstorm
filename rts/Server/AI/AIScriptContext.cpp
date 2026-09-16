@@ -322,8 +322,16 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getRadarBlips);
     lua_setfield(L, -2, "getRadarBlips");
 
-    lua_pushcfunction(L, l_issueCommand);
-    lua_setfield(L, -2, "issueCommand");
+    // `AI.issueCommand` is deliberately NOT registered in production
+    // (ai-actuation F6): a per-unit order path bypasses the authority charge
+    // every directive pays, so the strategic floor ("the AI commands through
+    // directives, like a commander, not through unit puppetry") is
+    // structural, not convention. The test harness opts back in — it uses
+    // the verb as its readback channel, never as gameplay.
+    if (exposeIssueCommandForTests) {
+        lua_pushcfunction(L, l_issueCommand);
+        lua_setfield(L, -2, "issueCommand");
+    }
 
     lua_pushcfunction(L, l_getFrame);
     lua_setfield(L, -2, "getFrame");
@@ -560,6 +568,9 @@ int AIScriptContext::l_issueDirective(lua_State* L) {
     cmd.shape             = static_cast<uint8_t>(TableNumber(L, 2, "shape", 0));
     cmd.requestedStrength = static_cast<uint32_t>(TableNumber(L, 2, "requestedStrength", 0));
     cmd.expiresInFrames   = static_cast<uint32_t>(TableNumber(L, 2, "expiresInFrames", 0));
+    lua_getfield(L, 2, "idleOnly");
+    cmd.idleOnly = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
 
     lua_getfield(L, 2, "params");
     if (lua_istable(L, -1)) {
@@ -707,6 +718,8 @@ int AIScriptContext::l_getRadarBlips(lua_State* L) {
     }
     return 1;
 }
+
+bool AIScriptContext::exposeIssueCommandForTests = false;
 
 int AIScriptContext::l_issueCommand(lua_State* L) {
     auto* ctx = GetAIContext(L);

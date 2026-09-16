@@ -29,6 +29,13 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Production never registers `AI.issueCommand` (ai-actuation F6); this
+// harness opts back in because the verb is its readback channel.
+const bool kExposeIssueCommand = [] {
+    AIScriptContext::exposeIssueCommandForTests = true;
+    return true;
+}();
+
 std::string ReadFile(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(f)),
@@ -802,4 +809,49 @@ TEST_CASE("SG1 5(b): the journal names each AI verb, so intent-before-directive 
               static_cast<AICommandKind>(j.Records()[0].subKind))) == "lua-msg");
     CHECK(std::string(AICommandKindName(
               static_cast<AICommandKind>(j.Records()[1].subKind))) == "issue-directive");
+}
+
+// ── 2026-09-10 review, ai-actuation F5/F6 ──────────────────────────────────
+
+TEST_CASE("review F5: a directive spec's idleOnly choice reaches the wire command") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "strategos_f5_idleonly";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::ofstream(dir / "main.lua") <<
+        "function onUpdate(frame)\n"
+        "  AI.issueDirective(0, { type=5, priority=3, shape=1, params={10,0,20,8},\n"
+        "    idleOnly=true })\n"
+        "  AI.issueDirective(0, { type=5, priority=3, shape=1, params={10,0,20,8} })\n"
+        "end\n";
+
+    AIScriptContext ctx("f5_idle", /*teamId*/ 6, /*allyTeamId*/ 6, dir.string());
+    REQUIRE(ctx.Init(ReadFile(dir / "main.lua"), "main.lua"));
+    AIStateSnapshot snap;
+    snap.teamId = 6;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    const auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 2);
+    CHECK(cmds[0].idleOnly);        // the spec's polite co-commander choice
+    CHECK(!cmds[1].idleOnly);       // the default stays D56's explicit order
+}
+
+TEST_CASE("review F6: AI.issueCommand is not registered outside the test harness") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "strategos_f6_nocmd";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    // The chunk itself asserts the verb's absence: Init fails if it exists.
+    std::ofstream(dir / "main.lua") <<
+        "assert(AI.issueCommand == nil, 'issueCommand must not be registered')\n"
+        "function onUpdate(frame) end\n";
+
+    AIScriptContext::exposeIssueCommandForTests = false;
+    AIScriptContext ctx("f6_nocmd", /*teamId*/ 7, /*allyTeamId*/ 7, dir.string());
+    const bool booted = ctx.Init(ReadFile(dir / "main.lua"), "main.lua");
+    AIScriptContext::exposeIssueCommandForTests = true;   // restore the harness
+    CHECK(booted);
 }

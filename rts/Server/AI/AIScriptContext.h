@@ -47,6 +47,13 @@ public:
                     int playerId = -1);
     ~AIScriptContext() override;
 
+    /// Test-harness knob (ai-actuation F6): `AI.issueCommand` is never
+    /// registered in production — a per-unit order path would bypass the
+    /// authority charge every directive pays. The doctest harness sets this
+    /// to keep using the verb as its readback channel. Never set it in
+    /// server code.
+    static bool exposeIssueCommandForTests;
+
     // --- IScriptContext ---
     const std::string& GetName() const override { return name; }
     int GetOrder() const override { return 1000 + teamId; }

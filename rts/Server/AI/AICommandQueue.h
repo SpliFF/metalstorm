@@ -111,6 +111,10 @@ struct AICommand {
     // Optional area condition (within-circle) so an area-scoped directive draws
     // only squads near its target; 0 radius = wildcard (draw any idle squad).
     float    withinX = 0.0f, withinZ = 0.0f, withinRadius = 0.0f;
+    // The spec's own choice (ai-actuation F5): true = recruit only units with
+    // an EMPTY command queue — a polite co-commander that never yanks a force
+    // out of a fight. Default false, D56's answer for an explicit order.
+    bool     idleOnly = false;
     // SetPosture payload (also reused for a group name on CreateGroup, and for
     // the LuaMsg verb's opaque game-Lua payload — the engine never parses it;
     // the parley/wire.lua codec and the gadget handlers own that schema):

@@ -520,10 +520,10 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
 // plumbing. Keep it here, next to Evaluate's candidate gate, so the two halves
 // of the idle rule stay readable together.
 StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
-                                             float withinRadius)
+                                             float withinRadius, bool idleOnly)
 {
     StandingOrderConditions conds;
-    conds.idleOnly = false;
+    conds.idleOnly = idleOnly;
     if (withinRadius > 0.0f) {
         conds.withinCenter = float3(withinX, 0.0f, withinZ);
         conds.withinRadius = withinRadius;
