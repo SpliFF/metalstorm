@@ -20,8 +20,13 @@
 --   fe:step(300, onUpdate)             -- advance 300 frames, calling onUpdate every 10
 --   fe.applied / fe.refused / fe.violations / fe.log / fe.spent
 --
--- `AI.issueCommand` IS registered (the real runtime registers it too) but any
--- call lands in `fe.violations` — the strategic floor is asserted, not assumed.
+-- `AI.issueCommand` is registered here and ONLY here: since 2026-09-16 the
+-- production VM does not register it at all (AIScriptContext.cpp
+-- `exposeIssueCommandForTests`), so directives are the only actuation path.
+-- The double keeps the verb for exactly the reason the C++ harness does — to
+-- catch an AI reaching for it: any call lands in `fe.violations`. Pass
+-- `exposeIssueCommand = false` to model the production VM, in which the verb
+-- is simply absent (`Engine.caps().unitCommand == false`).
 
 local Authority = require('lib.authority')
 
@@ -40,6 +45,12 @@ function FE.new(cfg)
     self.mapW, self.mapH = cfg.mapWidth or 2048, cfg.mapHeight or 2048
     self.frame    = cfg.frame or 0
     self.params   = { game = {}, team = {} }
+    -- Game params are LOS-masked on the way into the snapshot (2026-09-16,
+    -- AIStateSnapshot.cpp F11): only RULESPARAMLOS_PUBLIC entries cross the
+    -- side boundary. Non-public game params are held here, unreadable through
+    -- the surface, so a spec can prove an AI never sees them.
+    self.maskedParams = {}
+    self.exposeIssueCommand = cfg.exposeIssueCommand ~= false
     self.mapData  = { ['regions.json'] = cfg.regions }
     self.defExport = { ['power.json'] = cfg.power }
     self.ownUnits, self.enemies, self.blips = {}, {}, {}
@@ -73,7 +84,22 @@ function FE:setFrame(f) self.frame = f end
 function FE:setOwnUnits(list) self.ownUnits = list or {} end
 function FE:setEnemies(list)  self.enemies = list or {} end
 function FE:setBlips(list)    self.blips = list or {} end
-function FE:setRulesParam(scope, key, value) self.params[scope][key] = value end
+--- Publish a rulesParam. `los` (game scope only) mirrors the snapshot's mask:
+-- nil / 'public' travels; anything else ('private', 'allied', 'team') is
+-- withheld exactly as the engine withholds it. Team scope is the AI's OWN
+-- team, which is private-readable by its owner — never masked.
+function FE:setRulesParam(scope, key, value, los)
+    if scope == 'game' and los ~= nil and los ~= 'public' then
+        self.params.game[key] = nil
+        self.maskedParams[key] = value
+        return
+    end
+    if scope == 'game' then self.maskedParams[key] = nil end
+    self.params[scope][key] = value
+end
+
+--- The value the sim holds for a masked game param (never visible to the AI).
+function FE:maskedValue(key) return self.maskedParams[key] end
 function FE:setMapData(name, tbl)   self.mapData[name] = tbl end
 function FE:setDefExport(name, tbl) self.defExport[name] = tbl end
 function FE:setPool(v) self.pool = v; self:syncPool() end
@@ -147,6 +173,9 @@ function FE:buildSurface()
                       shape = math.floor(tonumber(spec.shape) or 0),
                       requestedStrength = math.floor(tonumber(spec.requestedStrength) or 0),
                       expiresInFrames = math.floor(tonumber(spec.expiresInFrames) or 0),
+                      -- lua_toboolean: absent/false/nil ⇒ false, everything
+                      -- else (including 0) ⇒ true.
+                      idleOnly = (spec.idleOnly ~= nil and spec.idleOnly ~= false),
                       params = {} }
         for i, v in ipairs(spec.params or {}) do cmd.params[i] = tonumber(v) or 0 end
         if type(spec.within) == 'table' then
@@ -171,11 +200,14 @@ function FE:buildSurface()
         push({ kind = 'luaMsg', text = msg })
         return true
     end
-    -- The generic per-unit verb the real runtime also registers. Recorded as
-    -- a VIOLATION: a Metalstorm AI must never reach it.
-    function AI.issueCommand(unitId, cmdId, ...)
-        fe.violations[#fe.violations + 1] = { frame = fe.frame, unitId = unitId,
-                                              cmdId = cmdId, params = { ... } }
+    -- The generic per-unit verb. The production VM does NOT register it
+    -- (2026-09-16); this double keeps it, like the C++ test harness, purely
+    -- so that an AI reaching for it is RECORDED rather than merely erroring.
+    if fe.exposeIssueCommand then
+        function AI.issueCommand(unitId, cmdId, ...)
+            fe.violations[#fe.violations + 1] = { frame = fe.frame, unitId = unitId,
+                                                  cmdId = cmdId, params = { ... } }
+        end
     end
     return AI
 end

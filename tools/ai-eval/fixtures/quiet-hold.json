@@ -1,0 +1,43 @@
+{
+    "id": "quiet-hold",
+    "title": "Quiet home ground",
+    "why": "The control case. Nobody is coming. An AI that burns authority here is an AI that cannot afford the fight it is about to lose — and one that issues NOTHING is not holding its ground either. Scores the standing-order cadence: what does it cost to hold a line for 60 seconds?",
+    "frames": 1800,
+    "team": 0,
+    "player": 7,
+    "pool": 60,
+    "map": { "width": 2048, "height": 2048 },
+    "regions": "tools/ai-eval/fixtures/world/three-region.json",
+    "power": "tools/ai-eval/fixtures/world/power.json",
+    "params": [
+        { "scope": "game", "key": "region_north_ridge_team", "value": 0 },
+        { "scope": "game", "key": "region_central_basin_team", "value": -1 },
+        { "scope": "game", "key": "region_south_marsh_team", "value": -1 },
+        { "scope": "game", "key": "objective_count", "value": 0 }
+    ],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 300, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 320, "health": 1.0, "hasCommands": false },
+            { "id": 3, "defId": 103, "x": 380, "y": 0, "z": 340, "health": 1.0, "hasCommands": false }
+        ]
+    },
+    "timeline": [],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" },
+        { "check": "maxSpend", "value": 40, "why": "holding still for a minute must not cost a battle's worth of authority" }
+    ],
+    "expectByAi": {
+        "garrison": [
+            { "check": "minDirectives", "value": 1, "why": "quiet ground is still HELD" },
+            { "check": "hasDirectiveType", "type": "Defend", "region": "north_ridge" },
+            { "check": "noDirectiveType", "type": "Withdraw", "why": "nothing to run from" },
+            { "check": "maxDirectives", "value": 14, "why": "re-state at half-ttl, not every tick" }
+        ],
+        "null": [
+            { "check": "maxDirectives", "value": 0, "why": "the no-op control: if this scores, the fixture is the signal" }
+        ]
+    }
+}

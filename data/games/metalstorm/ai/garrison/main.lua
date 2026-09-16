@@ -35,7 +35,7 @@ local DEFAULT_PROFILE = 'sentinel'
 local self = {
     booted = false, profile = nil, settings = nil, state = nil,
     picture = nil, actuator = nil, scheduler = nil, reporter = nil,
-    playerId = -1, teamId = -1,
+    playerId = -1, teamId = -1, seenEnemies = nil,
 }
 
 local function resolveProfile()
@@ -67,6 +67,19 @@ local function boot()
     if self.rejected then
         self.reporter:event('warning', { unknownProfile = self.rejected, using = self.profile.id })
     end
+end
+
+--- The cheap poll, run on EVERY runtime callin (every 10 frames) — the only
+-- thing standing between a dormant garrison and a minute of not noticing it is
+-- being overrun, since the runtime dispatches no contact event (F4). One
+-- `getVisibleEnemies` copy: no region maths, no picture refresh. A JUMP in
+-- visible enemies (not a drift) forces an early strategic tick through
+-- Scheduler:due's alert path, which is itself rate-limited to minGap.
+local function contactAlert()
+    local n = #Engine.visibleEnemies()
+    local was = self.seenEnemies
+    self.seenEnemies = n
+    return was ~= nil and n > was
 end
 
 local function strategicTick(frame)
@@ -115,6 +128,7 @@ local function strategicTick(frame)
     local ms = t0 and Engine.nowMs() and (Engine.nowMs() - t0) or nil
     self.reporter:tick(frame, {
         tier = tier, period = self.scheduler:period(), orders = #decision.orders,
+        alerts = self.scheduler.alerts,
         issued = st.tick.issued, spent = st.tick.spent, pool = pool, budget = budget,
         idle = decision.idle or 0, errors = st.total.errors, computeMs = ms,
         home = (function() local n = 0; for _ in pairs(decision.home or {}) do n = n + 1 end; return n end)(),
@@ -130,7 +144,8 @@ function onUpdate(frame)
             return
         end
     end
-    if not self.scheduler:due(frame) then return end
+    local ok, alert = pcall(contactAlert)
+    if not self.scheduler:due(frame, ok and alert) then return end
     local ok, err = pcall(strategicTick, frame)
     if not ok then
         -- A crashing tick must not wedge the AI: log and try again next tick.

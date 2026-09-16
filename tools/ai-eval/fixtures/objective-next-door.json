@@ -1,0 +1,55 @@
+{
+    "id": "objective-next-door",
+    "title": "A cheap objective next door",
+    "why": "An unclaimed control objective opens in the neighbouring region at frame 300 while home is quiet. A defender with spare authority should take it; a defender under pressure should not. Scores initiative: does the AI ever do anything that is not a reaction?",
+    "frames": 1800,
+    "team": 0,
+    "player": 7,
+    "pool": 60,
+    "map": { "width": 2048, "height": 2048 },
+    "regions": "tools/ai-eval/fixtures/world/three-region.json",
+    "power": "tools/ai-eval/fixtures/world/power.json",
+    "params": [
+        { "scope": "game", "key": "region_north_ridge_team", "value": 0 },
+        { "scope": "game", "key": "region_central_basin_team", "value": -1 },
+        { "scope": "game", "key": "region_south_marsh_team", "value": -1 },
+        { "scope": "game", "key": "objective_count", "value": 0 }
+    ],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 300, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 320, "health": 1.0, "hasCommands": false },
+            { "id": 3, "defId": 103, "x": 380, "y": 0, "z": 340, "health": 1.0, "hasCommands": false }
+        ]
+    },
+    "timeline": [
+        {
+            "frame": 300,
+            "event": { "kind": "objective", "region": "central_basin", "id": "basin-opens" },
+            "params": [
+                { "scope": "game", "key": "objective_count", "value": 1 },
+                { "scope": "game", "key": "objective_1_type", "value": "control" },
+                { "scope": "game", "key": "objective_1_state", "value": "active" },
+                { "scope": "game", "key": "objective_1_reward", "value": 120 },
+                { "scope": "game", "key": "objective_1_team", "value": -1 },
+                { "scope": "game", "key": "objective_1_region", "value": "central_basin" },
+                { "scope": "game", "key": "objective_1_scope", "value": "region" }
+            ]
+        }
+    ],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" }
+    ],
+    "expectByAi": {
+        "garrison": [
+            { "check": "hasDirectiveTypeAfter", "type": "Assault", "frame": 300, "region": "central_basin",
+              "why": "a control objective is taken, not guarded" },
+            { "check": "sendsMessage", "cmd": "ai.intent", "why": "the intent tag the veto panel annotates" }
+        ],
+        "null": [
+            { "check": "maxDirectives", "value": 0 }
+        ]
+    }
+}

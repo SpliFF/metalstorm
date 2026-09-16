@@ -52,6 +52,14 @@ end
 --   requestedStrength demand cap in ABSOLUTE HITPOINTS (0 = take what idles)
 --   ttl               expiresInFrames (default D.DEFAULT_TTL_FRAMES)
 --   within            true → draw only squads already inside the target circle
+--   idleOnly          true → the directive only ever assigns units that are
+--                     IDLE, and completes when its idle pool runs dry
+--                     (OrgGroups.cpp DirIsIdle). The engine's default for an
+--                     AI directive is FALSE — an AI is its team's commander
+--                     and its order preempts, exactly like a human's (D56) —
+--                     but the SPEC's own choice is honoured since 2026-09-16
+--                     (ai-actuation F5), so a deferent AI sharing a side with
+--                     humans can opt back into the polite behaviour.
 -- Returns the spec, or nil (+ reason) when there is no geometry to place it.
 function D.build(opts)
     if type(opts) ~= 'table' or type(opts.type) ~= 'number' then
@@ -74,6 +82,7 @@ function D.build(opts)
         params            = r and { cx, 0, cz, r } or { cx, 0, cz },
         requestedStrength = math.max(0, math.floor(opts.requestedStrength or 0)),
         expiresInFrames   = math.max(1, math.floor(opts.ttl or D.DEFAULT_TTL_FRAMES)),
+        idleOnly          = opts.idleOnly and true or false,
     }
     if opts.within and r then
         spec.within = { x = cx, z = cz, radius = r }

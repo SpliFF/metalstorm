@@ -1,0 +1,30 @@
+{
+    "id": "blind-start",
+    "title": "Blind and broke",
+    "why": "The hostile-input case: no region graph (an unprocessed map), no power table, no published objectives, an empty authority pool, and an enemy in the fog. Every read the AI makes comes back nil. The only passing behaviour is to keep ticking quietly — a blind AI must do nothing rash, must not crash the sim thread it runs on, and must not queue commands it cannot pay for.",
+    "frames": 1200,
+    "team": 0,
+    "player": 7,
+    "pool": 0,
+    "map": { "width": 2048, "height": 2048 },
+    "params": [],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 300, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 320, "health": 0.4, "hasCommands": false }
+        ],
+        "blips": [ { "id": 91, "x": 1500, "z": 400 } ]
+    },
+    "timeline": [
+        { "frame": 600, "enemies": [ { "id": 91, "defId": 103, "x": 400, "z": 400, "health": 1.0 } ],
+          "event": { "kind": "contact", "id": "fog-contact" } }
+    ],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" },
+        { "check": "maxSpend", "value": 0, "why": "an empty pool buys nothing — and the drain, not the AI, is the arbiter" },
+        { "check": "maxDirectives", "value": 0, "why": "no graph means no honest place to put one" }
+    ],
+    "expectByAi": {}
+}

@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -68,6 +68,31 @@ test-debug-mcp:
 # veto-loop verdict (PLAN-ai-synced-write.md task 5).
 test-headless-batch:
 	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs test/churn-checks.test.mjs test/key-census.test.mjs test/ai-veto-checks.test.mjs
+
+# AI-player suites (docs/ai-players.md). Pure Lua + busted, no server, no
+# build: the reusable library (ai/lib), the garrison's doctrine core and the
+# strategos. Each runs from its own plugin root because the AI VM's `require`
+# is plugin-scoped (F3) — cwd IS the module root, exactly as it is in the
+# runtime.
+test-ai-lua:
+	cd data/games/metalstorm/ai && busted lib/tests/
+	cd data/games/metalstorm/ai/garrison && busted tests/
+	cd data/games/metalstorm/ai/strategos && busted tests/
+
+# AI evaluation harness (docs/reviews/2026-09-10/ai-framework.md task 4): every
+# AI plugin against every fixture, scored on what the SIM would have done with
+# its commands — directives that survived the drain, authority actually
+# charged, reaction latency, and any reach for the per-unit verb the strategic
+# floor forbids. Hermetic (one `lua` process per cell against ai/lib's fake
+# engine), so it is a gate and not a nightly. The scorer's own unit tests run
+# first: a scoreboard nobody checks flatters whatever it measures.
+#
+# Exit 1 = a fixture expectation failed; exit 2 = a regression against
+# tools/ai-eval/baseline.json. Re-baseline with:
+#   node tools/ai-eval/run-eval.mjs --save-baseline
+test-ai-eval:
+	node --test tools/ai-eval/score.test.mjs
+	node tools/ai-eval/run-eval.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.

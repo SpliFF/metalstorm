@@ -9,6 +9,14 @@ describe("lib.directives", function()
     local regions
     before_each(function() regions = Regions.load(Fix.regionsJson()) end)
 
+    it("defaults idleOnly false and honours an opt-in (2026-09-16, F5)", function()
+        local spec = D.defend(regions.north_ridge, {})
+        assert.are.equal(false, spec.idleOnly,
+            'an AI directive preempts by default, like a human commander order (D56)')
+        local polite = D.defend(regions.north_ridge, { idleOnly = true })
+        assert.are.equal(true, polite.idleOnly)
+    end)
+
     it("mirrors the engine enums", function()
         assert.are.equal(10, D.Type.Defend)
         assert.are.equal(14, D.Type.DefendFront)
