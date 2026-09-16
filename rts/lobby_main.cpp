@@ -10284,7 +10284,15 @@ int main(int argc, char *argv[]) {
           // Dev accounts are skipped. They are minted by `/api/rooms/direct`
           // and by every harness that boots a room, and a standing ladder
           // whose top is the test fixtures is not a ladder.
-          {
+          //
+          // Gated on the room being neither a replay nor a broadcast watch
+          // (checked BEFORE crediting, not just before the branches below
+          // that clean those rooms up): a replay/broadcast room's "server"
+          // is a playback or relay process, not a Mission, so whoever first
+          // called /api/replays/watch or /api/broadcasts/watch must not be
+          // paid as if they had played one.
+          if (Journey::RoomEarnsAccrual(gReplayRooms.count(roomId) > 0,
+                                         gBroadcastRooms.count(roomId) > 0)) {
             WarSummary finalSummary;
             const bool haveSummary = warSummaryFor(roomId, finalSummary);
             std::unordered_map<std::string, int> credited;
@@ -10297,7 +10305,7 @@ int main(int argc, char *argv[]) {
               if (accountId <= 0 || !paid.insert(accountId).second)
                 return;
               const auto u = db.FindUserById(accountId);
-              if (!u || u->isDev)
+              if (!u || u->isDev || u->isProvisional)
                 return;
               const auto cit = credited.find(username);
               const Journey::Accrual a = Journey::SessionAccrual(
