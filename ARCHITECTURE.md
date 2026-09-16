@@ -974,7 +974,7 @@ subtrees each gadget family delegates to (with their own `tests/`).
 |------|---------|
 | `client/squads/` | The **SoA squad engine** (default, `config.engine:'soa'`): `soa-kernel`, `steering`, cohesion modules, `formation`, `governor`, `squad-transport.js` (the world↔battle seam's client half). Plain-ESM `*.test.js`, in the client vitest gate. |
 | `ui/widgets/` + `ui/lib/` | The game's native-UI widgets and shared display libs (e.g. `authority-format.js`, `authority-cost.js`), loaded via `metalstorm.ui.json`. **Separate vitest root** — the client gate never runs it. |
-| `scenarios/` | Authored + generated battle scenarios (`*.lua`, `economy_validation_grid.json`). |
+| `scenarios/` | Authored + generated battle scenarios (`*.lua`). `economy_validation_grid.json` is a **retired pointer stub** — the economy harness is pure Lua now (`LuaRules/Gadgets/authority/economy_sim.lua`, run by `tools/economy-validation.js`). |
 | `ai/strategos/` | The game's server-side Lua AI (strategic, directive-only; parley verbs real since 2026-09-10). |
 | `ai/lib/` | Reusable, engine-agnostic AI-player library (picture/regions/authority/directives/actuator/scheduler/reporter + `testing/fake_engine.lua`); `vendor/` holds byte-identical copies of the synced cost/wire specs, pinned by `lib/tests/vendor_drift_spec.lua` — re-copy after editing an original. Not an AI itself (AIDiscovery skips it). |
 | `ai/garrison/` | A second, simpler AI player (defender/NPC) built on `ai/lib` — proves the library; `lib` is a tracked symlink because the AI sandbox cannot `require` across plugins. |
