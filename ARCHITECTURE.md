@@ -1910,6 +1910,24 @@ wall-clock heartbeat; **a live game never sends one, and that absence is the
 client's entire mode signal** — the playback bar mounts on the first one it
 receives.
 
+### Broadcast tap (`.msb`)
+
+Delayed spectating records **effects**, not causes: `--broadcast-out <file>` seats a
+global-visibility spectator session under a reserved id (`broadcast::kTapClientId`,
+`rts/Server/BroadcastTap.h`) that is never in `playerHandler`, and the single outbound
+funnel (`WebTransportServer::SendStream`/`BroadcastStream`, via `SetTapSink`) writes every
+byte it would have sent to a `.msb` log — so the log can only contain what a spectator was
+entitled to see, by construction rather than by a second filter.
+`rts/Server/BroadcastLog.{h,cpp}` owns that container: magic `MSBCAST\0` + version +
+a reused `replay::Header` JSON + marker-framed `R` records / `K` keyframes / `T` trailer,
+uncompressed, with a **streaming reader over a growing file** (a short tail is the recorder
+mid-write, not corruption) and a keyframe index built by skipping payloads.
+Every 1800 frames the streamer writes a `K` and re-emits the tap's join bundle
+(`StateStreamer::EmitJoinBundle`) so a backward seek lands on a whole world; the
+`GetClientCount() > 0` gates are `GameServerContext::HasStreamConsumers()` instead, because
+a tapped mission must keep streaming with nobody connected. Playback is a memcpy and a
+clock, never a sim — the relay that serves it is PLAN-beta-broadcast.md lane S2.
+
 ### Replay browsing
 
 The lobby serves what it recorded. `POST /api/replays/list` returns a row per

@@ -48,6 +48,7 @@
 #include "Server/OrgGroups.h"
 #include "Server/SyncedInputJournal.h"
 #include "Server/ReplayFile.h"
+#include "Server/BroadcastTap.h"
 #include "Server/ReplayPlayer.h"
 #include "Server/ReplayControlDeck.h"
 #include "Server/ReplayStateBroadcast.h"
@@ -335,6 +336,11 @@ int main(int argc, char* argv[])
     // a copy of another file's, and the first person to diff them would spend a
     // day discovering that.
     std::string journalFilePath;
+    // PLAN-beta-broadcast.md S1: `--broadcast-out <file>` records the outbound
+    // global-spectator stream to a `.msb` log. Orthogonal to --journal-file:
+    // that one records CAUSES for re-execution, this one records EFFECTS for
+    // delayed spectating, and a mission may write both.
+    std::string broadcastOutPath;
     std::string replayFilePath;
     std::string replayVerifyRef;
     bool replayVerify = false;
@@ -545,6 +551,8 @@ int main(int argc, char* argv[])
             // the bar a fixture with nothing under a move order can still hold
             // — and the one option A would restore for every fixture.
             roundTripCfg.strict = true;
+        } else if (arg == "--broadcast-out" && i + 1 < argc) {
+            broadcastOutPath = argv[++i];
         } else if (arg == "--journal-file" && i + 1 < argc) {
             journalFilePath = argv[++i];
         } else if (arg == "--replay" && i + 1 < argc) {
@@ -1263,6 +1271,9 @@ int main(int argc, char* argv[])
     // since a run asked to produce a shareable artefact must not have its
     // records land in a diagnostic ring instead.
     replay::Writer replayWriter;
+    // The broadcast tap (S1). Same lifetime discipline as replayWriter: declared
+    // here so it outlives the loop, opened once the defs cache key exists.
+    broadcast::Tap broadcastTap;
     if (journalAuditRecords > 0) {
         syncedinput::Journal().SetJournal(&auditJournal);
         SLOG(SPRING_LOG_NOTICE,
@@ -1675,7 +1686,7 @@ int main(int argc, char* argv[])
     // chokepoint #5, the record the whole stream is anchored on — fires a few
     // lines below, and a recorder opened after it would produce a headless
     // replay file with no anchor at all.
-    if (!journalFilePath.empty()) {
+    if (!journalFilePath.empty() || !broadcastOutPath.empty()) {
         replay::Header rhdr;
         // FIDELITY-STANDIN: PLAN-replay §1 binds a replay to the exact engine
         // build ("same-binary bound"), but this tree has no build-identity
@@ -1722,22 +1733,45 @@ int main(int argc, char* argv[])
             rhdr.aiSlots.push_back({ra.id, ra.team, ra.startPos});
 
         std::string werr;
-        if (!replayWriter.Open(journalFilePath, rhdr, werr)) {
-            // Fatal on purpose. A run told to produce a replay that silently
-            // produces nothing is worse than one that refuses to start: the
-            // first is discovered days later, when the recording was the point.
-            SLOG(SPRING_LOG_ERROR, "--journal-file: %s", werr.c_str());
-            return 1;
+        // The tap first: it is the cheaper failure and shares the header.
+        if (!broadcastOutPath.empty()) {
+            std::string berr;
+            if (!broadcastTap.Open(broadcastOutPath, rhdr, berr)) {
+                // Fatal for the same reason the replay recorder is: a run told
+                // to produce a broadcast that silently produces nothing is
+                // discovered an hour later, when the log was the point.
+                SLOG(SPRING_LOG_ERROR, "--broadcast-out: %s", berr.c_str());
+                return 1;
+            }
+            broadcast::RegisterTapSession(sessions);
+            ctx.broadcastTap = &broadcastTap;
+            rtcServer.SetTapSink([&broadcastTap](ClientID, StreamClass cls, uint32_t lane,
+                                                 bool bcast, const uint8_t* data, size_t len) {
+                broadcastTap.Sink(static_cast<uint8_t>(cls),
+                                  static_cast<uint8_t>(lane), bcast, data, len);
+            });
+            SLOG(SPRING_LOG_NOTICE,
+                 "broadcast tap open: %s (global-spectator stream, keyframe every %d frames)",
+                 broadcastOutPath.c_str(), broadcast::kKeyframeFrames);
         }
-        syncedinput::Journal().SetJournal(&replayWriter);
-        SLOG(SPRING_LOG_NOTICE,
-             "replay recording open: %s (defs=%s, state-hash every %d frames%s)",
-             journalFilePath.c_str(), defsCacheKey.c_str(), journalHashEvery,
-             journalHashEvery > 0 ? "" : " — DISABLED, this file will not be verifiable");
-        SLOG(SPRING_LOG_WARNING,
-            "replay: engineHash is a stand-in (protocol version + TU compile "
-            "stamp) — this tree exposes no build identity, so a header match "
-            "does NOT prove the replaying binary is the recording one");
+        if (!journalFilePath.empty()) {
+            if (!replayWriter.Open(journalFilePath, rhdr, werr)) {
+                // Fatal on purpose. A run told to produce a replay that silently
+                // produces nothing is worse than one that refuses to start: the
+                // first is discovered days later, when the recording was the point.
+                SLOG(SPRING_LOG_ERROR, "--journal-file: %s", werr.c_str());
+                return 1;
+            }
+            syncedinput::Journal().SetJournal(&replayWriter);
+            SLOG(SPRING_LOG_NOTICE,
+                 "replay recording open: %s (defs=%s, state-hash every %d frames%s)",
+                 journalFilePath.c_str(), defsCacheKey.c_str(), journalHashEvery,
+                 journalHashEvery > 0 ? "" : " — DISABLED, this file will not be verifiable");
+            SLOG(SPRING_LOG_WARNING,
+                "replay: engineHash is a stand-in (protocol version + TU compile "
+                "stamp) — this tree exposes no build identity, so a header match "
+                "does NOT prove the replaying binary is the recording one");
+        }  // journalFilePath
     }
 
     // ── Replay feed: the inverse of the five recording chokepoints ──
@@ -3583,6 +3617,10 @@ int main(int argc, char* argv[])
         // and the file format already treats a torn tail as the E1 truncation
         // case rather than as corruption.
         if (replayWriter.Enabled()) replayWriter.Flush();
+        // Same granularity, same reason (PLAN-beta-broadcast.md S1): a crash
+        // costs one tick of the broadcast, and a torn tail reads as "live",
+        // which for a broadcast log is the ordinary state anyway.
+        if (broadcastTap.Active()) broadcastTap.Flush();
     }
 
     // --- Close the replay recording (PLAN-replay task 2) ---
@@ -3597,6 +3635,26 @@ int main(int argc, char* argv[])
     if (roundTrip.Enabled() && roundTrip.CurrentPhase() != snapshotrt::Phase::Done) {
         SLOG(SPRING_LOG_ERROR, "%s", roundTrip.FormatVerdict().c_str());
         roundTripExitCode = 1;
+    }
+
+    // --- Close the broadcast tap (PLAN-beta-broadcast.md S1) ---
+    // Beside the replay close and for the identical reason: the trailer is what
+    // tells a catalogue this segment is RECORDED rather than live. Detach the
+    // sink first so nothing written during teardown lands after the trailer.
+    if (broadcastTap.Active()) {
+        rtcServer.SetTapSink(nullptr);
+        const bool tapWroteBadly = broadcastTap.Log().Failed();
+        const uint64_t tapRecords = broadcastTap.Log().Written();
+        const uint64_t tapKeyframes = broadcastTap.Log().KeyframesWritten();
+        const uint64_t tapBytes = broadcastTap.Log().BytesWritten();
+        broadcastTap.Close(sim.GetFrameNum());
+        SLOG(tapWroteBadly ? SPRING_LOG_ERROR : SPRING_LOG_NOTICE,
+             "broadcast log closed: %s (%llu records, %llu keyframes, %llu payload bytes, "
+             "end frame %d)%s",
+             broadcastOutPath.c_str(), (unsigned long long)tapRecords,
+             (unsigned long long)tapKeyframes, (unsigned long long)tapBytes,
+             sim.GetFrameNum(),
+             tapWroteBadly ? " — WITH WRITE ERRORS, the segment is incomplete" : "");
     }
 
     int replayExitCode = 0;

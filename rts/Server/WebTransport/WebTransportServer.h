@@ -41,6 +41,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -190,7 +191,22 @@ public:
         return outboundSuppressed_.load(std::memory_order_relaxed);
     }
 
+    /// Broadcast tap sink (PLAN-beta-broadcast.md S1). Every byte a client
+    /// receives passes SendStream/BroadcastStream, already post-visibility
+    /// filter — so this one hook is the entire recorder.
+    ///
+    /// It runs BEFORE the `outboundSuppressed_` check on purpose: the deferred
+    /// `.msr → .msb` converter re-executes a replay muted, and a tap that
+    /// honoured the mute would record nothing on exactly the run that exists to
+    /// produce a log.
+    ///
+    /// Set once from main() before Start(); called on the sim thread only.
+    using TapSink = std::function<void(ClientID clientId, StreamClass cls, uint32_t lane,
+                                       bool broadcast, const uint8_t* data, size_t len)>;
+    void SetTapSink(TapSink s) { tapSink_ = std::move(s); }
+
 private:
     std::unique_ptr<WebTransportServerImpl> impl_;
     std::atomic<bool> outboundSuppressed_{false};
+    TapSink tapSink_;
 };

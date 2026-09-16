@@ -13,6 +13,7 @@
 #include "Server/IdRecycleAnnouncer.h"
 
 struct GameServerContext;
+struct ClientSession;
 
 // StateStreamer — owns the per-tick broadcast pipeline that used to be a long
 // sequence of blocks at the tail of the server_main.cpp sim loop. Tick() calls
@@ -26,6 +27,22 @@ public:
     explicit StateStreamer(GameServerContext& ctx) : ctx(ctx) {}
 
     void Tick(int frameNum);
+
+    /// Re-send `session` everything a fresh join would receive, so the next
+    /// tick's fan-out gives it full state rather than deltas
+    /// (PLAN-beta-broadcast.md S1). Called on the tap session behind every
+    /// broadcast keyframe: a watcher who seeks to that `K` replays the bundle
+    /// that follows and lands on a WHOLE world.
+    ///
+    /// Scope, stated because it is the lane's one real risk: this covers the
+    /// join state StateStreamer owns (delta cache, rules-param snapshot + key
+    /// dictionary, team-stats history cursors, the complete LOS set). The
+    /// auth-path one-shots in ClientMessageHandler — TeamStartInfo, GameModOptions
+    /// — are NOT re-emitted here, because a relay reconstructs them from the log
+    /// header (`replay::Header::modOptions`) and its own map/game load rather
+    /// than from the stream; GameInfo needs nothing either, it is broadcast
+    /// every 30 frames and so is already in the log.
+    void EmitJoinBundle(ClientSession& session);
 
     /// PLAN-long-uptime §3 (S1) growth metrics. Assigned interned ids,
     /// excluding the reserved id 0. Monotone between compactions, so pairing
