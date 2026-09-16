@@ -248,6 +248,10 @@ struct WorldAuthorityAttribution {
     std::string reason;
 };
 
+/// (faction id → side key) pairs, so `AttributeSettlement` can compare a
+/// commander's WORLD faction against the SIDE keys a settlement names.
+struct WorldFactionSideKey { std::string factionId; std::string sideKey; };
+
 /// Who earned what from one settlement. Pure: the caller supplies the
 /// commanders standing at the settled POI, so the rule is testable with no
 /// database and no war.
@@ -258,6 +262,7 @@ struct WorldAuthorityAttribution {
 std::vector<WorldAuthorityAttribution> AttributeSettlement(
     const WorldSettlementRecord& settlement,
     const std::vector<WorldCommanderRecord>& commandersAtPoi,
+    const std::vector<WorldFactionSideKey>& factionSides,
     const WorldStatRules& rules);
 
 /// The order budget, as the player panel shows it.

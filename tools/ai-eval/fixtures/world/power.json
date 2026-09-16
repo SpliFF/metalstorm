@@ -1,0 +1,7 @@
+{
+    "defs": {
+        "101": { "name": "ms_tank_s1", "dps": 40, "hp": 1200, "class": "tanks", "scale": 1 },
+        "102": { "name": "ms_scout",   "dps": 10, "hp": 400,  "class": "recon", "scale": 1 },
+        "103": { "name": "ms_heavy",   "dps": 90, "hp": 3000, "class": "tanks", "scale": 3 }
+    }
+}

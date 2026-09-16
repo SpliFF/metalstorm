@@ -292,7 +292,7 @@ describe('clarifications', () => {
             actions: [
                 {
                     kind: 'command',
-                    intent: { verb: 'patrol', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Northgate' } },
+                    intent: { verb: 'attack', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Black Ridge' } },
                 },
                 { kind: 'guidance', guidance: { op: 'stance', value: 'aggressive' } },
             ],
@@ -579,7 +579,7 @@ describe('the say line', () => {
             say: 'Patrolling Northgate.',
             actions: [{
                 kind: 'command',
-                intent: { verb: 'patrol', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Northgate' } },
+                intent: { verb: 'attack', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Black Ridge' } },
             }],
         }, h.ports);
         expect(report.lines.map((l) => l.kind)).toEqual(['refused']);
@@ -593,7 +593,7 @@ describe('the say line', () => {
                 { kind: 'guidance', guidance: { op: 'stance', value: 'aggressive' } },
                 {
                     kind: 'command',
-                    intent: { verb: 'patrol', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Northgate' } },
+                    intent: { verb: 'attack', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Black Ridge' } },
                 },
             ],
         }, h.ports);
@@ -613,7 +613,7 @@ describe('the say line', () => {
             actions: [
                 {
                     kind: 'command',
-                    intent: { verb: 'patrol', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Northgate' } },
+                    intent: { verb: 'attack', subject: { type: 'any' }, target: { type: 'entity-ref', name: 'Black Ridge' } },
                 },
                 { kind: 'guidance', guidance: { op: 'stance', value: 'aggressive' } },
             ],

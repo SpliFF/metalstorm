@@ -58,7 +58,7 @@ import {
 } from './drilldown.js';
 import {
     MAX_OBJECTIVE_CHIPS, URGENT_FRAMES,
-    createObjectiveAnnouncer, framesRemaining, isResolved, parseObjectives,
+    createObjectiveAnnouncer, disambiguateTitles, framesRemaining, isResolved, parseObjectives,
     rankObjectives, resolvePlace, visibleTo,
     type ObjectiveEvent, type ObjectivePlace, type ObjectiveRecord,
 } from './objective-model.js';
@@ -102,9 +102,30 @@ export interface Board {
     placeById: Map<number, ObjectivePlace | null>;
     frame: number;
     teamId?: number;
+    /** Local sim playerNum — `objective_<id>_player == me` is a task ASSIGNED
+     *  to this player (PLAN-beta.md "Mentorship"). */
+    playerId?: number;
     delegated: ReadonlySet<number>;
     /** id → wall-clock ms at which its announcement highlight expires. */
     announcedUntil: Map<number, number>;
+    /** id → qualifier for a title that collides with another on this board
+     *  (`disambiguateTitles`). Empty for unique titles. */
+    qualifiers?: Map<number, string>;
+}
+
+/** The chip title: the short name, qualified only when another row shares it. */
+export function chipTitle(board: Board, o: ObjectiveRecord, place: ObjectivePlace | null): string {
+    const q = board.qualifiers?.get(o.id);
+    const name = shortName(o, place);
+    return q ? `${name} ${q}` : name;
+}
+
+/** Fill `board.qualifiers` for the records about to be drawn. */
+function qualifyBoard(board: Board, records: readonly ObjectiveRecord[]): void {
+    board.qualifiers = disambiguateTitles(
+        records,
+        (o) => shortName(o, board.placeById.get(o.id) ?? null),
+    );
 }
 
 /** The ref an objective is addressed by — here, and (U2) on its world marker. */
@@ -158,7 +179,8 @@ function mount(ctx: WidgetContext): void {
 
     const board: Board = {
         byId: new Map(), placeById: new Map(), frame: 0,
-        teamId: ctx.identity?.teamId, delegated: new Set(), announcedUntil: new Map(),
+        teamId: ctx.identity?.teamId, playerId: ctx.identity?.playerId,
+        delegated: new Set(), announcedUntil: new Map(),
     };
     const handles = new Map<number, { handle: DrilldownHandle; travellable: boolean }>();
     const announcer = createObjectiveAnnouncer();
@@ -251,6 +273,10 @@ function mount(ctx: WidgetContext): void {
         const ranked = rankObjectives(mine, {
             frame: board.frame, playerId: ctx.identity?.playerId, changedIds,
         });
+        // Qualify against the WHOLE board, not the visible slice: a title that
+        // is unique among three chips and duplicated in the tab must read the
+        // same in both, or a player opening the tab sees a chip rename itself.
+        qualifyBoard(board, ranked);
         const visible = showAll ? ranked : ranked.slice(0, MAX_OBJECTIVE_CHIPS);
         const wanted = new Set(visible.map((o) => o.id));
 
@@ -353,6 +379,24 @@ function delegatedSet(ctx: WidgetContext): ReadonlySet<number> {
 // ────────────────────────────── rung 1 ──────────────────────────────────
 
 /**
+ * "from <callsign>" when this objective was handed to the local player.
+ *
+ * The sim publishes WHO it is for (`objective_<id>_player`) and not who set
+ * it — the only source for that is the mentorship the player is in, which is
+ * the relationship the task actually came out of. No mentor and it reads as a
+ * bare task rather than inventing an author.
+ */
+function taskFrom(board: Board, o: ObjectiveRecord): string | null {
+    const me = board.playerId;
+    if (me === undefined || me < 0) return null;
+    const forPlayer = (o as { player?: number | string }).player;
+    if (forPlayer === undefined || Number(forPlayer) !== me) return null;
+    const mentor = uiStore.mentorOf(me);
+    if (mentor === undefined) return 'yours';
+    return `from ${mentor < 0 ? 'your AI mentor' : uiStore.callsignOf(mentor)}`;
+}
+
+/**
  * A name, a state word and at most three numbers — the ladder's rung-1 budget,
  * spent on the three an objective is actually acted on by.
  *
@@ -384,8 +428,11 @@ export function summaryFor(board: Board, id: number): DrilldownSummary {
         stats.push({ label: '⬡', value: String(Math.round(o.reward)), tone: 'gold' });
     }
 
+    const task = taskFrom(board, o);
+    if (task) stats.push({ label: 'Task', value: task, tone: 'accent' });
+
     return {
-        title: shortName(o, place),
+        title: chipTitle(board, o, place),
         state: stateWord(o, { frame: board.frame, teamId: board.teamId }),
         stats,
     };
@@ -401,6 +448,11 @@ function renderDetail(host: HTMLElement, board: Board, id: number): void {
     // The sentence the player clicked, first — a context panel that opens on
     // different words than the chip it came from reads as a different thing.
     host.append(detailRow('Task', taskLine(o, place)));
+
+    // Who it is for. Only rendered when it is for THIS player: an objective
+    // assigned to someone else is the team's board as usual.
+    const from = taskFrom(board, o);
+    if (from) host.append(detailRow('Assigned', from === 'yours' ? 'to you' : `to you, ${from}`));
 
     const prose = document.createElement('p');
     prose.className = 'nui-dd__prose';
@@ -546,6 +598,7 @@ function mountBoard(ctx: WidgetContext): void {
         const ranked = rankObjectives(mine, {
             frame: board.frame, playerId: ctx.identity?.playerId, changedIds: new Set(),
         });
+        qualifyBoard(board, ranked);
         const wanted = new Set(ranked.map((o) => o.id));
         for (const [id, handle] of handles) {
             if (!wanted.has(id)) { handle.dispose(); handles.delete(id); }

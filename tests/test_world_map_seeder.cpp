@@ -101,6 +101,22 @@ TEST_CASE("W3: a fresh world is seeded up to its initial budget, battle maps fir
     CHECK(WorldDirector::PoisFor(f.db, id).size() == 2);
 }
 
+TEST_CASE("review F16: a mistyped budget key falls back to the default instead of throwing at boot") {
+    WorldDb f;
+    const std::string id = WorldDirector::SeedDefaultWorld(f.db, kEpoch);
+    REQUIRE(!id.empty());
+    auto world = WorldDirector::Load(f.db, id);
+    REQUIRE(world.has_value());
+    // A hand-edited config with a string where a number belongs: this runs at
+    // lobby boot, so it must degrade to the default, never take the process
+    // down with a json type_error.
+    world->config["poiBudgetInitial"] = "eight";
+    REQUIRE(WorldDirector::Upsert(f.db, *world));
+    int added = -1;
+    CHECK_NOTHROW(added = WorldMapSeeder::SeedFromRegistry(f.db, id, kEpoch));
+    CHECK(added > 0);  // seeded under the DEFAULT budget, not zero and not a crash
+}
+
 TEST_CASE("W3: a wide-open budget seeds the whole register, including world-only POIs") {
     WorldDb f;
     const std::string id = WorldDirector::SeedDefaultWorld(f.db, kEpoch);

@@ -136,7 +136,11 @@ describe("budget governor", function()
         local p = makePicture({
             _role = role,
             regions = {
-                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin' } },
+                home  = { owner = 0, value = 1.5, neighbors = { 'front', 'basin', 'yard' } },
+                -- A second owned region: with only ONE the posture floor splits
+                -- a garrison off `home` (planner buildPackages) and the package
+                -- on the wire is 75 % of the bucket — tested on its own below.
+                yard  = { owner = 0, value = 1.0, neighbors = { 'home' } },
                 front = { owner = 1, value = 1.0, neighbors = { 'home' } },
                 basin = { owner = nil, value = 2.0, neighbors = { 'home' } },
             },
@@ -237,7 +241,10 @@ describe("commitment hysteresis (anti-thrash)", function()
 
     it("keeps the current package when the challenger doesn't clear the bar", function()
         local commitments = {
-            ['def:home'] = { packageId = 'pkg:home', sinceFrame = 1000, score = 145 },
+            -- 250 × 1.4 = 350 > the challenger's ~271 (300 × pSuccess 0.91 −
+            -- the flat 2-authority directive fee). Was 145 under the old
+            -- force-scaled cost model, which no charge site ever applied.
+            ['def:home'] = { packageId = 'pkg:home', sinceFrame = 1000, score = 250 },
         }
         local out = plan(twoPackageFixture(), commitments)
         assert.are.equal('pkg:home', commitments['def:home'].packageId)
@@ -579,11 +586,17 @@ describe("guidance stance re-weights the slate (binding, §6.2)", function()
         })
     end
 
+    -- `home` is the sole owned region, so the posture floor splits a garrison
+    -- off it (pkg:home:garrison) that may only DEFEND home. The stance decides
+    -- what the MOBILE package (pkg:home) does; the garrison's own DEFEND is
+    -- not the stance's doing and is filtered out here.
     local function outcome(out)
         local defend, expand = false, false
         for _, d in ipairs(out.directives) do
-            if d.goalId == 'def:home' then defend = true end
-            if d.goalId == 'exp:plains' then expand = true end
+            if d.groupId == 'pkg:home' then
+                if d.goalId == 'def:home' then defend = true end
+                if d.goalId == 'exp:plains' then expand = true end
+            end
         end
         return defend, expand
     end
@@ -714,7 +727,9 @@ describe("terminal objective is contested (Q-E1 / D47)", function()
     end)
 
     it("and is taken anyway once the holder is about to bank the war", function()
-        local p = warFixture(1, 0.9, 1)
+        -- 0.95: the floor decays to 0.35 × 0.05 = 0.0175, under the mobile
+        -- package's ~0.022 (750 after the garrison split, against 5000).
+        local p = warFixture(1, 0.95, 1)
         p.intel.raven.strength = 5000
         assert.is_truthy(directiveFor(plan(p), 'obj:1'))
     end)
@@ -873,5 +888,58 @@ describe("a human's veto is excluded AND reported (PLAN-ai-synced-write task 5)"
         -- would then keep naming it for a planner that had stopped acting.
         local out = plan(vetoFixture('exp:nowhere'))
         assert.are.same({}, ids(out.vetoed))
+    end)
+end)
+
+--=============================================================================
+-- WITHDRAW (transports plan §3.4). Until picture.lua learned to read
+-- ms_departure_<teamId>_{x,z,r} (this fixed the ai-eval outmatched-withdrawal
+-- gap), `picture.transports` never existed for strategos and this whole path
+-- — real, scored, and previously untested by ANY busted spec — was dead code:
+-- a garrison overran its home region and strategos kept assaulting out.
+--=============================================================================
+describe("WITHDRAW (outmatched, with a departure zone, §11)", function()
+    -- A textbook 2-for-1 overrun: 3 own vs 6 enemy, ratio == 0.5 == the
+    -- default profile's own withdrawRatio exactly. `<=`, not `<`, is the
+    -- point of this fixture (Threat.losing's boundary fix).
+    local function overrunFixture(hasDeparture)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home = { owner = 0, value = 1.0, neighbors = { 'safe' } },
+                safe = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            intel   = { home = { strength = 6, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger  = { home = { strength = 3 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            transports = hasDeparture
+                and { departure = { x = 10, z = 10, radius = 400, region = 'safe' }, stranded = false }
+                or nil,
+        })
+    end
+
+    local function withdrawDirective(out)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'withdraw' then return d end
+        end
+        return nil
+    end
+
+    it("does nothing without a departure zone (picture.transports absent)", function()
+        assert.is_nil(withdrawDirective(plan(overrunFixture(false))))
+    end)
+
+    it("withdraws through the published departure zone once outmatched 2:1", function()
+        local d = withdrawDirective(plan(overrunFixture(true)))
+        assert.is_truthy(d)
+        assert.are.equal('WITHDRAW', d.directive)
+        assert.are.equal('safe', d.region)   -- (10,10) resolves into `safe`
+    end)
+
+    it("stranded (no transport left) refuses even with a departure zone published", function()
+        local p = overrunFixture(true)
+        p.transports.stranded = true
+        assert.is_nil(withdrawDirective(plan(p)))
     end)
 end)

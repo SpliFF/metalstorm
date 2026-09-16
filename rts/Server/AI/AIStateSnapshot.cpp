@@ -14,12 +14,42 @@
 #include "Lua/LuaHandleSynced.h"
 #include "Lua/LuaRulesParams.h"
 
+#include <string_view>
+
+// GAME-scoped keys that reach the AI regardless of the los they were
+// published with (see AISnapshotGameParamVisible's header). The diplomacy
+// board is the whole list: game_parley.lua publishes `parley_count`,
+// `parley_<id>_*` and the `trust_<lo>_<hi>` ledger with the engine's default
+// (private) los, and a proposal an AI cannot read is a proposal it can never
+// answer — recon_01's Diplomacy Mission waits forever on exactly that.
+static constexpr std::string_view kGameParamPrefixAllow[] = {
+    "parley_",   // proposals, pacts, and the toast ring
+    "trust_",    // the per-pair trust ledger the same board is valued against
+};
+
+bool AISnapshotGameParamVisible(const std::string& key, int los) {
+    if ((los & LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK) != 0) return true;
+    for (const std::string_view prefix : kGameParamPrefixAllow) {
+        if (std::string_view(key).starts_with(prefix)) return true;
+    }
+    return false;
+}
+
 // AI1: copy a rulesParams store (game or team scope) into the snapshot's
 // AI-visible map, mirroring the wire producer's bool→number coercion.
+// `gameScope` selects the allow-listed predicate above; team scope keeps the
+// plain mask test (a team's own params are private-readable by their owner).
 static void CopyRulesParams(const LuaRulesParams::Params& src,
-                            std::unordered_map<std::string, AIRulesParamValue>& dst) {
+                            std::unordered_map<std::string, AIRulesParamValue>& dst,
+                            int losMask = LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK,
+                            bool gameScope = false) {
     dst.reserve(src.size());
     for (const auto& [key, p] : src) {
+        // Mirror LuaSyncedRead's mask semantics (ai-actuation F11): an entry
+        // the mask cannot read never reaches the snapshot — the AI sees what
+        // a player on its side could read, no cheating channel.
+        if (gameScope ? !AISnapshotGameParamVisible(key, p.los)
+                      : ((p.los & losMask) == 0)) continue;
         AIRulesParamValue out;
         std::visit([&](auto&& v) {
             using T = std::decay_t<decltype(v)>;
@@ -66,7 +96,12 @@ AIStateSnapshot BuildAISnapshot(int teamId, int allyTeamId, int lodLevel) {
     // player sees). Team scope is this AI's own team params only (fog-limited:
     // never another team's private state). The picture builder reads these via
     // AI.getRulesParam('game'|'team', key).
-    CopyRulesParams(CSplitLuaHandle::GetGameParams(), snap.gameParams);
+    // Game params cross the side boundary, so only PUBLIC entries travel
+    // (F11) — plus the allow-listed diplomacy board, which every player's Lua
+    // reads already (AISnapshotGameParamVisible). The AI's OWN team params are
+    // private-readable by their owner.
+    CopyRulesParams(CSplitLuaHandle::GetGameParams(), snap.gameParams,
+                    LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK, /*gameScope=*/true);
     if (teamId >= 0 && teamId < teamHandler.ActiveTeams()) {
         if (const CTeam* team = teamHandler.Team(teamId))
             CopyRulesParams(team->modParams, snap.teamParams);

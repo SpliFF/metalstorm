@@ -558,41 +558,98 @@ Response — the same room object `/api/rooms/start` already returns, plus a `se
 
 ### World layer
 
-The world layer is the persistent design-level metagame that sits above individual battles:
-wars (battles) are ordinary rooms keyed by `room_id`; force commitments settle through the
-**WorldEscrow** ledger (committed force leaves the faction's pool at commit, refunds on a
-pre-contact cancel); conquest is an **explicit claim act** (`world_poi_claims` — POI ownership
-changes at war end only through a filed, paid claim); and seasons produce digests with
-Discord webhook and Web Push (RFC 8291) offline notification channels.
+The world layer is the persistent design-level metagame that sits above individual battles
+(design of record: [world-layer.md](world-layer.md)). Wars (battles) are ordinary rooms keyed by
+`room_id`; force commitments settle through the **WorldEscrow** ledger (committed force leaves
+the faction's pool at commit, refunds on a pre-contact cancel); conquest is an **explicit claim
+act** (`world_poi_claims` — POI ownership changes at war end only through a filed, paid claim);
+seasons produce digests; Discord webhook and Web Push (RFC 8291) are the offline notification
+channels.
 
-The GET routes take an optional `?world=<id>` query parameter; the POST routes always act on
-the lobby's **primary** world (the GETs default to it too). Shared errors: 503
+**World selection.** Every `/api/world*` route — GET **and** POST — takes an optional
+`?world=<id>` query parameter (the dispatcher stashes the query string for POSTs too) and defaults
+to the lobby's **primary** world (the oldest `active` row). Shared errors: 503
 `{"error":"world_database_unavailable"}` (faulted DB handle — never a plausible empty world),
-404 `{"error":"no_world"}`. Reads are public; acts require a token. Most POST routes here
-require the caller to be in a world faction (403 `{"error":"not_in_a_faction"}`), and the
-acting faction is always read from the caller's membership, never from the body.
+404 `{"error":"no_world"}` (no world at all, or the named one is missing). Reads are public;
+acts require a token (401 `unauthorized`). The POSTs that act *for a faction* (`claims/file`,
+`staging/commit`) require membership (403 `{"error":"not_in_a_faction"}`) and read the acting
+faction from the caller's membership, never from the body; `staging/cancel` and
+`claims/withdraw` are authorised against the row's faction (any member may act). A body that
+is well-formed JSON of the wrong shape (a string where an integer is expected) is a 500
+`internal error` from the dispatcher's guard, not a 400. Error bodies are `{ok:false, error,
+detail?}`; `have`/`need` ride along on `insufficient_authority`.
 
 | Endpoint | Method / auth | Description |
 |----------|---------------|-------------|
-| `/api/world` | GET, public | World clock + meta (`worldId`, `name`, `state`, `config`, `clock:{worldMs, paused, day, hour, label, ...}`) with the active season folded on. Read-only — never ticks the clock |
-| `/api/world/pois` | GET, public | The POI graph (nodes + edges), with battle markers, faction identities and gathering forces merged on. A young world answers 200 with empty arrays |
-| `/api/world/stats` | GET, public | Rates in force, every commander's Authority, and each faction's roster with derived Rank (rank is vote weight — auditable on purpose) |
-| `/api/world/factions` | GET, public | Faction roster + archetype catalogue + founding rules |
-| `/api/world/me` | POST, token | This account's standing: world authority, founding-gate check, membership, `sideKey` (the account's battle side, or null), plus commander/capacity/rank stats |
-| `/api/world/factions/found` | POST, token | Found a faction. Body `{name, archetype, governance?, colour?, seatPoi?}`. 403 `insufficient_authority` (with `have`/`need`), 409 `name_taken`/`already_member`/`seat_taken` |
-| `/api/world/factions/join` | POST, token | Body `{factionId}`. Enforces the side-key seam: adopts the faction's side if the account has none, 409 `side_mismatch` if both are set and differ. → `{ok, factionId, sideKeyAdopted}` |
+| `/api/world` | GET, public | World clock + meta with the active season folded on. Read-only — never ticks the clock. Shape below |
+| `/api/world/pois` | GET, public | The POI graph (nodes + edges), with battle markers, faction identities and gathering forces merged on. A young world answers 200 with empty arrays. Shape below |
+| `/api/world/stats` | GET, public | Rates in force, every commander's Authority, each faction's roster with derived Rank (rank is vote weight — auditable on purpose), and the economy. **Settles commander authority accrual on the way past** (idempotent). Shape below |
+| `/api/world/factions` | GET, public | Faction roster + archetype catalogue + founding rules. Shape below |
+| `/api/world/me` | POST, token | This account's standing: world authority, founding-gate check, membership, `sideKey` (the account's battle side, or null), plus commander/capacity/rank stats. **Grants the starter commander** when the account first clears the threshold. Shape below |
+| `/api/world/factions/found` | POST, token | Found a faction. Body `{name, archetype, governance?, colour?, seatPoi?}`. → `{ok, factionId, authority}` (authority = what remains after the spend). 400 `bad_name`/`bad_archetype`/`bad_seat`, 403 `insufficient_authority` (with `have`/`need`), 409 `name_taken`/`already_member`/`seat_taken`, 500 `db_error` |
+| `/api/world/factions/join` | POST, token | Body `{factionId}`. Enforces the side-key seam: adopts the faction's side if the account has none, 409 `side_mismatch` (with `accountSideKey`/`factionSideKey`) if both are set and differ. 400 `bad_request` (missing id), 404 `no_such_faction`, 409 `already_member`. → `{ok, factionId, sideKeyAdopted}` |
 | `/api/world/factions/leave` | POST, token | Leave whatever faction this account is in. → `{ok, left}` — leaving nothing is a no-op, not an error. `users.faction_id` is never cleared |
-| `/api/world/claims` | GET, public | Every claim in the world plus the conquest rates (a filed claim is declared, priceable intent) |
-| `/api/world/claims/file` | POST, token | Body `{poi}`. Charges the caller's authority. 409 `already_owner`/`already_claimed`, 404 `no_poi`, 403 `insufficient_authority` (with `have`/`need`). → `{ok, claim}` |
-| `/api/world/claims/withdraw` | POST, token | Body `{claimId}`. Any member of the claiming faction may withdraw (403 `not_your_claim` otherwise; 404 `no_claim`). → `{ok, withdrawn}` |
-| `/api/world/staging/commit` | POST, token | Commit force at a POI (opens or joins a staging window; the war is created when the window ends). Body `{poi, transports?:1, squads?:1, origin?}`. Opens a WorldEscrow row. 409 `already_held`, 404 `no_poi`. → `{ok, joined, staging}` |
-| `/api/world/staging/cancel` | POST, token | Withdraw before contact — refunds the escrow. Body `{stagingId}`. 403 `not_your_commitment`, 404 `no_staging`. → `{ok, cancelled}` |
-| `/api/world/pause` | POST, **admin** | Global world-clock pause. Body `{action:"pause"\|"resume", reason?}`. Freezes world-clock progression only — running battles keep going. → `{ok, changed, clock}` (already-paused is a no-op, `changed:false`) |
-| `/api/world/seasons` | GET, public | Season archive index, newest first |
-| `/api/world/seasons/{n}` | GET, public | One season plus its archived digest rows. `{n}` is digits only (`/latest` is not a route); anything else — and any unknown number — is 404 `{"error":"no_such_season"}`. An active season answers 200 with empty `digests` |
-| `/api/world/push/key` | GET, public | Whether the world offers Web Push, and the VAPID public key for `pushManager.subscribe` → `{worldId, enabled, publicKey}` |
-| `/api/world/push/subscribe` | POST, token | Store this account's `PushSubscription.toJSON()` shape: `{endpoint, keys:{p256dh, auth}}`. Validated hard (https endpoint, 65-byte point, 16-byte secret) → 201, else 400 `bad_subscription` |
-| `/api/world/push/unsubscribe` | POST, token | Body `{endpoint}`. Scoped to the acting account |
+| `/api/world/claims` | GET, public | Every claim in the world (newest first) plus the conquest rates. Shape below |
+| `/api/world/claims/file` | POST, token | Body `{poi}`. Charges the caller's world authority (`claimPoiCost`, 25). 409 `already_owner`/`already_claimed`, 404 `no_poi`/`no_faction`, 403 `insufficient_authority` (with `have`/`need`, the founding route's answer — F13 fixed 2026-09-16), 500 `db_error`. → `{ok, claim}` |
+| `/api/world/claims/withdraw` | POST, token | Body `{claimId}`. Any member of the claiming faction may withdraw (403 `not_your_claim` otherwise; 404 `no_claim`). → `{ok, withdrawn}` — a claim already resolved answers `withdrawn:false` |
+| `/api/world/staging/commit` | POST, token | Commit force at a POI (opens or joins a staging window; the war is created when the window ends). Body `{poi, transports?:1, squads?:1, origin?}` — counts are unbounded integers (holdings are not enforced yet). Opens a WorldEscrow row for THIS commit's counts. 409 `already_held`, 404 `no_poi`/`no_world`/`no_faction`, 400 `no_transport`/`no_squads`/`no_battle_map`, 500 `db_error`. → `{ok, joined, staging}` (`staging` is one item of the `pois[].staging[]` shape below) |
+| `/api/world/staging/cancel` | POST, token | Withdraw before contact — refunds the escrow. Body `{stagingId}`. 403 `not_your_commitment`, 404 `no_staging`. → `{ok, cancelled}` (`false` if the window had already closed) |
+| `/api/world/pause` | POST, **admin** | Global world-clock pause. Body `{action:"pause"\|"resume", reason?}` (default action `pause`). Freezes world-clock progression only — running battles keep going. 400 `bad_action`. → `{ok, changed, clock}` (already-paused is a no-op, `changed:false`) |
+| `/api/world/seasons` | GET, public | Season archive index, newest first → `{worldId, seasons:[{number, state:"active"\|"ended", seasonId:"<world>/season-<n>", startedWorldMs, endedWorldMs}]}` (`endedWorldMs` is 0 while active) |
+| `/api/world/seasons/{n}` | GET, public | One season plus its archived digest rows → `{worldId, season:{…as above}, digests:[{factionId\|null, settlementsWon, poiIncomeTotal, decayTotal, treasuryAtRollover}]}` (`factionId:null` is the unclaimed bucket). `{n}` is digits only (`/latest` is not a route); anything else — and any unknown number — is 404 `{"error":"no_such_season"}`. An active season answers 200 with empty `digests` |
+| `/api/world/push/key` | GET, public | Whether the world offers Web Push, and the VAPID public key for `pushManager.subscribe` → `{worldId, enabled, publicKey\|null}` |
+| `/api/world/push/subscribe` | POST, token | Store this account's `PushSubscription.toJSON()` shape: `{endpoint, keys:{p256dh, auth}}`. Validated hard (https endpoint, 65-byte point, 16-byte secret) → 201 `{ok}`, else 400 `bad_subscription`; 500 `store_failed` |
+| `/api/world/push/unsubscribe` | POST, token | Body `{endpoint}`. Scoped to the acting account. 400 `bad_subscription` (empty endpoint) → `{ok}` |
+
+**Response shapes** (what the server actually returns; keys a client may rely on):
+
+- `GET /api/world` → `{worldId, name, state, createdAt, config:{…every tunable, verbatim},
+  clock:{realMs, worldMs, epochRealMs, epochWorldMs, runningRealMs, pausedRealMs, paused,
+  ratioNum, ratioDen, day, hour, minute, second, label:"Day 12, 07:31"}, poiCount,
+  season:{number, startedWorldMs, endsWorldMs, lengthWorldMs, remainingWorldMs}|null}`.
+  `season` is null only before the first season tick after a fresh boot.
+- `GET /api/world/pois` → `{worldId, pois:[{id, name, lat, lon, kind, mapId|null, tags:[],
+  owner|null, config, battleStatus:"quiet"|"staging"|"active", warRoomId|null,
+  staging:[{stagingId, poiId, attackerFaction, originPoiId|null, transports, squads,
+  state:"staging", openedAtWorldMs, endsAtWorldMs, remainingWorldMs, roomId|null}]}],
+  edges:[{from, to, transitWorldMs, kind, bidirectional, config}],
+  factions:{<id>:{name, colour, archetype, state}}}`.
+- `GET /api/world/stats` → `{worldId, rules:{authorityPerVictory, authorityPerDefeat,
+  authorityDecayPerWorldDay, authorityFloor, commanderGrantAuthority, capacityBase,
+  capacityPerCommanderAuthority, capacityRechargeHours, capacityRechargeFraction,
+  rankPerCommander, rankPerCommanderAuthority, rankPerPoiHeld, rankPerArtifact}, accrued,
+  commanders:[{commanderId, name, accountId, factionId, poiId, state, authority,
+  authorityStored, loaned, loanedTo?}], factions:[{factionId, name, colour,
+  members:[{accountId, username, role, rank:{total, commanderCount, poiCount, loanedCount,
+  terms:{commanders, commanderAuthority, regions, money, resources, units, artifacts}}}],
+  rankTotal}], economy:{poiIncomePerWorldDay, treasuryDecayPerWorldDay, treasuryFloor,
+  factions:[{factionId, treasury, poisHeld}]}}`. Members are ordered by rank, highest first.
+- `GET /api/world/factions` → `{worldId, factions:[{id, name, archetype, governance, colour,
+  sideKey|null, foundedAt, state:"active"|"dormant", config:{parameters:{…}, nameRegister},
+  memberCount}], archetypes:[{key, name, description, nameRegister, governance, colour,
+  parameters:{diplomacy, command, finance, production, mining, intel, electronics, loyalty,
+  technology, archaeology}}], rules:{foundFactionAuthority, foundFactionCost, nameMinLen,
+  nameMaxLen}}`.
+- `POST /api/world/me` → `{worldId, accountId, authority, canFound,
+  membership:{factionId, role, rank, joinedAt, name, colour, sideKey|null}|null, sideKey|null,
+  commanderGranted, accrued, commanders:[…as stats], capacity:{max, spent, available,
+  rechargedAt, nextRechargeInMs, rechargeHours}, rank:{…as stats, factionId|null},
+  statRules:{…as stats.rules}}`. (W7's scalar `capacity` is overwritten by W8's object of
+  the same name — clients must read the object.)
+- `GET /api/world/claims` → `{worldId, rules:{claimPoiCost, claimRefundFraction,
+  claimExpiryWorldMs}, claims:[{claimId, poi, faction, accountId, cost, refund,
+  state:"open"|"won"|"lost"|"expired"|"withdrawn", filedAtWorldMs, resolvedAt, settlementId}]}`.
+
+**SSE events** (on the identified chat stream, `/api/chat/stream`; lobby browsers only —
+in-game clients have no room SSE):
+
+- `world-staging` — `{world, poi, poiName, kind:"opened"|"materialised"|"cancelled"|"failed",
+  attackerFaction, defenderFaction, stagingId, claimId:0, worldMs, headline}`, addressed to the
+  attacking faction's members ∪ the defending faction's members ∪ accounts with an active
+  commander at the POI. A late commit joining an open window fires nothing.
+- `world-poi` — the same shape with `kind:"ownership"`, `attackerFaction` = the new owner,
+  `defenderFaction` = the previous owner, `claimId` = the winning claim.
+- `world-season` — broadcast `{worldId, endedSeason, newSeason, headline}`.
 
 ### Wars
 

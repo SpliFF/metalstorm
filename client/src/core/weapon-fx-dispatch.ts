@@ -52,6 +52,17 @@ export enum ProjectileType {
 /// hits always render *something* instead of silently no-opping.
 const DEFAULT_EXPLOSION_NAME = '__default_explosion';
 
+/// True when the weapon def authors a CEG of its own (in-flight `cegTag` or
+/// impact `explosionGenerator`). The native-FX dispatch branches on this: a
+/// def with an authored CEG keeps the ceg-runtime path (ZK/BAR, map and
+/// feature explosions); a def with none is a Metalstorm def and the
+/// weapon-fx.json resolver gets first refusal.
+export function hasAuthoredCeg(def: WeaponDefInfo | undefined): boolean {
+    const ceg = (def?.cegTag ?? '').toLowerCase();
+    const eg = (def?.explosionGenerator ?? '').toLowerCase();
+    return (ceg !== '' && ceg !== 'none') || (eg !== '' && eg !== 'none');
+}
+
 /// Pick the muzzle CEG name for a weapon firing event. Streamed
 /// `cegTag` wins; weapons that didn't author one render no muzzle.
 /// (Before Phase 8 cleanup, archetype-keyed placeholders supplied a

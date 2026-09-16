@@ -1,6 +1,8 @@
 {
   "_doc": [
-    "Metalstorm weapon -> FX/SFX resolution map. The native-game analogue of the ",
+    "LIVE: read by client/src/core/weapon-fx-resolver.ts (exact -> defaults[weapontype] ",
+  "-> __fallback, case-insensitive) and drawn by native-fx/fx-game-loader.ts. ",
+  "Metalstorm weapon -> FX/SFX resolution map. The native-game analogue of the ",
     "BAR/ZK client dispatch (client/src/core/weapon-fx-dispatch.ts effectForFire / ",
     "effectForImpact), but data instead of code: no cegTag/explosionGenerator ",
     "strings on the defs — the client FX dispatch reads THIS table keyed by weapon ",
@@ -40,6 +42,7 @@
     "MS_AC_S1":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "impact_ac",      "fireSound": "ac_fire",       "impactSound": "hit_metal_small" },
     "MS_AC_S2":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "impact_ac",      "fireSound": "ac_fire",       "impactSound": "hit_metal_med" },
     "MS_AC_S3":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "expl_small",     "fireSound": "ac_fire",       "impactSound": "blast_small" },
+    "MS_AC_TECHNICAL":     { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "impact_ac",      "fireSound": "ac_fire",       "impactSound": "hit_metal_small" },
 
     "MS_RAILGUN_S1":       { "muzzle": "muzzle_railgun", "projectile": "tracer_railgun","trail": null,           "impact": "impact_railgun", "fireSound": "railgun_fire",  "impactSound": "hit_rail" },
     "MS_RAILGUN_S2":       { "muzzle": "muzzle_railgun", "projectile": "tracer_railgun","trail": null,           "impact": "impact_railgun", "fireSound": "railgun_fire",  "impactSound": "hit_rail" },
@@ -60,6 +63,7 @@
 
     "MS_MISSILE_CRUISE_S1":{ "muzzle": "launch_cruise",  "projectile": null,            "trail": "trail_cruise", "impact": "expl_large",     "fireSound": "cruise_launch", "impactSound": "blast_large" },
     "MS_MISSILE_CRUISE_S2":{ "muzzle": "launch_cruise",  "projectile": null,            "trail": "trail_cruise", "impact": "expl_huge",      "fireSound": "cruise_launch", "impactSound": "blast_huge" },
+    "MS_MISSILE_CRUISE_SUB":{ "muzzle": "launch_cruise", "projectile": null,            "trail": "trail_cruise", "impact": "expl_huge",      "fireSound": "cruise_launch", "impactSound": "blast_huge" },
 
     "MS_TORPEDO_S1":       { "muzzle": "launch_torpedo", "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "torpedo_launch","impactSound": "blast_water" },
     "MS_TORPEDO_S2":       { "muzzle": "launch_torpedo", "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "torpedo_launch","impactSound": "blast_water" },

@@ -57,6 +57,32 @@ local Planner   = need('planner')
 local Actuators = need('actuators')
 local Roles     = need('roles')
 local Lod       = need('lod')
+local Wire      = need('wire')
+
+--=============================================================================
+-- Robustness knobs (main.lua-local: they govern the crank, not a decision).
+--=============================================================================
+--- Between strategic ticks, how often to glance at the parley board for a
+--- pending proposal addressed to us. game_parley.lua expires an unanswered
+--- proposal after 1 800 frames (60 s); a dormant NPC at LOD 3 sleeps 1 800
+--- frames between ticks, so without this poll it would sleep through every
+--- offer it ever received. One poll = one `parley_count` read + one
+--- state/to pair per live id — cheaper than a single region overlay.
+local PARLEY_POLL_FRAMES = 150
+--- A failed boot is retried, but not on every onUpdate: the runtime calls at
+--- its own tickInterval and a boot that throws on a missing file would
+--- otherwise spam the log dozens of times a second.
+local BOOT_RETRY_FRAMES  = 300
+--- Tick-error backoff: each consecutive failing tick doubles the wait before
+--- the next attempt, up to this multiple of the LOD period. A tick that
+--- throws on a transient (a half-published board) recovers on the next
+--- attempt; one that throws on a real bug stops burning the sim thread at
+--- full cadence while still retrying (so a later hot-fix / restored state
+--- is picked up). Reset to 1 by the first successful tick.
+local MAX_BACKOFF        = 8
+--- The last error text carried on the health line (a rulesParam value; keep
+--- it short — the full trace is in the log line noteError writes).
+local ERROR_TEXT_MAX     = 160
 
 --=============================================================================
 -- Instance state (persists across onUpdate calls — the VM is long-lived).
@@ -85,6 +111,22 @@ local self = {
     -- Commitments (plan §3.3): goalId → { groupId, sinceFrame, score }.
     -- Hysteresis lives here; decays over ~2 min. Soft state, not truth.
     commitments   = {},
+
+    -- Parley ledger (interaction §6.2). `answered[id]` = frame we sent a
+    -- response for proposal id (the board still reads 'offered' for a tick or
+    -- two while the message drains — this stops a second send). `deferred[id]`
+    -- = a proposal the co-commander deference rule left to the humans (narrated
+    -- once, and it must not keep forcing early ticks). Both are pruned against
+    -- the live pending list, so they stay bounded by the board. Cleared on a
+    -- role flip: a proposal deferred as co-commander is answerable as caretaker.
+    parley        = { answered = {}, deferred = {}, lastPollFrame = -1 },
+
+    -- Health (task 5 of the 2026-09-10 review): what the HUD/MCP can read.
+    -- Published each tick via the `ai.health` message → game_ai_guidance.lua →
+    -- ai_health_<playerID>_* team rulesParams; see publishHealth.
+    health        = { ticks = 0, errors = 0, backoff = 1,
+                      lastError = nil, lastErrorFrame = nil, lastTickMs = nil },
+    bootFailFrame = nil,   -- frame of the last failed boot (retry gate)
 }
 
 --=============================================================================
@@ -216,6 +258,106 @@ local function boot(frame)
 end
 
 --=============================================================================
+-- Parley (interaction §6.2). The decision is the pure core's
+-- (Planner.evaluateProposals); the authority to ACT on it is the actuator's
+-- (its deference rule); this function is the bookkeeping between them, so
+-- that every pending proposal addressed to us is answered exactly once, or
+-- deferred to our humans exactly once, inside game_parley.lua's window.
+--=============================================================================
+local function handleParley(frame, picture, role, plan)
+    local ledger = self.parley
+    local live = {}
+    for _, p in ipairs((picture.parley or {}).proposals or {}) do live[p.id] = p end
+    -- Prune: a proposal no longer on the board (resolved, retention-expired)
+    -- needs no memory. Keeps both tables bounded by parley_count.
+    for id in pairs(ledger.answered) do if not live[id] then ledger.answered[id] = nil end end
+    for id in pairs(ledger.deferred) do if not live[id] then ledger.deferred[id] = nil end end
+
+    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role, plan)) do
+        if not ledger.answered[r.id] and not ledger.deferred[r.id] then
+            local p = live[r.id]
+            local ok, why = self.actuators:respondProposal(p or r.id, r.decision, r.extra)
+            if ok then
+                ledger.answered[r.id] = frame
+                self.actuators:chat(string.format(
+                    "[strategos] parley #%d (%s from team %s): %s",
+                    r.id, p and p.kind or '?', p and tostring(p.fromTeam) or '?', r.decision))
+            elseif why == 'deferred' then
+                ledger.deferred[r.id] = frame
+                self.actuators:chat(string.format(
+                    "[strategos] parley #%d (%s from team %s): deferred to my team's "
+                    .. "humans (co-commander never binds them; my read was %s)",
+                    r.id, p and p.kind or '?', p and tostring(p.fromTeam) or '?', r.decision))
+            elseif why ~= 'no_verb' then
+                -- engine_refused (size clamp) / bad_decision: say so, retry next tick.
+                self.actuators:chat(string.format(
+                    "[strategos] parley #%d: response not sent (%s)", r.id, tostring(why)))
+            end
+        end
+    end
+
+    -- Originate (the hook the pure core drives — `Planner.originateProposals`,
+    -- landed 2026-09-17: tribute-for-peace when losing badly, a ceasefire at
+    -- parity when our force is bleeding, and silence otherwise). Still
+    -- feature-detected, so a core without it is not an error. The actuator's
+    -- per-tick rate limit and deference rule apply; the gadget's
+    -- fee/caps/cooldown apply after that.
+    if type(Planner.originateProposals) == 'function' then
+        for _, o in ipairs(Planner.originateProposals(picture, self.profile, role) or {}) do
+            local ok, why = self.actuators:propose(o.kind, o.toTeam, o.terms)
+            if ok then
+                self.actuators:chat(string.format("[strategos] proposing %s to team %s",
+                    tostring(o.kind), tostring(o.toTeam)))
+            elseif why ~= 'rate_limited' and why ~= 'deferred' and why ~= 'no_verb' then
+                self.actuators:chat(string.format("[strategos] proposal %s to team %s not sent (%s)",
+                    tostring(o.kind), tostring(o.toTeam), tostring(why)))
+            end
+        end
+    end
+end
+
+--- Is there a pending proposal addressed to us that we have neither answered
+--- nor deferred? Cheap (Picture.pendingProposals); polled between ticks.
+local function parleyNeedsTick(frame)
+    local ledger = self.parley
+    if frame - ledger.lastPollFrame < PARLEY_POLL_FRAMES then return false end
+    ledger.lastPollFrame = frame
+    local teamId = self.role and self.role.teamId
+    for _, id in ipairs(Picture.pendingProposals(teamId)) do
+        if not ledger.answered[id] and not ledger.deferred[id] then return true end
+    end
+    return false
+end
+
+--=============================================================================
+-- Health (review task 5). ONE message per strategic tick, `ai.health`, over
+-- the same funnel as `ai.intent`; game_ai_guidance.lua mirrors it as the
+-- team rulesParams `ai_health_<playerID>_{ticks,errors,issued,planned,
+-- directives,spent,responses,deferred,backoff,frame,error}` (allied LOS) —
+-- `directives`/`spent` there are the gadget's own CHARGED figures (from
+-- RecordIntent), `issued`/`planned` are these self-reported ones. Also one
+-- log line when anything is wrong, so a headless run shows it.
+--=============================================================================
+local function publishHealth(frame)
+    if not self.actuators then return end
+    local h, s = self.health, self.actuators:getStats()
+    local err = h.lastError and tostring(h.lastError):sub(1, ERROR_TEXT_MAX) or nil
+    self.actuators:sendMessage(Wire.encode('ai.health', {
+        ticks = h.ticks, errors = h.errors, backoff = h.backoff, frame = frame,
+        issued = s.directives, planned = math.floor(s.spent),
+        responses = s.responses, proposals = s.proposals, deferred = s.deferred,
+        refused = s.refused, lastErrorFrame = h.lastErrorFrame,
+        computeMs = h.lastTickMs and string.format('%.2f', h.lastTickMs) or nil,
+        error = err,
+    }))
+    if h.errors > 0 and h.lastErrorFrame == frame then
+        self.actuators:chat(string.format(
+            "[strategos] health f=%d ticks=%d errors=%d backoff=x%d last=%s",
+            frame, h.ticks, h.errors, h.backoff, err or '-'))
+    end
+end
+
+--=============================================================================
 -- The strategic tick (plan §3): the whole brain, at 0.2 Hz.
 -- LOD (plan §3 / PLAN-ai.md) stretches the period for dormant NPC factions.
 --=============================================================================
@@ -240,6 +382,9 @@ local function strategicTick(frame)
             tostring(teamHumans())))
         self.role = role
         self.actuators.role = role
+        -- A proposal deferred as co-commander is ours to answer as caretaker
+        -- (and one we answered as caretaker stays answered either way).
+        self.parley.deferred = {}
     end
 
     -- 1. READ — refresh the Picture from mirrors + decay memory (picture.lua).
@@ -274,6 +419,7 @@ local function strategicTick(frame)
 
     -- Compute cost measured here, before the WRITE/narration I/O below.
     local computeMs = (t0 and clock) and (clock() - t0) or nil
+    self.health.lastTickMs = computeMs
 
     if self.lodTier ~= prevTier then
         self.actuators:chat(string.format(
@@ -339,15 +485,12 @@ local function strategicTick(frame)
         math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
         math.floor(plan.spent or 0), budgetTag, vetoTag))
 
-    -- 5. PARLEY — evaluate proposals addressed to us and respond
-    -- (interaction §6.2). The decision is computed unconditionally (pure,
-    -- testable now); only the actual respond CALL is missing a runtime verb
-    -- (Actuators:respondProposal degrades to a no-op false, same as every other
-    -- AI2-class verb in actuators.lua — see its comment: I1 has landed, so this
-    -- is unimplemented, not blocked).
-    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
-        self.actuators:respondProposal(r.id, r.decision)
-    end
+    -- 5. PARLEY — answer proposals addressed to us, originate our own
+    -- (interaction §6.2). In its own pcall: a parley fault must never undo
+    -- the directives this tick already issued, and a directive fault must
+    -- never leave a proposal unanswered.
+    local pok, perr = pcall(handleParley, frame, picture, role, plan)
+    if not pok then self.actuators:noteError(frame, perr) end
 end
 
 --=============================================================================
@@ -357,33 +500,59 @@ end
 --=============================================================================
 function onUpdate(frame)
     if not self.booted then
-        local ok, err = pcall(boot, frame)
-        if not ok then
-            -- Loud, once: a failed boot must be obvious in the log, not silent.
-            AI_STRATEGOS_BOOT_ERROR = tostring(err)
+        -- A failed boot is retried on a gate, not on every callin.
+        if self.bootFailFrame and (frame - self.bootFailFrame) < BOOT_RETRY_FRAMES then
             return
         end
+        local ok, err = pcall(boot, frame)
+        if not ok then
+            -- Loud: a failed boot must be obvious in the log, not silent.
+            AI_STRATEGOS_BOOT_ERROR = tostring(err)
+            self.bootFailFrame = frame
+            self.health.errors = self.health.errors + 1
+            self.health.lastError, self.health.lastErrorFrame = tostring(err), frame
+            local AI = _G.AI
+            if type(AI) == 'table' and type(AI.log) == 'function' then
+                AI.log("[strategos] boot failed (retry in " .. BOOT_RETRY_FRAMES
+                    .. " frames): " .. tostring(err))
+            end
+            return
+        end
+        self.bootFailFrame = nil
     end
 
     -- LOD gate (plan §3 / PLAN-ai.md LOD table): a dormant NPC faction thinks
     -- once a minute instead of once every five seconds. The tier is re-derived
     -- at the end of every tick from that tick's Picture (lod.lua), clamped into
     -- the role's own LOD band — so a co-commander is pinned at LOD 0 and only an
-    -- NPC ever actually goes quiet.
+    -- NPC ever actually goes quiet. A run of failing ticks stretches the period
+    -- further (health.backoff); a pending proposal addressed to us cuts through
+    -- both gates so the answer lands inside game_parley.lua's 60 s window.
     local period = self.role
         and Lod.periodFor(self.lodTier, self.role, Config)
         or Config.STRATEGIC_TICK_FRAMES
+    period = period * self.health.backoff
     if self.lastTickFrame >= 0 and (frame - self.lastTickFrame) < period then
-        return
+        if not parleyNeedsTick(frame) then return end
     end
     self.lastTickFrame = frame
 
     local ok, err = pcall(strategicTick, frame)
-    if not ok then
-        -- A crashing tick must not wedge the AI: log and try again next tick.
+    local h = self.health
+    if ok then
+        h.ticks = h.ticks + 1
+        h.backoff = 1
+    else
+        -- A crashing tick must not wedge the AI: log, back off, try again.
         -- Statelessness (plan §7) means we lose nothing but this tick.
+        h.errors = h.errors + 1
+        h.lastError, h.lastErrorFrame = tostring(err), frame
+        h.backoff = math.min(MAX_BACKOFF, h.backoff * 2)
         if self.actuators then self.actuators:noteError(frame, err) end
     end
+    -- The health line goes out even (especially) on a failed tick; it is
+    -- itself guarded so a broken narration channel cannot mask the tick.
+    pcall(publishHealth, frame)
 end
 
 --=============================================================================

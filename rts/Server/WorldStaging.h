@@ -85,6 +85,11 @@ struct WorldStagingRules {
     /// retry forever, because a POI whose map no scenario fields would spin
     /// on every tick for the life of the world.
     int    materialiseMaxAttempts      = 5;
+    /// Per-commit force ceilings (F20): what materialisation could not seat,
+    /// commitment must not take. `stagingMaxTransportsPerCommit` /
+    /// `stagingMaxSquadsPerCommit` in the world config.
+    int    maxTransportsPerCommit      = 16;
+    int    maxSquadsPerCommit          = 64;
 
     static WorldStagingRules FromWorldConfig(const nlohmann::json& worldConfig);
 };

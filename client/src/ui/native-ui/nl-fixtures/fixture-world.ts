@@ -27,6 +27,8 @@ import { CameraPort, createNLCameraPort } from '../camera-port.js';
 import { UiActionRegistry, createNLUiActionPort } from '../ui-action-registry.js';
 import { QueryEngine, type Census, type CensusPort, type CensusUnit } from '../query-engine.js';
 import type { NLResponse } from '../nl-envelope.js';
+import type { NLContextFocus } from '../nl-focus.js';
+import type { BattleMoment } from '../../../core/battle-events.js';
 
 // ─────────────────────────── fixture shapes ───────────────────────────
 
@@ -115,6 +117,30 @@ export interface FixtureContext {
     noUnitClass?: boolean;
     /** Omit the `groupPosition` port, so nearest-to-target is skipped. */
     noGroupPosition?: boolean;
+    /**
+     * What the player is looking at, in the wire shape `nl-focus.ts` emits
+     * (kinds, labels, place names — no ids). Passed through to the model by
+     * `tools/nl-eval` and turned back into a `NLFocusView` for the offline
+     * path by `focusViewFromContext`. Omitted ⇒ no focus.
+     */
+    focus?: NLContextFocus;
+    /**
+     * The battle history the `events` query reads (contract v2), oldest first.
+     * Omitted ⇒ the port is absent and the query refuses by name; an empty
+     * list ⇒ "nothing has happened yet".
+     */
+    moments?: FixtureMoment[];
+}
+
+/** One recorded battle moment. `frame` defaults to the census frame minus 300
+ *  (10 s ago) so an age reads out without every fixture stating one. */
+export interface FixtureMoment {
+    kind: BattleMoment['kind'];
+    x: number;
+    z: number;
+    count?: number;
+    cls?: string;
+    frame?: number;
 }
 
 /** Test-side expectations that go beyond the envelope itself. The required trio
@@ -178,6 +204,22 @@ export interface NLFixture {
     ports?: boolean;
     /** Why this fixture exists, when that isn't obvious from the utterance. */
     note?: string;
+    /**
+     * Do not score this fixture in the OFFLINE arm, and say why.
+     *
+     * A handful of fixtures exist to pin what the EXECUTOR does with an
+     * envelope the model got wrong — "the model said `selection` and nothing is
+     * selected" is a real thing a model does, and the refusal it earns is worth
+     * a fixture. Their `expected` is therefore deliberately not the canonical
+     * reading of the sentence, and scoring a deterministic producer against it
+     * would mark the producer down for being right.
+     *
+     * The string is the reason, and it is required: an exemption with no
+     * argument attached is how a corpus quietly stops measuring anything. The
+     * count is pinned in `offline-baseline.json`, so growing this list is a
+     * reviewed diff.
+     */
+    offlineSkip?: string;
 }
 
 export interface FixtureFile {
@@ -215,7 +257,7 @@ export interface FixtureWorld {
 
 /** Panels every board has unless it says otherwise — the Metalstorm manifest set
  *  plus the minimap, which is the one entry with a full-screen mode. */
-const DEFAULT_PANELS: NonNullable<FixtureContext['panels']> = [
+export const DEFAULT_PANELS: NonNullable<FixtureContext['panels']> = [
     { id: 'minimap', label: 'Minimap', aliases: ['mini map', 'tactical map'], fullscreen: true },
     { id: 'parley-panel', label: 'Parley', aliases: ['diplomacy panel', 'diplomacy'] },
     { id: 'objectives-panel', label: 'Objectives', aliases: ['objectives', 'mission'] },
@@ -409,6 +451,19 @@ export function buildFixtureWorld(context: FixtureContext, vocabulary: ClassVoca
     const gameRulesParams = context.gameRulesParams ?? {};
     const teamRulesParams = context.teamRulesParams ?? {};
 
+    const censusFrame = census?.frame ?? 1200;
+    const moments: BattleMoment[] | null = context.moments
+        ? context.moments.map((m, i) => ({
+            id: i + 1,
+            kind: m.kind,
+            frame: m.frame ?? censusFrame - 300,
+            x: m.x, z: m.z,
+            count: m.count ?? 1,
+            unitIds: [],
+            ...(m.cls ? { className: m.cls } : {}),
+        }))
+        : null;
+
     const ports = {
         camera: createNLCameraPort({ port: cameraPort, resolver, groupPosition }),
         uiActions: createNLUiActionPort(registry),
@@ -423,6 +478,7 @@ export function buildFixtureWorld(context: FixtureContext, vocabulary: ClassVoca
             teamRulesParam: (key) => teamRulesParams[key],
             playerId: 0,
             focusCamera: (x, z) => cameraPort.focusOn(x, z),
+            ...(moments ? { battleMoments: () => moments } : {}),
         }),
     };
 

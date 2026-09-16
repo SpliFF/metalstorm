@@ -211,6 +211,33 @@ export class PresentationClock {
         this.estFrame += dt * this.framesPerMs;
     }
 
+    /**
+     * Jump the cursor onto the newest frame actually received, discarding the
+     * jitter buffer for one shot.
+     *
+     * WHY (ai-visual-debug V2 — `sim_step` filming). The PLL corrects toward
+     * the newest observed frame by CORRECTION_GAIN (10%) per snapshot, and
+     * only hard-snaps past SNAP_FRAMES. That is right for a running game and
+     * useless for single-stepping: `sim_step 6` moves the server 6 frames, an
+     * error far below the snap threshold, and `tick()` cannot close it either
+     * because a paused sim has `framesPerMs === 0`. The cursor would sit
+     * frames behind the state we just deliberately produced, and the "film"
+     * would show a stale pose in every shot.
+     *
+     * Deliberately NOT the default. A running game wants the buffer — that is
+     * the whole point of D — so this is a capture-time escape hatch, called by
+     * the harness around a shot and nowhere else. Returns the frames jumped
+     * (0 when the clock has never anchored, i.e. no snapshot yet).
+     */
+    snapToNewest(): number {
+        if (!this.anchored) return 0;
+        const jumped = this.newestFrame - this.estFrame;
+        this.estFrame = this.newestFrame;
+        this.lastCorrectionFrames = jumped;
+        this.correctionCount++;
+        return jumped;
+    }
+
     /** Estimated current server frame (leading edge). */
     get E(): number {
         return this.estFrame;

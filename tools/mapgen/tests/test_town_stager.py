@@ -773,27 +773,35 @@ class TestOutput(unittest.TestCase):
 # ==========================================================================
 # Walls and defenses (town-planner T3)
 # ==========================================================================
-# THE WALL KIT DOES NOT EXIST IN THIS CLONE AND IS NOT GOING TO BE FAKED IN
-# PRODUCTION CODE. `ms_barricade_set` is model-integration M2 content behind
-# that lane's manual land gate, and `town_templates.PERIMETER` deliberately
-# gives it no shipped stand-in — a stockade tiled out of gun turrets reads as
-# the fortified tier and would destroy the distinction the whole step exists to
-# draw. So the tests drive the wall channel with an EXPLICIT synthetic roster,
-# exactly as the T2 tests drive the landmark channel with `M3_FEATURES`. When
-# M2 lands, `kit_roster()` stops being needed and these tests keep passing.
+# THE WALL KIT SHIPS NOW (2026-09-17), AND IS STILL NOT FAKED IN PRODUCTION
+# CODE. The units-assets lane split `ms_barricade_set` into `ms_barricade_wall`
+# / `ms_barricade_corner` / `ms_barricade_gate`, so `town_templates.PERIMETER`
+# resolves every line part to a real def and a walled town stages a real wall.
+# What has not changed is that there is still no STAND-IN outside that kit — a
+# stockade tiled out of gun turrets reads as the fortified tier and would
+# destroy the distinction the whole step exists to draw.
 #
-# The kit's real footprint is unknown, so four plausible ones are swept. That
-# is not thoroughness for its own sake: the shape of the kit is what decides how
-# many units a span takes, and the tiling has to be right for all of them.
+# These tests keep driving the wall channel through an explicit roster anyway,
+# because the assertions here are about TILING, and tiling is decided by the
+# kit's footprint: four plausible shapes are swept so the arithmetic is right
+# for all of them, not just for the 4x2 the wall segment happens to measure
+# today. They assert on the PART's resolved def rather than on a def name, per
+# this file's header — swapping the kit again must not touch this suite.
 
 KIT_SHAPES = [(6, 1), (3, 1), (8, 2), (1, 1)]
 
 
 def kit_roster(fx: int = 6, fz: int = 1):
-    """The shipped roster plus the two M2 perimeter defs, at a given kit size."""
+    """The shipped roster with every perimeter def resized to one kit shape.
+
+    Every def a LINE part can resolve to is overridden, head of the ladder
+    first: the tiling assertions below have to see the swept footprint whichever
+    def `resolve_perimeter` picks.
+    """
     r = dict(facts())
-    r["ms_barricade_set"] = ms_defs.UnitFacts(
-        "ms_barricade_set", fx, fz, 0.0, None, True)
+    for part in tt.LINE_PARTS:
+        for name in tt.PERIMETER["defs"][part]:
+            r[name] = ms_defs.UnitFacts(name, fx, fz, 0.0, None, True)
     r["ms_watchtower"] = ms_defs.UnitFacts(
         "ms_watchtower", 3, 3, 0.0, None, True)
     return r
@@ -868,8 +876,12 @@ class TestStagedDefenses(unittest.TestCase):
                 wall = staged.of_category("wall")
                 self.assertTrue(wall, f"{len(town.perimeter)} planned pieces "
                                       f"and nothing staged")
-                self.assertTrue(all(p.defname == "ms_barricade_set"
-                                    for p in wall))
+                self.assertTrue(
+                    all(p.defname == tt.PERIMETER["defs"][p.role][0]
+                        for p in wall),
+                    "a line part staged something other than the head of its "
+                    "own `PERIMETER['defs']` ladder: "
+                    + repr(sorted({(p.role, p.defname) for p in wall})))
                 self.assertTrue(all(p.channel == "unit" for p in wall))
                 self.assertEqual({p.role for p in wall} - set(tt.LINE_PARTS),
                                  set())

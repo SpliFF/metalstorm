@@ -31,6 +31,15 @@ components:
       scheme: basic
       description: Username and password (validated directly, no login step needed)
 
+  parameters:
+    worldQuery:
+      name: world
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        World id. Honoured by every /api/world* route, GET and POST alike;
+        defaults to the lobby's primary (oldest active) world.
   schemas:
     AuthResult:
       type: object
@@ -341,17 +350,17 @@ paths:
     get:
       summary: World clock + meta (with active season folded on)
       description: >
-        The /api/world* GET routes take an optional `?world=<id>` query
-        parameter, defaulting to the primary world; the POST routes always act
-        on the primary world. Shared errors: 503 world_database_unavailable,
-        404 no_world.
+        Every /api/world* route (GET and POST) takes an optional `?world=<id>`
+        query parameter, defaulting to the primary (oldest active) world.
+        Shared errors: 503 world_database_unavailable, 404 no_world, 401
+        unauthorized on token routes, 403 not_in_a_faction on the routes that
+        act for a faction. Design of record: docs/world-layer.md; response
+        shapes: docs/api.md "World layer".
       tags: [World]
       parameters:
-        - name: world
-          in: query
-          schema: { type: string }
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: "{worldId, name, state, config, clock:{worldMs, paused, day, label, ...}, season}" }
+        "200": { description: "{worldId, name, state, createdAt, config, clock:{realMs, worldMs, epochRealMs, epochWorldMs, runningRealMs, pausedRealMs, paused, ratioNum, ratioDen, day, hour, minute, second, label}, poiCount, season|null}" }
         "404": { description: No such world }
         "503": { description: World database unavailable }
 
@@ -360,38 +369,44 @@ paths:
       summary: POI graph (nodes + edges) with battle, faction and staging state merged on
       tags: [World]
       parameters:
-        - name: world
-          in: query
-          schema: { type: string }
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: POI graph (empty arrays for a young world) }
+        "200": { description: "{worldId, pois[]{…, battleStatus, warRoomId, staging[]}, edges[], factions{}} (empty arrays for a young world)" }
 
   /api/world/stats:
     get:
       summary: Rates in force, commander Authority, faction rosters with derived Rank
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: Stats body }
+        "200": { description: "{worldId, rules, accrued, commanders[], factions[]{members[]{rank}, rankTotal}, economy} — see docs/api.md; settles commander authority accrual idempotently on read" }
 
   /api/world/factions:
     get:
       summary: Faction roster + archetype catalogue + founding rules
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: Factions body }
+        "200": { description: "{worldId, factions[], archetypes[], rules} — see docs/api.md" }
 
   /api/world/me:
     post:
       summary: This account's standing in one world (authority, membership, sideKey, stats)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       responses:
-        "200": { description: Per-account standing }
+        "200": { description: "{worldId, accountId, authority, canFound, membership|null, sideKey|null, commanderGranted, accrued, commanders[], capacity{}, rank{}, statRules} — grants the starter commander on first eligible read" }
 
   /api/world/factions/found:
     post:
       summary: Found a world faction (side key read from the account, never the body)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -407,14 +422,18 @@ paths:
                 colour: { type: string }
                 seatPoi: { type: string }
       responses:
-        "200": { description: "{ok, factionId, authority}" }
+        "200": { description: "{ok, factionId, authority} — authority is what remains after the spend" }
+        "400": { description: bad_name / bad_archetype / bad_seat }
         "403": { description: "insufficient_authority (with have/need)" }
         "409": { description: name_taken / already_member / seat_taken }
+        "500": { description: db_error }
 
   /api/world/factions/join:
     post:
       summary: Join an existing faction (enforces the account/faction side-key seam)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -427,13 +446,16 @@ paths:
                 factionId: { type: string }
       responses:
         "200": { description: "{ok, factionId, sideKeyAdopted}" }
+        "400": { description: bad_request (factionId missing) }
         "404": { description: no_such_faction }
-        "409": { description: side_mismatch / already_member }
+        "409": { description: "side_mismatch (with accountSideKey/factionSideKey) / already_member" }
 
   /api/world/factions/leave:
     post:
       summary: Leave the caller's faction in this world (no-op reported, never an error)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       responses:
         "200": { description: "{ok, left}" }
@@ -442,13 +464,17 @@ paths:
     get:
       summary: Every claim in the world plus the conquest rates in force
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: Claims body }
+        "200": { description: "{worldId, rules{claimPoiCost, claimRefundFraction, claimExpiryWorldMs}, claims[]}" }
 
   /api/world/claims/file:
     post:
       summary: File a conquest claim on a POI (charges the caller's authority)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -461,14 +487,18 @@ paths:
                 poi: { type: string }
       responses:
         "200": { description: "{ok, claim}" }
-        "403": { description: not_in_a_faction / insufficient_authority }
-        "404": { description: no_poi }
+        "403": { description: "insufficient_authority (with have/need)" }
+        "403": { description: not_in_a_faction }
+        "404": { description: no_poi / no_faction }
         "409": { description: already_owner / already_claimed }
+        "500": { description: db_error }
 
   /api/world/claims/withdraw:
     post:
       summary: Withdraw an open claim (any member of the claiming faction)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -480,7 +510,7 @@ paths:
               properties:
                 claimId: { type: integer }
       responses:
-        "200": { description: "{ok, withdrawn}" }
+        "200": { description: "{ok, withdrawn} — withdrawn:false when a settlement already resolved it" }
         "403": { description: not_your_claim }
         "404": { description: no_claim }
 
@@ -488,6 +518,8 @@ paths:
     post:
       summary: Commit force at a POI (opens/joins a staging window; escrows the force)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -502,15 +534,19 @@ paths:
                 squads: { type: integer, default: 1 }
                 origin: { type: string }
       responses:
-        "200": { description: "{ok, joined, staging}" }
+        "200": { description: "{ok, joined, staging} — staging is one pois[].staging[] item" }
+        "400": { description: no_transport / no_squads / no_battle_map }
         "403": { description: not_in_a_faction }
-        "404": { description: no_poi }
+        "404": { description: no_poi / no_world / no_faction }
         "409": { description: already_held }
+        "500": { description: db_error }
 
   /api/world/staging/cancel:
     post:
       summary: Withdraw a commitment before contact (refunds the escrow)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -522,7 +558,7 @@ paths:
               properties:
                 stagingId: { type: integer }
       responses:
-        "200": { description: "{ok, cancelled}" }
+        "200": { description: "{ok, cancelled} — cancelled:false when the window had already closed" }
         "403": { description: not_your_commitment }
         "404": { description: no_staging }
 
@@ -530,6 +566,8 @@ paths:
     post:
       summary: Admin global world-clock pause/resume (battles keep running)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         content:
@@ -540,21 +578,25 @@ paths:
                 action: { type: string, enum: [pause, resume], default: pause }
                 reason: { type: string }
       responses:
-        "200": { description: "{ok, changed, clock}" }
+        "200": { description: "{ok, changed, clock} — changed:false when already in the requested state" }
+        "400": { description: bad_action }
         "403": { description: Admin role required }
 
   /api/world/seasons:
     get:
       summary: Season archive index (newest first)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       responses:
-        "200": { description: Seasons index }
+        "200": { description: "{worldId, seasons[]{number, state, seasonId, startedWorldMs, endedWorldMs}}" }
 
   /api/world/seasons/{n}:
     get:
       summary: One season plus its archived digest rows
       tags: [World]
       parameters:
+        - $ref: '#/components/parameters/worldQuery'
         - name: n
           in: path
           required: true
@@ -568,6 +610,8 @@ paths:
     get:
       summary: Web Push availability + the VAPID public key
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       responses:
         "200": { description: "{worldId, enabled, publicKey}" }
 
@@ -575,6 +619,8 @@ paths:
     post:
       summary: Store this account's browser push subscription (PushSubscription.toJSON shape)
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -593,11 +639,14 @@ paths:
       responses:
         "201": { description: Stored (insert-or-replace on world/account/endpoint) }
         "400": { description: bad_subscription }
+        "500": { description: store_failed }
 
   /api/world/push/unsubscribe:
     post:
       summary: Drop one of this account's push subscriptions
       tags: [World]
+      parameters:
+        - $ref: '#/components/parameters/worldQuery'
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true

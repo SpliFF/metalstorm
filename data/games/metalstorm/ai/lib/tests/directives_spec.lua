@@ -1,0 +1,86 @@
+-- lib/tests/directives_spec.lua — run from data/games/metalstorm/ai.
+package.path = './?.lua;' .. package.path
+
+local D       = require('lib.directives')
+local Regions = require('lib.regions')
+local Fix     = require('lib.tests.fixtures.graph')
+
+describe("lib.directives", function()
+    local regions
+    before_each(function() regions = Regions.load(Fix.regionsJson()) end)
+
+    it("defaults idleOnly false and honours an opt-in (2026-09-16, F5)", function()
+        local spec = D.defend(regions.north_ridge, {})
+        assert.are.equal(false, spec.idleOnly,
+            'an AI directive preempts by default, like a human commander order (D56)')
+        local polite = D.defend(regions.north_ridge, { idleOnly = true })
+        assert.are.equal(true, polite.idleOnly)
+    end)
+
+    it("mirrors the engine enums", function()
+        assert.are.equal(10, D.Type.Defend)
+        assert.are.equal(14, D.Type.DefendFront)
+        assert.are.equal(12, D.Type.Withdraw)
+        assert.are.equal(1, D.Shape.Circle)
+        assert.are.equal(2, D.Echelon.Army)
+        assert.are.equal('Screen', D.name(5))
+    end)
+
+    it("builds a Circle spec anchored on the region centroid, mortal by default", function()
+        local spec = D.defend(regions.north_ridge, { priority = 200 })
+        assert.are.equal(D.Type.Defend, spec.type)
+        assert.are.equal(D.Shape.Circle, spec.shape)
+        assert.are.equal(512, spec.params[1])
+        assert.are.equal(0, spec.params[2])
+        assert.are.equal(512, spec.params[3])
+        assert.is_true(spec.params[4] > 700)
+        assert.are.equal(200, spec.priority)
+        assert.are.equal(0, spec.requestedStrength)
+        assert.are.equal(D.DEFAULT_TTL_FRAMES, spec.expiresInFrames)
+        assert.is_nil(spec.within)
+    end)
+
+    it("never emits an immortal directive (ttl 0 is coerced to 1)", function()
+        local spec = D.screen(regions.south_marsh, { ttl = 0 })
+        assert.are.equal(1, spec.expiresInFrames)
+    end)
+
+    it("accepts a raw anchor and a within-filter", function()
+        local spec = D.withdraw({ x = 10, z = 20, radius = 300 }, { within = true, requestedStrength = 3600.7 })
+        assert.are.equal(D.Type.Withdraw, spec.type)
+        assert.are.same({ 10, 0, 20, 300 }, spec.params)
+        assert.are.same({ x = 10, z = 20, radius = 300 }, spec.within)
+        assert.are.equal(3600, spec.requestedStrength)
+        local pt = D.rally({ x = 5, z = 6 })
+        assert.are.equal(D.Shape.Point, pt.shape)
+        assert.are.same({ 5, 0, 6 }, pt.params)
+    end)
+
+    it("refuses to place a directive with no geometry", function()
+        local spec, why = D.assault({ polygon = {} })
+        assert.is_nil(spec); assert.is_truthy(why)
+        spec, why = D.build({ type = D.Type.Assault })
+        assert.is_nil(spec); assert.are.equal('no region or anchor', why)
+        assert.is_nil(D.build(nil))
+    end)
+
+    it("clamps priority into a byte", function()
+        assert.are.equal(255, D.defend(regions.north_ridge, { priority = 900 }).priority)
+        assert.are.equal(0, D.defend(regions.north_ridge, { priority = -5 }).priority)
+    end)
+
+    it("reports the E6 area key and the anchor's region", function()
+        local a = D.defend(regions.north_ridge)
+        local b = D.screen(regions.north_ridge)
+        assert.are.equal(D.clampKey(a), D.clampKey(b))
+        assert.are_not.equal(D.clampKey(a), D.clampKey(D.defend(regions.south_marsh)))
+        assert.are.equal('north_ridge', D.regionOf(a, regions))
+        assert.are.equal('area', D.clampKey({ params = {} }))
+    end)
+
+    it("encodes a posture bundle deterministically", function()
+        assert.are.equal('{"casualty":"moderate","engagement":"hold","reinforce":true}',
+            D.postureJson({ engagement = 'hold', reinforce = true, casualty = 'moderate' }))
+        assert.are.equal('{}', D.postureJson(nil))
+    end)
+end)

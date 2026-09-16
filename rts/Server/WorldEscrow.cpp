@@ -116,6 +116,7 @@ const char* WorldEscrowOutcomeToString(WorldEscrowOutcome o) {
         case WorldEscrowOutcome::Withdrew:    return "withdrew";
         case WorldEscrowOutcome::Routed:      return "routed";
         case WorldEscrowOutcome::Annihilated: return "annihilated";
+        case WorldEscrowOutcome::Voided:      return "voided";
     }
     return "annihilated";
 }
@@ -188,6 +189,11 @@ WorldEscrowPayout PayoutFor(WorldEscrowOutcome outcome, int transports,
                                                transports);
             p.captureSquads     = FlooredShare(rules.annihilatedCaptureFraction,
                                                squads);
+            break;
+        case WorldEscrowOutcome::Voided:
+            // No verdict was ever reached — the expedition simply comes home.
+            p.returnTransports = transports;
+            p.returnSquads     = squads;
             break;
     }
     return p;
@@ -400,6 +406,24 @@ std::vector<int64_t> WorldEscrow::EngagedStagingsForRoom(sqlite3* db,
         out.push_back(sqlite3_column_int64(stmt, 0));
     sqlite3_finalize(stmt);
     return out;
+}
+
+bool WorldEscrow::EngagedOrSettledForRoom(sqlite3* db, uint32_t roomId,
+                                          const std::string& factionId) {
+    if (!db || roomId == 0 || factionId.empty()) return false;
+    // A label read on a world table, not a war-table join: "did this faction
+    // have force in that war's escrow?" (season digest F2).
+    static const char* kSql =
+        "SELECT 1 FROM world_escrow "
+        "WHERE room_id=? AND faction_id=? AND state IN ('engaged','settled') "
+        "LIMIT 1";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, static_cast<int64_t>(roomId));
+    sqlite3_bind_text(stmt, 2, factionId.c_str(), -1, SQLITE_TRANSIENT);
+    const bool found = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return found;
 }
 
 WorldEscrowSettleResult WorldEscrow::Settle(sqlite3* db, int64_t stagingId,

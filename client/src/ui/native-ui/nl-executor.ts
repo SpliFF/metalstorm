@@ -387,13 +387,12 @@ function runCommand(
             `which the sim has no slot for yet — nothing sent.`);
     }
 
-    if (!intent.target) {
-        return no(`"${intent.verb}" needs a place I know — name a region or objective.`);
-    }
-
     // Target first: a class-count subject ranks its candidates by distance TO
-    // the target, so the target has to exist before the subject is chosen.
-    const target = resolver.resolveTarget(intent.verb, intent.target);
+    // the target, so the target has to exist before the subject is chosen. An
+    // absent target is the resolver's to judge (only `withdraw` may omit one —
+    // it pulls back to the nearest departure zone; anything else refuses by
+    // name there), so the executor and the echo cannot disagree about it.
+    const target = resolver.resolveTarget(intent.verb, intent.target, intent.subject);
     if (target.kind !== 'ok') return failed('target', target);
 
     const when = intent.when ? resolver.resolveWhen(intent.when) : ({ kind: 'ok', value: undefined } as const);

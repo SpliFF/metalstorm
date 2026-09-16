@@ -81,6 +81,14 @@ struct WarControlSummary {
     unsigned neutral = 0;
 };
 
+/// One player's objective credit for this mission.
+struct WarSummaryCredit {
+    std::string username;
+    /// Objectives this player was credited on. Never negative; the accrual
+    /// clamps anyway (Journey::SessionAccrual).
+    int objectives = 0;
+};
+
 struct WarSummary {
     int frame = 0;
     int64_t uptimeSec = 0;
@@ -101,6 +109,13 @@ struct WarSummary {
     /// with no scenario or one declaring no start regions, and read by the
     /// Director as "cannot tell" rather than "everybody is eliminated".
     bool footholdsKnown = false;
+    /// Per-player objective credit, for the standing accrual at mission end
+    /// (PLAN-beta-journey.md §0, Journey::SessionAccrual). Empty whenever the
+    /// sim publishes none, which the accrual reads as "credited with none" —
+    /// the session is still worth its +10. Keyed by USERNAME because that is
+    /// the only identifier both processes hold: the sim knows a CPlayer's
+    /// name, not the lobby's account id.
+    std::vector<WarSummaryCredit> credits;
 };
 
 /// One player row as the sim holds it. A struct rather than the engine's
@@ -197,6 +212,14 @@ inline std::string EncodeWarSummary(const WarSummary& s) {
         j["sides"].push_back(std::move(sj));
     }
     j["footholds_known"] = s.footholdsKnown;
+    // Omitted entirely when empty — an absent key and an empty array mean the
+    // same thing to the decoder, and the row is written every 2 s.
+    if (!s.credits.empty()) {
+        j["credits"] = nlohmann::json::array();
+        for (const auto& c : s.credits)
+            j["credits"].push_back({{"username", c.username},
+                                    {"objectives", c.objectives}});
+    }
     j["stakes"] = s.stakes;
     j["control"] = {{"total", s.control.total},
                     {"contested", s.control.contested},
@@ -239,6 +262,17 @@ inline bool DecodeWarSummary(const std::string& text, WarSummary& out) {
         s.sides.push_back(std::move(side));
     }
     s.footholdsKnown = j.value("footholds_known", false);
+    // Additive like `footholds`, and for the same reason: an older game
+    // server publishes no credits and the accrual pays the session anyway.
+    if (j.contains("credits") && j["credits"].is_array()) {
+        for (const auto& cj : j["credits"]) {
+            if (!cj.is_object()) continue;
+            WarSummaryCredit c;
+            c.username = cj.value("username", std::string{});
+            c.objectives = cj.value("objectives", 0);
+            if (!c.username.empty()) s.credits.push_back(std::move(c));
+        }
+    }
     s.stakes = j.value("stakes", 0.0);
     if (j.contains("control") && j["control"].is_object()) {
         s.control.total = j["control"].value("total", 0u);

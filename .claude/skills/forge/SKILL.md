@@ -8,9 +8,14 @@ description: Build production Metalstorm 3D models (units, buildings, sites, pro
 Everything needed to produce an engine-ready model is pre-built at
 **`tools/forge/`** (repo-relative; absolute:
 `/Users/shannon/WarriorHut/Projects/springrts-web/tools/forge`). Do NOT
-re-extract tooling, create venvs, `npm ci`, or read the big precedent
-generators — that is the expensive anti-pattern this environment exists to
-kill.
+re-extract tooling or read the big precedent generators — that is the
+expensive anti-pattern this environment exists to kill. Two gitignored
+per-checkout pieces exist ONCE per checkout and are otherwise never rebuilt:
+`tools/forge/venv` (`python3 -m venv tools/forge/venv && tools/forge/venv/bin/pip install numpy pillow`)
+and `tools/fable-model-forge/node_modules` (`cd tools/fable-model-forge && npm ci`).
+If `$FORGE/venv/bin/python` is missing in a fresh worktree, run those two
+lines (or point `env.sh` at the main checkout's copy) — do not improvise a
+third environment.
 
 ## Start here, in order
 
@@ -51,12 +56,14 @@ ASSETS.md row. Batch small props 2–4 per agent.
 
 ## What's here already
 
-`tools/forge/dist/batch-01..batch-04/` hold ~70 finished, validated models
-(gltf+bin+ktx2+png) in varying states of integration — several families
-(e.g. the tanks: `ms_tanks_s1`/`ms_tanks_s3` replacing the wz_* placeholders)
-are already integrated into `data/games/metalstorm/models/`. Check BOTH
-`dist/` and the game data tree before generating a model that may already
-exist. `samples/` holds their generator triplets. The generator toolkit is
+`tools/forge/dist/batch-01..batch-04/` (LOCAL-ONLY, gitignored — present in
+the main checkout, absent from every worktree; regenerable from `samples/`)
+hold ~70 finished, validated models (gltf+bin+ktx2+png). **All 70 are already
+integrated** into `data/games/metalstorm/models/` (the shipped `ms_*` corpus
+replaced every `wz_*` placeholder, 2026-08). Check the game data tree (and
+`ASSETS.md` — its rows use brace-expansion groups, expand them before declaring
+a gap) before generating a model that may already exist. `samples/` holds the
+generator triplets. The generator toolkit is
 the sibling folder tools/fable-model-forge/ in this same tree.
 
 ## World-scale contract (×8) — REQUIRED for integration
@@ -65,8 +72,9 @@ Forge models are authored in **metres**, but the engine adopted
 **8 elmos = 1 m applied at import** (Option A, decided 2026-08-27). Unit
 models in `data/games/metalstorm/models/` must carry
 `SPRINGRTS_geometry.units="elmos"` and be exactly 8× the metre baseline in
-`world_scale_baseline.json`; map features stay ×1. The gate is
+`tools/scripts/world_scale_baseline.json`; map features stay ×1. The gate is
 `python3 tools/scripts/check_model_scale.py` — a hand-copied forge gltf
-(still in metres) FAILS it. Import with `modelimporter --metres`, which
+(still in metres) FAILS it. Run it after every import, redirect its output to
+a file and read the exit code (never through a pipe). Import with `modelimporter --metres`, which
 scales geometry and metadata together. Impostor framing constants are
 scale-invariant but must be re-baked after a rescale.

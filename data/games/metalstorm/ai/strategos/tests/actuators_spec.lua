@@ -441,3 +441,210 @@ describe("actuators — ai.intent tag (I1/SG1 §2.5)", function()
         assert.are.equal(0, #log.messages)
     end)
 end)
+
+
+--=============================================================================
+-- Parley verbs over the I1 funnel (interaction §6.2) + the deference rule.
+--=============================================================================
+local Actuators = require('actuators')
+local Wire      = require('wire')
+
+local function coCommanderRole()
+    local role = Roles.resolve('co_commander', Config)
+    role.teamId = 1
+    return role
+end
+
+local function lastMessage(log)
+    local msg = log.messages[#log.messages]
+    if not msg then return nil end
+    local cmd, fields = Wire.decode(msg)
+    return cmd, fields
+end
+
+describe("actuators — parley verbs (interaction §6.2 over I1)", function()
+    it("respondProposal encodes the SAME parley.respond wire a human panel sends", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        local ok = act:respondProposal({ id = 3, kind = 'ceasefire' }, 'accept')
+        assert.is_true(ok)
+        local cmd, fields = lastMessage(log)
+        assert.are.equal('parley.respond', cmd)
+        assert.are.equal('3', fields.id)
+        assert.are.equal('accept', fields.decision)
+        assert.is_nil(fields.kind)
+        assert.are.equal(1, act:getStats().responses)
+    end)
+
+    it("accepts a bare id, and the plan's counterTerms spelling becomes a counter", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:respondProposal(4, 'counterTerms', { kind = 'tribute' }))
+        local cmd, fields = lastMessage(log)
+        assert.are.equal('parley.respond', cmd)
+        assert.are.equal('counter', fields.decision)
+        assert.are.equal('tribute', fields.kind)
+    end)
+
+    it("a counter carries its TERMS, not just its kind", function()
+        -- Without the terms a counter could only re-send the number it was
+        -- objecting to: GG.Parley.Respond defaults `extra.terms` to the
+        -- ORIGINAL proposal's. So the planner's "counter at what we can
+        -- actually pay" needs every term name on the wire (the same flat
+        -- field set `parley.propose` uses — game_parley.lua decodes both with
+        -- one function).
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:respondProposal({ id = 8, kind = 'tribute' }, 'counter',
+            { kind = 'tribute', terms = { amount = 50, payer = 'to', duration = 900,
+                                          perMinute = true, regionKey = 'r1' } }))
+        local cmd, fields = lastMessage(log)
+        assert.are.equal('parley.respond', cmd)
+        assert.are.equal('counter', fields.decision)
+        assert.are.equal('tribute', fields.kind)
+        assert.are.equal('50', fields.amount)
+        assert.are.equal('to', fields.payer)
+        assert.are.equal('900', fields.duration)
+        assert.are.equal('1', fields.perMinute)
+        assert.are.equal('r1', fields.regionKey)
+    end)
+
+    it("sends no terms on an accept or a reject", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:respondProposal({ id = 9, kind = 'tribute' }, 'accept',
+            { terms = { amount = 50 } }))
+        local _, fields = lastMessage(log)
+        assert.is_nil(fields.amount, 'terms only mean something on a counter')
+    end)
+
+    it("refuses an unknown decision without touching the wire", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        local ok, why = act:respondProposal(4, 'maybe')
+        assert.is_false(ok)
+        assert.are.equal('bad_decision', why)
+        assert.are.equal(0, #log.messages)
+    end)
+
+    it("degrades to false/no_verb on an engine without sendMessage", function()
+        local log = makeAI({ noSendMessage = true })
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        local ok, why = act:respondProposal({ id = 1, kind = 'intel' }, 'accept')
+        assert.is_false(ok)
+        assert.are.equal('no_verb', why)
+        assert.are.equal(0, #log.messages)
+    end)
+
+    it("propose encodes every term with game_parley.lua's names (lists comma-joined)", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        local ok = act:propose('safe_passage', 5, {
+            duration = 1800, corridor = { 'a', 'b' }, unitClass = 'tanks', perMinute = true,
+        })
+        assert.is_true(ok)
+        local cmd, fields = lastMessage(log)
+        assert.are.equal('parley.propose', cmd)
+        assert.are.equal('5', fields.toTeam)
+        assert.are.equal('safe_passage', fields.kind)
+        assert.are.equal('1800', fields.duration)
+        assert.are.same({ 'a', 'b' }, Wire.list(fields.corridor))
+        assert.are.equal('tanks', fields.unitClass)
+        assert.are.equal('1', fields.perMinute)
+        assert.is_nil(fields.amount)
+        assert.are.equal(1, act:getStats().proposals)
+    end)
+
+    it("originates at most one proposal per tick; apply() opens the next window", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:propose('ceasefire', 5, { duration = 900 }))
+        local ok, why = act:propose('ceasefire', 6, { duration = 900 })
+        assert.is_false(ok)
+        assert.are.equal('rate_limited', why)
+        act:apply({ directives = {} }, pictureWithRegions(), { tickFrames = 150 })
+        assert.is_true(act:propose('ceasefire', 6, { duration = 900 }))
+        assert.are.equal(2, #log.messages)
+    end)
+end)
+
+describe("actuators — the co-commander DEFERENCE rule (never binds its humans)", function()
+    it("neither accepts nor rejects a binding proposal — it leaves it to the humans", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = coCommanderRole(), profile = {} })
+        for _, decision in ipairs({ 'accept', 'reject', 'counter' }) do
+            local ok, why = act:respondProposal({ id = 2, kind = 'ceasefire' }, decision)
+            assert.is_false(ok)
+            assert.are.equal('deferred', why)
+        end
+        assert.are.equal(0, #log.messages)
+        assert.are.equal(3, act:getStats().deferred)
+    end)
+
+    it("may still ACCEPT an intel offer (it obliges the team to nothing)", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = coCommanderRole(), profile = {} })
+        assert.is_true(act:respondProposal({ id = 2, kind = 'intel' }, 'accept'))
+        assert.are.equal(1, #log.messages)
+        -- ...but not reject it, and a bare id (kind unknown) gets no exception.
+        assert.is_false(act:respondProposal({ id = 3, kind = 'intel' }, 'reject'))
+        assert.is_false(act:respondProposal(4, 'accept'))
+        assert.are.equal(1, #log.messages)
+    end)
+
+    it("never originates a proposal", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = coCommanderRole(), profile = {} })
+        local ok, why = act:propose('ceasefire', 5, { duration = 900 })
+        assert.is_false(ok)
+        assert.are.equal('deferred', why)
+        assert.are.equal(0, #log.messages)
+    end)
+
+    it("the rule follows the LIVE role: upgraded to full_side, the same actuator answers", function()
+        -- main.lua swaps `actuators.role` on a caretaker up/downgrade (§5.1).
+        local log = makeAI()
+        local act = Actuators.new({ role = coCommanderRole(), profile = {} })
+        assert.is_false(act:respondProposal({ id = 2, kind = 'ceasefire' }, 'accept'))
+        act.role = fullSideRole()
+        assert.is_true(act:respondProposal({ id = 2, kind = 'ceasefire' }, 'accept'))
+        act.role = coCommanderRole()
+        assert.is_false(act:respondProposal({ id = 5, kind = 'ceasefire' }, 'accept'))
+        assert.are.equal(1, #log.messages)
+    end)
+end)
+
+describe("actuators — idle rule on the wire + health counters", function()
+    local function planWithOneDirective()
+        return { directives = {
+            { type = 'directive', directive = 'ASSAULT', region = 'front',
+              strength = 3, healthStrength = 3600, predictedCost = 40, goalId = 'exp:front' },
+        } }
+    end
+
+    it("a co-commander's directive states idleOnly=true, a full side's false", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = coCommanderRole(), profile = {} })
+        act:apply(planWithOneDirective(), pictureWithRegions(), { tickFrames = 150 })
+        assert.are.equal(1, #log.directives)
+        assert.is_true(log.directives[1].spec.idleOnly)
+
+        log = makeAI()
+        act = Actuators.new({ role = fullSideRole(), profile = {} })
+        act:apply(planWithOneDirective(), pictureWithRegions(), { tickFrames = 150 })
+        assert.is_false(log.directives[1].spec.idleOnly)
+    end)
+
+    it("counts issued directives and their predicted spend; a skipped one counts nothing", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        local plan = planWithOneDirective()
+        plan.directives[2] = { type = 'directive', directive = 'ASSAULT', region = 'nowhere',
+                               strength = 1, predictedCost = 99 }
+        act:apply(plan, pictureWithRegions(), { tickFrames = 150 })
+        local s = act:getStats()
+        assert.are.equal(1, s.directives)
+        assert.are.equal(40, s.spent)
+        assert.are.equal(1, #log.directives)
+    end)
+end)

@@ -22,9 +22,27 @@ import { runScenarioValidation, scenarioPath } from './scenario-validate.js';
 import { buildDirectManifest, listManifestNames, loadManifestByName } from './direct-manifest.js';
 import { classifyEndResponse } from './room-end.js';
 import { validateToolArgs } from './tool-args.js';
+import { TOOLS } from './tools.js';
+import { pickServer, listCandidates } from './room-target.js';
+import { buildVerb } from './verb-args.js';
+import { redactSessions } from './redact.js';
+import { worldHandlers } from './world-tools.js';
+import { aiHandlers } from './ai-tools.js';
+import { nlHandlers } from './nl-tools.js';
 import {
     BrowserRegistry, launchBrowser, closeBrowser, describeClose, defaultIsAlive,
 } from './browser.js';
+import {
+    DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
+    parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
+} from './capture-subject.js';
+import {
+    GAME_SPEED, MAX_STEP_FRAMES,
+    buildSequenceHarnessCall, describeSequencePlan, extForMime, formatSequenceMeta,
+    frameFileName, motionOnset, planSequence, realtimeBudgetError, sanitiseName,
+    sequenceRelayTimeoutMs, stepTimeoutMs, summariseShots, totalTurnDegrees,
+    validateSequenceArgs,
+} from './capture-sequence.js';
 import {
     classifyBindingError, bindingMismatchReason, bindingMismatchBanner,
     probeSqliteAnnotations, dbDivergenceWarning,
@@ -37,12 +55,30 @@ import {
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
-    rmdirSync, statSync,
+    rmdirSync, statSync, mkdirSync,
 } from 'fs';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
+// --- Every network call has a deadline -------------------------------------
+//
+// A lobby that accepts the TCP connection and never answers (wedged HTTP loop,
+// a paused debugger, a half-dead process) used to hang the MCP handler for
+// ever: login, /api/processes, the log server, exec — none of them carried a
+// signal. This module-level `fetch` shadows the global and stamps a default
+// AbortSignal on any call that did not bring its own; a caller with a longer
+// or shorter budget (exec, the browser relay) passes `signal` explicitly.
+const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.SPRING_MCP_HTTP_TIMEOUT_MS) || 15000;
+const EXEC_TIMEOUT_MS = Number(process.env.SPRING_MCP_EXEC_TIMEOUT_MS) || 60000;
+const rawFetch = globalThis.fetch;
+async function fetch(url, init) {
+    const opts = init ? { ...init } : {};
+    if (!opts.signal) opts.signal = AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS);
+    return rawFetch(url, opts);
+}
+const deadline = (ms) => ({ signal: AbortSignal.timeout(ms) });
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
@@ -263,19 +299,21 @@ async function getGameServers() {
     return (await getGameServersWithSource()).rows;
 }
 
-async function getGameServerUrl(roomId) {
+// Resolve a roomId to a LIVE server, or an error that says why not. The rules
+// (ended rows refused, dead pids refused, "you passed a port") live in
+// room-target.js — the point is that an old room's row must never route a
+// query to whichever server now holds its port.
+async function resolveServer(roomId) {
     const servers = await getGameServers();
-    let server;
-    if (roomId !== undefined && roomId > 0) {
-        server = servers.find(s => s.room_id === roomId);
-    } else {
-        // Prefer running, fall back to starting, fall back to anything not ended.
-        server = servers.find(s => s.state === 'running')
-            || servers.find(s => s.state === 'starting')
-            || servers.find(s => s.state !== 'ended');
-    }
-    if (!server) return null;
-    return { url: `http://127.0.0.1:${server.port}`, ...server };
+    const picked = pickServer(servers, roomId, { pidAlive });
+    if (picked.error) return { error: picked.error };
+    return { server: { url: `http://127.0.0.1:${picked.server.port}`, ...picked.server } };
+}
+
+/** Compatibility shape for callers that only need "a server or null". */
+async function getGameServerUrl(roomId) {
+    const r = await resolveServer(roomId);
+    return r.server ?? null;
 }
 
 // --- Readiness probing ---
@@ -521,6 +559,7 @@ async function execOnServer(serverUrl, scope, code) {
             'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ scope, code }),
+        ...deadline(EXEC_TIMEOUT_MS),
     }));
     if (!resp.ok) {
         const text = await resp.text();
@@ -530,14 +569,8 @@ async function execOnServer(serverUrl, scope, code) {
 }
 
 async function execOnGameServer(scope, code, roomId) {
-    const server = await getGameServerUrl(roomId);
-    if (!server) {
-        const servers = await getGameServers();
-        if (servers.length === 0) {
-            throw new Error('No game servers found. Is the lobby running and is a game in progress?');
-        }
-        throw new Error(`No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`);
-    }
+    const { server, error } = await resolveServer(roomId);
+    if (error) throw new Error(error.replace(/^Error: /, ''));
     return execOnServer(server.url, scope, code);
 }
 
@@ -563,6 +596,159 @@ async function execJsonVerb(verb, roomId) {
     }
     try { return { json: JSON.parse(output) }; }
     catch { return { legacy: output }; }
+}
+
+// --- V2: sim control + sequence helpers -------------------------------
+//
+// Shared by capture_subject, capture_sequence and order_and_film. They all
+// need the same three things: read the world's CURRENT pause/LOS/speed/cheat
+// state before touching it, execute a plan step, and put everything back
+// exactly as found — including the parts we did not change.
+
+/** Read the sim state a capture plan is built against. Every field that
+ *  cannot be read stays null, and `planCapture` then omits the restore rather
+ *  than guessing — un-pausing a sim somebody else froze is the failure this
+ *  whole ordering discipline exists to prevent. */
+async function observeSimState(roomId, wantCheats) {
+    const state = { simPaused: null, los: parseLosStatus(null), cheatsOn: null, simSpeed: null };
+    try {
+        const gs = await execJsonVerb('state', roomId);
+        if (gs.json && typeof gs.json.paused === 'boolean') state.simPaused = gs.json.paused;
+        if (gs.json && Number.isFinite(gs.json.speed)) state.simSpeed = gs.json.speed;
+    } catch { /* leave null */ }
+    try {
+        const los = await execOnGameServer('server', 'json los status', roomId);
+        state.los = parseLosStatus(los.success ? los.output : null);
+    } catch { /* leave unknown — the plan then leaves LOS alone, loudly */ }
+    if (wantCheats) {
+        try {
+            const c = await execOnGameServer('server', 'json cheats status', roomId);
+            if (c.success) {
+                try { state.cheatsOn = Boolean(JSON.parse(c.output).cheatEnabled); }
+                catch { state.cheatsOn = /cheatEnabled=on/.test(c.output); }
+            }
+        } catch { /* leave null — we then do not toggle cheats at all */ }
+    }
+    return state;
+}
+
+/** Execute one plan step. `ctx` collects what the step tells us
+ *  (`spawnedIds`, `revealed`, `notes`). */
+async function runPlanStep(step, roomId, ctx) {
+    switch (step.op) {
+        case 'cheats':
+            await execOnGameServer('server', step.enable ? 'cheats on' : 'cheats off', roomId);
+            return;
+        case 'spawn': {
+            const cmd = `spawn ${step.def} ${step.x} ${step.z} ${step.team} ${step.count}`;
+            const j = await execJsonVerb(cmd, roomId);
+            const reply = j.json ?? j.legacy;
+            if (j.json?.error) throw new Error(`spawn failed: ${j.json.error}`);
+            ctx.spawnedIds = parseSpawnIds(reply);
+            if (!ctx.spawnedIds.length) {
+                ctx.notes.push(`spawn reply carried no unit id (${String(reply).slice(0, 120)})`
+                    + ' — falling back to resolving the def by name');
+            }
+            return;
+        }
+        case 'los':
+            await execOnGameServer('server', step.enable ? 'los on' : 'los off', roomId);
+            ctx.revealed = step.enable;
+            return;
+        case 'settle':
+            await new Promise((r) => setTimeout(r, step.ms));
+            return;
+        case 'speed':
+            await execOnGameServer('server', `speed ${step.value}`, roomId);
+            return;
+        case 'pause':
+            await execOnGameServer('server', step.paused ? 'pause' : 'unpause', roomId);
+            return;
+        default:
+            return;
+    }
+}
+
+/** Current sim frame, or null when it cannot be read. */
+async function readSimFrame(roomId) {
+    try {
+        const j = await execJsonVerb('frame', roomId);
+        if (j.json && Number.isFinite(j.json.frame)) return j.json.frame;
+        const n = Number(String(j.legacy ?? '').trim());
+        return Number.isFinite(n) ? n : null;
+    } catch { return null; }
+}
+
+/**
+ * Advance the sim by exactly `frames` and WAIT for it to land.
+ *
+ * "Land" is the whole contract. `sim_step` grants a budget the tick loop then
+ * spends one frame at a time, paced by the current speed factor — so the verb
+ * returns long before the world has moved, and a caller that captures on the
+ * reply photographs the frame it was already on. Hence the poll.
+ */
+async function stepSim(frames, roomId, simSpeed = 1) {
+    const before = await readSimFrame(roomId);
+    let granted = frames;
+    let reply;
+    // The frame the STEP started from, as the verb itself saw it. Not the
+    // `before` read above: on the first step of a sequence the sim is still
+    // running, so the frame moves between that read and the grant landing, and
+    // `before + granted` then under-counts. Waiting on a stale target returns
+    // with budget still unspent — the sequence's very first interval is then
+    // silently short. The verb's own `frame` is stamped inside the tick that
+    // processes the grant, so `target` from it is exact.
+    let target = null;
+    try {
+        const j = await execJsonVerb(`sim_step ${frames}`, roomId);
+        if (j.json) {
+            if (j.json.error) return { ok: false, reason: j.json.error };
+            granted = Number(j.json.granted ?? frames);
+            if (Number.isFinite(j.json.target)) target = j.json.target;
+            reply = j.json;
+        } else if (j.legacy != null) {
+            reply = { text: j.legacy };
+        } else {
+            return {
+                ok: false,
+                reason: 'this game server has no `sim_step` verb — it predates'
+                    + ' ai-visual-debug V2. Rebuild spring-server (the lobby forks'
+                    + ' build/release/spring-server when it exists) and restart the room.',
+            };
+        }
+    } catch (e) {
+        return { ok: false, reason: e.message };
+    }
+
+    if (target == null) target = before == null ? null : before + granted;
+    const deadline = Date.now() + stepTimeoutMs(granted, simSpeed);
+    let landed = before;
+    while (target != null && Date.now() < deadline) {
+        landed = await readSimFrame(roomId);
+        if (landed != null && landed >= target) break;
+        await new Promise((r) => setTimeout(r, 25));
+    }
+    return {
+        ok: target == null || (landed != null && landed >= target),
+        from: before, to: landed, target, granted, reply,
+        timedOut: target != null && !(landed != null && landed >= target),
+    };
+}
+
+/** One `unit_state` read, stamped with the sim frame it was taken at. */
+async function sampleUnitMotion(unitId, roomId) {
+    const frame = await readSimFrame(roomId);
+    const j = await execJsonVerb(`unit_state ${unitId}`, roomId);
+    if (!j.json || j.json.error) return null;
+    return { frame: frame ?? 0, pos: j.json.pos ?? { x: 0, z: 0 }, heading: j.json.heading ?? 0 };
+}
+
+/** Where a sequence's frames go. Under data/ by default — a burst is working
+ *  material, and dropping a dozen JPEGs into a committed directory on every
+ *  call is how a shots/ folder stops being readable. */
+function sequenceOutDir(args) {
+    if (args.outDir) return resolve(args.outDir);
+    return join(projectRoot(), 'data', 'captures', sanitiseName(args.name));
 }
 
 // --- Browser lifecycle ----------------------------------------------------
@@ -661,8 +847,9 @@ async function closeRoomBrowsers(roomId, timeoutMs = 5000) {
 ///   'widgets' — the in-worker LuaUI runtime (Lua source, via window.widgets.eval)
 ///   'test'    — a `window.test` harness expression, e.g. `readyState()`
 async function clientEval(target, code, roomId, clientId, timeoutMs) {
-    const server = await getGameServerUrl(roomId);
-    if (!server) return { fallback: 'no active game server found' };
+    const resolved = await resolveServer(roomId);
+    if (resolved.error) return { fallback: resolved.error.replace(/^Error: /, '') };
+    const server = resolved.server;
     let resp;
     try {
         resp = await authedFetch(token => fetch(`${server.url}/api/client/eval`, {
@@ -673,6 +860,10 @@ async function clientEval(target, code, roomId, clientId, timeoutMs) {
                 ...(clientId ? { clientId } : {}),
                 ...(timeoutMs ? { timeoutMs } : {}),
             }),
+            // The server parks this request for up to its own timeoutMs
+            // (default 10 s, cap 60 s) waiting on the browser; give the HTTP
+            // side that budget plus a margin, never less.
+            ...deadline((timeoutMs || 10000) + 5000),
         }));
     } catch (e) {
         return { fallback: `game server unreachable: ${e.message}` };
@@ -930,6 +1121,13 @@ function pidAlive(pid) {
 async function endProcess(pid, { graceful = true, timeoutMs = 10000, pollMs = 250, escalate = true } = {}) {
     const t0 = Date.now();
     let escalatedToKill = false;
+    // process.kill(0, sig) signals OUR OWN PROCESS GROUP (the MCP, and under
+    // mprocs everything in the pane); a negative pid signals a group by id. A
+    // hibernated room's row carries pid 0, so this guard is what stands
+    // between `end_game` on such a room and the whole dev stack going down.
+    if (!Number.isInteger(pid) || pid <= 1) {
+        return { exited: false, escalatedToKill, waitedMs: 0, refused: `refusing to signal pid ${pid}` };
+    }
     if (graceful) {
         try { process.kill(pid, 'SIGTERM'); }
         catch { return { exited: !pidAlive(pid), escalatedToKill, waitedMs: 0 }; }
@@ -1158,6 +1356,9 @@ function resolveRoomTargetStrict(servers, roomId) {
     if (!target) {
         return { error: `Error: no game server for room ${roomId}. Candidates:\n${list}` };
     }
+    if (!(target.pid > 1)) {
+        return { error: `Error: room ${roomId} has no process to signal (pid=${target.pid}, state=${target.state}) — a hibernated or never-spawned room. Nothing to end.` };
+    }
     return { target };
 }
 
@@ -1199,816 +1400,7 @@ function clearDefsCache(gameId) {
     return { removed };
 }
 
-// --- Tool definitions ---
-// Shared tail for every tool that goes over the P7 browser-eval relay —
-// documented once so each description stays honest about the three gates.
-const RELAY = 'Runs over the P7 browser-eval relay (POST /api/client/eval on the game server): the code executes in a CONNECTED browser and the result comes back here. Three gates — the route is compiled out under SPRING_PROD, only an admin-role session is addressed (a /api/rooms/direct dev account is role "player" and is NEVER eligible; launch_scenario\'s default player IS admin), and the browser refuses unless it is a DEV build or was booted with ?allowClientEval=1. When any gate refuses, this tool falls back to printing the chrome-devtools snippet to paste by hand.';
-
-const TOOLS = [
-    {
-        name: 'get_logs',
-        description: 'Get recent log entries from the log server. Returns structured log entries with level, section, scope, process, frame, room_id, game_id, and message. Pass roomId to scope to a single game/room (each game server tags its logs with its room).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID — scope to one game instance (0 for all)', default: 0 },
-                game: { type: 'string', description: 'Filter by game content id (e.g. "zk", "papertanks")' },
-                level: { type: 'number', description: 'Minimum log level (0=DEBUG, 2=NOTICE, 4=ERROR)', default: 0 },
-                section: { type: 'string', description: 'Filter by section (e.g. "lua", "sim", "server")' },
-                scope: { type: 'string', description: 'Filter by scope (e.g. "LuaRules", "LuaGaia")' },
-                sinceMinutes: { type: 'number', description: 'Only entries from the last N minutes (recency window)' },
-                limit: { type: 'number', description: 'Max entries to return', default: 50 },
-            },
-        },
-    },
-    {
-        name: 'search_logs',
-        description: 'Full-text search across log entries. Scope a search to a single room/game and/or a recent time window to avoid a flood of historical logs — e.g. search_logs(query:"error", roomId:5, sinceMinutes:10).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                query: { type: 'string', description: 'Search text (substring match on message). Optional if a roomId/game filter is given.' },
-                roomId: { type: 'number', description: 'Scope to one room/game instance (0 or omit for all)' },
-                game: { type: 'string', description: 'Filter by game content id (e.g. "zk")' },
-                section: { type: 'string', description: 'Filter by section (e.g. "lua", "sim")' },
-                level: { type: 'number', description: 'Minimum log level' },
-                sinceMinutes: { type: 'number', description: 'Only entries from the last N minutes (recency window)' },
-                limit: { type: 'number', description: 'Max entries', default: 50 },
-            },
-        },
-    },
-    {
-        name: 'exec_lua',
-        description: 'Execute Lua code in a specific scope on the game server. Use scope "LuaRules" for game-wide gadgets, "LuaGaia" for map gadgets, "server" for server commands.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                scope: { type: 'string', description: 'Execution scope', enum: ['LuaRules', 'LuaGaia', 'server'] },
-                code: { type: 'string', description: 'Lua code or server command to execute' },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-            required: ['scope', 'code'],
-        },
-    },
-    {
-        name: 'get_game_state',
-        description: 'Get current game state summary from the game server. Returns a JSON object {frame, paused, speed, teams, units, luaHeapKb} (luaHeapKb is 0 when LuaRules is not loaded). Against a game server that predates the `json ` exec prefix it falls back to the legacy one-line text "frame=N teams=N units=N".',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-        },
-    },
-    {
-        name: 'list_units',
-        description: 'List units in the game, optionally filtered by team. Returns a JSON object {total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]} — `total` counts every match of the team filter, `units` is capped at 100 rows (`returned`). Falls back to legacy text against a pre-`json ` game server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                team: { type: 'number', description: 'Team ID (-1 for all)', default: -1 },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-        },
-    },
-    {
-        name: 'list_processes',
-        description: 'List game server processes as JSON: {servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}. Discovery is the lobby /api/processes with a SQLite fallback; `ready`/`clientCount`/heartbeat come from the game_status table and `identity` ({stamp, engineHash, pid}) from each server\'s /api/metrics (null on a server built before P8). For strays, zombie ports and binary drift use list_stack instead.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-        },
-    },
-    {
-        name: 'list_stack',
-        description: 'Full dev-stack census in one call — replaces ad-hoc pgrep/lsof hunts. Returns {findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}. `findings[]` classifies everything it sees: managed (lobby/logserver/vite/game servers the lobby owns), stray-server (a spring-server the lobby does not know about — e.g. a hand-launched headless run), zombie-port (a listener on 9100-10099 that is not a managed game server; blocks the next room, since room routing is by port), duplicate-lobby, orphan-vite (a vite on a fallback port — a browser pointed at it silently drives the wrong stack), stale-status-row (report-only), binary-drift (the lobby forks build/release/spring-server when it exists, so a debug-only rebuild is invisible) and stale-binary-running. Each finding carries a severity and a suggestedAction. Read-only: it never connects to the mprocs control port (a bare connect can crash mprocs) and never kills anything — that is cleanup_stack.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                probeHashes: { type: 'boolean', description: 'Also run `spring-server --print-engine-hash` on each on-disk binary and read `identity` from every running server, enabling stale-binary-running detection ("the process you are testing is not the binary you just built"). Adds ~1s. Default false.', default: false },
-            },
-        },
-    },
-    {
-        name: 'cleanup_stack',
-        description: 'Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                dryRun: { type: 'boolean', description: 'Report the plan without killing anything. Default TRUE.', default: true },
-                kinds: { type: 'array', items: { type: 'string', enum: CLEANABLE_KINDS }, description: `Restrict to these classifications (default: all of ${CLEANABLE_KINDS.join(', ')}).` },
-                force: { type: 'boolean', description: 'Allow killing a zombie-port pid whose command line is not spring-server (the 9100-10099 range can catch unrelated dev tools). Default false.', default: false },
-            },
-        },
-    },
-    {
-        name: 'get_lua_source',
-        description: 'Read a Lua source file from the game content via HTTP. Path relative to game root.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID (e.g. "papertanks")' },
-                filePath: { type: 'string', description: 'File path relative to game root (e.g. "LuaRules/Gadgets/unit_spawner.lua")' },
-            },
-            required: ['gameId', 'filePath'],
-        },
-    },
-    {
-        name: 'list_gadgets',
-        description: 'List loaded Lua gadgets and their status on the game server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-        },
-    },
-    {
-        name: 'query_db',
-        description: 'Execute a read-only SQL query against the lobby database.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                query: { type: 'string', description: 'SQL query — only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads)' },
-            },
-            required: ['query'],
-        },
-    },
-    {
-        name: 'list_sessions',
-        description: 'List recent game sessions from the log server.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-        },
-    },
-    {
-        name: 'restart_lobby',
-        description: 'Restart the lobby server in-place (re-exec with same args, same pid — mprocs stays authoritative). Running game servers are preserved. Use after rebuilding spring-lobby.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-        },
-    },
-    {
-        name: 'restart_logserver',
-        description: 'Restart the log server (:8010) in-place (re-exec with same args, same pid — mprocs stays authoritative). Use after rebuilding spring-logserver, or to recover the log pipeline if it stops responding.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-        },
-    },
-    {
-        name: 'restart_game',
-        description: 'Restart a running game server in-place (re-exec with same args). Clients are notified and will reconnect. Use after rebuilding spring-server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID (0 or omit for first active game)' },
-            },
-        },
-    },
-    {
-        name: 'restart_client',
-        description: 'Restart the Vite client dev server (:8012) via the mprocs control channel (select-proc + restart-proc — the pane stays authoritative, no dead pane / duplicate listener). Use after editing a worker-imported client file (entity-renderer.ts, game-processor.ts, …): Vite serves a stale `?worker` bundle until the pane is restarted. Unlike the C++ servers, Vite has no in-place re-exec. Requires mprocs started with the `server:` key (mprocs.yaml); otherwise it falls back to kill+relaunch.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                clearCache: { type: 'boolean', description: 'Also clear client/node_modules/.vite before restarting (use if a plain restart still serves stale worker code). Default false.' },
-            },
-        },
-    },
-    {
-        name: 'get_unit_def',
-        description: 'Read a single UnitDef from the on-disk defs cache without needing a running game. Decodes the FlatBuffer baked by spring-server. Returns full Tier 4 fields including customParams, transportSize, repairSpeed, yardmap, etc.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
-                name: { type: 'string', description: 'Unit def name (e.g. "armcom1") OR omit and pass defId' },
-                defId: { type: 'number', description: 'Numeric def ID. Either name or defId is required.' },
-            },
-            required: ['gameId'],
-        },
-    },
-    {
-        name: 'list_unit_defs',
-        description: 'List all UnitDefs from the cache, optionally filtered by name pattern. Use this to scan customParams, find units with a particular field set, etc. Returns names + summary fields by default; pass full=true for complete records.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
-                pattern: { type: 'string', description: 'Substring filter on def name (case-insensitive). Omit for all.' },
-                full: { type: 'boolean', description: 'If true, return full def records. Default: name + key fields only.', default: false },
-                limit: { type: 'number', description: 'Max results', default: 50 },
-            },
-            required: ['gameId'],
-        },
-    },
-    {
-        name: 'get_weapon_def',
-        description: 'Read a single WeaponDef from the on-disk defs cache. Decodes the FlatBuffer baked by spring-server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID (e.g. "zk")' },
-                name: { type: 'string', description: 'Weapon def name OR omit and pass defId' },
-                defId: { type: 'number', description: 'Numeric weapon def ID. Either name or defId is required.' },
-            },
-            required: ['gameId'],
-        },
-    },
-    {
-        name: 'clear_defs_cache',
-        description: 'Delete the baked defs cache (unitdefs/weapondefs/cegdefs/featuredefs .lua.br + power.json, plus legacy .bin orphans) for a game, or all games. Forces the next game session to re-bake from source. Required after schema changes that did NOT bump the cache key. Cheaper than killing the running game.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID to clear. Omit to clear all games.' },
-            },
-        },
-    },
-    {
-        name: 'kill_game',
-        description: 'DEPRECATED — alias for end_game(graceful:false). Force-kills the spring-server process for a room (SIGKILL, no exit checkpoint). Prefer end_game. roomId is required.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID (required — omitting it now refuses with a candidate list)' },
-            },
-        },
-    },
-    {
-        name: 'end_game',
-        description: "Gracefully stop ONE room's game server. Prefers the lobby's POST /api/admin/rooms/end, which returns a drain-quality report: the exit checkpoint verified against the snapshot store (outcome, frame, lossy) plus resume eligibility. A route-level 404 means a lobby binary older than P4 — falls back to a direct SIGTERM/poll/SIGKILL from the MCP process (source:'sigterm-fallback'); an auth/validation failure is reported, never silently downgraded. NOTE: the room flips to \"ended\" asynchronously via the lobby health loop, not in this response — poll /api/rooms or probe_game if you need to observe it. To stop a room cleanly WITH a report use this, not a same-name launch_direct relaunch (that SIGTERMs, deletes and respawns). kill_game is the deprecated graceful:false alias.",
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID (required — omitting it refuses with a candidate list).' },
-                graceful: { type: 'boolean', default: true, description: 'false → SIGKILL immediately from the MCP process (same as deprecated kill_game); no server report, no exit checkpoint.' },
-                timeoutMs: { type: 'number', default: 10000, description: 'How long to wait for the exit checkpoint before escalating to SIGKILL. The server caps this at 30000.' },
-                escalate: { type: 'boolean', default: true, description: 'SIGKILL if the server has not exited within timeoutMs. false leaves a stuck server alive and reports outcome "still_alive".' },
-            },
-            required: ['roomId'],
-        },
-    },
-    {
-        name: 'get_frame',
-        description: 'Current sim frame + simFps via the public /api/metrics endpoint (no exec, no auth, works while paused).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-        },
-    },
-    {
-        name: 'probe_game',
-        description: "One-shot readiness probe for a game server. Composes the lobby process row, pid liveness, the game_status heartbeat and /api/metrics into a single phase: spawning (process up, nothing published yet) | loading (heartbeat present, ready=0 or stale) | ready (accepting connections) | ticking (sim advancing) | dead (no process row, or the pid is gone). Use wait_for_game to poll until a phase is reached.",
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game.' },
-            },
-        },
-    },
-    {
-        name: 'wait_for_game',
-        description: "Poll a game server (via probe_game) until it reaches a readiness phase (ready = accepting connections, ticking = sim advancing) or a target frame. Fails FAST on server death: returns phase 'dead' immediately with the last room-scoped log lines instead of waiting out the timeout. A timeout returns timedOut:true plus the honest last probe rather than throwing.",
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number', description: 'Room ID. Omit to auto-pick the newest non-ended game (resolved once, then pinned).' },
-                until: { type: 'string', enum: ['ready', 'ticking', 'frame'], default: 'ready', description: "until='ready' is satisfied by ready OR ticking." },
-                frame: { type: 'number', description: "Target sim frame (required when until='frame')." },
-                timeoutMs: { type: 'number', default: 120000 },
-                pollMs: { type: 'number', default: 500 },
-            },
-        },
-    },
-    {
-        name: 'revive_team',
-        description: 'Flip a dead team (or all dead teams) back to alive so units can be spawned onto it. Pairs with set_cheats to stop the game-over check re-killing it.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                team: { type: 'number', description: 'Team ID. Omit to revive all dead teams.' },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-        },
-    },
-    {
-        name: 'set_stockpile',
-        description: "Insta-fill a unit's stockpile weapon (missiles etc.) — skips the build cycle. Wraps the server `stockpile` verb.",
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number' },
-                count: { type: 'number', description: 'Stockpiled shots to set.' },
-                queued: { type: 'number', default: 0 },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-            required: ['unitId', 'count'],
-        },
-    },
-    {
-        name: 'profile',
-        description: 'Server-side profilers. target=lua → per-callin synced Lua wall-time; target=sim → SimFrame phase split (native sim / unit scripts / Lua call-ins, also surfaced under /api/metrics simFrame). action: on|off|reset|status|report.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                target: { type: 'string', enum: ['lua', 'sim'] },
-                action: { type: 'string', enum: ['on', 'off', 'reset', 'status', 'report'], default: 'report' },
-                topN: { type: 'number', description: 'Row cap for target=lua report (default 25).' },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-            required: ['target'],
-        },
-    },
-    {
-        name: 'launch_game',
-        description: 'Launch a fresh game directly via the lobby HTTP API — bypasses the lobby UI. Creates a room (or reuses existing one for the user), adds an AI slot, marks the host ready, and starts the game. Waits (via probe_game) until the server is accepting connections, failing fast if it dies during boot. Returns the new room ID, gameServerPort, the readiness `phase`, and — on failure only — `lastLogs`.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', description: 'Game ID (e.g. "zk")', default: 'zk' },
-                mapId: { type: 'string', description: 'Map ID (e.g. "pools_of_ilys_1.0.0")' },
-                roomName: { type: 'string', description: 'Room name', default: 'debug' },
-                ai: { type: 'string', description: 'AI to add for the opposing team. Set to "" to skip AI. Default: "null" (Null AI engine bot).', default: 'null' },
-                username: { type: 'string', description: 'Username to launch as. Defaults to admin / SPRING_USER.' },
-                password: { type: 'string', description: 'Password. Defaults to SPRING_PASS.' },
-                clearCache: { type: 'boolean', description: 'Delete the defs cache before launching to force a fresh bake.', default: false },
-                testStartupSelector: { type: 'boolean', description: 'Keep ZK\'s "Startup Info and Selector" commander-chooser overlay enabled. Default false — the suggested browserUrl disables it so the view is clear on launch. Set true only when specifically testing that overlay.', default: false },
-            },
-            required: ['mapId'],
-        },
-    },
-    {
-        name: 'launch_scenario',
-        description: 'Launch a scenario game directly (no lobby UI, no manifest files): resolves the scenario via GET /api/games/<gameId>/scenarios, builds the /api/rooms/direct manifest in memory with the scenario as the TOP-LEVEL field (modoptions.scenario alone gets overwritten by the map default), POSTs it, and waits for the sim to tick. Re-launching the same scenario replaces the previous room (same room name → teardown + recreate). Returns {roomId, port, sessions, browserUrl} — browserUrl attaches to THIS room (?play= + room + token in the URL hash) and never re-launches; the token is in the hash fragment, so it stays out of server logs but does land in browser history (dev feature). Requires the lobby to run with --dev-direct-start. A players[] entry naming an unknown username creates an is_dev account; the defaults never do.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                scenarioId: { type: 'string', description: 'Scenario id — the file stem of data/games/<gameId>/scenarios/<id>.lua (e.g. "crossing_standoff").' },
-                gameId: { type: 'string', default: 'metalstorm', description: 'Game the scenario belongs to.' },
-                openBrowser: { type: 'boolean', default: false, description: 'Open a browser client on browserUrl and wait for it to connect, then re-probe. The default roster seats a HUMAN, so without this the sim holds at frame -1 and every relay tool answers "no connected admin client" — with it, wait:"ticking" is reachable in one call. The browser is tracked and end_game closes it. Returns its report under `browser`.' },
-                browserHeadless: { type: 'boolean', default: true, description: 'Headless browser for openBrowser (renders identically; opens no window). false to watch the run.' },
-                mapId: { type: 'string', description: 'Map override. Default: the scenario\'s declared world.map.' },
-                ai: { type: 'string', default: 'null', description: 'AI id seated on every non-host playable side ("null", "strategos"). "" = no AI slots (the lobby\'s solo-team safety net may still add a Null AI).' },
-                players: {
-                    type: 'array',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            username: { type: 'string' },
-                            team: { type: 'number' },
-                            side: { type: 'string', description: 'Playable faction key; resolved to that side\'s team.' },
-                            spectator: { type: 'boolean' },
-                        },
-                        required: ['username'],
-                    },
-                    description: 'Default [{username:"admin"}] seated on the scenario\'s first playable side. players[0] is the room host; extras default to spectators.',
-                },
-                side: { type: 'string', description: 'Shorthand: seat players[0] on this faction\'s side.' },
-                modoptions: { type: 'object', description: 'Extra modoptions. A "scenario" key here is hoisted to the manifest top level (it does NOT work as a modoption).' },
-                roomName: { type: 'string', description: 'Room name. Default "mcp:<scenarioId>". Re-POSTing a name replaces that room.' },
-                headless: { type: 'boolean', default: false, description: 'No browser will connect: omit browserUrl and warn about the idle-grace self-exit (workaround: lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS).' },
-                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return immediately, when the game server answers /api/metrics, or when the sim frame advances.' },
-                waitTimeoutMs: { type: 'number', default: 120000 },
-                idleGraceSeconds: { type: 'number', description: 'Written to the manifest as idleStartupGraceSeconds: how long the server waits for its first client before self-exiting (default 120s, which kills a browserless run at frame -1). Silently inert on lobby binaries older than P3 — fallback there is the lobby env SPRING_IDLE_STARTUP_GRACE_SECONDS.' },
-                skipBriefing: { type: 'boolean', default: true, description: 'Append &skipBriefing=1 to browserUrl (S2 splash bypass).' },
-                force: { type: 'boolean', default: false, description: 'Launch even if the scenario is not in the lobby\'s (startup-snapshot) list — the direct path reads the VFS fresh. Requires mapId; sides default to the legacy two-team shape.' },
-            },
-            required: ['scenarioId'],
-        },
-    },
-    {
-        name: 'launch_direct',
-        description: 'Launch a game from a RAW /api/rooms/direct manifest — the manual sibling of launch_scenario (which builds its manifest in memory from a scenarioId; prefer that for scenario tests, and this one for full control: custom rosters, modoptions, sessionKind, idle timers). Takes a manifest by name from manifests/, inline, or both merged, POSTs it, and waits for the sim to tick. Merge order: file manifest → `manifest` deep-merged on top (objects recurse; arrays and scalars replace) → `overrides` shallow-merged last (top-level keys replaced wholesale). Manifest shape: {name, map (required), game, sessionKind, scenario (TOP-LEVEL — modoptions.scenario alone is overwritten by the map default), modoptions{}, players[] (>=1; players[0] is the host; {username, team, startPos, spectator}), aiSlots[] ({aiId, team, startPos, profile}), autoStart, idleStartupGraceSeconds, idleExitSeconds}. `name` is IDEMPOTENT BY REPLACEMENT: re-POSTing a name SIGTERMs that room\'s server and recreates the room (a clean restart, not an error), and a manifest with no name defaults to "dev:direct", so two unnamed launches silently clobber each other — concurrent lanes must set distinct names. Declared players are force-left from any prior room. Requires the lobby to run with --dev-direct-start. Returns {roomId, port, sessions, players, aiSlots, browserUrl, phase, frame, notes}.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                manifestName: { type: 'string', description: 'File stem under manifests/ (e.g. "crossing_standoff_direct"). A miss lists the available names.' },
-                manifest: { type: 'object', description: 'Inline manifest, deep-merged OVER the file one. Use alone for a fully inline launch.' },
-                overrides: { type: 'object', description: 'Shallow merge applied last — top-level keys replace wholesale. The escape hatch when deep-merge is wrong (e.g. swapping the whole players[] array).' },
-                wait: { type: 'string', enum: ['none', 'ready', 'ticking'], default: 'ticking', description: 'Return after the POST, when the game server answers /api/metrics, or when the sim frame advances. NOTE: a skirmish holds GameStart until its rostered humans connect — an exec-only test with human players must use "ready" (or an AI-only/spectator roster, or sessionKind:"persistent", neither of which waits).' },
-                timeoutMs: { type: 'number', default: 120000, description: 'Wait budget in ms.' },
-                clearCache: { type: 'boolean', default: false, description: 'Delete the defs cache for the manifest\'s game before launching.' },
-                idleGraceSeconds: { type: 'number', description: 'Sugar for manifest.idleStartupGraceSeconds — how long the server waits for its first client before self-exiting (default 120s, which kills exec-driven tests at frame -1). Ignored without error by lobby binaries older than P3; fallback there is to start the LOBBY with SPRING_IDLE_STARTUP_GRACE_SECONDS in its env (applies to every room it spawns, so pair it with end_game teardown).' },
-            },
-        },
-    },
-    {
-        name: 'api_request',
-        description: 'Make an authenticated HTTP request to the lobby, log server, or a specific game server. Tokens are obtained automatically (admin/admin by default — override via SPRING_USER/SPRING_PASS env). Prefer this over running curl + setting Authorization headers manually.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                target: {
-                    type: 'string',
-                    description: 'Which server to hit. "lobby" → :8011, "log" → :8010, "game" → dynamic game server (uses roomId or first running), "url" → use the absolute `url` arg verbatim.',
-                    enum: ['lobby', 'log', 'game', 'url'],
-                    default: 'lobby',
-                },
-                path: { type: 'string', description: 'Path beginning with "/", e.g. "/api/rooms". Ignored when target="url".' },
-                url: { type: 'string', description: 'Absolute URL (only when target="url").' },
-                method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], default: 'GET' },
-                body: { description: 'Request body. Plain object/array → JSON, string → sent verbatim.' },
-                headers: { type: 'object', description: 'Extra request headers as a {name: value} map.' },
-                roomId: { type: 'number', description: 'Game server room ID (when target="game"). Omit to pick the first active game.' },
-                auth: { type: 'boolean', default: true, description: 'Attach Bearer auth header. Set false for unauthenticated probes.' },
-                expectJson: { type: 'boolean', default: true, description: 'Parse the response as JSON when true; otherwise return raw text.' },
-            },
-            required: ['path'],
-        },
-    },
-    {
-        name: 'spawn_unit',
-        description: 'Spawn one or more units of a given def at a world XZ position on a team. Wraps the LuaExecEngine `server spawn` verb (which delegates to Spring.CreateUnit on the LuaRules synced state, so Allow* veto rules apply). Y is auto-resolved via Spring.GetGroundHeight. When count > 1 the server lays them out in a square grid 48 elmos apart. Returns a JSON object {spawned, ids:[...]}; falls back to the legacy "spawned N unit(s): ..." text against a pre-`json ` game server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                defName: { type: 'string', description: 'Unit def name (e.g. "armcom1", "papertank").' },
-                x: { type: 'number', description: 'World X coordinate (elmos).' },
-                z: { type: 'number', description: 'World Z coordinate (elmos).' },
-                team: { type: 'number', description: 'Owning team ID', default: 0 },
-                count: { type: 'number', description: 'How many to spawn (max 256)', default: 1 },
-                roomId: { type: 'number', description: 'Room/game server ID (auto-detected if omitted)' },
-            },
-            required: ['defName', 'x', 'z'],
-        },
-    },
-    {
-        name: 'kill_unit',
-        description: 'Destroy a unit by ID via Spring.DestroyUnit. Optional self-destruct flag (plays the unit\'s death animation/explosion) and reclaim flag (drops a wreckage feature instead of nothing).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number', description: 'Sim unit ID to destroy.' },
-                selfDestruct: { type: 'boolean', default: false },
-                reclaimed: { type: 'boolean', default: false },
-                roomId: { type: 'number' },
-            },
-            required: ['unitId'],
-        },
-    },
-    {
-        name: 'damage_unit',
-        description: 'Apply damage to a unit via Spring.AddUnitDamage. Returns the post-damage health.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number' },
-                amount: { type: 'number', description: 'HP of damage to apply.' },
-                paralyze: { type: 'boolean', default: false },
-                roomId: { type: 'number' },
-            },
-            required: ['unitId', 'amount'],
-        },
-    },
-    {
-        name: 'give_order',
-        description: 'Issue a single command to a unit via Spring.GiveOrderToUnit. Use the standard CMD.* numeric IDs (10=MOVE, 20=ATTACK, 0=STOP, 90=RECLAIM, 25=GUARD, 15=PATROL, 16=FIGHT, etc. — see client/src/core/command-buffer.ts for the full table).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number' },
-                cmdId: { type: 'number', description: 'Spring command ID, e.g. 10=MOVE, 20=ATTACK.' },
-                params: { type: 'array', items: { type: 'number' }, description: 'Up to 4 numeric params (e.g. [x,y,z] for MOVE, [targetUnitId] for ATTACK).', default: [] },
-                opts: { type: 'number', description: 'Spring command-options bitfield (32=SHIFT/queue).', default: 0 },
-                roomId: { type: 'number' },
-            },
-            required: ['unitId', 'cmdId'],
-        },
-    },
-    {
-        name: 'clear_units',
-        description: 'Wipe every unit (or every unit on a team) via Spring.DestroyUnit on each. Useful between test cases.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                team: { type: 'number', description: 'Team ID. Omit to clear ALL units on every team.' },
-                roomId: { type: 'number' },
-            },
-        },
-    },
-    {
-        name: 'get_unit_state',
-        description: 'Dump health, position, team, weapons, and per-weapon target/range/reload state for a single unit. Reads sim state directly (no Lua round-trip). Returns a JSON object {id, def, team, hp, maxHp, pos:{x,y,z}, heading, weapons:[{index, def, range, reloadFrame, hasTarget}]} — `index` is the unit\'s own weapon slot (null slots are skipped, so the array can be shorter). Falls back to legacy text against a pre-`json ` game server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number' },
-                roomId: { type: 'number' },
-            },
-            required: ['unitId'],
-        },
-    },
-    {
-        name: 'set_debug_logging',
-        description: 'Toggle one or more debug-log subsystems on the game server. Logged lines surface via get_logs / search_logs (section= the subsystem name). Subsystems: combat (damage/hit/kill events), sound (every SoundEvent push), weapon (every CWeapon::Fire), explosion (planned), order (planned), unit (planned), script (planned). Returns the post-call status string.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                combat:    { type: 'boolean' },
-                sound:     { type: 'boolean' },
-                weapon:    { type: 'boolean' },
-                explosion: { type: 'boolean' },
-                order:     { type: 'boolean' },
-                unit:      { type: 'boolean' },
-                script:    { type: 'boolean' },
-                roomId:    { type: 'number' },
-            },
-        },
-    },
-    {
-        name: 'get_combat_summary',
-        description: 'Quick-look queue depths for combat events and sound events still pending broadcast. Useful for sanity-checking that combat is actually happening. Returns a JSON object {combat, sounds}; falls back to legacy text against a pre-`json ` game server.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId: { type: 'number' },
-            },
-        },
-    },
-    {
-        name: 'pause_sim',
-        description: 'Pause / unpause the server simulation tick (gs->paused). Sim freezes; the client keeps rendering. Pair with `set_render_paused` (browser-side) when you want a fully-frozen scene for a screenshot.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                paused: { type: 'boolean' },
-                roomId: { type: 'number' },
-            },
-            required: ['paused'],
-        },
-    },
-    {
-        name: 'set_sim_speed',
-        description: 'Set the sim speed multiplier (range 0.05 – 100). 1 = normal, 2 = double, 0.1 = ten-times slower. Useful for slow-mo combat inspection or fast-forwarding past dead time in long tests.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                multiplier: { type: 'number' },
-                roomId:     { type: 'number' },
-            },
-            required: ['multiplier'],
-        },
-    },
-    {
-        name: 'set_los',
-        description: 'Toggle global line-of-sight for every ally team (reveals the whole map for spectators and players alike). Wraps the `los on|off|status` server verb, which calls losHandler->SetGlobalLOS for each active ally team. Useful for debugging: with LOS off you can\'t see enemy units; with global LOS on the whole map streams to every viewport.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                enable: { type: 'boolean', description: 'true → reveal map; false → restore normal LOS; omit → return current state.' },
-                roomId: { type: 'number' },
-            },
-        },
-    },
-    {
-        name: 'set_cheats',
-        description: 'Toggle cheat mode on the game server (gs->cheatEnabled + gs->godMode). When on, Lua paths gated by `if gs->cheatEnabled` (Spring.SetUnitHealth above max, Spring.CreateUnit on any team, etc.) start working from any caller. Pairs with `set_unit_invulnerable` for sustained combat-FX testing.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                enable: { type: 'boolean', description: 'true → enable cheats; false → disable; omit → return current state.' },
-                roomId: { type: 'number' },
-            },
-        },
-    },
-    {
-        name: 'set_unit_invulnerable',
-        description: 'Make a specific unit immune to damage (toggles a CUnit::invulnerable flag that short-circuits DoDamage on the very first line). Survives weapon hits, AddUnitDamage, water damage, self-destruct attempts — everything funnels through DoDamage. Useful for keeping a damage target alive while you study impact CEGs or beam-hit FX.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                unitId: { type: 'number' },
-                invulnerable: { type: 'boolean', description: 'true → immune; false → restore normal damage; omit → return current state.' },
-                roomId: { type: 'number' },
-            },
-            required: ['unitId'],
-        },
-    },
-    {
-        name: 'spawn_at_camera',
-        description: 'Spawn one or more units at the current browser camera\'s look-at position. Reads `window.test.cameraPose().lookAt` in the browser and forwards to `window.test.spawn(...)`, returning {x, z, response}. ' + RELAY,
-        inputSchema: {
-            type: 'object',
-            properties: {
-                defName: { type: 'string', description: 'Unit def name (e.g. "armcom1", "cloakraid").' },
-                team: { type: 'number', description: 'Owning team ID', default: 0 },
-                count: { type: 'number', description: 'How many to spawn (max 256)', default: 1 },
-                offset: { type: 'object', description: 'Optional XZ offset from camera look-at, e.g. {x:200, z:0} to spawn 200 elmos east.' },
-            },
-            required: ['defName'],
-        },
-    },
-    {
-        name: 'browser_test',
-        description: 'Call a TestHarness method on `window.test` in the browser and return its result. ' + RELAY + ' Methods: focus(unitId), focusOn(x,z), pause(), resume(), screenshot(), saveScreenshot(name), select([ids]), spawnAndFocus(def,x,z,team), stageCombat(atk,tgt,x,z), state(), units(team), unitState(id), highResScreenshot(w,h), simPause(), simResume(), simSpeed(n). Performance profiling (see docs/debugging-performance.md): perfDump(windowMs?) / perfReset() — permanent per-phase (camera/entity/fx/render/ui/total) frame-time distribution; uiProfileStart() / uiProfileDump(topN?) / uiProfileStop() — per-widget LuaUI Fengari cost breakdown (call dump BEFORE stop, not after — stop clears the data); netSim({delayMs,jitterMs,lossProb}) / netSimOff() / netSimPreset("lan"|"wan"|"intercont") / netStats() — simulate WAN conditions and tally bandwidth per message type.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                method: { type: 'string', description: 'TestHarness method name.' },
-                args:   { type: 'array', description: 'JSON-serialisable args. Strings become quoted, numbers/bools/arrays passed through.', default: [] },
-            },
-            required: ['method'],
-        },
-    },
-    {
-        name: 'evaluate_widget_lua',
-        description: 'Run a Lua snippet in the LuaUI widget runtime (browser-side render worker) and return its result string. Use when you need to inspect WG, widgetHandler, _widgetErrors, or call any Spring.* function as the player would see it. ' + RELAY,
-        inputSchema: {
-            type: 'object',
-            properties: {
-                code: { type: 'string', description: 'Lua code. Last expression returned via "return …".' },
-            },
-            required: ['code'],
-        },
-    },
-
-    {
-        name: 'client_eval',
-        description: 'Execute arbitrary code inside a connected browser client and return the result. ' + RELAY + ' Targets: "js" (main-thread global scope — document, window.test, window.widgets), "worker" (render-worker global scope — the __entityRenderer / __csm / __renderPipeline / __fxLightPool debug hooks the render-core move stranded there), "widgets" (Lua source run in the in-worker LuaUI runtime), "test" (an expression with the `test` harness already bound, e.g. `readyState()` or `captureFrame({maxDim:640})`). `output` is JSON-parsed when it parses. Keep results well under 4 MB — that is the wire control-message cap.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                code:      { type: 'string', description: 'Code to run (JS, or Lua for target "widgets").' },
-                target:    { type: 'string', enum: ['js', 'worker', 'widgets', 'test'], description: 'Which executor runs it.', default: 'js' },
-                roomId:    { type: 'number', description: 'Room to target (default: the single active game).' },
-                clientId:  { type: 'number', description: 'Address a specific connected client id; it must still be an admin session. Default: the lowest-id admin client.' },
-                timeoutMs: { type: 'number', description: 'Server-side wait, 500–60000. Default 10000.', default: 10000 },
-            },
-            required: ['code'],
-        },
-    },
-    {
-        name: 'client_ready',
-        description: 'Client-side readiness: relays `window.test.readyState()` to the connected browser and returns its report (renderer up, defs ingested, LuaUI booted, newest game frame, feed age). ' + RELAY + ' This is the BROWSER\'s view — for server-side readiness (sim ticking, players seated) use `wait_for_game` instead; the two answer different questions and a game can be server-ready while the tab is still ingesting defs.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
-                clientId: { type: 'number', description: 'Address a specific admin client id.' },
-            },
-        },
-    },
-    {
-        name: 'client_screenshot',
-        description: 'Capture the browser client\'s rendered frame and return it as an image you can actually look at, plus a text block of capture metadata (width/height, frameId, gameFrame, per-phase stats, byte size). Relays `window.test.captureFrame({maxDim, stats:true})`, which waits for a real presented frame rather than grabbing a stale backbuffer. ' + RELAY + ' maxDim is clamped to 2048 to stay well inside the 4 MB wire cap.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                maxDim:   { type: 'number', description: 'Longest edge in pixels, 64–2048.', default: 1280 },
-                quality:  { type: 'number', description: 'JPEG quality 0–1 (passed through to captureFrame).' },
-                roomId:   { type: 'number', description: 'Room to target (default: the single active game).' },
-                clientId: { type: 'number', description: 'Address a specific admin client id.' },
-            },
-        },
-    },
-
-    // --- Browser lifecycle ---------------------------------------------
-    // The relay tools above need a CONNECTED admin client. These three make
-    // one, without a human at a keyboard and without chrome-devtools MCP
-    // (a second browser stack, launched for a CDP session we do not want).
-    {
-        name: 'open_client',
-        description: 'Open a browser client and connect it to a room — the missing half of the relay tools, which all need a CONNECTED admin client and could not previously make one. Pass `roomId` to attach to a room this server launched (its browserUrl, including the host session token, is remembered from launch_scenario/launch_direct), or pass an explicit `url` for anything else. HEADLESS BY DEFAULT: verified to render this Babylon client identically (same mesh counts, working client_screenshot) while opening no window on the user\'s machine — pass headless:false to watch a run live. With `waitReady` (the default) it returns only once the relay actually answers, reporting {connected:true, clientId, readyState}; "the process started" is a much weaker claim than "a client is connected". The browser is tracked, so end_game closes it and list_clients can see it. Chrome is found automatically (override with SPRING_BROWSER).',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                roomId:   { type: 'number', description: 'Attach to this room using the browserUrl remembered from its launch. Required unless `url` is given.' },
-                url:      { type: 'string', description: 'Explicit URL. Overrides the remembered browserUrl; use for a room this server did not launch, or a non-game page.' },
-                headless: { type: 'boolean', default: true, description: 'false opens a visible window (useful to watch a run, or to debug a client that will not connect).' },
-                width:    { type: 'number', default: 1280 },
-                height:   { type: 'number', default: 800 },
-                waitReady:   { type: 'boolean', default: true, description: 'Wait until the relay reaches the new client before returning.' },
-                waitReadyMs: { type: 'number', default: 60000, description: 'How long to wait for that first relay answer.' },
-            },
-        },
-    },
-    {
-        name: 'close_client',
-        description: 'Close a browser this server opened. `{pid}` closes one, `{roomId}` closes every client attached to that room, `{all:true}` closes all of them. SIGTERM to the process GROUP → poll → SIGKILL, because Chrome is a process tree and signalling the bare parent leaves GPU-holding renderers behind (an abandoned renderer has corrupted whole perf sessions here). Returns a per-browser report — read the `outcome`, not just the count: `exited` is clean, `killed_after_timeout` means SIGTERM was ignored, `kill_failed` needs a human. Refuses to signal a pid this server did not launch.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                pid:       { type: 'number', description: 'A pid returned by open_client.' },
-                roomId:    { type: 'number', description: 'Close every client attached to this room.' },
-                all:       { type: 'boolean', description: 'Close every tracked client.' },
-                timeoutMs: { type: 'number', default: 5000, description: 'Grace before SIGKILL.' },
-            },
-        },
-    },
-    {
-        name: 'list_clients',
-        description: 'The browsers this server launched: {pid, roomId, url, headless, profileDir, startedAt, alive}. Liveness is re-probed on every call, never cached, so a browser that died or was killed by hand shows alive:false instead of a stale yes. Only ever lists this server\'s own browsers — a browser you opened yourself is invisible here (and is never signalled by close_client).',
-        inputSchema: { type: 'object', properties: {} },
-    },
-
-    // --- Scenario authoring (S3) ---------------------------------------
-    // The loop these four close: list what exists → validate offline until
-    // clean → write (with the resync the lobby needs to SEE the file) →
-    // launch with launch_scenario. Only validate_scenario works with the
-    // stack down; the other three talk to the lobby.
-    {
-        name: 'list_scenarios',
-        description: 'List the scenarios a game ships, merging the lobby\'s discovery view (id, displayName, '
-            + 'map, tutorial/retired flags, terminal = has a victory objective, playable sides, briefing) with '
-            + 'the admin provenance view for generated wars (seed, generator params/version, createdBy/At). '
-            + 'Rows are tagged source: "authored" (a hand-written scenarios/*.lua) or "generated" (gen_*, owned '
-            + 'by the scenario DB — regenerate rather than edit those). Needs a running lobby; degrades to the '
-            + 'public view alone if the admin call is refused.',
-        inputSchema: {
-            type: 'object',
-            properties: { gameId: { type: 'string', default: 'metalstorm' } },
-        },
-    },
-    {
-        name: 'validate_scenario',
-        description: 'Offline structured validation of a scenario file — replicates BOTH parsers (the lobby\'s '
-            + 'bare lua_State discovery pass AND game_scenario.lua\'s GameStart validate()) without booting '
-            + 'anything, and without a running lobby. Returns findings[] of {severity, rule, path, message} with '
-            + 'severity error|warning|info|skipped. A scenario with zero error findings will be offered by the '
-            + 'lobby and will pass the in-game validator, modulo the live-only checks reported as "skipped". '
-            + 'Note "skipped" means NOT CHECKED, never "fine". Rule ids and what each mirrors: docs/scenarios.md §11.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', default: 'metalstorm' },
-                scenarioId: { type: 'string', description: 'Reads data/games/<gameId>/scenarios/<scenarioId>.lua. Either this or luaSource.' },
-                luaSource: { type: 'string', description: 'Validate source text directly — the pre-write check. Either this or scenarioId.' },
-                passability: { type: 'boolean', default: false, description: 'Also run regions_from_map.py --verify on world.map (read-only; needs the processed map + python3; slow).' },
-            },
-        },
-    },
-    {
-        name: 'write_scenario',
-        description: 'Validate, then write data/games/<gameId>/scenarios/<scenarioId>.lua, then resync the lobby '
-            + 'so the file is actually OFFERED (lobby scenario lists are a startup snapshot — a new file is '
-            + 'invisible to the picker and to launch_scenario until a resync). Error findings always block the '
-            + 'write; warnings block unless force:true. Refuses the gen_ prefix: those ids belong to the scenario '
-            + 'DB and its orphan sweep DELETES any gen_*.lua no row claims. Reports offered:true|false by '
-            + 're-reading the lobby list afterwards, because a file the lobby then silently declines to offer is '
-            + 'exactly the failure this tool exists to catch.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', default: 'metalstorm' },
-                scenarioId: { type: 'string', description: 'Grammar: ^[a-z0-9_]+$, max 64 chars, must not start with gen_.' },
-                luaSource: { type: 'string', description: 'The whole file. Must be a PURE Lua table literal returning a table — no VFS/Spring/GG/require at file scope.' },
-                resync: { type: 'boolean', default: true },
-                overwrite: { type: 'boolean', default: false, description: 'Required to replace an existing file.' },
-                force: { type: 'boolean', default: false, description: 'Write despite warning findings. Error findings always block.' },
-            },
-            required: ['scenarioId', 'luaSource'],
-        },
-    },
-    {
-        name: 'generate_scenario',
-        description: 'Generate a war for a map with scenariogen.py via the lobby admin route, store it in the '
-            + 'scenario DB, materialise it to scenarios/gen_*.lua and re-discover it — returning the entry '
-            + 'exactly as the Create Game picker now sees it. The seed defaults server-side to sum(ord(c) for c '
-            + 'in mapId), so re-running with no seed is an idempotent upsert of the same war rather than a new '
-            + 'one. On a map that cannot host a war the route answers 422 with the generator\'s own REJECTED '
-            + 'line naming the violated invariant — surfaced verbatim. Needs a running lobby + admin auth.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                gameId: { type: 'string', default: 'metalstorm' },
-                mapId: { type: 'string', description: 'Processed map id, e.g. "meridian_basin".' },
-                seed: { type: 'integer', description: 'Defaults to sum of mapId char codes (reproducible).' },
-                sides: { type: 'integer', description: '2-8' },
-                towns: { type: 'integer', description: '0-32' },
-                outposts: { type: 'integer', description: '0-32' },
-                bases: { type: 'integer', description: '0-32' },
-                mines: { type: 'integer', description: '0-32' },
-                sites: { type: 'integer', description: '0-32' },
-                relics: { type: 'integer', description: '0-32' },
-                wrecks: { type: 'integer', description: '0-32' },
-                bridges: { type: 'integer', description: '0-32' },
-                works: { type: 'integer', description: '0-32' },
-                harbour: { type: 'integer', description: '0-32' },
-                shanty: { type: 'integer', description: '0-32' },
-                hostility: { type: 'string', description: 'Generator enum (see scenariogen.py --hostility).' },
-                roster: { type: 'string', description: 'Generator enum (see scenariogen.py --roster).' },
-                coverage: {
-                    type: 'boolean',
-                    description: 'Full-coverage war: force the preset that can reach every def ms_defs knows, '
-                        + 'then REFUSE unless the staged war really contains one of each. Explicit knobs still '
-                        + 'win, so coverage+towns:5 means five towns.',
-                },
-                player: {
-                    type: 'boolean',
-                    description: 'Generate for a HUMAN: drop the mutual-ground-reachability gate, so islands, '
-                        + 'rivers and straits produce a scenario instead of a refusal.',
-                },
-            },
-            required: ['mapId'],
-        },
-    },
-];
+// --- Tool definitions live in tools.js (imported above) ---
 
 // --- Tool execution ---
 async function executeTool(name, args) {
@@ -2020,14 +1412,22 @@ async function executeTool(name, args) {
             if (args.scope) params.set('scope', args.scope);
             if (args.game) params.set('game', args.game);
             if (args.sinceMinutes) params.set('since', String(Date.now() - args.sinceMinutes * 60000));
-            if (args.limit) params.set('limit', String(args.limit));
+            // Always bounded: an omitted limit used to defer to the log
+            // server's default, and a huge one pulled the whole table into
+            // the transcript. 50 by default, 1000 at most.
+            params.set('limit', String(clampLogLimit(args.limit)));
             const roomId = args.roomId || 0;
             const url = `${LOG_SERVER_URL}/api/logs/${roomId}?${params}`;
-            const data = await fetchJson(url);
+            const data = await fetchJson(url, DEFAULT_FETCH_TIMEOUT_MS);
             return formatLogEntries(data);
         }
 
         case 'search_logs': {
+            // A search with no text and no scope is "the whole log" — refuse
+            // it rather than stream history into the conversation.
+            if (!args.query && !args.roomId && !args.game && !args.sinceMinutes) {
+                return 'Error: search_logs needs a `query`, or at least one of roomId / game / sinceMinutes to scope the search.';
+            }
             const params = new URLSearchParams();
             if (args.query) params.set('q', args.query);
             // roomId scopes the search to a single game instance; the
@@ -2037,9 +1437,9 @@ async function executeTool(name, args) {
             if (args.section) params.set('section', args.section);
             if (args.level) params.set('level', String(args.level));
             if (args.sinceMinutes) params.set('since', String(Date.now() - args.sinceMinutes * 60000));
-            if (args.limit) params.set('limit', String(args.limit));
+            params.set('limit', String(clampLogLimit(args.limit)));
             const url = `${LOG_SERVER_URL}/api/logs/search?${params}`;
-            const data = await fetchJson(url);
+            const data = await fetchJson(url, DEFAULT_FETCH_TIMEOUT_MS);
             return formatLogEntries(data);
         }
 
@@ -2321,13 +1721,8 @@ async function executeTool(name, args) {
         }
 
         case 'restart_game': {
-            const server = await getGameServerUrl(args.roomId);
-            if (!server) {
-                const servers = await getGameServers();
-                if (servers.length === 0)
-                    return 'No game servers found. Is the lobby running and is a game in progress?';
-                return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
-            }
+            const { server, error } = await resolveServer(args.roomId);
+            if (error) return error;
             const resp = await authedFetch(token => fetch(`${server.url}/api/restart`, {
                 method: 'POST',
                 headers: {
@@ -2462,13 +1857,9 @@ async function executeTool(name, args) {
         }
 
         case 'get_frame': {
-            const server = await getGameServerUrl(args.roomId);
-            if (!server) {
-                const servers = await getGameServers();
-                if (!servers.length) return 'No game servers found. Is the lobby running and is a game in progress?';
-                return `No active game server found. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
-            }
-            const m = await fetchMetrics(server.url);
+            const { server, error } = await resolveServer(args.roomId);
+            if (error) return error;
+            const m = await fetchMetrics(server.url, 5000);
             return JSON.stringify({
                 roomId: server.room_id,
                 frame: m.frame,
@@ -2533,13 +1924,13 @@ async function executeTool(name, args) {
         }
 
         case 'revive_team': {
-            const cmd = args.team !== undefined ? `revive_team ${args.team}` : 'revive_team all';
+            const cmd = buildVerb('revive_team', [[args.team ?? 'all', 'team']]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'set_stockpile': {
-            const cmd = `stockpile ${args.unitId} ${args.count} ${args.queued ?? 0}`;
+            const cmd = buildVerb('stockpile', [[args.unitId, 'unitId', 'num'], [args.count, 'count', 'num'], [args.queued ?? 0, 'queued', 'num']]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
@@ -2596,7 +1987,8 @@ async function executeTool(name, args) {
 
             const authHdr = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${userToken}` };
 
-            if (args.clearCache) clearDefsCache(args.gameId || 'zk');
+            const launchGameId = args.gameId || 'metalstorm';
+            if (args.clearCache) clearDefsCache(launchGameId);
 
             // Leave any existing room so /api/rooms succeeds (the user
             // can only be in one at a time).
@@ -2608,7 +2000,7 @@ async function executeTool(name, args) {
                 body: JSON.stringify({
                     name: args.roomName || 'debug',
                     map: args.mapId,
-                    game: args.gameId || 'zk',
+                    game: launchGameId,
                 }),
             });
             if (!createResp.ok) return `Create room failed (${createResp.status}): ${await createResp.text()}`;
@@ -2675,7 +2067,7 @@ async function executeTool(name, args) {
             const out = {
                 roomId: targetRoomId,
                 gameServerPort: started.gameServerPort,
-                gameId: args.gameId || 'zk',
+                gameId: launchGameId,
                 mapId: args.mapId,
                 state: finalState,
                 ready,
@@ -2808,11 +2200,18 @@ async function executeTool(name, args) {
                   + (args.skipBriefing === false ? '' : '&skipBriefing=1')
                   + `#token=${encodeURIComponent(hostToken)}`;
 
+            const sessionCheck = verifySessionRows(room.sessions);
+            if (sessionCheck.missing.length) {
+                notes.push(`WARNING: session token(s) for ${sessionCheck.missing.join(', ')} are NOT in the lobby's sessions table `
+                         + '(the known /api/rooms/direct trap: the row is minted and then dropped by forceLeaveCurrentRoom). '
+                         + 'A browser attaching with browserUrl will fail auth — end_game this room and launch again.');
+            }
             const out = {
                 roomId,
                 port: room.game_server_port,
                 roomName: manifest.name,
-                sessions: room.sessions,
+                // Live bearer tokens; redacted unless asked for (redact.js).
+                sessions: redactSessions(room.sessions, args.revealTokens === true),
                 browserUrl,
                 scenario: scenario && {
                     id: scenario.id, map: scenario.map,
@@ -2917,11 +2316,16 @@ async function executeTool(name, args) {
                 }
             }
 
+            const sessionCheck = verifySessionRows(room.sessions);
+            if (sessionCheck.missing.length) {
+                notes.push(`WARNING: session token(s) for ${sessionCheck.missing.join(', ')} are NOT in the lobby's sessions table `
+                         + '(the known /api/rooms/direct trap) — a client logging in with them will fail auth. Relaunch.');
+            }
             const out = {
                 roomId,
                 port: room.game_server_port,
                 roomName: manifest.name || 'dev:direct',
-                sessions: room.sessions,
+                sessions: redactSessions(room.sessions, args.revealTokens === true),
                 players: room.players,
                 aiSlots: room.ai_slots,
                 // Deliberately NOT the ?direct=<name> form: that boot re-POSTs
@@ -2954,17 +2358,15 @@ async function executeTool(name, args) {
             if (target === 'url') {
                 if (!args.url) return 'Error: target="url" requires `url`.';
                 url = args.url;
+            } else if (!args.path || !String(args.path).startsWith('/')) {
+                return `Error: target="${target}" requires \`path\` beginning with "/" (got ${JSON.stringify(args.path)}).`;
             } else if (target === 'lobby') {
                 url = `${LOBBY_URL}${args.path}`;
             } else if (target === 'log') {
                 url = `${LOG_SERVER_URL}${args.path}`;
             } else if (target === 'game') {
-                const server = await getGameServerUrl(args.roomId);
-                if (!server) {
-                    const servers = await getGameServers();
-                    if (!servers.length) return 'Error: no game servers found. Is a game running?';
-                    return `Error: no active game server. Available: ${servers.map(s => `room ${s.room_id} (${s.state})`).join(', ')}`;
-                }
+                const { server, error } = await resolveServer(args.roomId);
+                if (error) return error;
                 url = `${server.url}${args.path}`;
             } else {
                 return `Error: unknown target "${target}".`;
@@ -2973,6 +2375,7 @@ async function executeTool(name, args) {
             const method = (args.method || 'GET').toUpperCase();
             const headers = { ...(args.headers || {}) };
             const wantAuth = args.auth !== false;
+            const timeoutMs = Math.max(500, Math.min(300000, Number(args.timeoutMs ?? 30000)));
 
             let body;
             if (args.body !== undefined && method !== 'GET' && method !== 'DELETE') {
@@ -2990,6 +2393,7 @@ async function executeTool(name, args) {
                 method,
                 headers: token ? { ...headers, 'Authorization': `Bearer ${token}` } : headers,
                 body,
+                ...deadline(timeoutMs),
             });
             const resp = wantAuth ? await authedFetch(doFetch) : await doFetch('');
             const text = await resp.text();
@@ -3007,7 +2411,10 @@ async function executeTool(name, args) {
         }
 
         case 'spawn_unit': {
-            const cmd = `spawn ${args.defName} ${args.x} ${args.z} ${args.team ?? 0} ${args.count ?? 1}`;
+            const cmd = buildVerb('spawn', [
+                [args.defName, 'defName'], [args.x, 'x', 'num'], [args.z, 'z', 'num'],
+                [args.team ?? 0, 'team', 'num'], [args.count ?? 1, 'count', 'num'],
+            ]);
             const j = await execJsonVerb(cmd, args.roomId);
             if (j.json) {
                 if (j.json.error) return `Error: ${j.json.error}`;
@@ -3022,38 +2429,44 @@ async function executeTool(name, args) {
         }
 
         case 'kill_unit': {
-            const cmd = `kill ${args.unitId} ${args.selfDestruct ? 1 : 0} ${args.reclaimed ? 1 : 0}`;
+            const cmd = buildVerb('kill', [[args.unitId, 'unitId', 'num'], [!!args.selfDestruct, 'selfDestruct'], [!!args.reclaimed, 'reclaimed']]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'damage_unit': {
-            const cmd = `damage ${args.unitId} ${args.amount} ${args.paralyze ? 1 : 0}`;
+            const cmd = buildVerb('damage', [[args.unitId, 'unitId', 'num'], [args.amount, 'amount', 'num'], [!!args.paralyze, 'paralyze']]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'give_order': {
-            const params = (args.params || []).join(' ');
-            const cmd = `order ${args.unitId} ${args.cmdId} ${params} ${args.opts ?? 0}`.replace(/\s+/g, ' ').trim();
+            const params = Array.isArray(args.params) ? args.params : [];
+            if (params.length > 4) return 'Error: give_order takes at most 4 params.';
+            const cmd = buildVerb('order', [
+                [args.unitId, 'unitId', 'num'], [args.cmdId, 'cmdId', 'num'],
+                ...params.map((p, i) => [p, `params[${i}]`, 'num']),
+                [args.opts ?? 0, 'opts', 'num'],
+            ]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'clear_units': {
-            const cmd = args.team !== undefined ? `clear ${args.team}` : 'clear';
+            const cmd = buildVerb('clear', [[args.team, 'team', 'num']]);
             const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
         case 'get_unit_state': {
-            const j = await execJsonVerb(`unit_state ${args.unitId}`, args.roomId);
+            const cmd = buildVerb('unit_state', [[args.unitId, 'unitId', 'num']]);
+            const j = await execJsonVerb(cmd, args.roomId);
             if (j.json) {
                 if (j.json.error) return `Error: ${j.json.error}`;
                 return j.json;
             }
             if (j.legacy) return j.legacy;
-            const r = await execOnGameServer('server', `unit_state ${args.unitId}`, args.roomId);
+            const r = await execOnGameServer('server', cmd, args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
@@ -3084,7 +2497,7 @@ async function executeTool(name, args) {
         }
 
         case 'set_sim_speed': {
-            const r = await execOnGameServer('server', `speed ${args.multiplier}`, args.roomId);
+            const r = await execOnGameServer('server', buildVerb('speed', [[args.multiplier, 'multiplier', 'num']]), args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
@@ -3106,7 +2519,7 @@ async function executeTool(name, args) {
             if (!args.unitId) return 'Error: unitId is required';
             const tail = args.invulnerable === undefined ? 'status'
                        : args.invulnerable ? 'on' : 'off';
-            const r = await execOnGameServer('server', `invulnerable ${args.unitId} ${tail}`, args.roomId);
+            const r = await execOnGameServer('server', buildVerb('invulnerable', [[args.unitId, 'unitId', 'num'], [tail, 'mode']]), args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
@@ -3338,6 +2751,385 @@ async function executeTool(name, args) {
             };
         }
 
+
+        case 'capture_subject': {
+            const argError = validateCaptureArgs(args);
+            if (argError) return `Error: ${argError}`;
+
+            // 1. OBSERVE before touching anything. Every restore step below is
+            //    conditional on what we found, because "undo everything" would
+            //    un-pause a sim somebody else froze and un-reveal a map that
+            //    was revealed on purpose.
+            const state = await observeSimState(args.roomId, Boolean(args.spawn));
+
+            const plan = planCapture(args, state);
+            const notes = [...plan.notes];
+            const ctx = { spawnedIds: [], revealed: state.los.allOn === true, notes };
+            const runStep = (step) => runPlanStep(step, args.roomId, ctx);
+
+            let relayed;
+            try {
+                for (const s of plan.pre) await runStep(s);
+                // 2. THE ONE ROUND TRIP. Resolve → frame → dwell → hold →
+                //    capture → judge → retry, all browser-side. Splitting this
+                //    is the bug (see the tool description).
+                relayed = await clientEval(
+                    'test',
+                    buildHarnessCall({
+                        ...args,
+                        __revealed: ctx.revealed,
+                        // Whenever WE stopped the world, the presentation cursor
+                        // has no wall-clock rate left to close the gap to the
+                        // state the server is actually holding, so the shot must
+                        // be told to jump onto it.
+                        syncPresentation: args.syncPresentation
+                            ?? plan.pre.some((st) => st.op === 'pause'),
+                    }),
+                    args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+            } finally {
+                // 3. Restore even when the capture threw — a half-applied
+                //    capture that leaves the sim paused poisons the session.
+                for (const s of plan.post) {
+                    try { await runStep(s); }
+                    catch (e) { notes.push(`restore step ${s.op} failed: ${e.message}`); }
+                }
+            }
+
+            if (relayed.fallback) {
+                return `Relay unavailable: ${relayed.fallback}. `
+                    + 'capture_subject needs a CONNECTED admin browser — open one with '
+                    + '`open_client({roomId})`, or launch with `openBrowser:true`.';
+            }
+            if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+            const shot = clientEvalValue(relayed.output);
+            if (!shot || typeof shot !== 'object' || !shot.dataUrl) {
+                return `Unexpected captureSubject reply: ${String(relayed.output).slice(0, 400)}`;
+            }
+            const m = /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+            if (!m) return `captureSubject returned a non-data-URL image (${shot.dataUrl.slice(0, 60)}…)`;
+            if (ctx.spawnedIds.length) notes.push(`spawned unit id(s): ${ctx.spawnedIds.join(', ')}`);
+            return {
+                content: [
+                    { type: 'image', data: m[2], mimeType: m[1] },
+                    { type: 'text', text: formatCaptureMeta(shot, {
+                        notes, plan: describePlan(plan), clientId: relayed.clientId,
+                    }) },
+                ],
+            };
+        }
+
+        case 'step_sim': {
+            const frames = Math.max(1, Math.min(MAX_STEP_FRAMES,
+                Math.floor(Number(args.frames ?? 1))));
+            const st = await observeSimState(args.roomId, false);
+            const r = await stepSim(frames, args.roomId, st.simSpeed ?? 1);
+            if (!r.ok && r.reason) return `Error: ${r.reason}`;
+            const lines = [
+                r.timedOut
+                    ? `step: TIMED OUT — asked for ${r.granted} frame(s) from ${r.from},`
+                      + ` reached ${r.to}. The sim is paused with a step budget possibly`
+                      + ' still outstanding; pause_sim or unpause to clear it.'
+                    : `step: OK — ${r.from} → ${r.to} (${r.granted} frame(s))`,
+                `sim: paused${st.simPaused === false ? ' (it was running; step_sim paused it)' : ''}`
+                    + `, speed ${st.simSpeed ?? '?'}×`,
+                `game-seconds advanced: ${(r.granted / GAME_SPEED).toFixed(3)}`,
+            ];
+            return lines.join('\n');
+        }
+
+        case 'capture_sequence':
+        case 'order_and_film': {
+            const isOrder = name === 'order_and_film';
+            if (isOrder && !Number.isFinite(args.unitId)) {
+                return 'Error: order_and_film needs `unitId` — the unit to order and film.';
+            }
+            const seqArgs = isOrder
+                ? { ...args, frames: args.frames ?? 8, everyNthSimFrame: args.everyNthSimFrame ?? 6 }
+                : args;
+            const argError = validateSequenceArgs(seqArgs);
+            if (argError) return `Error: ${argError}`;
+
+            const state = await observeSimState(args.roomId, Boolean(args.spawn));
+            const plan = planSequence(seqArgs, state);
+            if (plan.mode === 'realtime') {
+                const budgetError = realtimeBudgetError(
+                    plan.frames, plan.stride, plan.simSpeed ?? 1,
+                    Number.isFinite(args.settleMs) ? args.settleMs : 250);
+                if (budgetError) return `Error: ${budgetError}`;
+            }
+            const notes = [...plan.notes];
+            const ctx = { spawnedIds: [], revealed: state.los.allOn === true, notes };
+            const runStep = (step) => runPlanStep(step, args.roomId, ctx);
+            const effSpeed = plan.simSpeed ?? state.simSpeed ?? 1;
+
+            // ── The order, and the wait for it to BECOME MOTION ──────────
+            //
+            // Before any of the capture plan runs: the order has to go in
+            // while the sim is still running, and the onset poll has to watch
+            // a running sim. Doing this after the plan's `pause` would mean
+            // waiting for motion from a stopped world — forever.
+            let onset = null;
+            if (isOrder) {
+                let cmdId = args.order?.cmdId;
+                let params = args.order?.params ?? [];
+                if (args.move) {
+                    cmdId = 10;
+                    const y = Number.isFinite(args.move.y) ? args.move.y : 0;
+                    params = [args.move.x, y, args.move.z];
+                } else if (Number.isFinite(args.attack)) {
+                    cmdId = 20;
+                    params = [args.attack];
+                }
+                if (!Number.isFinite(cmdId)) {
+                    return 'Error: order_and_film needs one of `move:{x,z}`, `attack:<unitId>`'
+                        + ' or an explicit `order:{cmdId, params}`.';
+                }
+                const cmd = `order ${args.unitId} ${cmdId} ${params.join(' ')} ${args.order?.opts ?? 0}`
+                    .replace(/\s+/g, ' ').trim();
+                const ordered = await execOnGameServer('server', cmd, args.roomId);
+                if (!ordered.success) return `Error: order refused: ${ordered.output}`;
+                notes.push(`order: ${cmd} → ${String(ordered.output).slice(0, 120)}`);
+
+                const timeoutMs = Math.max(0, Number(args.onsetTimeoutMs ?? 8000));
+                const pollFrames = Math.max(1, Math.floor(Number(args.onsetPollFrames ?? 3)));
+                const pollMs = Math.max(50, (pollFrames / (GAME_SPEED * effSpeed)) * 1000);
+                const started = Date.now();
+                let prev = await sampleUnitMotion(args.unitId, args.roomId);
+                let polls = 0;
+                let last = { speed: 0, turnRateDegPerSec: 0, moving: false };
+                while (Date.now() - started < timeoutMs) {
+                    await new Promise((r) => setTimeout(r, pollMs));
+                    const cur = await sampleUnitMotion(args.unitId, args.roomId);
+                    polls++;
+                    if (!cur) { notes.push(`unit ${args.unitId} vanished while waiting for motion`); break; }
+                    if (prev) {
+                        last = motionOnset(prev, cur, {
+                            speedThreshold: args.speedThreshold,
+                            turnThreshold: args.turnThreshold,
+                        });
+                        if (last.moving) break;
+                    }
+                    prev = cur;
+                }
+                onset = {
+                    waitedMs: Date.now() - started, polls,
+                    moving: last.moving === true,
+                    speed: last.speed ?? 0,
+                    turnRateDegPerSec: last.turnRateDegPerSec ?? 0,
+                };
+                if (!onset.moving) {
+                    notes.push('the unit never crossed the motion threshold before the'
+                        + ' onset timeout — filming anyway, because a hull that did not'
+                        + ' move IS the finding when the order was supposed to move it');
+                }
+            }
+
+            // ── Setup: spawn / reveal / settle / speed / (pause in step mode) ──
+            const shots = [];
+            const headingSamples = [];
+            let relayed = null;
+            let subject = null;
+            let framing = null;
+            let sequenceWarnings = [];
+            let stepReport = null;
+            try {
+                for (const st of plan.pre) await runStep(st);
+
+                if (plan.mode === 'realtime') {
+                    // ONE relay evaluation for the whole burst: the wall-clock
+                    // interval between shots has to be paced browser-side or it
+                    // is relay latency wearing a stopwatch.
+                    relayed = await clientEval(
+                        'test',
+                        buildSequenceHarnessCall({ ...seqArgs, __revealed: ctx.revealed }, plan),
+                        args.roomId, args.clientId,
+                        sequenceRelayTimeoutMs(plan.frames, plan.stride, effSpeed));
+                    if (relayed.fallback) {
+                        return `Relay unavailable: ${relayed.fallback}. `
+                            + 'capture_sequence needs a CONNECTED admin browser — open one '
+                            + 'with `open_client({roomId})`.';
+                    }
+                    if (!relayed.success) return `Error (client ${relayed.clientId}): ${relayed.output}`;
+                    const burst = clientEvalValue(relayed.output);
+                    if (!burst || !Array.isArray(burst.shots)) {
+                        return `Unexpected captureSequence reply: ${String(relayed.output).slice(0, 400)}`;
+                    }
+                    subject = burst.subject;
+                    framing = burst.framing;
+                    sequenceWarnings = burst.warnings ?? [];
+                    if (burst.truncated) notes.push('the burst was cut short by the relay wire cap');
+                    for (const sh of burst.shots) shots.push(sh);
+                } else {
+                    // STEP MODE. capture → sim_step → capture → …  The sim is
+                    // stopped between shots, so the seconds each relay call
+                    // costs buy exactly nothing of sim time: the spacing is the
+                    // step size and only the step size.
+                    let resolvedUnitId = Number.isFinite(seqArgs.unitId) ? seqArgs.unitId : null;
+                    const steps = [];
+                    const t0 = Date.now();
+                    // The SERVER's frame is the spacing axis, not the client's.
+                    // `captureFrame().gameFrame` comes from GameInfo, which is
+                    // broadcast once a game-second, so it quantises to 30 and a
+                    // 9-frame step reads as 0 or 30 — the spacing would look
+                    // wrong when it was exact. We know the true frame: the step
+                    // reply says where it landed.
+                    let serverFrame = await readSimFrame(args.roomId);
+                    for (let i = 0; i < plan.frames; i++) {
+                        if (i > 0) {
+                            const r = await stepSim(plan.stride, args.roomId, effSpeed);
+                            steps.push(r);
+                            if (Number.isFinite(r.to)) serverFrame = r.to;
+                            if (!r.ok && r.reason) {
+                                notes.push(`sim_step failed at shot ${i}: ${r.reason}`);
+                                break;
+                            }
+                            if (r.timedOut) {
+                                notes.push(`sim_step ${plan.stride} timed out before shot ${i}`
+                                    + ` (reached ${r.to} of ${r.target})`);
+                            }
+                        }
+                        const shotArgs = {
+                            ...seqArgs,
+                            // Resolve the def ONCE: after the first shot we know
+                            // which entity we are filming, and re-resolving would
+                            // let a newer instance steal the camera mid-sequence.
+                            ...(resolvedUnitId != null
+                                ? { unitId: resolvedUnitId, def: undefined, unitIds: undefined }
+                                : {}),
+                            // A sequence is a dozen images, not one: JPEG at a
+                            // readable-not-lavish size, or ten 1.8 MB PNGs land
+                            // on disk and nobody can commit the evidence.
+                            maxDim: seqArgs.maxDim ?? 1000,
+                            format: seqArgs.format ?? 'jpeg',
+                            quality: seqArgs.quality ?? 0.72,
+                            syncPresentation: true,
+                            // Keep the rig alive between shots; one orbitStop at
+                            // the end instead of a teardown per frame.
+                            restore: false,
+                            // The retry ladder re-frames up and out, which would
+                            // silently change the viewpoint mid-sequence. Only
+                            // the first shot is allowed to hunt for a framing.
+                            retries: i === 0 ? 2 : 0,
+                            __revealed: ctx.revealed,
+                        };
+                        const one = await clientEval('test', buildHarnessCall(shotArgs),
+                            args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+                        if (one.fallback) {
+                            return `Relay unavailable: ${one.fallback}. `
+                                + 'capture_sequence needs a CONNECTED admin browser.';
+                        }
+                        if (!one.success) {
+                            notes.push(`shot ${i} failed: ${String(one.output).slice(0, 200)}`);
+                            break;
+                        }
+                        relayed = one;
+                        const shot = clientEvalValue(one.output);
+                        if (!shot || !shot.dataUrl) {
+                            notes.push(`shot ${i} returned no image`);
+                            break;
+                        }
+                        if (!subject) { subject = shot.subject; framing = shot.framing; }
+                        if (resolvedUnitId == null && Number.isFinite(shot.subject?.unitId)) {
+                            resolvedUnitId = shot.subject.unitId;
+                        }
+                        for (const w of shot.warnings ?? []) {
+                            if (!sequenceWarnings.includes(w)) sequenceWarnings.push(w);
+                        }
+                        shots.push({
+                            index: i,
+                            gameFrame: serverFrame ?? shot.gameFrame,
+                            // What the CLIENT was actually showing: the freshest
+                            // entity snapshot it holds. Judged separately, because
+                            // a sim that stepped while the client stayed put is a
+                            // still life with correct-looking metadata.
+                            clientFrame: shot.presentation?.newestFrame,
+                            frameId: shot.frameId,
+                            atMs: Date.now() - t0,
+                            dataUrl: shot.dataUrl,
+                            width: shot.width, height: shot.height,
+                            stats: shot.stats,
+                            verdict: shot.attempts?.[shot.attempts.length - 1]?.verdict,
+                        });
+                        if (resolvedUnitId != null) {
+                            const sample = await sampleUnitMotion(resolvedUnitId, args.roomId);
+                            if (sample) headingSamples.push(sample);
+                        }
+                    }
+                    stepReport = steps;
+                    // The rig was left standing on purpose; put the camera back.
+                    await clientEval('test', 'orbitStop()', args.roomId, args.clientId)
+                        .catch(() => undefined);
+                }
+            } finally {
+                for (const st of plan.post) {
+                    try { await runStep(st); }
+                    catch (e) { notes.push(`restore step ${st.op} failed: ${e.message}`); }
+                }
+            }
+
+            if (ctx.spawnedIds.length) notes.push(`spawned unit id(s): ${ctx.spawnedIds.join(', ')}`);
+            if (shots.length === 0) {
+                return 'Error: the sequence captured no frames.\n'
+                    + notes.map((n) => `note: ${n}`).join('\n');
+            }
+
+            // ── Write the frames to disk ────────────────────────────────
+            const outDir = sequenceOutDir({
+                ...args,
+                name: args.name ?? (isOrder ? `order-${args.unitId}` : 'sequence'),
+            });
+            mkdirSync(outDir, { recursive: true });
+            const files = [];
+            for (const sh of shots) {
+                const m = /^data:([^;]+);base64,(.*)$/s.exec(sh.dataUrl ?? '');
+                if (!m) continue;
+                const path = join(outDir, frameFileName(sh.index, sh.gameFrame, extForMime(m[1])));
+                writeFileSync(path, Buffer.from(m[2], 'base64'));
+                files.push({
+                    index: sh.index,
+                    gameFrame: sh.gameFrame,
+                    deltaFrames: files.length ? sh.gameFrame - files[files.length - 1].gameFrame : 0,
+                    mean: sh.stats?.mean,
+                    black: sh.verdict?.black === true,
+                    path,
+                    mimeType: m[1],
+                    data: m[2],
+                });
+            }
+
+            const summary = summariseShots(shots, plan);
+            const result = {
+                ok: summary.ok,
+                mode: plan.mode,
+                requested: {
+                    frames: plan.frames,
+                    everyNthSimFrame: plan.stride,
+                    simSpeed: plan.simSpeed,
+                },
+                subject, framing, shots, summary, files,
+                warnings: sequenceWarnings,
+                onset,
+                turnDegrees: headingSamples.length > 1
+                    ? totalTurnDegrees(headingSamples) : undefined,
+            };
+            notes.push(`frames written to ${outDir}`);
+            if (stepReport?.some((r) => r.timedOut)) {
+                notes.push('at least one step did not land inside its budget — the'
+                    + ' spacing in `deltas` above is what actually happened');
+            }
+
+            const inline = Math.max(0, Math.min(4, Number(args.inlineFrames ?? 1)));
+            const content = [];
+            for (const f of files.slice(0, inline)) {
+                content.push({ type: 'image', data: f.data, mimeType: f.mimeType });
+            }
+            content.push({ type: 'text', text: formatSequenceMeta(result, {
+                notes, plan: describeSequencePlan(plan),
+                clientId: relayed?.clientId,
+            }) });
+            return { content };
+        }
+
         // --- Scenario authoring (S3) -----------------------------------
 
         case 'validate_scenario': {
@@ -3504,9 +3296,15 @@ async function executeTool(name, args) {
             const gameId = args.gameId || 'metalstorm';
             if (!args.mapId) return 'Error: generate_scenario needs a mapId.';
             const body = { gameId, mapId: args.mapId };
-            for (const k of ['seed', 'sides', 'towns', 'outposts', 'bases', 'mines',
-                             'sites', 'relics', 'wrecks', 'bridges', 'hostility', 'roster'])
-                if (args[k] !== undefined) body[k] = args[k];
+            // Forward EVERY knob the schema declares, derived from the schema
+            // itself. The old hand-kept list predated `works`, `harbour`,
+            // `shanty`, `coverage` and `player`, so those five were accepted
+            // by validation and silently dropped before the POST — a whitelist
+            // emitter drops new keys (memory). Deriving it makes that class of
+            // drift impossible; self-check.mjs guards the rest.
+            const knobs = Object.keys(TOOLS.find(t => t.name === 'generate_scenario').inputSchema.properties)
+                .filter(k => k !== 'gameId' && k !== 'mapId');
+            for (const k of knobs) if (args[k] !== undefined) body[k] = args[k];
 
             let r;
             try {
@@ -3528,12 +3326,63 @@ async function executeTool(name, args) {
             return JSON.stringify(payload, null, 2);
         }
 
-        default:
+        default: {
+            // World / AI / NL tools live in their own modules and receive the
+            // IO they need injected (world-tools.js, ai-tools.js, nl-tools.js)
+            // — that is what makes them unit-testable with fakes.
+            const handler = worldHandlers[name] || aiHandlers[name] || nlHandlers[name];
+            if (handler) return handler(args, toolIo);
             return `Unknown tool: ${name}`;
+        }
     }
 }
 
+// The IO surface handed to the module-hosted tools. Every function here is
+// one the in-file tools already use; the modules never touch fetch/sqlite
+// directly, so a test can drive them with plain fakes.
+const toolIo = {
+    lobbyUrl: LOBBY_URL,
+    logServerUrl: LOG_SERVER_URL,
+    fetch: (url, init) => fetch(url, init),
+    authedFetch,
+    resolveServer,
+    getGameServers,
+    execLua: (scope, code, roomId) => execOnGameServer(scope, code, roomId),
+    execJsonVerb,
+    authUser: AUTH_USER,
+};
+
+// After a direct launch, confirm the minted session rows actually exist —
+// /api/rooms/direct is known to answer with tokens it then drops (memory:
+// project_direct_room_session_loss). Read-only, feature-detected: no sqlite,
+// no table, no rows to check → {checked:false}. Never throws.
+function verifySessionRows(sessions) {
+    const out = { checked: false, missing: [] };
+    if (!sessions || typeof sessions !== 'object' || sqliteUnavailable) return out;
+    try {
+        const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+        try {
+            const stmt = db.prepare('SELECT 1 FROM sessions WHERE token = ?');
+            for (const [user, token] of Object.entries(sessions)) {
+                if (typeof token !== 'string' || !token) continue;
+                out.checked = true;
+                if (!stmt.get(token)) out.missing.push(user);
+            }
+        } finally { db.close(); }
+    } catch { /* no db / no table — leave unchecked */ }
+    return out;
+}
+
+const LOG_LIMIT_DEFAULT = 50;
+const LOG_LIMIT_MAX = 1000;
+function clampLogLimit(limit) {
+    const n = Number(limit);
+    if (!Number.isFinite(n) || n <= 0) return LOG_LIMIT_DEFAULT;
+    return Math.min(LOG_LIMIT_MAX, Math.floor(n));
+}
+
 function formatLogEntries(entries) {
+    if (!Array.isArray(entries)) return `Unexpected log server reply: ${String(JSON.stringify(entries)).slice(0, 200)}`;
     if (!entries.length) return 'No log entries found.';
     const LEVELS = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
     return entries.map(e => {

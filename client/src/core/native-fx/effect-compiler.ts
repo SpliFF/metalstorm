@@ -179,6 +179,11 @@ export interface SpawnContext {
     now: number;
     /** RNG in [0,1) — injectable for deterministic tests. */
     rng?: () => number;
+    /** Multiplies every particle emitter's spawn count (PLAN-beta-presentation
+     *  L-FX step 5, `gfx.particleQuality` → 0.5/0.75/1.0). Undefined = 1
+     *  (no scaling). Muzzle/tracer/trail/shockwave counts are per-shot, not
+     *  density, so they are left alone. */
+    countScale?: number;
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -403,7 +408,8 @@ function appendEmitter(lib: FxLibrary, e: FxEmitter, ctx: SpawnContext, out: Com
 function appendParticles(
     lib: FxLibrary, e: FxEmitter, ctx: SpawnContext, rng: () => number, out: CompiledBatch,
 ): void {
-    const n = Math.max(1, Math.round(range(e.count, 1, rng)));
+    const scale = ctx.countScale ?? 1;
+    const n = Math.max(1, Math.round(range(e.count, 1, rng) * scale));
     const rows = new Float32Array(n * PARTICLE_FLOATS);
     const frame = e.sprite != null ? (lib.atlas.frames[e.sprite] ?? 0) : 0;
     const sizePair = pair(e.size, [8, 8]);

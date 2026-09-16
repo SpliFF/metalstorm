@@ -4,11 +4,15 @@
  * Renders transient effects (impacts, kills, shields) in response to
  * CombatEvent and ProjectileImpact messages from the server.
  *
- * The fast path dispatches into `CegRuntime` keyed by the weapon def's
- * authored `explosionGenerator` (or an archetype fallback). When no
- * CEG can be resolved we fall back to a coloured procedural sphere so
- * something is still visible — the user can grep the console for
- * `[combat-fx] CEG fallback` to find weapon defs missing CEG coverage.
+ * Three dispatch paths, tried in order at every site:
+ *   1. NATIVE (Metalstorm) — the weapon def authors no CEG and
+ *      `effects/weapon-fx.json` resolves it, so the authored native-FX
+ *      library draws it (native-fx/fx-game-loader.ts). Impacts with an
+ *      `impact` effect also raise a ground scar.
+ *   2. CEG — dispatch into `CegRuntime` keyed by the def's authored
+ *      `explosionGenerator` (ZK/BAR, maps, features).
+ *   3. procedural fallback — a coloured sphere/box so something is still
+ *      visible; grep `[combat-fx] CEG fallback` for defs missing coverage.
  */
 
 import {
@@ -29,8 +33,11 @@ import type { DistortionRenderer } from './distortion-renderer.js';
 import {
     ImpactKind,
     effectForImpact,
+    hasAuthoredCeg,
     impactContextFlags,
 } from './weapon-fx-dispatch.js';
+import type { NativeFxSink, WeaponFxSlots } from './weapon-fx-resolver.js';
+import type { FxLightPool } from './fx-light-pool.js';
 
 /**
  * The procedural fallback shapes CombatFX draws. PLAN-perf.md M18: each is
@@ -74,6 +81,24 @@ interface ActiveEffect {
 /** Shared identity rotation for the axis-aligned shapes. Never mutated. */
 const FX_NO_ROT = Quaternion.Identity();
 
+/** Smallest ground scar a native impact raises (elmos). */
+const NATIVE_SCAR_MIN_RADIUS = 6;
+/** Statistical-volley tracer cone half-angle and burst window (L-FX step 4). */
+const VOLLEY_SPREAD_DEG = 3;
+const VOLLEY_BURST_SEC = 0.4;
+/** Muzzle light for an invented volley: dim, brief, straw-warm (art brief). */
+const MUZZLE_LIGHT_COLOR: readonly [number, number, number] = [1.0, 0.82, 0.5];
+const MUZZLE_LIGHT_PEAK = 0.35;
+const MUZZLE_LIGHT_RANGE = 90;
+const MUZZLE_LIGHT_TTL_SEC = 0.08;
+/** Native stand-in for a statistical miss — an authored ricochet reads as
+ *  "a round landed here" without leaking whether it hit. */
+const VOLLEY_MISS_EFFECT = 'impact_ricochet';
+/** Where an invented volley's muzzle and impact sit above the reported
+ *  positions — the same offsets the procedural tracer has always used. */
+const MUZZLE_HEIGHT = 8;
+const IMPACT_HEIGHT = 6;
+
 /**
  * The rotation that points a mesh's local +Z down (dx, dy, dz) — i.e. what
  * `Mesh.lookAt` bakes in. Reproduces `TransformNode.setDirection` exactly
@@ -108,6 +133,10 @@ export class CombatFX {
     private cegRuntime: CegRuntime | null;
     private defCache: DefCache | null;
     private distortion: DistortionRenderer | null = null;
+    private nativeFx: NativeFxSink | null = null;
+    /// Muzzle light for invented (statistical) volleys only — the pool gates
+    /// itself on `gfx.fxLights`, so this is off on the Low preset by default.
+    private lightPool: FxLightPool | null = null;
     private effects: ActiveEffect[] = [];
     /// Active damage-field barrages keyed by server field id.
     private barrages = new Map<number, ActiveBarrage>();
@@ -296,6 +325,44 @@ export class CombatFX {
         this.distortion = distortion;
     }
 
+    /// The native-FX pass (null on games that ship no FX library).
+    setNativeFx(sink: NativeFxSink | null): void {
+        this.nativeFx = sink;
+    }
+
+    setLightPool(pool: FxLightPool | null): void {
+        this.lightPool = pool;
+    }
+
+    /// Native FX slots for a weapon def, or null when the native path does
+    /// not apply: no library loaded, no def, or the def authors its own CEG
+    /// (ZK/BAR — `ceg-runtime` keeps those).
+    private nativeSlots(weaponDefId: number): WeaponFxSlots | null {
+        if (!this.nativeFx || !weaponDefId || !this.defCache) return null;
+        const def = this.defCache.getWeaponDef(weaponDefId);
+        if (!def || hasAuthoredCeg(def)) return null;
+        return this.nativeFx.resolve(def.name, def.projectileType);
+    }
+
+    /// Spawn a native impact effect at a point and raise its scar. Returns
+    /// false when the slots carry no impact effect (caller falls through).
+    private spawnNativeImpact(
+        slots: WeaponFxSlots | null, x: number, y: number, z: number, aoe: number,
+    ): boolean {
+        if (!slots?.impact || !this.nativeFx) return false;
+        this.nativeFx.spawn(slots.impact, x, y, z, 0, 1, 0);
+        // Scars ride the decal overlay's existing onSnapshot(scars) shape;
+        // radius from the weapon's blast, floored so a small round still
+        // leaves a mark.
+        this.nativeFx.scar(x, y, z, Math.max(NATIVE_SCAR_MIN_RADIUS, aoe));
+        return true;
+    }
+
+    /// Blast radius for a weapon def, for scar sizing.
+    private aoeOf(weaponDefId: number): number {
+        return this.defCache?.getWeaponDef(weaponDefId)?.aoe ?? 0;
+    }
+
     /// React to a projectile lifecycle Impact event. The projectile
     /// renderer also fires impact CEGs through its own dispatcher
     /// (for impacts not associated with a unit kill / damage event);
@@ -304,6 +371,13 @@ export class CombatFX {
     onProjectileImpacts(events: ProjectileImpactInfo[]): void {
         for (const e of events) {
             const { x, y, z } = e.pos;
+            // Native first: a Metalstorm def (no authored CEG) that resolves
+            // draws its authored impact and is done — no CEG, no fallback.
+            const native = this.nativeSlots(e.weaponDefId ?? 0);
+            if (native && this.spawnNativeImpact(native, x, y, z,
+                this.aoeOf(e.weaponDefId ?? 0))) {
+                continue;
+            }
             switch (e.impactKind as ImpactKind) {
                 case ImpactKind.Shield:
                     if (!this.spawnCegImpact(e.impactKind, e.weaponDefId, x, y, z, true)) {
@@ -345,8 +419,10 @@ export class CombatFX {
                     // is forced (forceWeaponDispatch=true) since the
                     // impact kind is Unit and the default behaviour is
                     // to skip Unit impacts in the projectile renderer.
-                    if (!this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
-                        evt.x, evt.y, evt.z, true, evt.damage)) {
+                    if (!this.spawnNativeImpact(this.nativeSlots(evt.weaponDefId),
+                        evt.x, evt.y, evt.z, this.aoeOf(evt.weaponDefId))
+                        && !this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
+                            evt.x, evt.y, evt.z, true, evt.damage)) {
                         this.spawnFallbackImpact(evt.x, evt.y, evt.z, evt.damage);
                     }
                     // No impact point-light (faithful to ZK — none authored).
@@ -357,8 +433,10 @@ export class CombatFX {
                     }
                     break;
                 case 3: // Kill
-                    if (!this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
-                        evt.x, evt.y, evt.z, true, evt.damage)) {
+                    if (!this.spawnNativeImpact(this.nativeSlots(evt.weaponDefId),
+                        evt.x, evt.y, evt.z, this.aoeOf(evt.weaponDefId))
+                        && !this.spawnCegImpact(ImpactKind.Unit, evt.weaponDefId,
+                            evt.x, evt.y, evt.z, true, evt.damage)) {
                         this.spawnFallbackExplosion(evt.x, evt.y, evt.z);
                     }
                     // Bigger kill burst — distortion shockwave only, no
@@ -384,22 +462,50 @@ export class CombatFX {
     onVolleyOutcome(events: VolleyOutcomeInfo[], getPos?: PositionResolver): void {
         for (const e of events) {
             const isHit = e.result === 0;
+            const native = this.nativeSlots(e.weaponDefId);
+            const src = (e.attackerId && getPos) ? getPos(e.attackerId) : null;
 
             // Invent tracers from the firing unit (only if it's visible to us).
-            const src = (e.attackerId && getPos) ? getPos(e.attackerId) : null;
             if (src) {
-                const n = Math.min(Math.max(e.rounds, 1), 8);
-                for (let k = 0; k < n; k++)
-                    this.spawnTracer(src, e.x, e.y, e.z);
+                if (native?.projectile && this.nativeFx) {
+                    // `rounds` authored tracer copies in a ±3° cone, the burst
+                    // spread over 0.4 s so a volley reads as a burst rather
+                    // than one fat streak.
+                    this.nativeFx.volleyTracers(native.projectile,
+                        { x: src.x, y: src.y + MUZZLE_HEIGHT, z: src.z },
+                        { x: e.x, y: e.y + IMPACT_HEIGHT, z: e.z },
+                        Math.max(e.rounds, 1), VOLLEY_SPREAD_DEG, VOLLEY_BURST_SEC);
+                    if (native.muzzle) {
+                        this.nativeFx.spawn(native.muzzle,
+                            src.x, src.y + MUZZLE_HEIGHT, src.z,
+                            e.x - src.x, e.y - src.y, e.z - src.z);
+                    }
+                    // Dim brief muzzle light. The pool is itself gated on
+                    // `gfx.fxLights` (fx-light-pool.ts setEnabled), so Low
+                    // presets drop this without a second switch.
+                    this.lightPool?.emit(src.x, src.y + MUZZLE_HEIGHT, src.z,
+                        MUZZLE_LIGHT_COLOR, MUZZLE_LIGHT_PEAK,
+                        MUZZLE_LIGHT_RANGE, MUZZLE_LIGHT_TTL_SEC);
+                } else {
+                    const n = Math.min(Math.max(e.rounds, 1), 8);
+                    for (let k = 0; k < n; k++)
+                        this.spawnTracer(src, e.x, e.y, e.z);
+                }
             }
 
             if (isHit) {
-                if (!this.spawnCegImpact(ImpactKind.Unit, e.weaponDefId,
-                    e.x, e.y, e.z, true, e.damage)) {
+                if (!this.spawnNativeImpact(native, e.x, e.y, e.z,
+                    this.aoeOf(e.weaponDefId))
+                    && !this.spawnCegImpact(ImpactKind.Unit, e.weaponDefId,
+                        e.x, e.y, e.z, true, e.damage)) {
                     this.spawnFallbackImpact(e.x, e.y, e.z, e.damage);
                 }
                 const r = Math.min(40 + e.damage * 0.3, 120);
                 this.distortion?.emitShockwave(e.x, e.y, e.z, r);
+            } else if (native && this.nativeFx?.has(VOLLEY_MISS_EFFECT)) {
+                // Miss or Unknown — no result leak, and no scar: the round
+                // went wide. Authored ricochet instead of the dirt sphere.
+                this.nativeFx.spawn(VOLLEY_MISS_EFFECT, e.x, e.y, e.z, 0, 1, 0);
             } else {
                 // Miss or Unknown — no result leak, just a dirt puff at impact.
                 this.spawnFallbackDust(e.x, e.y, e.z);

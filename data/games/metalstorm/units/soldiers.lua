@@ -12,7 +12,14 @@ return mk{
     -- 1.8-2.1 m TALL but stands in about 0.7-0.95 m of ground once shoulders,
     -- pack and rifle are counted (gen_infantry.py SHOULDER 0.205 half-width);
     -- height is the wrong number here. s4 is the sealed exo shell, broader.
-    sizes = { 0.7, 0.75, 0.8, 0.95 },
+    -- APPLIED 2026-09-17 (units-assets review 2026-09-10 finding 4): the rows
+    -- are the shipped bodies' measured ground extents, 0.7 / 0.8 / 1.0 / 1.1 m
+    -- (s3's 0.8 was under its 1.0 m body, so a rifle section interpenetrated).
+    -- Sub-elmo differences: at 8 elmos/m these round to the same 3-elmo
+    -- clearance radius for s1-s3, so the golden radii in
+    -- LuaRules/Gadgets/tests/squad_extents_spec.lua and
+    -- client/squads/member-spacing.test.js do not move — checked, not assumed.
+    sizes = { 0.7, 0.8, 1.0, 1.1 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S1' } },
                 description = 'Rifle section — numerous and expendable',

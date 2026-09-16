@@ -74,6 +74,7 @@ local function freshWorld()
 
     _G.Spring = {
         GetModOptions = function() return { scenario = SCENARIO } end,
+        SetUnitNeutral = function() end,
         GetTeamList   = function() return { 0, 1 } end,
         GetGaiaTeamID = function() return 2 end,
         GetGroundHeight = function() return world.groundHeight end,
@@ -215,11 +216,14 @@ describe("featuredef authoring", function()
     end)
 
     it("tags every def with an ms_feature_kind", function()
-        local kinds = { wreck = true, bridge = true, ancient = true }
+        -- 'landmark' joined 2026-09-17 with features/landmarks.lua (civilian
+        -- landmarks: the lighthouse). The ancient span in bridges.lua tags
+        -- itself 'ancient' on purpose — see its def.
+        local kinds = { wreck = true, bridge = true, ancient = true, landmark = true }
         for _, def in pairs(defs) do
             local kind = def.customParams.ms_feature_kind
             assert.is_true(kinds[kind] == true,
-                def.name .. ': ms_feature_kind "' .. tostring(kind) .. '" is not one of wreck/bridge/ancient')
+                def.name .. ': ms_feature_kind "' .. tostring(kind) .. '" is not one of wreck/bridge/ancient/landmark')
         end
     end)
 

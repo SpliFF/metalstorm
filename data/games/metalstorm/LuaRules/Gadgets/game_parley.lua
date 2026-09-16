@@ -763,6 +763,27 @@ function gadget:Initialize()
     PROPOSE_FEE = tonumber(mo.parley_propose_fee) or PROPOSE_FEE
 end
 
+--- Wire fields → a terms table. ONE flat field set carries every term name
+--- (see the `parley.propose` note below), and both `propose` and a `counter`
+--- response decode it — a counter that could not restate an amount could only
+--- ever re-send the number it was objecting to.
+local function decodeTerms(fields)
+    return {
+        duration = Wire.num(fields.duration),
+        regionKey = fields.regionKey,
+        amount = Wire.num(fields.amount),
+        perMinute = fields.perMinute == '1',
+        payer = fields.payer,
+        corridor = fields.corridor and Wire.list(fields.corridor) or nil,
+        unitClass = fields.unitClass,
+        objectiveId = Wire.num(fields.objectiveId),
+        split = Wire.num(fields.split),
+        innerKind = fields.innerKind,
+        orElse = fields.orElse,
+        regionKeys = fields.regionKeys and Wire.list(fields.regionKeys) or nil,
+    }
+end
+
 function gadget:RecvLuaMsg(msg, playerID)
     local cmd, fields = Wire.decode(msg)
     if not cmd then return end
@@ -770,24 +791,48 @@ function gadget:RecvLuaMsg(msg, playerID)
     if not fromTeam then return end
 
     if cmd == 'parley.propose' then
-        local terms = {
-            duration = Wire.num(fields.duration),
-            regionKey = fields.regionKey,
-            amount = Wire.num(fields.amount),
-            perMinute = fields.perMinute == '1',
-            payer = fields.payer,
-            corridor = fields.corridor and Wire.list(fields.corridor) or nil,
-            unitClass = fields.unitClass,
-            objectiveId = Wire.num(fields.objectiveId),
-            split = Wire.num(fields.split),
-            innerKind = fields.innerKind,
-            orElse = fields.orElse,
-            regionKeys = fields.regionKeys and Wire.list(fields.regionKeys) or nil,
-        }
+        local terms = decodeTerms(fields)
+        -- A demand wraps another kind (§4: "a demand is just an offered
+        -- proposal; once accepted it IS that pact"), and validateDemand checks
+        -- the WRAPPED kind's terms. The wire is one flat field set, so the
+        -- inner terms are the same fields — `cmd=parley.propose&kind=demand&
+        -- innerKind=tribute&amount=200&payer=to` is "pay me 200". Until
+        -- 2026-09-10 innerTerms was never built here, so every wire demand
+        -- with an inner kind failed validation ('amount required') and only a
+        -- bare, effect-less demand could ever be sent. The AI's propose verb
+        -- (ai/strategos/actuators.lua) and picture.lua's innerTerms view both
+        -- rely on this one-flat-set convention.
+        if terms.innerKind then
+            local inner = {}
+            for k, v in pairs(terms) do
+                if k ~= 'innerKind' and k ~= 'orElse' then inner[k] = v end
+            end
+            terms.innerTerms = inner
+        end
         GG.Parley.Propose(fromTeam, playerID, Wire.num(fields.toTeam) or fields.toTeam, fields.kind, terms)
     elseif cmd == 'parley.respond' then
-        GG.Parley.Respond(Wire.num(fields.id), fromTeam, playerID, fields.decision,
-            fields.kind and { kind = fields.kind } or nil)
+        -- 'counterTerms' is the name PLAN-metalstorm-interaction §6.2 used for
+        -- the third decision; GG.Parley.Respond spells it 'counter'. Accept
+        -- both on the wire so neither sender has to know the other's spelling.
+        local decision = fields.decision
+        if decision == 'counterTerms' then decision = 'counter' end
+        -- A counter may restate the KIND, the TERMS, or both; anything it does
+        -- not restate falls back to the original proposal's (Respond's own
+        -- default). Terms only travel on a counter — decoding them for an
+        -- accept/reject would be noise the gadget then has to ignore.
+        local extra = nil
+        if decision == 'counter' then
+            local hasTerms = fields.duration or fields.amount or fields.payer
+                or fields.regionKey or fields.corridor or fields.unitClass
+                or fields.objectiveId or fields.split or fields.innerKind
+                or fields.orElse or fields.regionKeys or fields.perMinute
+            if fields.kind or hasTerms then
+                extra = { kind = fields.kind, terms = hasTerms and decodeTerms(fields) or nil }
+            end
+        elseif fields.kind then
+            extra = { kind = fields.kind }
+        end
+        GG.Parley.Respond(Wire.num(fields.id), fromTeam, playerID, decision, extra)
     elseif cmd == 'parley.withdraw' then
         GG.Parley.Withdraw(Wire.num(fields.id), fromTeam)
     end

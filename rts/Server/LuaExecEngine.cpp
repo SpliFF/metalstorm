@@ -22,6 +22,7 @@
 #include "Sim/Misc/LosHandler.h"
 #include "Server/LuaDebugger.h"
 #include "Server/DebugFlags.h"
+#include "Server/SimStep.h"
 #include "Server/CombatEventCollector.h"
 #include "Server/SoundEventCollector.h"
 
@@ -245,11 +246,57 @@ std::string ExecuteServerCommand(const std::string& cmdIn) {
     }
     if (cmd == "pause") {
         gs->paused = true;
+        // A pause is a full stop. An outstanding `sim_step` grant from an
+        // earlier stop is stale by definition, and letting it survive would
+        // make THIS pause leak frames nobody asked for.
+        simstep::Clear();
+        if (wantJson) {
+            return nlohmann::json{{"paused", true}, {"frame", gs->frameNum}}.dump();
+        }
         return "paused";
     }
     if (cmd == "unpause") {
         gs->paused = false;
+        simstep::Clear();
+        if (wantJson) {
+            return nlohmann::json{{"paused", false}, {"frame", gs->frameNum}}.dump();
+        }
         return "unpaused";
+    }
+    // sim_step [N] — advance exactly N sim frames from a stop, then stop again.
+    //
+    // The filming primitive (see Server/SimStep.h). Slow motion narrows the
+    // window a capture has to hit; stepping removes it: between two shots the
+    // world advances by N frames and by nothing else, however many seconds the
+    // camera round trip took. Pauses first if the sim was running, because
+    // "step" from a moving sim is not a thing a caller can mean.
+    //
+    // Paced by the CURRENT speed factor — the tick loop still sleeps its
+    // interval per frame — so N frames at `speed 0.1` takes N/3 seconds of
+    // wall time. Callers that need to know it finished should poll `frame`.
+    if (cmd == "sim_step" || cmd.rfind("sim_step ", 0) == 0) {
+        int want = 1;
+        if (cmd.size() > 9) want = std::atoi(cmd.c_str() + 9);
+        if (want <= 0) want = 1;
+        const bool wasPaused = gs->paused;
+        gs->paused = true;
+        const int granted = simstep::Grant(want);
+        const int from = gs->frameNum;
+        if (wantJson) {
+            return nlohmann::json{
+                {"granted",   granted},
+                {"requested", want},
+                {"frame",     from},
+                {"target",    from + granted},
+                {"wasPaused", wasPaused},
+                {"maxFrames", simstep::kMaxStepFrames},
+            }.dump();
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "stepping %d frame(s) from %d to %d%s",
+                 granted, from, from + granted,
+                 wasPaused ? "" : " (sim was running; paused it first)");
+        return buf;
     }
     if (cmd.rfind("speed ", 0) == 0) {
         float spd = std::atof(cmd.c_str() + 6);

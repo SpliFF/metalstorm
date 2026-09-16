@@ -257,6 +257,64 @@ function GG.AIGuidance.PendingCount()
     return n
 end
 
+-- ============================================================
+-- AI health (2026-09-10 review, task 5). The AI VM cannot write rulesParams;
+-- it sends ONE `ai.health` message per strategic tick (ai/strategos/main.lua
+-- publishHealth) and this gadget mirrors it as team rulesParams the HUD/MCP
+-- can read:
+--
+--   ai_health_<playerID>_ticks          strategic ticks completed
+--   ai_health_<playerID>_errors         ticks (or boots) that threw
+--   ai_health_<playerID>_backoff        current period multiplier (1 = healthy)
+--   ai_health_<playerID>_frame          frame of the last report
+--   ai_health_<playerID>_issued         directives the AI SENT (self-reported)
+--   ai_health_<playerID>_planned        predicted authority of what it sent
+--   ai_health_<playerID>_directives     directives actually CHARGED (from RecordIntent)
+--   ai_health_<playerID>_spent          authority actually charged for them
+--   ai_health_<playerID>_responses      parley responses sent
+--   ai_health_<playerID>_proposals      parley proposals originated
+--   ai_health_<playerID>_deferred       parley decisions deferred to the team's humans
+--   ai_health_<playerID>_refused        verbs the engine/actuator refused
+--   ai_health_<playerID>_computeMs      last tick's pure-pipeline ms (§6 budget)
+--   ai_health_<playerID>_lastErrorFrame frame of the last error (absent if none)
+--   ai_health_<playerID>_error          last error text, ≤160 chars ('' if none)
+--
+-- Allied LOS (a status label, not a plan — same scope as the authority
+-- pools). Only an AI virtual player may write its own line (isAI check, the
+-- same hostile-wire rule as `ai.intent`): a human on the funnel cannot forge
+-- an AI's health.
+-- ============================================================
+local ALLIED_LOS = { allied = true }
+local HEALTH_NUMERIC = { 'ticks', 'errors', 'backoff', 'frame', 'issued', 'planned',
+                         'responses', 'proposals', 'deferred', 'refused', 'computeMs',
+                         'lastErrorFrame' }
+local aiHealth  = {}   -- playerID -> { team, <numeric fields>, error }
+local aiCharged = {}   -- playerID -> { directives, spent } (accrued in RecordIntent)
+
+local function publishHealth(teamID, playerID)
+    local p = 'ai_health_' .. math.floor(playerID) .. '_'
+    local h = aiHealth[playerID] or {}
+    local c = aiCharged[playerID] or { directives = 0, spent = 0 }
+    for _, k in ipairs(HEALTH_NUMERIC) do
+        if h[k] ~= nil then Spring.SetTeamRulesParam(teamID, p .. k, h[k], ALLIED_LOS) end
+    end
+    Spring.SetTeamRulesParam(teamID, p .. 'error', h.error or '', ALLIED_LOS)
+    Spring.SetTeamRulesParam(teamID, p .. 'directives', c.directives, ALLIED_LOS)
+    Spring.SetTeamRulesParam(teamID, p .. 'spent', math.floor(c.spent), ALLIED_LOS)
+end
+
+--- Same-VM read of one AI's health line (tests, other gadgets, the MCP exec
+--- path). The HUD reads the rulesParams above instead.
+function GG.AIGuidance.Health(playerID)
+    local h = aiHealth[playerID]
+    if not h then return nil end
+    local out = {}
+    for k, v in pairs(h) do out[k] = v end
+    local c = aiCharged[playerID] or { directives = 0, spent = 0 }
+    out.directives, out.spent = c.directives, c.spent
+    return out
+end
+
 -- Directive type (engine OrgGroups.h enum, mirrored in ai/strategos/
 -- actuators.lua) → a human-legible label for the intent report. Keyed by the
 -- numeric directiveType the charge callin carries.
@@ -298,6 +356,17 @@ function GG.AIGuidance.RecordIntent(teamID, directiveType, group, spend, playerI
     })
     while #s.intent > INTENT_MAX do s.intent[#s.intent] = nil end
     publishIntent(teamID)
+    -- The CHARGED half of the AI health line (see the `ai.health` handler
+    -- below): this callin is the one place a directive is known to have
+    -- really been created and paid for, so the authoritative directive count
+    -- and spend per AI player accrue here, not from the AI's self-report.
+    if playerID then
+        local c = aiCharged[playerID] or { directives = 0, spent = 0 }
+        c.directives = c.directives + 1
+        c.spent = c.spent + (spend or 0)
+        aiCharged[playerID] = c
+        publishHealth(teamID, playerID)
+    end
 end
 
 --- Timed "human-touched" asset lock (§5.1). A human directing a group makes it
@@ -505,6 +574,14 @@ function gadget:RecvLuaMsg(msg, playerID)
         setVeto(teamID, playerID, Wire.num(fields.goalId) or fields.goalId)
     elseif cmd == 'ai.intent' then
         setPendingGoal(teamID, playerID, fields.goalId)
+    elseif cmd == 'ai.health' then
+        if isAIPlayer(playerID) then
+            local h = { team = teamID }
+            for _, k in ipairs(HEALTH_NUMERIC) do h[k] = Wire.num(fields[k]) end
+            h.error = fields.error and tostring(fields.error):sub(1, 160) or nil
+            aiHealth[playerID] = h
+            publishHealth(teamID, playerID)
+        end
     end
 end
 

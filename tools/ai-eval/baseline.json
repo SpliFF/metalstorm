@@ -1,0 +1,473 @@
+{
+  "generator": "tools/ai-eval/run-eval.mjs",
+  "ais": [
+    "data/games/metalstorm/ai/garrison",
+    "data/games/metalstorm/ai/strategos",
+    "content/engine/ai/null"
+  ],
+  "fixtures": [
+    "blind-start.json",
+    "contact-reaction.json",
+    "objective-empty-ground.json",
+    "objective-next-door.json",
+    "outmatched-withdrawal.json",
+    "quiet-hold.json",
+    "recorded-meridian-contact.json"
+  ],
+  "cells": {
+    "garrison/blind-start": {
+      "ai": "garrison",
+      "fixture": "blind-start",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true,
+        "4:maxDirectives": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "strategos/blind-start": {
+      "ai": "strategos",
+      "fixture": "blind-start",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true,
+        "4:maxDirectives": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "null/blind-start": {
+      "ai": "null",
+      "fixture": "blind-start",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true,
+        "4:maxDirectives": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "garrison/contact-reaction": {
+      "ai": "garrison",
+      "fixture": "contact-reaction",
+      "directives": 14,
+      "spent": 28,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 0,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 13,
+        "Screen": 1
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true,
+        "5:noDirectiveType": true
+      },
+      "checksPassed": 6,
+      "checksFailed": 0
+    },
+    "strategos/contact-reaction": {
+      "ai": "strategos",
+      "fixture": "contact-reaction",
+      "directives": 12,
+      "spent": 24,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 4,
+        "Defend": 8
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "null/contact-reaction": {
+      "ai": "null",
+      "fixture": "contact-reaction",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true,
+        "4:noReaction": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "garrison/objective-empty-ground": {
+      "ai": "garrison",
+      "fixture": "objective-empty-ground",
+      "directives": 22,
+      "spent": 44,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 12,
+        "Assault": 10
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "strategos/objective-empty-ground": {
+      "ai": "strategos",
+      "fixture": "objective-empty-ground",
+      "directives": 10,
+      "spent": 20,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 10
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "null/objective-empty-ground": {
+      "ai": "null",
+      "fixture": "objective-empty-ground",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    },
+    "garrison/objective-next-door": {
+      "ai": "garrison",
+      "fixture": "objective-next-door",
+      "directives": 11,
+      "spent": 22,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 6,
+        "Screen": 1,
+        "Assault": 4
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:hasDirectiveTypeAfter": true,
+        "4:sendsMessage": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "strategos/objective-next-door": {
+      "ai": "strategos",
+      "fixture": "objective-next-door",
+      "directives": 12,
+      "spent": 24,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 12
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "null/objective-next-door": {
+      "ai": "null",
+      "fixture": "objective-next-door",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    },
+    "garrison/outmatched-withdrawal": {
+      "ai": "garrison",
+      "fixture": "outmatched-withdrawal",
+      "directives": 15,
+      "spent": 30,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 0,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 4,
+        "Screen": 2,
+        "Withdraw": 9
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true,
+        "5:withdrawsThrough": true
+      },
+      "checksPassed": 6,
+      "checksFailed": 0
+    },
+    "strategos/outmatched-withdrawal": {
+      "ai": "strategos",
+      "fixture": "outmatched-withdrawal",
+      "directives": 20,
+      "spent": 40,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 4,
+        "Withdraw": 8,
+        "Defend": 8
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "null/outmatched-withdrawal": {
+      "ai": "null",
+      "fixture": "outmatched-withdrawal",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    },
+    "garrison/quiet-hold": {
+      "ai": "garrison",
+      "fixture": "quiet-hold",
+      "directives": 8,
+      "spent": 16,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 6,
+        "Screen": 2
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true,
+        "4:minDirectives": true,
+        "5:hasDirectiveType": true,
+        "6:noDirectiveType": true,
+        "7:maxDirectives": true
+      },
+      "checksPassed": 8,
+      "checksFailed": 0
+    },
+    "strategos/quiet-hold": {
+      "ai": "strategos",
+      "fixture": "quiet-hold",
+      "directives": 12,
+      "spent": 24,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 12
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    },
+    "null/quiet-hold": {
+      "ai": "null",
+      "fixture": "quiet-hold",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 0,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxSpend": true,
+        "4:maxDirectives": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "garrison/recorded-meridian-contact": {
+      "ai": "garrison",
+      "fixture": "recorded-meridian-contact",
+      "directives": 40,
+      "spent": 80,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 0,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 39,
+        "DefendFront": 1
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "strategos/recorded-meridian-contact": {
+      "ai": "strategos",
+      "fixture": "recorded-meridian-contact",
+      "directives": 39,
+      "spent": 78,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 130,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 33,
+        "Screen": 6
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "null/recorded-meridian-contact": {
+      "ai": "null",
+      "fixture": "recorded-meridian-contact",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    }
+  },
+  "totals": {
+    "cells": 21,
+    "checksPassed": 95,
+    "checksFailed": 0,
+    "violations": 0,
+    "errors": 0,
+    "spent": 430
+  }
+}

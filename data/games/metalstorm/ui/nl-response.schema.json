@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NLResponse",
-  "description": "The one shape a natural-language command may take. Either `actions` is non-empty and `clarify` is absent, or `clarify` is present and `actions` is empty — asking and acting are mutually exclusive.",
+  "description": "NLResponse contract v2. The one shape a natural-language command may take. Either `actions` is non-empty and `clarify` is absent, or `clarify` is present and `actions` is empty — asking and acting are mutually exclusive.",
   "type": "object",
   "properties": {
     "actions": {
@@ -31,7 +31,8 @@
                       "withdraw",
                       "reinforce",
                       "build"
-                    ]
+                    ],
+                    "description": "attack: assault a place or spotted force. secure: take and hold. defend/hold: stay and protect. patrol/screen: ring around a place. scout: look at. escort: move with. withdraw: pull back — omit `target` for the nearest departure zone. reinforce: add strength. build: field engineering (fortify) — there is no base building in a battle."
                   },
                   "subject": {
                     "description": "Who executes. `selection` is what the player currently has selected; `any` is team-wide (\"whoever is free\"); `ai` hands the order to the AI commander.",
@@ -66,6 +67,7 @@
                               "bombers",
                               "buildings",
                               "civilians",
+                              "civships",
                               "civvehicles",
                               "command",
                               "courier",
@@ -121,6 +123,7 @@
                               "bombers",
                               "buildings",
                               "civilians",
+                              "civships",
                               "civvehicles",
                               "command",
                               "courier",
@@ -706,6 +709,7 @@
                           "bombers",
                           "buildings",
                           "civilians",
+                          "civships",
                           "civvehicles",
                           "command",
                           "courier",
@@ -808,6 +812,22 @@
                     "properties": {
                       "op": {
                         "const": "objectives"
+                      }
+                    },
+                    "required": [
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "const": "events"
+                      },
+                      "near": {
+                        "type": "string",
+                        "description": "Optional place name from the context payload — \"what's happening at Northgate\". Omit for the whole battle."
                       }
                     },
                     "required": [

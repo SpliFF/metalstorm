@@ -16,7 +16,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Matrix, Color3, Color4, Mesh, MeshBuilder,
-    StandardMaterial, RenderTargetTexture } from '@babylonjs/core';
+    RenderTargetTexture } from '@babylonjs/core';
 // P5: high-res RTT screenshot. Imported from its module path (not the barrel)
 // so the DumpTools side-effects it needs come along in a tree-shaken build.
 import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
@@ -55,10 +55,12 @@ import { withPageDiskCache } from './terrain-page-cache.js';
 import { planPageGrid } from './terrain-page-grid.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
-    loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
-    type MapLighting,
+    loadMapLighting, defaultMapLighting, loadMapWaterAbsorption, loadMapAtmosphere,
+    normaliseSunDir, type MapLighting,
 } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
+import { createAtmosphere, applyMapAtmosphere, type Atmosphere } from './atmosphere.js';
+import { createWaterSurface } from './water-surface.js';
 import type { ShadowDepthBoundsMode } from './shadow-depth-bounds.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
@@ -106,6 +108,10 @@ import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
+import {
+    createNativeFxGamePass, NATIVE_FX_QUALITY_TIERS, type NativeFxGamePass,
+} from './native-fx/fx-game-loader.js';
+import { UnitFxDispatch } from './unit-fx-dispatch.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -500,6 +506,9 @@ let gpTerrainPagesEnabling = false;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
+/// L-ATMOS: sky dome + fog, built once per session (createAtmosphere),
+/// retuned once per map load (applyMapAtmosphere) — see atmosphere.ts.
+let gpAtmosphere: Atmosphere | null = null;
 let gpDistortion: DistortionRenderer | null = null;
 let gpMuzzleFlare: MuzzleFlareRenderer | null = null;
 /// PLAN.md Stage B1: latches true on the first frame ZK's authored deferred
@@ -526,6 +535,36 @@ function parseDeferredLights(str: string, stride: number): number[][] {
 let gpCegRuntime: CegRuntime | null = null;
 let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;
+/// Metalstorm native-FX pass (native-fx/fx-game-loader.ts). Null on games
+/// that ship no effects/ library — every non-Metalstorm game today.
+let gpNativeFx: NativeFxGamePass | null = null;
+/// Unit-side FX dispatch (death/damage-smoke/move-dust, unit-fx-dispatch.ts,
+/// PLAN-beta-presentation L-FX step 6). Built alongside gpNativeFx — needs
+/// its resolved unit-fx.json and its NativeFxSink.
+let gpUnitFx: UnitFxDispatch | null = null;
+
+/// Empty entity iterator — the FX construction block's default before/if
+/// gpCtx.entityRenderer isn't up yet, so UnitFxDispatch.tick()'s sweep has
+/// something to iterate.
+function* EMPTY_ENTITIES(): IterableIterator<[number, { defId: number; healthScale: number }]> {}
+
+/// L-FX step 6: play a plain named SoundItem (gamedata/sounds.lua) at a
+/// world position — the same synthesised-event path onUiSound's "named"
+/// branch uses (below), reused here for unit-fx-dispatch.ts's death sound.
+/// A name gamedata/sounds.lua doesn't define yet (e.g. before pres-audio's
+/// death_* rows land) just resolves to nothing on main — no error, per
+/// SoundEventPlayer.playResolved's empty-path fallthrough.
+function gpPlayNamedSound(name: string, x: number, y: number, z: number): void {
+    const ref: SoundRefInfo = { id: -1, path: '', category: -1, volume: 1, pitch: 1, name };
+    const e: SoundEventInfo = {
+        soundId: -1, sourceDefId: 0, sourceKind: 3,
+        x, y, z, volume: 1, pitch: 1, priority: 128, team: 255, channel: AudioChannel.Battle,
+    };
+    postToMain({ type: 'gp:audioSoundEvents', events: [{ e, ref }] });
+}
+/// How long a native impact's ground scar lives (seconds). The art brief
+/// asks for persistent scarring; the decal overlay fades them out.
+const NATIVE_FX_SCAR_TTL_S = 90;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// PLAN-maps.md M6: distance LOD for map features that ship a baked impostor
@@ -638,6 +677,12 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
         weaponDefIds: (id) => {
             const defId = r.getEntityDefId(id);
             return defId === undefined ? null : gpDefCache?.getUnitDef(defId)?.weaponDefIds ?? null;
+        },
+        // recoil-driver.ts's kick input: aoe/projectileSpeed straight off the
+        // fired weapon's def, so RecoilDriver.kick() fires on every shot.
+        weaponAoeVelocity: (weaponDefId) => {
+            const wd = gpDefCache?.getWeaponDef(weaponDefId);
+            return wd ? { aoe: wd.aoe, projectileSpeed: wd.projectileSpeed } : undefined;
         },
     }, r);
     gpClipPolicy = new ClipAutoPolicy({
@@ -838,6 +883,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
 
+    // L-AUDIO: hand mapinfo.lua's sound.preset to main, which owns the
+    // AudioContext and picks the master reverb IR (setReverbPreset).
+    postToMain({ type: 'gp:soundPreset', preset: map.soundPreset });
+
     // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
     // mex snap. Spring's metalmap is half the heightmap resolution: each cell
     // covers 2 heightmap squares = 2 × squareSize elmos. Ports input-manager
@@ -887,6 +936,18 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         if (gpCtx.sceneLighting === sceneLighting) {
             applyMapLighting(lighting, sceneLighting);
             gpCtx.mapLighting = lighting;
+            // PLAN-beta-presentation.md L-ATMOS: sky luminance/turbidity are
+            // derived from this same sun direction, so the atmosphere apply
+            // is sequenced after the lighting apply (both fire-and-forget
+            // off the same mapinfo.lua fetch; loadMapAtmosphere is a second
+            // HTTP-cached read of it, same pattern as loadMapWaterAbsorption).
+            if (gpAtmosphere && gpScene === scene) {
+                void loadMapAtmosphere(mapSourceAbs).then((atmo) => {
+                    if (gpAtmosphere && gpScene === scene) {
+                        applyMapAtmosphere(gpAtmosphere, scene, atmo, normaliseSunDir(lighting.sunDir));
+                    }
+                });
+            }
         }
     });
 
@@ -1020,13 +1081,11 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     }).catch((err) => postLog(2, `[gp] renderMapFeatures failed: ${err}`));
 
     // Water plane at Y=0 (maps with voidWater=true ship their own fluid widget).
-    // FIDELITY-STANDIN: a flat alpha-blended plane instead of Recoil's BumpWater
-    // (reflection/refraction/waves). The tint follows BumpWater's SurfaceColor
-    // define exactly — surfaceColor * 0.4 at surfaceAlpha (BumpWater.cpp:429).
-    // water.baseColor is NOT the surface colour: it (with absorb/minColor) is
-    // the underwater TERRAIN shade, applied by WaterAbsorptionPlugin below.
-    // Using it here painted pools_of_ilys's pink absorb base across the whole
-    // surface at an invented 0.4 alpha floor — the G1a solid-magenta pools.
+    // PLAN-beta-presentation.md L-ATMOS step 4: procedural scroll-bump +
+    // Fresnel + shore-foam material (water-surface.ts), replacing the flat
+    // StandardMaterial stand-in. Still NOT Recoil's BumpWater and NOT
+    // Babylon's WaterMaterial — both need a reflection RTT (a second scene
+    // render), too costly at XL900 scale.
     if (!map.water.voidWater) {
         const water = MeshBuilder.CreateGround('water', {
             width: map.widthElmos, height: map.heightElmos,
@@ -1034,17 +1093,18 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         water.position.set(map.widthElmos / 2, 0, map.heightElmos / 2);
         water.isPickable = false;
         water.renderingGroupId = 1;
-        const wmat = new StandardMaterial('waterMat', scene);
-        const [r, g, b] = map.water.surfaceColor;
-        wmat.diffuseColor = new Color3(r * 0.4, g * 0.4, b * 0.4);
-        wmat.emissiveColor = new Color3(r * 0.12, g * 0.12, b * 0.12);
-        wmat.specularColor = new Color3(0.2, 0.2, 0.2);
-        wmat.alpha = map.water.surfaceAlpha;
-        wmat.backFaceCulling = false;
-        water.material = wmat;
+        createWaterSurface(scene, water, {
+            surfaceColor: map.water.surfaceColor,
+            surfaceAlpha: map.water.surfaceAlpha,
+            heightmap: map.heightmap,
+            mapx: map.mapx,
+            mapy: map.mapy,
+            minHeight: map.minHeight,
+            maxHeight: map.maxHeight,
+        });
         water.receiveShadows = false;
         sceneLighting.csm.removeShadowCaster(water, false);
-        postLog(1, '[gp] water plane: flat surfaceColor stand-in (no BumpWater reflection/refraction)');
+        postLog(1, '[gp] water plane: procedural scroll-bump + Fresnel + shore foam (water-surface.ts)');
     }
 
     // Underwater terrain absorption (Recoil SMF_WATER_ABSORPTION): depth-graded
@@ -1478,6 +1538,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     attackerId: 0, targetId: entityId, weaponDefId: 0,
                     result: 3, damage: 500, x, y, z,
                 }]);
+                // L-FX step 6: unit-class death burst + sound. defId comes
+                // from `meta`, read above BEFORE removeEntity() drops it.
+                if (meta) gpUnitFx?.onDeath(entityId, meta.defId, x, y, z);
+                gpUnitFx?.remove(entityId);
                 // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
                 removeUnitFromLiveState(entityId);
             });
@@ -1655,6 +1719,19 @@ function gpConnect(msg: GpInitToWorker): void {
                 gpSchedule(frame, 'combatFx', () => {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
+                    // L-FX step 6 / pres-anim contract: hit-flinch nudges the
+                    // target away from the attacker via MotionLeanRegistry.
+                    // impulse(). result===0 is Hit (see CombatFX.onCombatEvents).
+                    if (ev.result === 0 && ev.attackerId) {
+                        const atk = gpCtx.entityRenderer?.getEntityPosition(ev.attackerId);
+                        const tgt = gpCtx.entityRenderer?.getEntityPosition(ev.targetId);
+                        if (atk && tgt) {
+                            const dx = tgt.x - atk.x, dz = tgt.z - atk.z;
+                            const len = Math.hypot(dx, dz) || 1;
+                            gpUnitFx?.onHit(ev.targetId, dx / len, dz / len,
+                                Math.min(ev.damage / 50, 3));
+                        }
+                    }
                 });
                 // PLAN-metalstorm-squad-casualties §4/§5: a hit on a squad unit
                 // is a victim-selection hint (impact position) and — if the
@@ -2496,7 +2573,11 @@ export function gpInit(msg: GpInitToWorker): void {
     // RH scene so the glTF loader + the server's RH wire format line up
     // (PLAN-coordinate-system) — same setup main.ts used before the move.
     scene.useRightHandedSystem = true;
-    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+    // Placeholder until the map's mapinfo.lua atmosphere resolves and
+    // createAtmosphere/applyMapAtmosphere (atmosphere.ts) take over — a
+    // desaturated dusk-grey reads better than near-black during the gap.
+    scene.clearColor = new Color4(0.45, 0.47, 0.52, 1);
+    gpAtmosphere = createAtmosphere(scene);
 
     // Preserve the depth buffer across rendering groups so meshes in a higher
     // group still depth-test against the terrain (group 0). Babylon's DEFAULT is
@@ -2996,6 +3077,61 @@ export function gpInit(msg: GpInitToWorker): void {
     combatFX.setDistortion(gpDistortion);
     gpCombatFX = combatFX;
 
+    // L-FX steps 1-4: the Metalstorm native-FX pass. Async (it fetches the
+    // authored GLSL + effect JSON over the game VFS) and best-effort — a game
+    // without an effects/ library resolves to null and every dispatch site
+    // keeps the CEG path it has today. Once up, a weapon def that authors NO
+    // CEG and resolves through effects/weapon-fx.json draws natively instead.
+    // L-FX step 5: `gfx.nativeFx` is the kill switch (Low preset off) — skip
+    // building the pass at all rather than build-then-disable, same
+    // restart-only semantics as `gfx.particleQuality` (both read once here).
+    if (clientSettings.getBool('gfx.nativeFx', true)) {
+        const qualityTier = clientSettings.getInt('gfx.particleQuality', NATIVE_FX_QUALITY_TIERS.length - 1);
+        createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '', qualityTier)
+            .then((pass) => {
+                if (!pass || !gpCombatFX) { pass?.dispose(); return; }
+                gpNativeFx = pass;
+                // Impact scars ride the decal overlay's existing snapshot shape —
+                // no new decal API (PLAN-beta-presentation L-DECALS contract).
+                pass.setScarSink((x, y, z, radius) => {
+                    gpDecalOverlay?.onSnapshot([{
+                        x, y, z, radius,
+                        ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
+                        r: 0.5, g: 0.5, b: 0.5, a: 1,
+                    }]);
+                });
+                projectileRenderer.setNativeFx(pass);
+                combatFX.setNativeFx(pass);
+                combatFX.setLightPool(gpCtx.fxLightPool);
+                // L-FX step 5: live count-scale re-tune on later particleQuality
+                // changes (the pool-capacity half stays restart-only).
+                clientSettings.subscribe('gfx.particleQuality',
+                    (v) => pass.setQuality(Number(v)));
+                // L-FX step 6: unit-side death/damage-smoke/move-dust dispatch.
+                // Hit-flinch (getMotionLean) and the move-dust rate
+                // (getUnitSpeed) ride pres-anim's MotionLeanRegistry.impulse /
+                // WheelSpinDriver.spinning.
+                gpUnitFx = new UnitFxDispatch({
+                    unitFx: pass.unitFx,
+                    sink: pass,
+                    getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
+                    getEntities: () => gpCtx.entityRenderer?.getEntities() ?? EMPTY_ENTITIES(),
+                    getEntityPosition: (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null,
+                    playNamedSound: (name, x, y, z) => gpPlayNamedSound(name, x, y, z),
+                    getMotionLean: () => gpMotionLean,
+                    getUnitSpeed: (id) => gpWheelSpin?.spinning(id) ?? 0,
+                    // Share the LOD/budget fence with the legacy per-frame
+                    // entity-script path (entity-fx-fence.ts) rather than a
+                    // second independent budget — one combined 3-5ms/frame
+                    // ceiling, one entityFxFenceDump() debug surface.
+                    fence: getEntityFxFence(),
+                });
+                (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
+                postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
+            })
+            .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+    }
+
     // Dynamic feature renderer — getRuntime()-spawned features (wrecks, debris,
     // reclaim removals). Map-placed features load once via renderMapFeatures
     // in gpLoadMap.
@@ -3201,7 +3337,9 @@ export function gpInit(msg: GpInitToWorker): void {
             updateLiveProjectiles(gpCtx.projectileRenderer.snapshotForWorker());
         }
         gpCegRuntime?.tick(fxDt);
+        gpNativeFx?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
+        gpUnitFx?.tick(fxDt, camera.position.x, camera.position.y, camera.position.z);
         gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
         {
@@ -4327,6 +4465,10 @@ export function gpShutdown(): void {
     gpCtx.projectileRenderer = null;
     gpCegRuntime?.dispose();
     gpCegRuntime = null;
+    gpNativeFx?.dispose();
+    gpNativeFx = null;
+    gpUnitFx = null;
+    delete (globalThis as Record<string, unknown>).__nativeFx;
     gpBuildBeamRenderer?.dispose();
     gpBuildBeamRenderer = null;
     gpCombatFX?.dispose();
@@ -4362,6 +4504,12 @@ export function gpShutdown(): void {
     gpDeformTerrain = null;
     gpMapData = null;
     gpStartCameraFramed = false;   // re-frame the next game's start on load
+    // dispose() (not just null) — it holds a clientSettings 'gfx.sky'
+    // subscription that outlives scene.dispose() below and must be dropped
+    // explicitly, or every game session leaks one more closure onto a dead
+    // dome (see atmosphere.ts).
+    gpAtmosphere?.dispose();
+    gpAtmosphere = null;
     gpCtx.sceneLighting = null;
     gpEngine?.stopRenderLoop();
     // scene.dispose() tears down the terrain mesh, fog, water, lights, CSM,
@@ -4762,6 +4910,7 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                 gpOrbitRig.set(obj(1, {}));
             }
             gpOrbitRig.frame(gpCamera.fov, gpAspect());
+            gpOrbitCommit();
             return gpOrbitRig.state();
         }
         case 'orbitStop': {
@@ -4774,11 +4923,13 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         }
         case 'orbitSet':
             gpOrbitRig?.set(obj(0, {}));
+            gpOrbitCommit();
             return gpOrbitRig?.state() ?? null;
         case 'orbitFrame':
             if (gpOrbitRig && gpCamera) {
                 gpOrbitRig.frame(gpCamera.fov, gpAspect(), num(0, 0.7));
             }
+            gpOrbitCommit();
             return gpOrbitRig?.state() ?? null;
         case 'orbitState':
             return gpOrbitRig?.state() ?? null;
@@ -4830,6 +4981,28 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — PLAN-model-harness: world bounding sphere + E1 fallback probe —
         case 'entityBounds':
             return gpCtx.entityRenderer?.getEntityBounds(num(0)) ?? null;
+        // — capture-subject: def name → live entity ids, newest first —
+        case 'entitiesByDef':
+            return gpCtx.entityRenderer?.findEntitiesByDef(String(args[0] ?? '')) ?? [];
+        // — capture-sequence (ai-visual-debug V2): put the presentation cursor
+        //   ON the newest received frame. The filming path only; see
+        //   PresentationClock.snapToNewest for why the PLL cannot be relied on
+        //   to close a `sim_step`-sized gap, and why this is not the default. —
+        case 'presentationSnap': {
+            const c = gpPresentationClock;
+            if (!c) return { ok: false, reason: 'no presentation clock' };
+            const jumped = c.snapToNewest();
+            return {
+                ok: c.isAnchored,
+                jumpedFrames: jumped,
+                E: c.E,
+                P: c.P,
+                newestFrame: c.newestObservedFrame,
+                gameFrame: gpGameFrame,
+                paused: gpPaused,
+                simSpeed: gpSimSpeed,
+            };
+        }
         // — PLAN-model-harness: render-group toggles for the F8 panel —
         case 'setWireframe':
             if (gpScene) gpScene.forceWireframe = Boolean(args[0]);
@@ -5106,6 +5279,22 @@ function gpEnsureSunRig(): SunRig | null {
 /// Resolve a test-harness orbit target: a unit id tracks that entity's live
 /// bounding sphere; an {x, z, radius?} point is a static ground anchor
 /// (wreck inspection etc.).
+/**
+ * Push the rig's pose onto the Babylon camera NOW, instead of waiting for the
+ * next render-loop tick.
+ *
+ * The render loop early-returns while `gpRenderPaused` is set, and
+ * `gpOrbitRig.tick()` lives after that gate — so under `test.pause()` the
+ * sequence "aim the rig, then capture" used to capture the camera pose from
+ * BEFORE the aim, silently. `captureFrame` renders the scene itself when
+ * paused, which made it look like the framing call had simply been ignored.
+ * Ticking on every rig mutation costs two vector writes and makes rig ops
+ * synchronously effective whether or not rendering is paused.
+ */
+function gpOrbitCommit(): void {
+    gpOrbitRig?.tick();
+}
+
 function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
     if (typeof spec === 'number') {
         const unitId = spec;

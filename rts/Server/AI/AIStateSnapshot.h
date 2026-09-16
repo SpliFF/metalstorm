@@ -83,5 +83,18 @@ struct AIStateSnapshot {
     int lodLevel = 0;
 };
 
+/// Is this GAME-scoped rulesParam visible to an AI's snapshot? (AI1/F11.)
+///
+/// The default is the F11 rule: only entries published `{public = true}`
+/// cross into the snapshot. The exception is the diplomacy board — a gadget
+/// that publishes a proposal addressed to a team publishes it with the
+/// engine's default (private) los, and yet `Spring.GetGameRulesParam` serves
+/// GAME scope with RULESPARAMLOS_PRIVATE_MASK, so every player's Lua reads
+/// those keys already. Withholding them from the AI does not protect a
+/// secret; it just makes the AI the one participant that cannot hear an
+/// offer made to it. So a small prefix allow-list travels regardless of los:
+/// it grants the AI parity with a human client, never more.
+bool AISnapshotGameParamVisible(const std::string& key, int los);
+
 /// Build a snapshot for a specific AI team from the current sim state.
 AIStateSnapshot BuildAISnapshot(int teamId, int allyTeamId, int lodLevel = 0);

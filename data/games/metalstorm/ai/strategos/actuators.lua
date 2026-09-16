@@ -76,7 +76,22 @@ function Actuators.new(cfg)
     self.lastIntent = nil
     self.lastSuggestFrame = nil  -- rate limiter for suggest-only mode (mentor)
     self.ttlFrames = nil         -- set per apply() from the live tick period
+    self.proposalsThisTick = 0   -- parley originate rate limit (reset per apply)
+    -- Counters for the AI health line (main.lua publishes them each tick via
+    -- the `ai.health` message; game_ai_guidance.lua mirrors them as
+    -- ai_health_<playerID>_* team rulesParams). `spent` is the PREDICTED cost
+    -- of what went out — the authoritative charged figure is the synced side's
+    -- (RecordIntent), and the gadget publishes both, labelled.
+    self.stats = { directives = 0, spent = 0, skipped = 0, responses = 0,
+                   proposals = 0, deferred = 0, refused = 0 }
     return self
+end
+
+--- The health counters (a copy — callers never mutate the live table).
+function Actuators:getStats()
+    local out = {}
+    for k, v in pairs(self.stats) do out[k] = v end
+    return out
 end
 
 function Actuators._detect()
@@ -91,9 +106,8 @@ function Actuators._detect()
         log            = has('log'),               -- server-log channel (headless)
         marker         = has('marker') or has('setMarker'),
         stakeBounty    = has('stakeBounty'),      -- authority stake from AI
-        respond        = has('respondProposal'),  -- interaction §6.2 (not on the surface)
-        propose        = has('propose'),          -- interaction §6.2 (not on the surface)
-        sendMessage    = has('sendMessage'),      -- I1/SG1 (AI → synced RecvLuaMsg)
+        sendMessage    = has('sendMessage'),      -- I1/SG1 (AI → synced RecvLuaMsg);
+                                                  -- also carries BOTH parley verbs
     }
 end
 
@@ -180,18 +194,126 @@ function Actuators:marker(pos, txt)
     return false
 end
 
---- Respond to / originate a parley proposal (interaction §6.2). NOT gated on an
---- engine ask any more: I1 landed (`AI.sendMessage`, see :112), so parley could
---- be spoken over the same wire commands a human's panel sends — these two verbs
---- are simply unimplemented on the runtime surface, and building them on the
---- message funnel is PLAN-metalstorm-ai task 4(a) work, not this lane's.
-function Actuators:respondProposal(id, decision) -- decision: accept|reject|counterTerms
-    if self.caps.respond then return _G.AI.respondProposal(id, decision) end
-    return false
+--=============================================================================
+-- Parley (interaction §6.2) — spoken over the I1 funnel. Both verbs encode the
+-- SAME `parley.respond` / `parley.propose` wire strings a human's parley panel
+-- sends, and land in game_parley.lua's RecvLuaMsg with this AI's real playerID
+-- (AI3): the fee comes out of the AI's own pool, escrow is staked in its name,
+-- and the gadget's validators, caps and cooldowns apply unchanged (§7 "nothing
+-- in the parley gadget knows whether a team is human-led, AI-led, or mixed").
+--
+-- THE DEFERENCE RULE (co-commander, PLAN-metalstorm-ai §5.1 spirit). A pact
+-- binds the WHOLE team: game_parley.lua's ROE veto refuses every unit's attack
+-- orders, a tribute debits the team pool, a joint objective widens who may
+-- complete the team's objective. A guidance-bound role (`role.readsGuidance` —
+-- co_commander, i.e. an AI sharing its team with a present human) is by
+-- construction subordinate to those humans, so it NEVER binds them: it neither
+-- proposes nor answers. It does not reject either — a rejection would take the
+-- decision away from the human and start the 2 min E6 cooldown in their name.
+-- The proposal is left pending for the humans; main.lua narrates the deferral
+-- once. The single exception is ACCEPTING an `intel` offer: it obliges the
+-- team to nothing (the PROPOSER reveals their strength) and is free.
+-- When the last human leaves, the same VM upgrades to full_side (caretaker)
+-- and gains full parley authority; pacts it makes then are team pacts and
+-- survive the humans' return like any other synced state.
+--
+-- This is a STRUCTURAL gate in the write surface, same pattern as
+-- suggest-only mode: the pure core may evaluate whatever it likes, the verb
+-- refuses. `parleyAuthority()` is the one place the rule lives.
+--=============================================================================
+local PARLEY_DECISIONS = {
+    accept = 'accept', reject = 'reject',
+    counter = 'counter', counterTerms = 'counter',   -- the plan's spelling, too
+}
+
+--- 'full' | 'defer' — may this role bind its team into a pact?
+function Actuators:parleyAuthority()
+    local role = self.role
+    if role and role.readsGuidance then return 'defer' end
+    return 'full'
 end
+
+--- Answer a pending proposal addressed to our team.
+--- `proposal` is the Picture record ({ id, kind, ... }) or a bare id (then the
+--- kind is unknown and the deference exception cannot apply). `decision` is
+--- accept | reject | counter (alias counterTerms); `extra.kind` optionally
+--- re-kinds a counter. Returns ok[, reason] — the reason names WHY a response
+--- was not sent (deferred / no_verb / bad_decision / rejected-by-engine), so a
+--- caller can narrate rather than silently drop.
+function Actuators:respondProposal(proposal, decision, extra)
+    local id, kind = proposal, nil
+    if type(proposal) == 'table' then id, kind = proposal.id, proposal.kind end
+    local d = PARLEY_DECISIONS[decision]
+    if id == nil or not d then self.stats.refused = self.stats.refused + 1; return false, 'bad_decision' end
+    if not self.caps.sendMessage then return false, 'no_verb' end
+    if self:parleyAuthority() == 'defer' and not (kind == 'intel' and d == 'accept') then
+        self.stats.deferred = self.stats.deferred + 1
+        return false, 'deferred'
+    end
+    local fields = { id = id, decision = d }
+    if d == 'counter' and extra then
+        -- A counter restates the kind, the terms, or both. The term names are
+        -- game_parley.lua's ONE flat field set — the same names `propose`
+        -- sends — and anything left out falls back to the original proposal's
+        -- terms in GG.Parley.Respond. Without the terms a counter could only
+        -- re-send the very number it was objecting to, which is how the
+        -- planner's "counter at what we can actually pay" would have become
+        -- "repeat their demand back at them".
+        fields.kind = extra.kind
+        local t = extra.terms
+        if t then
+            fields.duration = t.duration
+            fields.regionKey = t.regionKey
+            fields.amount = t.amount
+            fields.perMinute = t.perMinute and '1' or nil
+            fields.payer = t.payer
+            fields.corridor = t.corridor
+            fields.unitClass = t.unitClass
+            fields.objectiveId = t.objectiveId
+            fields.split = t.split
+            fields.innerKind = t.innerKind
+            fields.orElse = t.orElse
+            fields.regionKeys = t.regionKeys
+        end
+    end
+    local ok = self:sendMessage(Wire.encode('parley.respond', fields))
+    if ok then self.stats.responses = self.stats.responses + 1
+    else self.stats.refused = self.stats.refused + 1 end
+    return ok, (not ok) and 'engine_refused' or nil
+end
+
+--- Rate limit on originating proposals: one per strategic tick. The gadget's
+--- own E6 caps (4 live outgoing, 2 min per-counterparty cooldown after a
+--- rejection, 15-authority fee) are the real brake; this only stops a planner
+--- bug from paying the fee N times in one tick.
+local MAX_PROPOSALS_PER_TICK = 1
+
+--- Originate a proposal to `toTeam` (a teamID, or 'civ' for the estate).
+--- `terms` uses game_parley.lua's term names (duration, regionKey, amount,
+--- perMinute, payer, corridor, unitClass, objectiveId, split, innerKind,
+--- orElse, regionKeys); a demand's inner terms are the same flat fields.
 function Actuators:propose(kind, toTeam, terms)
-    if self.caps.propose then return _G.AI.propose(kind, toTeam, terms) end
-    return false
+    if type(kind) ~= 'string' or toTeam == nil then return false, 'bad_args' end
+    if not self.caps.sendMessage then return false, 'no_verb' end
+    if self:parleyAuthority() == 'defer' then
+        self.stats.deferred = self.stats.deferred + 1
+        return false, 'deferred'
+    end
+    if self.proposalsThisTick >= MAX_PROPOSALS_PER_TICK then return false, 'rate_limited' end
+    terms = terms or {}
+    local fields = {
+        toTeam = toTeam, kind = kind,
+        duration = terms.duration, regionKey = terms.regionKey, amount = terms.amount,
+        perMinute = terms.perMinute and '1' or nil, payer = terms.payer,
+        corridor = terms.corridor, unitClass = terms.unitClass,
+        objectiveId = terms.objectiveId, split = terms.split,
+        innerKind = terms.innerKind, orElse = terms.orElse, regionKeys = terms.regionKeys,
+    }
+    self.proposalsThisTick = self.proposalsThisTick + 1
+    local ok = self:sendMessage(Wire.encode('parley.propose', fields))
+    if ok then self.stats.proposals = self.stats.proposals + 1
+    else self.stats.refused = self.stats.refused + 1 end
+    return ok, (not ok) and 'engine_refused' or nil
 end
 
 --=============================================================================
@@ -280,6 +402,17 @@ function Actuators:_directiveSpec(d, picture, priority)
         requestedStrength = math.max(0, math.floor(d.healthStrength or 0)),
         -- Every directive is MORTAL (D68). See _directiveTtlFrames.
         expiresInFrames = self:_directiveTtlFrames(),
+        -- The role's idle rule, stated on the wire (§5.1 "touches only idle
+        -- force"). A co-commander's directive must recruit ONLY units with an
+        -- empty command queue — never a unit its human teammate has ordered.
+        -- TODAY THE ENGINE IGNORES THIS FIELD: `AIDirectiveConditions`
+        -- (rts/Server/OrgGroups.cpp) hardcodes `idleOnly = false` for every AI
+        -- directive, so a co-commander's area directive CAN override a human's
+        -- standing orders. The field is emitted now so the C++ half is a
+        -- one-line read (see docs/reviews/2026-09-10/ai-actuation.md,
+        -- "Proposed C++ patches"); until it lands the guidance touch-locks and
+        -- the synced own-pool-only flag are the only hand-back protections.
+        idleOnly = (self.role and self.role.idleOnly) and true or false,
         -- No within-filter by default: draw idle unassigned squads from
         -- anywhere and advance them to the region. (Region-local tightening —
         -- within = {x=cx,z=cz,radius=radius} for pure hold directives — is a
@@ -319,7 +452,14 @@ function Actuators:_issueTagged(d, spec)
             region = d.region,
         }))
     end
-    return self:issueDirective(0, spec)          -- 0 = area scope
+    local ok = self:issueDirective(0, spec)      -- 0 = area scope
+    if ok then
+        self.stats.directives = self.stats.directives + 1
+        self.stats.spent = self.stats.spent + (tonumber(d.predictedCost) or 0)
+    else
+        self.stats.refused = self.stats.refused + 1
+    end
+    return ok
 end
 
 --=============================================================================
@@ -331,6 +471,7 @@ end
 --- rather than issuing an immortal directive.
 function Actuators:apply(plan, picture, opts)
     self.ttlFrames = opts and opts.tickFrames or nil
+    self.proposalsThisTick = 0
     -- Mentor/suggest-only mode (PLAN-metalstorm-onboarding.md §3): the planner
     -- runs normally but output routes to SUGGESTIONS via chat + suggested_for
     -- hints, rather than spending authority on real orders. The profile carries

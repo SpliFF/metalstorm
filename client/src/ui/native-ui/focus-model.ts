@@ -58,9 +58,10 @@ export type FocusKind =
     | 'squad'         // an org group, or a metalstorm squad unit
     | 'unit'          // raw unit ids that resolved to nothing named
     | 'town'          // a settlement / claimable POI
-    | 'enemy-force'   // a spotted hostile grouping
+    | 'enemy-force'   // a spotted hostile grouping (a selection of enemy units)
     | 'objective'     // a live objective
-    | 'area';         // a named place: region, district, landmark, zone
+    | 'area'          // a named place: region, district, landmark, zone
+    | 'ai';           // the team's co-commander AI (ai-hud.ts owns its rung 2)
 
 /**
  * One thing the player can be focused on.
@@ -158,9 +159,25 @@ export interface FocusGroupLike {
  * truthful answer, not an ambiguity to resolve here. Whoever needs ONE subject
  * (an order, a pronoun) applies its own tie-break with the whole list in hand.
  */
+export interface ResolveOptions {
+    /**
+     * Whether a unit id is an ENEMY unit. Supplied by the binding from the
+     * LOS-honest census (`side === 'enemy'`); absent ⇒ nothing is hostile.
+     *
+     * Hostile units never join an org group (a group is ours by construction),
+     * so they are split out of the loose remainder into an `enemy-force` ref —
+     * the directive's own third selectable kind. A selection of enemy tanks
+     * labelled "3 units" with a Halt button is a lie twice over: the sim will
+     * refuse the order, and the chip has told the player nothing about whose
+     * tanks they are.
+     */
+    isHostile?: (unitId: number) => boolean;
+}
+
 export function resolveSelectionSubjects(
     unitIds: readonly number[],
     groups: readonly FocusGroupLike[],
+    opts: ResolveOptions = {},
 ): FocusRef[] {
     if (unitIds.length === 0) return [];
 
@@ -189,7 +206,11 @@ export function resolveSelectionSubjects(
         });
     }
 
-    const loose = unitIds.filter((id) => !claimed.has(id));
+    const unclaimed = unitIds.filter((id) => !claimed.has(id));
+    const isHostile = opts.isHostile;
+    const hostile = isHostile ? unclaimed.filter((id) => isHostile(id)) : [];
+    const loose = isHostile ? unclaimed.filter((id) => !isHostile(id)) : unclaimed;
+
     if (loose.length > 0) {
         subjects.push({
             kind: 'unit',
@@ -199,6 +220,16 @@ export function resolveSelectionSubjects(
             label: loose.length === 1 ? `Unit ${loose[0]}` : `${loose.length} units`,
             unitIds: loose,
             data: { selectedCount: loose.length },
+        });
+    }
+
+    if (hostile.length > 0) {
+        subjects.push({
+            kind: 'enemy-force',
+            id: hostile.slice().sort((a, b) => a - b).join(','),
+            label: hostile.length === 1 ? 'Enemy unit' : `${hostile.length} enemy units`,
+            unitIds: hostile,
+            data: { selectedCount: hostile.length, hostile: true },
         });
     }
 
@@ -231,6 +262,15 @@ export interface NLFocusView {
     primary: FocusBrief | null;
     subjects: FocusBrief[];
     drilled: FocusBrief | null;
+    /**
+     * The ref under the pointer right now, if any — a chip being hovered, an
+     * objective row the mouse is resting on. Weaker than `primary`: it is
+     * what "this one" may mean while the pointer is on it, and nothing once
+     * the pointer leaves. Never promoted to `primary` here; an interpreter
+     * that wants to prefer it does so explicitly (see lib/focus.js's
+     * `primaryOf` for the documented tie-break).
+     */
+    hovered?: FocusBrief | null;
     openSurfaces: string[];
     selectionCount: number;
 }
@@ -278,6 +318,16 @@ function placeNameOf(ref: FocusRef): string | undefined {
 export class FocusModel {
     private state: FocusState = EMPTY;
     private listeners = new Set<Listener>();
+    /**
+     * The hovered ref lives OUTSIDE `FocusState` and has its own listeners.
+     * Hover changes on every pointer move across a chip stack; routing them
+     * through `commit` would re-render every drilldown on every mouse pass —
+     * the per-frame DOM churn PLAN-native-ui.md forbids, arriving by a side
+     * door. Surfaces that render from `subscribe` never see a hover; the NL
+     * layer reads it through `nlFocus()` at the moment it needs it.
+     */
+    private hovered: FocusRef | null = null;
+    private hoverListeners = new Set<(ref: FocusRef | null) => void>();
 
     getState(): FocusState {
         return this.state;
@@ -287,6 +337,45 @@ export class FocusModel {
     subscribe(listener: Listener): () => void {
         this.listeners.add(listener);
         return () => { this.listeners.delete(listener); };
+    }
+
+    // ── hover: the weakest focus ──────────────────────────────────────────
+
+    /** The pointer is on `ref`'s affordance. Replaces any previous hover. */
+    hover(ref: FocusRef): void {
+        if (this.hovered && focusRefKey(this.hovered) === focusRefKey(ref)) return;
+        this.hovered = ref;
+        this.notifyHover();
+    }
+
+    /**
+     * The pointer left `ref` (or, with no argument, left whatever it was on).
+     * Scoped by ref so a `mouseleave` from an old chip that fires AFTER the
+     * `mouseenter` of its neighbour cannot clear the neighbour's hover.
+     */
+    unhover(ref?: FocusRef): void {
+        if (this.hovered === null) return;
+        if (ref && focusRefKey(ref) !== focusRefKey(this.hovered)) return;
+        this.hovered = null;
+        this.notifyHover();
+    }
+
+    getHovered(): FocusRef | null {
+        return this.hovered;
+    }
+
+    /** Hover-only notifications, kept off the main listener set on purpose. */
+    subscribeHover(listener: (ref: FocusRef | null) => void): () => void {
+        this.hoverListeners.add(listener);
+        return () => { this.hoverListeners.delete(listener); };
+    }
+
+    private notifyHover(): void {
+        for (const listener of this.hoverListeners) {
+            try { listener(this.hovered); } catch (e) {
+                console.error('[focus-model] hover subscriber threw:', e);
+            }
+        }
     }
 
     /**
@@ -311,7 +400,7 @@ export class FocusModel {
             // A place/objective drill-down is not about the selection at all,
             // so a selection change must not close it.
             drilled.kind === 'objective' || drilled.kind === 'area' ||
-            drilled.kind === 'town' ||
+            drilled.kind === 'town' || drilled.kind === 'ai' ||
             nextSubjects.some((s) => focusRefKey(s) === focusRefKey(drilled))
         );
 
@@ -361,6 +450,7 @@ export class FocusModel {
 
     /** Full reset — session teardown, or a game that ended. */
     clear(): void {
+        if (this.hovered !== null) { this.hovered = null; this.notifyHover(); }
         if (this.state === EMPTY) return;
         this.commit(EMPTY);
     }
@@ -394,6 +484,7 @@ export class FocusModel {
             primary: drilled ?? (subjects.length === 1 ? subjects[0] : null),
             subjects,
             drilled,
+            hovered: this.hovered ? brief(this.hovered) : null,
             openSurfaces: [...this.state.openSurfaces],
             selectionCount: this.state.unitIds.length,
         };
@@ -474,14 +565,36 @@ export interface FocusStoreLike {
 export function bindSelectionToFocus(
     store: FocusStoreLike,
     model: FocusModel = focusModel,
+    opts: ResolveOptions = {},
 ): () => void {
     const resolve = () => {
         const ids = store.getSelection().unitIds;
-        model.setSelection(ids, resolveSelectionSubjects(ids, store.getOrgGroups()));
+        model.setSelection(ids, resolveSelectionSubjects(ids, store.getOrgGroups(), opts));
     };
     const unsubscribe = store.subscribe(['selection', 'orgGroups'], resolve);
     resolve();
-    return unsubscribe;
+    if (model === focusModel) sessionResolve = resolve;
+    return () => {
+        unsubscribe();
+        if (sessionResolve === resolve) sessionResolve = null;
+    };
+}
+
+/** The live binding's resolve, so a later data arrival can re-run it. */
+let sessionResolve: (() => void) | null = null;
+
+/**
+ * Re-resolve the session selection against whatever the resolvers know NOW.
+ *
+ * The binding re-runs on a selection or roster change and on nothing else,
+ * but `isHostile` reads a census snapshot that arrives AFTER the selection it
+ * describes (the HUD pulls one on selection change). Without this, a click on
+ * enemy tanks resolves to "3 units" a moment before the census can say whose,
+ * and stays that way until the player clicks again. `focus-hud.ts` calls it
+ * once each census refresh lands. No-op with no session binding.
+ */
+export function refocusSelection(): void {
+    sessionResolve?.();
 }
 
 // ──────────────────────────────── helpers ───────────────────────────────

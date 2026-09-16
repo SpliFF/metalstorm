@@ -1,0 +1,11 @@
+{
+  "id": "overlay_rust_streaks",
+  "class": "overlay",
+  "prompt": "Gravity-fed rust streaks running downward from bolt heads and seams, rust-toned on transparent alpha.",
+  "seed": 100501,
+  "width": 1024,
+  "height": 1024,
+  "tint": "#7a3b1e",
+  "output": "art/gen/overlays/rust_streaks.png",
+  "post": ["seamless", "pow2"]
+}

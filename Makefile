@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: check-skills setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-gadget-lua test-gadget-lua-baseline test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -47,6 +47,27 @@ test-client:
 
 test-all: test-cpp test-client
 
+# spring-debug MCP pure unit tests (no stack needed): the tool-arg validator,
+# the direct/scenario manifest merges, the stack census, the room-end
+# classifier, the sqlite-health probe, the scenario validator and the
+# capture_subject ordering rules. Its own `npm install` is a precondition —
+# node_modules there is gitignored and a fresh clone has none.
+#
+# NOT in test-all on purpose: two scenario-validate cases read baked def
+# caches (`data/games/<id>/cache/defs`) and a map's region graph, so they need
+# a game to have been run once in this tree and fail loudly otherwise. Running
+# them from a gate that has never booted a server would be a permanent red.
+test-debug-mcp: check-skills
+	cd tools/debug-mcp && npm install --silent && node --test
+
+# Skill/agent drift check: every MCP tool, tool argument, exec verb, HTTP
+# route, window.test method and file path named in .claude/{skills,agents}
+# must exist in the code. Hung off test-debug-mcp because the tool catalogue
+# it checks against is that suite's subject — a tool renamed there without the
+# skills following is precisely what this catches. No build, no servers.
+check-skills:
+	tools/claude-config/check-skills.sh
+
 # headless-batch pure unit tests (no server build needed): matrix expansion
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity
 # checks, the replay-verdict parser and the spectate-arm rules (PLAN-replay.md
@@ -55,6 +76,50 @@ test-all: test-cpp test-client
 # veto-loop verdict (PLAN-ai-synced-write.md task 5).
 test-headless-batch:
 	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs test/churn-checks.test.mjs test/key-census.test.mjs test/ai-veto-checks.test.mjs
+
+# AI-player suites (docs/ai-players.md). Pure Lua + busted, no server, no
+# build: the reusable library (ai/lib), the garrison's doctrine core and the
+# strategos. Each runs from its own plugin root because the AI VM's `require`
+# is plugin-scoped (F3) — cwd IS the module root, exactly as it is in the
+# runtime.
+test-ai-lua:
+	cd data/games/metalstorm/ai && busted lib/tests/
+	cd data/games/metalstorm/ai/garrison && busted tests/
+	cd data/games/metalstorm/ai/strategos && busted tests/
+
+# Every Metalstorm gadget busted spec (docs/debugging-tools.md "gadget lua
+# tests"), each family run from the cwd it needs — mock-driven gadget specs,
+# authority/civilians/objectives/parley/regions type modules, and the
+# scenario family, which needs the game root. One pass/fail/error summary;
+# exit is non-zero only when a family regresses past its recorded baseline
+# in tools/scripts/gadget-baseline.json (two families carry known
+# pre-existing red there — see the script's own header, not a bug to chase
+# here). Run one family only with `make test-gadget-lua FAMILY=<name>`.
+# ai/ has the same cwd-per-plugin-root pattern but is covered by test-ai-lua
+# above, not duplicated here.
+test-gadget-lua:
+	FAMILY=$(FAMILY) tools/scripts/test-gadget-lua.sh
+
+# Rewrite tools/scripts/gadget-baseline.json from the current tree's results.
+# A deliberate act — run it only when a change to the baseline (new known-red,
+# or a genuine fix) is intended, never as part of routine testing.
+test-gadget-lua-baseline:
+	WRITE_BASELINE=1 tools/scripts/test-gadget-lua.sh
+
+# AI evaluation harness (docs/reviews/2026-09-10/ai-framework.md task 4): every
+# AI plugin against every fixture, scored on what the SIM would have done with
+# its commands — directives that survived the drain, authority actually
+# charged, reaction latency, and any reach for the per-unit verb the strategic
+# floor forbids. Hermetic (one `lua` process per cell against ai/lib's fake
+# engine), so it is a gate and not a nightly. The scorer's own unit tests run
+# first: a scoreboard nobody checks flatters whatever it measures.
+#
+# Exit 1 = a fixture expectation failed; exit 2 = a regression against
+# tools/ai-eval/baseline.json. Re-baseline with:
+#   node tools/ai-eval/run-eval.mjs --save-baseline
+test-ai-eval:
+	node --test tools/ai-eval/score.test.mjs
+	node tools/ai-eval/run-eval.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.

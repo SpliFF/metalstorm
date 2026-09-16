@@ -118,7 +118,7 @@
 
     {
       "name": "a refusal part-way stops the plan and names what was skipped",
-      "utterance": "prioritise Northgate, patrol Slag Forge, and hold Osprey Fen",
+      "utterance": "prioritise Northgate, scout Black Ridge, and hold Osprey Fen",
       "context": "basin",
       "note": "M5 changed this from M1's 'a refusal does not stop the plan'. A multi-step envelope is one sentence split up, and its steps lean on each other — running step 3 on the assumption that step 2 happened is how a plan half-executes into a position nobody asked for. Skipping is recoverable; an order sent on a false premise costs authority and moves an army. The stop line names the step that ran and the one that didn't.",
       "expected": {
@@ -127,9 +127,9 @@
           {
             "kind": "command",
             "intent": {
-              "verb": "patrol",
+              "verb": "scout",
               "subject": { "type": "any" },
-              "target": { "type": "entity-ref", "name": "Slag Forge" }
+              "target": { "type": "entity-ref", "name": "Black Ridge" }
             }
           },
           {

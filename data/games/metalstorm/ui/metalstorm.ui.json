@@ -1,7 +1,7 @@
 {
   "_comment": "Metalstorm native JS UI manifest (PLAN-native-ui.md §3). Widgets receive a ui-store read API, a DOM mount inside #ui-root, and the validated command/directive submission API. Panel CHROME (frame, header, collapse toggle, count badge) is built by the loader from the `title`/`collapsible`/`collapsed` fields below — widgets render content only, so every panel looks the same by construction.",
-  "_retired": "objectives-panel — folded into the top-centre `objective-hud` (U1, DESIGN-DRILLDOWN.md §7). Its 5-entry outcome log is superseded by the rung-4 Events tab (U3); its bounty FORM is still homeless and still has no wire target (`objectives.createBounty`), which is why the widget file stays on disk unmounted.  command-composer — RETIRED by U4 (DESIGN-DRILLDOWN.md §7). `[VERB][SUBJECT][TARGET][WHEN]` chips plus a priority slider is the spreadsheet the design directive names: a four-slot form for issuing one order. It is replaced by two things that landed first — rung-3 actions on the thing itself (U0/U1: Halt, Follow, Assign to AI) and the command line's sentence, which reads the same compile table through the same envelope. client/src/native-widgets/command-composer.js stays on disk, unmounted, with its suite green: it is the only surface that can draw a ROUTE target (`nl-resolver.ts` refuses route verbs by name and points at it), so re-homing that map arm as a rung-3 action is the work that would let the file be deleted.",
-  "_layout": "BOTH RAILS ARE EMPTY and so is the BOTTOM (U3+U4, DESIGN-DRILLDOWN.md §6/§7). Docking keeps the centre and lower-centre of the viewport clear for unit selection and orders: authority pill top-left; the drill-down chip stacks (focus + objectives) top-centre; the ONE global access point top-right, with the decaying battle notices under it. Statistics, reports, events, objectives and diplomacy live behind the access point as `mount: \"menu:<tab>\"` — a widget has exactly one mount, which is how §6's rule 'if a surface is in the tab strip it is not also a rail panel' is enforced by construction rather than by anyone remembering it. bottom-center holds only the summonable command line, which is absent from the DOM until `/` is pressed. Bottom-left and bottom-right belong to the engine HUD (selection readout, minimap).",
+  "_retired": "objectives-panel — folded into the top-centre `objective-hud` (U1, DESIGN-DRILLDOWN.md §7); DELETED 2026-09-10 (hud-drilldown review): its outcome log was superseded by the Events tab and its bounty FORM never had a wire target (`objectives.createBounty` does not exist), so the file was a dead form waiting for a verb. ui/lib/objectives.js stays as the pure wire-contract mirror.  command-composer — RETIRED by U4 (DESIGN-DRILLDOWN.md §7). `[VERB][SUBJECT][TARGET][WHEN]` chips plus a priority slider is the spreadsheet the design directive names. Replaced by rung-3 actions on the thing itself and the command line's sentence. client/src/native-widgets/command-composer.js stays on disk, unmounted, with its suite green: it is the only surface that can draw a ROUTE target (`nl-resolver.ts` refuses route verbs by name and points at it). The game-dir `widgets/command-composer.js` STUB ('Composer (stub)') was deleted 2026-09-10 — it was never what the manifest mounted.",
+  "_layout": "BOTH RAILS ARE EMPTY and so is the BOTTOM (U3+U4, DESIGN-DRILLDOWN.md §6/§7). Docking keeps the centre and lower-centre of the viewport clear for unit selection and orders: authority pill top-left with the AI chip under it (both drill; neither is open by default); the drill-down chip stacks (focus + objectives) top-centre; the ONE global access point top-right, with the decaying battle notices under it. Statistics, reports, events, objectives and diplomacy live behind the access point as `mount: \"menu:<tab>\"` — a widget has exactly one mount, which is how §6's rule 'if a surface is in the tab strip it is not also a rail panel' is enforced by construction rather than by anyone remembering it. bottom-center holds only the summonable command line, which is absent from the DOM until `/` is pressed. Bottom-left and bottom-right belong to the engine HUD (selection readout, minimap).",
   "game": "metalstorm",
   "uiVersion": 1,
   "styles": [
@@ -12,12 +12,39 @@
       "id": "authority-bar",
       "entry": "widgets/authority-bar.js",
       "mount": "top-left",
-      "_chrome": "No title — the pill renders its own compact frame; a header would double its height for no extra information.",
+      "_chrome": "No title — the pill renders its own compact frame; a header would double its height for no extra information. The pill is a rung-0 button: click (or Enter) drills into the authority LEDGER (pools, where charges draw from, cost scale, recent awards/refusals); Esc closes it and returns focus to the pill. Never open by default.",
+      "nlAliases": [
+        "authority",
+        "authority ledger",
+        "ledger",
+        "my authority",
+        "budget"
+      ],
       "subscribes": [
         "teamRulesParams",
         "gameRulesParams",
         "playerRoster"
       ]
+    },
+    {
+      "id": "ai-hud",
+      "entry": "widgets/ai-hud.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/ui/native-ui/ai-hud.ts) via BUILTIN_WIDGETS — one createDrilldown over the same guidance_<team>_* params the Reports-tab panel reads.",
+      "mount": "top-left",
+      "_chrome": "NO title: a rung-1 chip under the authority pill, present ONLY while an AI guides this team (feature-detected from guidance_<team>_stance or an AI roster seat). Reads the ai-actuation lane's health params by name (guidance_<team>_health / _health_note / _activity) and renders nothing for them until they exist. Its rung 3 cycles the stance and hands off to the AI Command panel in the Reports tab.",
+      "nlAliases": [
+        "ai",
+        "the ai",
+        "co-commander",
+        "ai status",
+        "ai health"
+      ],
+      "subscribes": [
+        "teamRulesParams",
+        "playerRoster"
+      ],
+      "hideForSpectator": true
     },
     {
       "id": "focus-hud",
@@ -74,7 +101,44 @@
       ]
     },
     {
+      "id": "mentor-card",
+      "entry": "widgets/mentor-card.js",
+      "mount": "left",
+      "title": "Mentor",
+      "nlAliases": [
+        "mentor",
+        "mentor card",
+        "my mentor",
+        "mentorship"
+      ],
+      "_chrome": "PLAN-beta.md \"Mentorship\". The one place the relationship is visible: who is watching, what they have ordered, and the \"Show everything\" toggle that lifts the chatter filter. It renders nothing at all while there is no mentorship EXCEPT the one 30-second offer of an AI mentor, so a player who never enters one never sees a panel.",
+      "subscribes": [
+        "gameRulesParams",
+        "teamRulesParams",
+        "playerRoster"
+      ],
+      "hideForSpectator": true
+    },
+    {
+      "id": "tutorial-guide",
+      "entry": "widgets/tutorial-guide.js",
+      "mount": "left",
+      "title": "Guide",
+      "_note": "Written by the tutorial lane (PLAN-beta-journey.md lane E). The entry is listed ahead of the file so the manifest does not have to change when it lands; until then the dynamic import 404s and the loader logs one failed-widget line and carries on — every other widget still mounts.",
+      "nlAliases": [
+        "guide",
+        "tutorial",
+        "coach"
+      ],
+      "subscribes": [
+        "gameRulesParams",
+        "selection"
+      ],
+      "hideForSpectator": true
+    },
+    {
       "id": "scoreboard-panel",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/scoreboard-panel.js",
       "mount": "menu:statistics",
       "title": "Scoreboard",
@@ -91,6 +155,7 @@
     },
     {
       "id": "parley-panel",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/parley-panel.js",
       "mount": "menu:diplomacy",
       "title": "Parley",
@@ -110,6 +175,7 @@
     },
     {
       "id": "ai-command-panel",
+      "revealOn": "me:rank >= 3",
       "entry": "widgets/ai-command-panel.js",
       "mount": "menu:reports",
       "title": "AI Command",
@@ -128,6 +194,7 @@
     },
     {
       "id": "event-log",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/event-log.js",
       "builtin": true,
       "_builtin_note": "Mounted from client/src/ui/native-ui/moment-hud.ts's `eventLog` export — the notices and the log render the same BattleMoment records through the same phrasing, so they share a module by construction.",

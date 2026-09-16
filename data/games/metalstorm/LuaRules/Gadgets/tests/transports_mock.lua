@@ -89,6 +89,9 @@ function M.new(scenario)
     }
 
     function world.rp(key) return world.gameRulesParams[key] end
+    world.beached = {}                             -- cargo the gadget put ashore itself
+    world.heightAt = function() return 0 end       -- flat dry map by default
+    function world.setWater(depth) world.heightAt = function() return -depth end end
     function world.trp(team, key)
         local t = world.teamRulesParams[team]
         return t and t[key]
@@ -178,7 +181,28 @@ function M.new(scenario)
         GetGameFrame = function() return world.frame end,
         GetGaiaTeamID = function() return world.gaiaTeam end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
-        GetGroundHeight = function() return 0 end,
+        -- Terrain-vs-kind validation (2026-09-10) reads the heightmap; a spec
+        -- that stages a SEA wave sets `world.heightAt` to answer under water.
+        GetGroundHeight = function(x, z) return world.heightAt(x, z) end,
+        -- The engine's own passability answer for a square, which
+        -- terrainProblem() consults for a GROUND/SHIP carrier's entry point.
+        -- Modelled the way the engine actually behaves and the way it burned a
+        -- live run on 2026-09-17: it asks a def's GROUND MoveDef, so it says
+        -- NO over water — including for an aircraft, which has no movedef at
+        -- all. Absent from this mock the guard was simply inert in every spec,
+        -- which is why "an air wave cannot enter over the sea" only ever
+        -- surfaced in a real game.
+        -- Per-DEF, the way the engine answers: it consults THAT def's own
+        -- MoveDef. A landing ship is satisfied by deep water and refused on
+        -- land; a ground def is the reverse; an aircraft has no MoveDef at all
+        -- and is refused everywhere, which is the case that burned the live
+        -- run.
+        TestMoveOrder = function(defID, x, _, z)
+            local h = world.heightAt(x, z)
+            if defID == M.LANDING_SHIP then return h < 0 end
+            if defID == M.AIRSHIP then return false end
+            return h >= 0
+        end,
 
         GetTeamList = function()
             local out = {}
@@ -291,6 +315,14 @@ function M.new(scenario)
                 end
             end
             world.transporterOf[cargoID] = nil
+        end,
+        -- The beaching fallback (game_transports BEACH_AFTER_RETRIES) puts a
+        -- stalled sea wave's cargo ashore with UnitDetach + SetUnitPosition,
+        -- the same scriptless pair game_train.lua uses.
+        SetUnitPosition = function(id, x, z)
+            local u = world.units[id]
+            if u then u.x, u.z = x, z end
+            world.beached[#world.beached + 1] = { id = id, x = x, z = z }
         end,
         ValidUnitID = function(id) return world.units[id] ~= nil end,
         GetUnitHealth = function(id)

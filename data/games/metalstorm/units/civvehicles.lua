@@ -22,7 +22,7 @@ return {
         movementclass = 'VEH',
         maxdamage = 350, mass = 220,
         maxvelocity = 2.8, acceleration = 0.2, brakerate = 0.2, turnrate = 550,
-        footprintx = 2, footprintz = 3,
+        footprintx = 2, footprintz = 5,   -- 10.7 m bus: cells x 2 = 10 m (was 3 = 6 m)
         sightdistance = 250,
         canmove = true, canattack = false, canpatrol = true, canstop = true,
         -- Extraction carrier: it must actually be able to LOAD its passengers.

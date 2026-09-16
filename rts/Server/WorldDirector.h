@@ -116,6 +116,13 @@ struct WorldDefaults {
     int    factionNameMaxLen     = 32;
     int    factionNameMinLen     = 3;
 
+    // ── Escrow (mirrored by WorldEscrowRules::FromWorldConfig) ─────────────
+    // Seeded here so a world's config names every rate that prices it (F12);
+    // WorldEscrow.h documents what each one means.
+    double escrowAnnihilatedCaptureFraction = 0.25;
+    double escrowWithdrewThresholdFraction  = 0.50;
+    double escrowHeldSpoilsTreasury         = 25.0;
+
     // ── W8: the stat family's rates (Captures 23/24/27 + 12) ───────────────
     // Resolved by `WorldStatRules::FromWorldConfig` (WorldStats.h), which
     // documents what each one means. They live here so a world is seeded with

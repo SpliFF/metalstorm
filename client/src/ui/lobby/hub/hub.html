@@ -1,0 +1,56 @@
+<!-- Hub (PLAN-beta-journey.md §(e)): the post-login screen until tier 1.
+     Three verbs — Explore, Spectate, First Mission — and the full Mission
+     list one click away. `callsign`, `tier`, `faction` come from
+     /api/account/me (or their fallbacks) via LobbyUI. -->
+<div class="entry entry-hub">
+    <div class="entry-backdrop"></div>
+    <header class="entry-top">
+        <span class="entry-stamp">{{game_title}} <i>//</i> hub</span>
+        <div class="hub-account">
+            <span class="hub-callsign">{{callsign}}</span>
+            <span class="hub-tier">{{tier}}</span>
+            <span class="hub-faction">{{faction}}</span>
+        </div>
+        <div class="entry-top-tools">
+            <button type="button" class="entry-link" id="hub-browser-btn">All Missions</button>
+            <button type="button" class="entry-link" id="hub-help-btn">Field manual</button>
+            <button type="button" class="entry-link" id="logout-btn">Log out</button>
+        </div>
+    </header>
+    <main class="hub-stage">
+        <p class="entry-kicker hub-kicker" id="hub-greeting">Welcome to the Faction, {{callsign}}.</p>
+        <div class="hub-cards">
+            <article class="hub-card">
+                <span class="hub-num">01</span>
+                <h2>Explore</h2>
+                <p>The World map: who holds what, where the fronts are, which Missions are open.</p>
+                <button type="button" class="entry-btn" id="hub-explore-btn">Open the World</button>
+            </article>
+            <article class="hub-card">
+                <span class="hub-num">02</span>
+                <h2>Spectate</h2>
+                <p>Watch a Mission from above. See how a battle breathes before you are in one.</p>
+                <button type="button" class="entry-btn" id="hub-spectate-btn">Watch a Mission</button>
+            </article>
+            <article class="hub-card hub-card-mission">
+                <span class="hub-num">03</span>
+                <h2>First Mission</h2>
+                <p>Two ways in. Both are short, both count toward your Standing.</p>
+                <div class="hub-mission-row">
+                    <button type="button" class="entry-btn entry-btn-primary" id="hub-solo-btn">Solo</button>
+                    <span class="hub-mission-what">Your own training Mission. A few squads, no pressure.</span>
+                </div>
+                <div class="hub-mission-row">
+                    <button type="button" class="entry-btn" id="hub-support-btn">Support</button>
+                    <span class="hub-mission-what">A minor role in a larger battle.
+                        <span class="hub-badge">you'll join as support</span></span>
+                </div>
+                <p class="entry-msg" id="hub-msg"></p>
+            </article>
+        </div>
+        <p class="hub-guest-note" id="hub-guest-note" style="display:none">
+            You are here as a guest. <button type="button" class="entry-inline-link" id="hub-claim-btn">Claim this account</button>
+            to keep your Standing.
+        </p>
+    </main>
+</div>

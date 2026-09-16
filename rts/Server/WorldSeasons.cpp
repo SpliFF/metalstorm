@@ -6,10 +6,15 @@
 #include <map>
 #include <sstream>
 
+#include <unordered_map>
+
 #include "SqliteThreading.h"
+#include "WorldConquest.h"
 #include "WorldDirector.h"
 #include "WorldEconomy.h"
+#include "WorldEscrow.h"
 #include "WorldFactions.h"
+#include "WorldStats.h"
 
 namespace {
 
@@ -270,7 +275,7 @@ bool InsertDigest(sqlite3* db, const WorldSeasonDigestRecord& d) {
 /// against `world_settlement_ledger`/`world_economy_events` (see the header:
 /// a rollover never mutates either ledger), then one INSERT per faction/
 /// bucket that had anything to record.
-void ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
+bool ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
                    int64_t nowWorldMs, int64_t nowRealMs) {
     struct Bucket {
         int    settlementsWon = 0;
@@ -282,6 +287,15 @@ void ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
     // Settlements: everything appended since the PREVIOUS season's rollover
     // (the cursor this season opened with) — see the header for why a
     // row-order cursor is used instead of a world-ms window.
+    //
+    // Per WORLD faction: a settlement is "won" by every faction on the
+    // winning side that had force engaged or a claim resolved `won` by it.
+    // Side keys go to a separate `side:<key>` bucket so the archive still
+    // says which side took the field (F2 — one digest, ONE id space per key).
+    std::unordered_map<std::string, std::string> sideOf;
+    for (const auto& f : WorldFactions::ListFor(db, closing.worldId))
+        sideOf[f.factionId] = f.sideKey;
+    const auto claims = WorldConquest::ClaimsFor(db, closing.worldId);
     for (const auto& s : WorldDirector::SettlementsFor(db, closing.worldId)) {
         if (s.settlementId <= closing.settlementCursorStart) continue;
         const auto winners = SplitFactions(s.factions);
@@ -289,8 +303,15 @@ void ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
             buckets[""].settlementsWon += 1;  // unclaimed — no in-sim winner
             continue;
         }
-        for (const auto& f : winners)
-            buckets[f].settlementsWon += 1;
+        for (const auto& side : winners)
+            buckets["side:" + side].settlementsWon += 1;
+        for (const auto& c : claims)
+            if (c.settlementId == s.settlementId && c.state == WorldClaimState::Won)
+                buckets[c.factionId].settlementsWon += 1;
+        for (const auto& [fid, side] : sideOf)
+            if (!side.empty() && SettlementNamesFaction(s.factions, side) &&
+                WorldEscrow::EngagedOrSettledForRoom(db, s.roomId, fid))
+                buckets[fid].settlementsWon += 1;
     }
 
     // Economy: `world_ms` is exact (the tick's own `nowWorldMs`), so the
@@ -324,8 +345,11 @@ void ArchiveSeason(sqlite3* db, const WorldSeasonRecord& closing,
                                     ? 0.0
                                     : WorldEconomy::TreasuryFor(db, closing.worldId, factionId);
         d.recordedAt         = nowRealMs;
-        InsertDigest(db, d);
+        // A failed digest row fails the archive — inside the rollover
+        // transaction that rolls everything back to retry next tick (F3).
+        if (!InsertDigest(db, d)) return false;
     }
+    return true;
 }
 
 int64_t MaxSettlementId(sqlite3* db, const std::string& worldId) {
@@ -342,6 +366,8 @@ WorldSeasons::TickResult WorldSeasons::Tick(sqlite3* db, const std::string& worl
                                             int64_t nowWorldMs, int64_t nowRealMs) {
     TickResult result;
     if (!db || worldId.empty()) return result;
+    // Seasons disabled — same convention as `claimExpiryWorldMs` (F17).
+    if (rules.seasonLengthWorldMs <= 0) return result;
 
     const auto current = CurrentSeason(db, worldId);
     if (!current) {
@@ -349,8 +375,15 @@ WorldSeasons::TickResult WorldSeasons::Tick(sqlite3* db, const std::string& worl
         // ticked for the first time long after it was founded must not owe a
         // season's worth of retroactive length (same rule W9's cursor-plant
         // uses for the economic tick).
-        InsertSeason(db, worldId, /*seasonNumber=*/1, nowWorldMs,
-                    /*settlementCursorStart=*/0, nowRealMs);
+        //
+        // A world may have ENDED seasons but no active one (a crash between
+        // CloseSeason and InsertSeason on an older build): continue the
+        // numbering rather than colliding with season 1's UNIQUE index (F3).
+        int next = 1;
+        for (const auto& s : SeasonsFor(db, worldId))
+            next = std::max(next, s.seasonNumber + 1);
+        InsertSeason(db, worldId, next, nowWorldMs,
+                     next == 1 ? 0 : MaxSettlementId(db, worldId), nowRealMs);
         return result;
     }
 
@@ -360,12 +393,18 @@ WorldSeasons::TickResult WorldSeasons::Tick(sqlite3* db, const std::string& worl
     // paused world's worldMs does not move at all, so `elapsed` would be 0,
     // already caught above) — no separate pause guard is needed.
 
-    ArchiveSeason(db, *current, nowWorldMs, nowRealMs);
-    CloseSeason(db, worldId, current->seasonNumber, nowWorldMs);
-
-    const int64_t cursorForNext = MaxSettlementId(db, worldId);
+    // One transaction for archive + close + open (F3): a crash can no longer
+    // strand the world between seasons, and a failed digest insert rolls the
+    // whole rollover back to be retried next tick.
     const int nextSeasonNumber = current->seasonNumber + 1;
-    InsertSeason(db, worldId, nextSeasonNumber, nowWorldMs, cursorForNext, nowRealMs);
+    const bool committed = SqliteWriteTransaction(db, "WorldSeasonRollover", [&] {
+        if (!ArchiveSeason(db, *current, nowWorldMs, nowRealMs)) return SQLITE_ERROR;
+        if (!CloseSeason(db, worldId, current->seasonNumber, nowWorldMs)) return SQLITE_ERROR;
+        if (!InsertSeason(db, worldId, nextSeasonNumber, nowWorldMs,
+                          MaxSettlementId(db, worldId), nowRealMs)) return SQLITE_ERROR;
+        return SQLITE_OK;
+    });
+    if (!committed) return result;
 
     result.rolledOver         = true;
     result.endedSeasonNumber   = current->seasonNumber;

@@ -205,8 +205,13 @@ WorldClaimFileResult WorldConquest::FileClaim(sqlite3* db,
     const auto poi = WorldDirector::LoadPoi(db, req.worldId, req.poiId);
     if (!poi) return Failure("no_poi");
 
-    if (!WorldFactions::Load(db, req.worldId, req.factionId))
-        return Failure("no_faction");
+    const auto faction = WorldFactions::Load(db, req.worldId, req.factionId);
+    if (!faction) return Failure("no_faction");
+    // A claim that can never resolve is a pure authority burn — refuse it at
+    // filing (F9): a side-less faction can never appear in a settlement's
+    // winners, and a POI with no battle map can never be settled at all.
+    if (faction->sideKey.empty()) return Failure("no_side");
+    if (!poi->HasBattleMap()) return Failure("no_battle_map");
 
     // The owner needs no claim: rule 4 already keeps a defended POI, so a
     // claim by its own holder could only ever burn authority.
@@ -430,15 +435,25 @@ WorldConquestSettlementResult WorldConquest::SettleWar(
         [&](const WorldPoiClaimRecord& c) { return c.claimId == *winner; });
     if (claim == open.end()) return r;
 
-    if (!ResolveClaim(db, *claim, WorldClaimState::Won, 0.0,
-                      settlement.settlementId, nowRealMs))
-        return r;  // raced with a withdrawal — the withdrawal stands
+    // The `won` flip and the ownership transfer are ONE write (F8): if
+    // SetPoiOwner fails, the flip rolls back with it — otherwise a replay
+    // finds nothing open and the POI never transfers.
+    bool flipped = false;
+    const bool committed = SqliteWriteTransaction(db, "WorldConquestTransfer", [&] {
+        if (!ResolveClaim(db, *claim, WorldClaimState::Won, 0.0,
+                          settlement.settlementId, nowRealMs))
+            return SQLITE_ABORT;  // raced with a withdrawal — the withdrawal stands
+        flipped = true;
+        if (claim->factionId != poi->ownerFactionId &&
+            !WorldDirector::SetPoiOwner(db, settlement.worldId, settlement.poiId,
+                                        claim->factionId))
+            return SQLITE_ERROR;  // roll the flip back with the failed transfer
+        return SQLITE_OK;
+    });
+    if (!committed || !flipped) return r;
     if (claim->factionId != poi->ownerFactionId) {
-        if (WorldDirector::SetPoiOwner(db, settlement.worldId, settlement.poiId,
-                                       claim->factionId)) {
-            r.ownershipChanged  = true;
-            r.newOwnerFactionId = claim->factionId;
-        }
+        r.ownershipChanged  = true;
+        r.newOwnerFactionId = claim->factionId;
     }
     r.winningClaimId = *winner;
     return r;

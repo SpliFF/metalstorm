@@ -32,6 +32,7 @@ import type { AcceleratorResult } from './free-text-accelerator.js';
 import { matchLocalPattern, type LocalPatternDeps } from './nl-local-patterns.js';
 import {
     MAX_ACTIONS,
+    NL_CONTRACT_VERSION,
     validateNLResponse,
     type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
     type NLWhen, type ValidationResult,
@@ -45,6 +46,7 @@ import {
     bindFocusReferences, findSubjectDeictic, findTargetDeictic, isTargetDeictic,
 } from './nl-focus.js';
 import { interpret, type InterpretationPlan } from './nl-interpretation.js';
+import { fastPathParse, type FastPathRule } from './nl-fast-path.js';
 
 /** What the offline parser produced, plus the transparency notes that belong
  *  under whatever line the executor ends up printing. */
@@ -631,7 +633,7 @@ function deliver(
  * understand that" deserves to know the difference between a sentence the game
  * rejects and a proxy that is down.
  */
-export type NLRunSource = 'proxy' | 'offline-parser';
+export type NLRunSource = 'proxy' | 'offline-parser' | 'fast-path';
 
 /** Printed under the first line whenever the local path ran instead. */
 export const OFFLINE_TAG = '(offline parser)';
@@ -669,6 +671,11 @@ export interface RunResult extends LocalRunResult {
     source: NLRunSource;
     /** Why the proxy path was not used, when it wasn't. Logged, not shown. */
     fallbackReason?: string;
+    /** Which fast-path rule claimed the sentence, when one did. Telemetry and
+     *  the eval's absorption report; never shown to the player — a sentence the
+     *  fast path claimed is meant to be indistinguishable from one the model
+     *  read, only sooner. */
+    fastPathRule?: FastPathRule;
 }
 
 /**
@@ -692,6 +699,15 @@ export interface RunResult extends LocalRunResult {
 export async function runUtterance(
     utterance: string, deps: RemoteRunDeps,
 ): Promise<RunResult> {
+    // The deterministic pre-LLM claim (`nl-fast-path.ts`). Tried FIRST — before
+    // the proxy and before the offline parser — because a sentence it claims is
+    // one whose subject and target the resolver has already agreed to, and
+    // spending a round trip to be told the same thing is the one cost this
+    // layer exists to remove. It declines far more often than it claims, and a
+    // decline costs one index lookup.
+    const claimed = fastPath(utterance, deps);
+    if (claimed) return claimed;
+
     if (!deps.proxy) {
         return { ...runLocalUtterance(utterance, deps), source: 'offline-parser' };
     }
@@ -738,6 +754,48 @@ export async function runUtterance(
     return { ...deliver(validation.value, deps, []), validation, source: 'proxy' };
 }
 
+/**
+ * Run the fast path, or return null.
+ *
+ * The claimed envelope goes through `deliver` like every other producer's — the
+ * same validator, the same binder (a second time; it is idempotent and costs
+ * nothing on an already-bound envelope), the same confirm gate, the same
+ * executor. Skipping any of those to save a few more microseconds would make
+ * this a route to `sendCommand` with fewer checks on it than a typed sentence,
+ * which is the one thing `nl-envelope.ts` exists to prevent.
+ */
+function fastPath(utterance: string, deps: RemoteRunDeps): RunResult | null {
+    let claim;
+    try {
+        claim = fastPathParse(utterance, {
+            resolver: deps.ports.resolver,
+            index: deps.ports.resolver.index,
+            ...(deps.focus !== undefined ? { focus: deps.focus } : {}),
+            ...(deps.selectionGroupId !== undefined
+                ? { selectionGroupId: deps.selectionGroupId } : {}),
+        });
+    } catch {
+        // A producer that throws must not take the sentence down with it: the
+        // model path is still there and is the answer the player would have got
+        // a moment ago.
+        return null;
+    }
+    if (!claim) return null;
+
+    const validation = validateNLResponse(claim.response, {
+        vocabulary: deps.vocabulary,
+        ...(deps.panelIds ? { panelIds: deps.panelIds } : {}),
+    });
+    if (!validation.ok) return null;   // stand aside, silently — the model gets it
+
+    return {
+        ...deliver(validation.value, deps, []),
+        validation,
+        source: 'fast-path',
+        fastPathRule: claim.rule,
+    };
+}
+
 type ProxyOutcome =
     | { kind: 'ok'; envelope: unknown }
     | { kind: 'unavailable'; reason: string };
@@ -759,6 +817,14 @@ async function callProxy(utterance: string, proxy: ProxyDeps): Promise<ProxyOutc
             },
             body: JSON.stringify({
                 utterance,
+                // The envelope contract this client understands. The proxy
+                // ignores unknown keys today, so this changes nothing yet — and
+                // that is the point of sending it now: by the time a server
+                // wants to route on it, every deployed client is already
+                // saying which contract it speaks, instead of the newer half of
+                // the fleet being silently misparsed by the older half of the
+                // servers. See NL_CONTRACT_VERSION.
+                contract: NL_CONTRACT_VERSION,
                 context: proxy.context,
                 ...(proxy.history?.length ? { history: [...proxy.history] } : {}),
             }),

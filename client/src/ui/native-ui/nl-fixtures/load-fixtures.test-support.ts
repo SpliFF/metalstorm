@@ -43,6 +43,9 @@ export const FIXTURE_FILES = [
     'clarify-resubmit.json',
     'multi-step.json',
     'focus-deixis.json',
+    'contract-v2.json',
+    'focus-elision.json',
+    'injection.json',
 ] as const;
 
 export function loadVocabulary(): ClassVocabulary {

@@ -52,6 +52,7 @@ local Escort       = VFS.Include("LuaRules/Gadgets/objectives/escort.lua")
 local Protect      = VFS.Include("LuaRules/Gadgets/objectives/protect.lua")
 local Extract      = VFS.Include("LuaRules/Gadgets/objectives/extract.lua")
 local Infra        = VFS.Include("LuaRules/Gadgets/objectives/infra.lua")
+local Parley       = VFS.Include("LuaRules/Gadgets/objectives/parley.lua")
 local Generator    = VFS.Include("LuaRules/Gadgets/objectives/generator.lua")
 local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
 -- PLAN-metalstorm-wars.md §7 task 4: the per-objective war-end disposition
@@ -59,10 +60,11 @@ local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
 -- WALK is here in ExpireAllActive; the RULE is there.
 local WarEnd       = VFS.Include("LuaRules/Gadgets/objectives/warend.lua")
 local Tick         = VFS.Include("LuaRules/Gadgets/tick.lua")
+local Wire         = VFS.Include("LuaRules/Gadgets/parley/wire.lua")
 
 local TYPES = {
     control = Control, kill = Kill, escort = Escort,
-    protect = Protect, extract = Extract, infra = Infra,
+    protect = Protect, extract = Extract, infra = Infra, parley = Parley,
 }
 
 GG.Objectives = GG.Objectives or {}
@@ -231,7 +233,14 @@ local function regionExists(key)
     return false
 end
 
-local function buildCtx(frame)
+--- @param dyingUnitID  optional (F12): the unit whose UnitDestroyed is being
+---   dispatched. Spring still answers ValidUnitID/GetUnitHealth for it during
+---   the callin, so without this every module's "immediate re-evaluation" sees
+---   the corpse as alive and only notices ≤3 s later on the next eval tick.
+---   Safe for outbound escorts, whose success is read from the withdrawal
+---   counter game_transports increments BEFORE DestroyUnit (:579-589), not
+---   from the carrier still existing.
+local function buildCtx(frame, dyingUnitID)
     local unitsByRegion = {}
     if GG.Regions then
         for _, unitID in ipairs(Spring.GetAllUnits()) do
@@ -250,6 +259,7 @@ local function buildCtx(frame)
     return {
         frame = frame,
         evalPeriodFrames = EVAL_PERIOD,
+        gameRulesParam = function(key) return Spring.GetGameRulesParam(key) end,   -- objectives/parley.lua
         regionOwner = function(key)
             return GG.Regions and GG.Regions.ControllingTeam(key) or nil
         end,
@@ -271,6 +281,7 @@ local function buildCtx(frame)
         end,
         unitsInRegion = function(key) return unitsByRegion[key] or {} end,
         unitAlive = function(unitID)
+            if dyingUnitID and unitID == dyingUnitID then return false end
             return Spring.ValidUnitID(unitID) and Spring.GetUnitHealth(unitID) ~= nil
         end,
         unitPos = resolvedUnitPos,
@@ -390,7 +401,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
-    'victory', 'completed_by',
+    'victory', 'completed_by', 'player',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -430,6 +441,12 @@ local function publish(o, ctx)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
     if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor, PUBLIC) end
+    -- PLAN-beta-journey.md §(d) assigned tasks: the objective is one player's
+    -- to do, set by a mentor/Veteran through the verbs below. DIFFERENT from
+    -- `suggested`, which is a soft "yours to take" hint anyone may ignore —
+    -- `player` names whose task this IS, and objective-hud renders it as
+    -- "Task from <callsign>". Neither gates completion; both are labels.
+    if o.forPlayer then Spring.SetGameRulesParam(p .. 'player', o.forPlayer, PUBLIC) end
     -- source ∈ 'scripted'|'systemic'|'bounty' (§3.3). A staked bounty is
     -- publicly known (a commander visibly stakes authority on the objective),
     -- so surfacing the flag is fog-honest — it lets the co-commander AI apply
@@ -486,15 +503,44 @@ local function distributeAward(amount, participation, completingTeam, reason)
                         amount, reason)
 end
 
+--- §3.2 Lever 2: reward normalisation scales SYSTEMIC rewards by 1/velocity.
+--- Deliberately applied to the authored reward only, never to escrowed stakes
+--- — a player-staked bounty pays back exactly what was staked (§5 E2), and a
+--- scripted/bounty objective is not the generator's output to normalise.
+--- `GG.Authority.NormaliseReward` is itself a no-op while
+--- `reward_normalisation_enabled` is off, which is where the lever sits until
+--- F1's rebuilt velocity has been validated by the economy harness.
+local function normalisedReward(o, teamID)
+    local reward = o.reward or 0
+    if o.source ~= 'systemic' or not teamID or not GG.Authority.NormaliseReward then
+        return reward
+    end
+    return GG.Authority.NormaliseReward(teamID, reward)
+end
+
 local function awardObjective(o, completingTeam)
     completingTeam = completingTeam or o.forTeam
-    local amount = o.reward + (GG.Authority.EscrowTotal(o.id) or 0)
+    if not completingTeam then
+        -- F7: a scoped type authored without `forTeam` used to reach here with
+        -- no payee — distributeAward no-ops, but settling 'complete' cleared
+        -- the escrow anyway and the staked authority simply vanished. There is
+        -- nobody to pay, so refund the stakers instead of destroying stakes.
+        Spring.Echo(string.format(
+            '[Objectives] objective %d (%s) completed with no team to pay — '
+            .. 'refunding escrow instead of awarding', o.id, tostring(o.type)))
+        GG.Authority.SettleEscrow(o.id, 'expired')
+        return
+    end
+    local amount = normalisedReward(o, completingTeam) + (GG.Authority.EscrowTotal(o.id) or 0)
     distributeAward(amount, o.participation, completingTeam, 'objective_' .. o.type)
     GG.Authority.SettleEscrow(o.id, 'complete')
 end
 
 local function awardPeriodic(o, amount)
     if not o.forTeam then return end
+    if o.source == 'systemic' and GG.Authority.NormaliseReward then
+        amount = GG.Authority.NormaliseReward(o.forTeam, amount)
+    end
     distributeAward(amount, o.participation, o.forTeam, 'objective_' .. o.type .. '_income')
 end
 
@@ -603,12 +649,45 @@ function resolveObjective(o, state, completingTeam, ctx, escrowOutcome)
     if o.systemicKey then
         Generator.onResolved(genState, o.systemicRule, o.systemicKey)
     end
+    -- Gameplay rule (a): a completed control chains into the next region. The
+    -- generator only QUEUES it here — creating an objective from inside a
+    -- resolution would mutate activeList under the snapshot walk that resolve
+    -- cascades depend on.
+    if state == 'complete' then
+        Generator.onCompleted(genState, o)
+    end
+
+    -- F10: the bounty cap counts LIVE bounties, not lifetime ones. Without
+    -- this a commander who staked four bounties could never stake another for
+    -- the rest of the war, however long ago all four resolved.
+    if o.source == 'bounty' and o.bountyPlayer then
+        local n = (bountyCountByPlayer[o.bountyPlayer] or 0) - 1
+        bountyCountByPlayer[o.bountyPlayer] = (n > 0) and n or nil
+    end
 
     -- E4: mutual resolve — a still-active linked partner is mooted out.
+    -- F8: the partner inherits our escrowOutcome. At war end the sweep walks a
+    -- snapshot and skips the partner as already resolved, so passing the
+    -- default here routed its stakes back to the connected stakers instead of
+    -- the team pools the wars §7 rule requires.
     if o.linkedId then
         local partner = lookupObjective(o.linkedId)
         if partner and partner.state == 'active' then
-            resolveObjective(partner, 'expired', nil, ctx)
+            resolveObjective(partner, 'expired', nil, ctx, escrowOutcome)
+        end
+    end
+
+    -- F9: a parent that failed or expired must not leave its phase children
+    -- running — they have nothing left to report to, and the board keeps
+    -- showing live sub-objectives of a dead mission. Reentry is safe: each
+    -- child's onChildResolved finds this parent already non-'active' and
+    -- returns immediately.
+    if state ~= 'complete' and o.phaseChildren then
+        for _, cid in ipairs(o.phaseChildren) do
+            local c = lookupObjective(cid)
+            if c and c.state == 'active' then
+                resolveObjective(c, 'expired', nil, ctx, escrowOutcome)
+            end
         end
     end
 
@@ -644,6 +723,7 @@ function GG.Objectives.Create(def)
     local o = {
         id = id, type = def.type, scope = def.scope or 'tactical',
         forTeam = def.forTeam, forTeam2 = def.forTeam2,
+        forPlayer = def.forPlayer,
         reward = (def.reward or 0) * rewardScale,
         bounty = def.bounty or 0,
         params = def.params or {},
@@ -751,6 +831,7 @@ function GG.Objectives.CreateBounty(playerID, def, stakeAmount)
     bountyCountByPlayer[playerID] = (bountyCountByPlayer[playerID] or 0) + 1
     local o = objectives[id]
     o.bounty = stakeAmount
+    o.bountyPlayer = playerID   -- F10: who to give the cap slot back to on resolve
     publish(o, buildCtx(Spring.GetGameFrame()))
     return id
 end
@@ -934,6 +1015,12 @@ end
 local function buildWorld(frame, tick, ctx)
     return {
         frame = frame, tick = tick,
+        -- The scenario table, the way game_scenario/game_tutorial read it
+        -- (`GG.Scenario.data`) — the generator's own gate against a scripted
+        -- tutorial/solo Mission (F-tutorial-gen).
+        scenario = function()
+            return GG.Scenario and GG.Scenario.data
+        end,
         contestedRegions = function()
             return GG.Regions and GG.Regions.GetContested() or {}
         end,
@@ -1035,15 +1122,64 @@ local function buildWorld(frame, tick, ctx)
             end
             return nil
         end,
+        -- The chain rule (gameplay rule (a)) walks the region graph from the
+        -- region that was just taken; the comeback valve (rule (b)) counts
+        -- what each side owns. Both answer empty/neutral without GG.Regions,
+        -- which disables them rather than raising — the same "ready, awaiting
+        -- content" shape the civilian rules have.
+        regionNeighbors = function(key)
+            if not (GG.Regions and GG.Regions.Neighbors) then return {} end
+            return GG.Regions.Neighbors(key) or {}
+        end,
+        regionOwner = function(key)
+            return GG.Regions and GG.Regions.ControllingTeam(key) or nil
+        end,
+        ownedRegionCount = function(team)
+            if not GG.Regions then return 0 end
+            local n = 0
+            for _, key in ipairs(GG.Regions.Keys()) do
+                if GG.Regions.ControllingTeam(key) == team then n = n + 1 end
+            end
+            return n
+        end,
         modOptions = function() return Spring.GetModOptions() end,
         create = function(def) return GG.Objectives.Create(def) end,
         createLinkedPair = function(defA, defB) return GG.Objectives.CreateLinkedPair(defA, defB) end,
     }
 end
 
+--- Publish each team's comeback multiplier (gameplay rule (b)) as
+--- `objective_comeback_<team>`, a public game rulesParam.
+---
+--- Public, not team-scoped: a valve nobody can see is a valve players invent
+--- explanations for. The leading side seeing "the other lot are on x1.4" is
+--- the point — it reads as a stated rule rather than as the game quietly
+--- helping someone, and it tells the leader to close the match out.
+---
+--- Published every eval tick rather than on change: it is one SetGameRulesParam
+--- per team per 3 s, and a client that joins mid-war otherwise waits for the
+--- next territory swing to learn the number.
+local function publishComeback(world)
+    for _, teamID in ipairs(world.teams()) do
+        Spring.SetGameRulesParam('objective_comeback_' .. teamID,
+                                 Generator.comebackScale(world, teamID), PUBLIC)
+    end
+end
+
 -- ============================================================
 -- Lifecycle
 -- ============================================================
+
+-- F11: read the modoption at Initialize too, not only GameStart. game_scenario
+-- (layer -90) stages its scripted objectives from its own GameStart, which runs
+-- BEFORE this gadget's (layer -50) — so every scripted objective was created
+-- with rewardScale still at its 1.0 default and `authority_reward_scale` only
+-- ever reached the systemic ones. Initialize always runs, and runs before any
+-- GameStart, so it is the honest place to read a modoption from. Same pattern
+-- as game_authority.lua:854.
+function gadget:Initialize()
+    rewardScale = tonumber(Spring.GetModOptions().authority_reward_scale) or 1.0
+end
 
 function gadget:GameStart()
     rewardScale = tonumber(Spring.GetModOptions().authority_reward_scale) or 1.0
@@ -1079,13 +1215,25 @@ function gadget:GameFrame(frame)
             else
                 local module = TYPES[o.type]
                 if o.expiresAtFrame and frame >= o.expiresAtFrame then
-                    local outcome, team
-                    if module.onExpire then
-                        outcome, team = module.onExpire(o, ctx)
+                    -- F6: completion beats expiry on the same tick. The eval
+                    -- period is 3 s, so an objective finished anywhere inside
+                    -- the tick that also crosses its deadline used to be told
+                    -- it had run out of time — the predicate was never asked.
+                    -- Ask it first and only fall through to the expiry
+                    -- disposition when it answers nil; this mirrors the
+                    -- war-end sweep, which likewise checks before it expires.
+                    local state, team = module.check(o, ctx)
+                    if state then
+                        resolveObjective(o, state, team, ctx)
                     else
-                        outcome = 'expired'
+                        local outcome, eteam
+                        if module.onExpire then
+                            outcome, eteam = module.onExpire(o, ctx)
+                        else
+                            outcome = 'expired'
+                        end
+                        resolveObjective(o, outcome, eteam, ctx)
                     end
-                    resolveObjective(o, outcome, team, ctx)
                 else
                     local state, team = module.check(o, ctx)
                     if state then
@@ -1119,7 +1267,9 @@ function gadget:GameFrame(frame)
     --
     -- nil means "no gameover gadget in this game" → active, generate.
     if (GG.WarState or 'active') == 'active' then
-        Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+        local world = buildWorld(frame, evalTick, ctx)
+        Generator.tick(world, genState)
+        publishComeback(world)
     end
 
     -- Resolve-retention: clear rulesParams for objectives past the 30s window,
@@ -1137,6 +1287,75 @@ function gadget:GameFrame(frame)
             table.remove(pendingClear, i)
         end
     end
+end
+
+-- ============================================================
+-- Wire verbs (PLAN-beta-journey.md §(d) assigned tasks)
+-- ============================================================
+-- Same RecvLuaMsg codec every other human/AI command rides (parley/wire.lua).
+-- Both verbs are TASKING, not authority: a Veteran (rank >= 2) or the target
+-- player's own mentor may point a teammate at work. Rank arrives as the
+-- PUBLIC `rank_<pid>` param game_teams.lua publishes from the lobby's `tier`
+-- custom option; absent (dev launch, old lobby) it reads as 1 and both verbs
+-- are simply denied to everyone but a mentor.
+local WIRE_MIN_RANK = 2
+local BOUNTY_HOLD_FRAMES = 900   -- 30s default hold for a wire-built control bounty
+
+local function rankOfPlayer(playerID)
+    return tonumber(Spring.GetGameRulesParam('rank_' .. math.floor(playerID))) or 1
+end
+
+local function mentorOfPlayer(playerID)
+    local m = tonumber(Spring.GetGameRulesParam('mentor_' .. math.floor(playerID)))
+    if not m or m < 0 then return nil end   -- -1 is the AI mentor: nobody's playerID
+    return math.floor(m)
+end
+
+local function mayTask(issuerID, targetID)
+    if rankOfPlayer(issuerID) >= WIRE_MIN_RANK then return true end
+    return targetID ~= nil and mentorOfPlayer(targetID) == issuerID
+end
+
+--- Build the bounty def for `objectives.createBounty`. Only `control` is
+--- wire-constructible: every other type is defined by unit IDs (kill/protect/
+--- infra) or areas the client has no vocabulary for yet, and inventing a
+--- mapping for them here would be a stand-in, not a feature. `region=` names
+--- the place directly; `x=&z=&r=` resolves to whichever region contains the
+--- point (GG.Regions.KeyAt) — the same place, said with coordinates.
+local function wireBountyDef(fields)
+    local kind = fields.type or 'control'
+    if kind ~= 'control' then return nil end
+    local key = fields.region
+    if (not key or key == '') and GG.Regions and GG.Regions.KeyAt then
+        local x, z = Wire.num(fields.x), Wire.num(fields.z)
+        if x and z then key = GG.Regions.KeyAt(x, z) end
+    end
+    if type(key) ~= 'string' or key == '' then return nil end
+    return {
+        type = 'control', scope = 'tactical',
+        params = { regionKey = key, holdFrames = Wire.num(fields.hold) or BOUNTY_HOLD_FRAMES },
+    }
+end
+
+function gadget:RecvLuaMsg(msg, playerID)
+    local cmd, fields = Wire.decode(msg)
+    if cmd ~= 'objectives.suggest' and cmd ~= 'objectives.createBounty' then return end
+    local issuer = math.floor(playerID)
+    local target = Wire.num(fields.player)
+    target = target and math.floor(target) or nil
+    if not mayTask(issuer, target) then return end
+
+    if cmd == 'objectives.suggest' then
+        local id = Wire.num(fields.id)
+        if id and target then GG.Objectives.SuggestFor(id, target) end
+        return
+    end
+
+    local stake = Wire.num(fields.stake)
+    local def = wireBountyDef(fields)
+    if not def or not stake or stake <= 0 then return end
+    def.forPlayer = target
+    GG.Objectives.CreateBounty(issuer, def, stake)
 end
 
 -- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
@@ -1300,7 +1519,8 @@ function gadget:DefsReconciled(delta)
 end
 
 function gadget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-    local ctx = buildCtx(Spring.GetGameFrame())
+    -- F12: the dying unit is still ValidUnitID during this callin — tell ctx.
+    local ctx = buildCtx(Spring.GetGameFrame(), unitID)
 
     -- §5 presence-at-completion bonus: credit whoever's nearby a beat before
     -- dispatching onUnitDestroyed, so a kill/protect-fail landing this exact

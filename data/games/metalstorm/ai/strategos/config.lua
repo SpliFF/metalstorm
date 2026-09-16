@@ -41,8 +41,18 @@ Config.BLIP_STRENGTH   = 0.5
 Config.RESERVE_FRACTION    = 0.25      -- keep 25 % of pool for emergency DEFEND
 Config.COMMITMENT_DECAY_FRAMES = 3600  -- ~2 min — fresh orders are sticky
 Config.REASSIGN_BAR        = 1.4       -- newScore must beat current × this
-Config.PSUCCESS_FLOOR      = 0.6       -- don't trickle: mass or skip
-Config.TRAVEL_PENALTY_PER_HOP = 0.15   -- region-graph hops, not elmos
+-- Default pSuccess floor ("don't trickle: mass or skip"). A profile's own
+-- `pSuccessFloor` REPLACES this (planner.lua floorFor) — it used to be
+-- max()ed with it, which made every shipped profile's floor (0.0–0.15) inert.
+Config.PSUCCESS_FLOOR      = 0.6
+-- Travel: value is discounted 1/(1 + PER_HOP × hops) — a goal two hops away is
+-- worth ~77 % of the same goal next door. Unreachable = not a candidate at all.
+Config.TRAVEL_PENALTY_PER_HOP = 0.15
+-- Frames an army needs per region-graph hop (scorched_crossing: scenariogen
+-- measured 3411 frames for the slowest staged class over a ~2.2-hop approach;
+-- 1792-elmo regions). Used ONLY to refuse an expiring objective the package
+-- cannot reach in time — a coarse feasibility bar, not a travel model.
+Config.HOP_TRAVEL_FRAMES   = 1200
 
 -- Region value threshold for auto-DEFEND implicit goals (plan §3.1).
 Config.DEFEND_VALUE_MIN    = 1.0
@@ -64,45 +74,113 @@ Config.VICTORY_PSUCCESS_FLOOR = 0.35
 Config.STRATEGIC_VALUE_SCALE = 200
 
 --=============================================================================
+-- Threat map / posture / withdrawal (threat.lua, slate.lua, planner.lua)
+--=============================================================================
+-- Neighbour spill fraction for the threat map (see threat.lua header).
+Config.THREAT_SPILL = 0.5
+-- Posture floor: the fraction of a package standing in the anchor region
+-- (threat.lua anchorRegion — the departure zone, else our sole owned region)
+-- that is split off as a garrison and may only DEFEND that region. A profile's
+-- `garrisonFraction` overrides it.
+Config.GARRISON_FRACTION = 0.25
+-- Withdrawal: own/enemy strength ratio below which a side with a known
+-- departure zone falls back to it (profile `withdrawRatio` overrides), and the
+-- least confidence-weighted enemy strength that may trigger it at all.
+Config.WITHDRAW_RATIO     = 0.5
+Config.WITHDRAW_MIN_ENEMY = 3
+-- Objective expiry urgency: value × (1 + URGENCY_BOOST × (1 − remaining /
+-- HORIZON)) once an objective is inside the horizon. Protect objectives
+-- (expiry-as-success) are exempt — their value is steady until the bell.
+Config.EXPIRY_HORIZON_FRAMES = 3600
+Config.EXPIRY_URGENCY_BOOST  = 0.5
+-- Arrival cover: a DEFEND goal on an arrival's drop region this many frames
+-- before its eta (picture.transports.arrivals — see README "engine asks").
+Config.ARRIVAL_COVER_FRAMES = 1800
+-- Denial: an enemy-only objective (their protect town) is worth this fraction
+-- of its reward to us as an ATTACK target (profile `deny` overrides).
+Config.DENY_FRACTION = 0.3
+
+-- Passability by tag (graph.lua passableFor). GROUND blocks every land force;
+-- ARMOUR additionally blocks the ridges/fords only infantry crosses — the
+-- reading of mapinfo's "split for VEH/HEAVY, connected for INFANTRY"
+-- (meridian_basin) that the region tags can express. Tunables, not law.
+Config.GROUND_BLOCKED_TAGS = { water = true, deep = true, naval = true, lake = true }
+Config.ARMOUR_BLOCKED_TAGS = { infantry_only = true, ford = true, armour_blocked = true }
+-- Power-table classes that make a package "armour" for passability once they
+-- carry more than ARMOUR_SHARE of its strength.
+Config.ARMOUR_CLASSES = { tank = true, mech = true, artillery = true, heavy = true,
+                          vehicle = true, armour = true, armor = true }
+Config.ARMOUR_SHARE = 0.5
+
+--=============================================================================
 -- Authority-cost formula MIRROR (PLAN-metalstorm-authority.md §3.1/§3.3).
 -- The AI pays authority like a player; the planner subtracts predicted cost
 -- from each candidate's score. This must stay in lockstep with
--- LuaRules/Configs/authority_cost.lua (the synced source of truth) — the
--- shared JSON export (authority ask A3) will let both read one file. Until
--- then this is a hand-maintained copy; `version` guards drift.
+-- LuaRules/Configs/authority_cost.lua + LuaRules/Gadgets/authority/formula.lua
+-- (the synced source of truth). tests/mirror_spec.lua LOADS THOSE FILES and
+-- fails the moment this copy drifts.
+--
+-- WHAT IS ACTUALLY CHARGED (game_authority.lua ChargeDirective, read
+-- 2026-09-10 — the previous mirror predicted a formula the charge site never
+-- applied: force-scaled, region-modified, echelon-discounted):
+--   area-scoped directive (groupID 0 — what actuators.lua issues today, for
+--     directives AND postures):  ceil(base_k × 1 × 1.0 × order_class.standing × scale)
+--   group-scoped directive:      ceil(base_k × Σ authority_cost_base × 1.0 × order_class.directive × scale)
+--   costScale ≤ 0 → 0 (formula.lua's free-orders path).
+-- regionMod is PINNED to 1.0 at the directive charge site ("a directive has no
+-- single position"); the friendly/neutral/enemy table is kept for the day the
+-- charge grows a real one, and is NOT applied.
 --=============================================================================
 Config.authorityCost = {
     version = 1,
-    regionMod = { friendly = 0.5, neutral = 1.0, enemy = 2.0 },
-    orderMod = {
-        micro          = 1.0,        -- baseline (never issued by this AI)
-        posture        = 0.25,       -- cheap — behaviour settings aren't spam
-        build          = 2.0,        -- strategic commitment
-        directivePlatoon = 0.5,      -- amortised: half of hand-issuing
-        directiveArmy    = 0.35,     -- deeper amortisation at higher echelon
+    base_k  = 1.0,
+    -- order_class — verbatim copy of authority_cost.lua (mirror_spec checks).
+    order_class = {
+        directive  = 1.0,
+        standing   = 1.2,
+        micro      = 2.0,
+        group_op   = 0.5,
+        build      = 3.0,
+        posture    = 0.25,
+        bounty     = 1.0,
+        proposal   = 0.5,
     },
+    -- Documented bounds only (regions/cost.lua); not an input to the charge.
+    regionMod = { friendly = 0.5, neutral = 1.0, enemy = 2.0 },
+    -- Directive scope the actuator issues. 'area' = condition-scoped
+    -- (issueDirective(0, spec)); 'group' once org-group rosters reach the AI.
+    directiveScope = 'area',
 }
 
---- Predict the authority cost of a directive over a force package.
--- Mirror of the synced formula: ceil(Σ base × regionMod × orderMod × scale).
--- `pkg.baseSum` is Σ member authority_cost_base (from the def export);
--- `regionKind` ∈ {'friendly','neutral','enemy'}; `echelon` ∈ {'platoon','army'}.
-function Config.predictDirectiveCost(pkg, regionKind, echelon, costScale)
-    local ac = Config.authorityCost
-    local rMod = ac.regionMod[regionKind or 'neutral'] or 1.0
-    local oMod = (echelon == 'army') and ac.orderMod.directiveArmy
-                                     or ac.orderMod.directivePlatoon
-    local base = (pkg and pkg.baseSum) or 0
-    local scale = costScale or 1.0
-    return math.ceil(base * rMod * oMod * scale)
+--- The synced formula, verbatim (authority/formula.lua M.cost).
+function Config.formulaCost(baseK, baseCost, regionMod, orderClassMod, costScale)
+    if costScale <= 0 then return 0 end
+    return math.ceil(baseK * baseCost * regionMod * orderClassMod * costScale)
 end
 
---- Predict a posture change cost (nearly free — the always-affordable action).
-function Config.predictPostureCost(pkg, regionKind, costScale)
+--- Predict the authority cost of a directive over a force package.
+-- `pkg.baseSum` is Σ member authority_cost_base (the Picture supplies it when
+-- the power table carries scale; else `strength` stands in — a head count,
+-- which for s1 squads IS the base). `regionKind` is accepted for API
+-- stability and deliberately unused (see the header). `scope` defaults to the
+-- actuator's ('area').
+function Config.predictDirectiveCost(pkg, regionKind, echelon, costScale, scope)   -- luacheck: ignore regionKind echelon
     local ac = Config.authorityCost
-    local rMod = ac.regionMod[regionKind or 'neutral'] or 1.0
-    local base = (pkg and pkg.baseSum) or 0
-    return math.ceil(base * rMod * ac.orderMod.posture * (costScale or 1.0))
+    scope = scope or ac.directiveScope
+    local scale = costScale or 1.0
+    if scope == 'group' then
+        local base = (pkg and (pkg.baseSum or pkg.strength)) or 0
+        return Config.formulaCost(ac.base_k, base, 1.0, ac.order_class.directive, scale)
+    end
+    return Config.formulaCost(ac.base_k, 1, 1.0, ac.order_class.standing, scale)
+end
+
+--- Predict a posture change cost. Today a DEFEND posture is expressed as an
+-- area-scoped Defend directive (actuators.lua _applyPosture), so it costs the
+-- same flat standing fee — "nearly free" relative to a pool, but NOT zero, and
+-- the intent report now says so.
+function Config.predictPostureCost(pkg, regionKind, costScale)
+    return Config.predictDirectiveCost(pkg, regionKind, 'army', costScale)
 end
 
 --=============================================================================

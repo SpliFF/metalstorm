@@ -80,13 +80,15 @@ struct EscrowDb {
             REQUIRE(WorldDirector::SetPoiOwner(db, kW, id, owner));
     }
 
-    std::string Found(const std::string& name, int64_t account) {
+    std::string Found(const std::string& name, int64_t account,
+                      const std::string& sideKey = "compact") {
         WorldFactionFoundRequest r;
         r.worldId   = kW;
         r.name      = name;
         r.archetype = kArchetypeOrder;
         r.accountId = account;
         r.username  = "player" + std::to_string(account);
+        r.sideKey   = sideKey;
         const auto w = WorldDirector::Load(db, kW);
         REQUIRE(w.has_value());
         const auto res = WorldFactions::Found(
@@ -204,6 +206,19 @@ TEST_CASE("§7.5 payout: withdrew keeps what it carried out, forfeits the rest")
     CHECK(p.captureSquads == 0);
 }
 
+TEST_CASE("review F4: voided returns everything, captures nothing, pays no spoils") {
+    // A war that ended with no in-sim verdict (season end, operator retire)
+    // never priced anybody — the expedition simply comes home.
+    const WorldEscrowRules rules;
+    const auto p = PayoutFor(WorldEscrowOutcome::Voided, 4, 12, 0.0, rules);
+    CHECK(p.returnTransports == 4);
+    CHECK(p.returnSquads == 12);
+    CHECK(p.captureTransports == 0);
+    CHECK(p.captureSquads == 0);
+    CHECK(std::string(WorldEscrowOutcomeToString(WorldEscrowOutcome::Voided)) ==
+          "voided");
+}
+
 TEST_CASE("§7.5 payout: routed keeps what left; the remainder is annihilated") {
     const WorldEscrowRules rules;
     const auto p = PayoutFor(WorldEscrowOutcome::Routed, 4, 8, 0.25, rules);
@@ -247,7 +262,7 @@ TEST_CASE("the arrival manifest modoption encodes side, counts and staging id") 
 TEST_CASE("a commitment escrows its own counts and debits the pool") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
 
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
@@ -274,7 +289,7 @@ TEST_CASE("a commitment escrows its own counts and debits the pool") {
 TEST_CASE("a §7.2 join opens its OWN escrow row — who committed what survives") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
 
     const auto staging = t.CommitEscrowed("ridge", attacker, 1, 1);
@@ -307,7 +322,7 @@ TEST_CASE("a §7.2 join opens its OWN escrow row — who committed what survives
 TEST_CASE("engagement flips under a guard and moves no materiel") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
 
@@ -329,7 +344,7 @@ TEST_CASE("engagement flips under a guard and moves no materiel") {
 TEST_CASE("cancel refunds the escrow exactly once") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
 
@@ -354,7 +369,7 @@ TEST_CASE("cancel refunds the escrow exactly once") {
 TEST_CASE("an engaged row cannot be released — the war owns it now") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
     REQUIRE(WorldEscrow::MarkEngaged(t.db, staging.stagingId, 900, kNow) == 1);
@@ -369,7 +384,7 @@ TEST_CASE("an engaged row cannot be released — the war owns it now") {
 TEST_CASE("held settlement returns the force, pays spoils — exactly once") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
     REQUIRE(WorldEscrow::MarkEngaged(t.db, staging.stagingId, 900, kNow) == 1);
@@ -414,7 +429,7 @@ TEST_CASE("held settlement returns the force, pays spoils — exactly once") {
 TEST_CASE("annihilated settlement: the victor captures a quarter, once") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 4, 8);
     REQUIRE(WorldEscrow::MarkEngaged(t.db, staging.stagingId, 901, kNow) == 1);
@@ -469,7 +484,7 @@ TEST_CASE("annihilated with no victor named: the captured share is destroyed") {
 TEST_CASE("settling a staging with no engaged escrow writes nothing") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 2, 5);
     // Never engaged — the window has not materialised.
@@ -486,7 +501,7 @@ TEST_CASE("the spoils rate is per-world config") {
     EscrowDb t;
     t.SetConfig("escrowHeldSpoilsTreasury", 100.0);
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender);
     const auto staging = t.CommitEscrowed("ridge", attacker, 1, 1);
     REQUIRE(WorldEscrow::MarkEngaged(t.db, staging.stagingId, 903, kNow) == 1);
@@ -504,7 +519,7 @@ TEST_CASE("the spoils rate is per-world config") {
 TEST_CASE("two-war sequence: both settle once, replays settle nothing") {
     EscrowDb t;
     const auto attacker = t.Found("Iron Pact", 1);
-    const auto defender = t.Found("Home Guard", 2);
+    const auto defender = t.Found("Home Guard", 2, "union");
     t.AddPoi("ridge", defender, "meridian_basin");
     t.AddPoi("delta", defender, "crossing");
 

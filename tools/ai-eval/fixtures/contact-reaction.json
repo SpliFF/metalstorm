@@ -1,0 +1,51 @@
+{
+    "id": "contact-reaction",
+    "title": "Contact next door",
+    "why": "An enemy column becomes visible in the neighbouring region at frame 600. The scored quantity is REACTION LATENCY: frames from the sighting to the first directive anchored in or next to the region it appeared in. An AI that answers in 40 seconds is an AI whose LOD backoff is wrong, however good its doctrine.",
+    "frames": 1800,
+    "team": 0,
+    "player": 7,
+    "pool": 60,
+    "map": { "width": 2048, "height": 2048 },
+    "regions": "tools/ai-eval/fixtures/world/three-region.json",
+    "power": "tools/ai-eval/fixtures/world/power.json",
+    "params": [
+        { "scope": "game", "key": "region_north_ridge_team", "value": 0 },
+        { "scope": "game", "key": "region_central_basin_team", "value": -1 },
+        { "scope": "game", "key": "region_south_marsh_team", "value": -1 },
+        { "scope": "game", "key": "objective_count", "value": 0 }
+    ],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 300, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 320, "health": 1.0, "hasCommands": false },
+            { "id": 3, "defId": 103, "x": 380, "y": 0, "z": 340, "health": 1.0, "hasCommands": false }
+        ]
+    },
+    "timeline": [
+        {
+            "frame": 600,
+            "event": { "kind": "contact", "region": "central_basin", "id": "column-seen" },
+            "enemies": [
+                { "id": 91, "defId": 101, "x": 1500, "z": 400, "health": 1.0 },
+                { "id": 92, "defId": 101, "x": 1560, "z": 440, "health": 1.0 }
+            ]
+        }
+    ],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" }
+    ],
+    "expectByAi": {
+        "garrison": [
+            { "check": "reactionWithin", "frames": 160, "why": "one strategic tick at full alert plus the drain" },
+            { "check": "hasDirectiveTypeAfter", "type": "Defend", "frame": 600, "region": "north_ridge" },
+            { "check": "noDirectiveType", "type": "Withdraw", "why": "two tanks next door is not an overrun" }
+        ],
+        "null": [
+            { "check": "maxDirectives", "value": 0 },
+            { "check": "noReaction", "why": "the control must NOT react; if it does, the metric is measuring the harness" }
+        ]
+    }
+}

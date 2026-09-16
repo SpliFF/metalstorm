@@ -74,6 +74,15 @@ function proxyDeps(fetchImpl: typeof fetch, over: Partial<ProxyDeps> = {}): Prox
     };
 }
 
+/**
+ * The sentence these tests type carries "urgently" for one reason: the
+ * deterministic fast path (`nl-fast-path.ts`) claims a bare "defend Northgate"
+ * before the network is ever touched, which is exactly what it is for. A
+ * priority word is outside its closed grammar, so the sentence goes the long
+ * way round and the proxy/fallback plumbing below is still the thing under
+ * test. The fast path's own behaviour is asserted at the bottom of this file.
+ */
+
 // ─────────────────────────────── the fallback ──────────────────────────────
 
 describe('the proxy being unavailable falls back to the offline parser', () => {
@@ -83,7 +92,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
         const { impl, calls } = stubFetch(() => jsonResponse(503, { error: 'nl-disabled' }));
         const s = setup();
 
-        const result = await runUtterance('defend Northgate', {
+        const result = await runUtterance('defend Northgate urgently', {
             ...s.deps,
             proxy: proxyDeps(impl),
         });
@@ -102,7 +111,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
         const { impl } = stubFetch(() => jsonResponse(503, { error: 'nl-disabled' }));
         const s = setup();
 
-        await runUtterance('defend Northgate', { ...s.deps, proxy: proxyDeps(impl) });
+        await runUtterance('defend Northgate urgently', { ...s.deps, proxy: proxyDeps(impl) });
 
         const tagged = s.lines.filter((l) => (l.notes ?? []).includes(OFFLINE_TAG));
         expect(tagged.length).toBe(1);
@@ -119,7 +128,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
     it('falls back on 429 as well — a rate limit is not a refusal', async () => {
         const { impl } = stubFetch(() => jsonResponse(429, { error: 'nl-rate-limited' }));
         const s = setup();
-        const result = await runUtterance('defend Northgate', { ...s.deps, proxy: proxyDeps(impl) });
+        const result = await runUtterance('defend Northgate urgently', { ...s.deps, proxy: proxyDeps(impl) });
 
         expect(result.source).toBe('offline-parser');
         expect(result.fallbackReason).toBe('HTTP 429');
@@ -129,7 +138,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
     it('falls back when the socket dies', async () => {
         const impl = (async () => { throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch;
         const s = setup();
-        const result = await runUtterance('defend Northgate', { ...s.deps, proxy: proxyDeps(impl) });
+        const result = await runUtterance('defend Northgate urgently', { ...s.deps, proxy: proxyDeps(impl) });
 
         expect(result.source).toBe('offline-parser');
         expect(result.fallbackReason).toBe('Failed to fetch');
@@ -144,7 +153,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
         })) as unknown as typeof fetch;
         const s = setup();
 
-        const result = await runUtterance('defend Northgate', {
+        const result = await runUtterance('defend Northgate urgently', {
             ...s.deps,
             proxy: proxyDeps(impl, { timeoutMs: 10 }),
         });
@@ -156,7 +165,7 @@ describe('the proxy being unavailable falls back to the offline parser', () => {
 
     it('runs local-only when there is no proxy configured at all', async () => {
         const s = setup();
-        const result = await runUtterance('defend Northgate', s.deps);
+        const result = await runUtterance('defend Northgate urgently', s.deps);
         expect(result.source).toBe('offline-parser');
         // No tag: there is no proxy to have fallen back FROM, and labelling
         // the ordinary M0–M3 path "offline" would be noise.
@@ -251,7 +260,7 @@ describe('the proxy output is validated at the client', () => {
         const { impl } = stubFetch(() => jsonResponse(200, { actions: [] }));
         const s = setup();
 
-        const result = await runUtterance('defend Northgate', { ...s.deps, proxy: proxyDeps(impl) });
+        const result = await runUtterance('defend Northgate urgently', { ...s.deps, proxy: proxyDeps(impl) });
 
         expect(result.source).toBe('proxy');
         expect(result.report.sent).toHaveLength(0);
@@ -278,5 +287,120 @@ describe('the proxy output is validated at the client', () => {
         expect(result.source).toBe('proxy');
         expect(result.report.sent).toHaveLength(0);
         expect(s.lines.some((l) => l.kind === 'refused')).toBe(true);
+    });
+});
+
+// ──────────────────────── the deterministic fast path ───────────────────────
+
+/**
+ * The claim `nl-fast-path.ts` makes is narrow and the tests are about its
+ * EDGES, not its middle: what matters is not that "defend Northgate" is fast
+ * but that "defend Northga" and "defend the ridge over there somewhere" are
+ * still the model's problem, and that a claim never reaches `sendCommand` by a
+ * route with fewer checks on it.
+ */
+describe('the fast path claims a sentence before the network', () => {
+    it('a bare verb and an exact name never touches fetch', async () => {
+        const s = setup();
+        const { impl, calls } = stubFetch(() => jsonResponse(200, { actions: [] }));
+
+        const result = await runUtterance('defend Northgate', {
+            ...s.deps, proxy: proxyDeps(impl),
+        });
+
+        expect(result.source).toBe('fast-path');
+        expect(result.fastPathRule).toBe('verb-name');
+        expect(calls).toHaveLength(0);
+        expect(s.sent).toHaveLength(1);
+    });
+
+    it('it is the same envelope the proxy path would have executed', async () => {
+        const s = setup();
+        const { impl } = stubFetch(() => jsonResponse(200, { actions: [] }));
+        const result = await runUtterance('defend Northgate', {
+            ...s.deps, proxy: proxyDeps(impl),
+        });
+
+        // Validated like any other producer's — the claim goes through
+        // `validateNLResponse`, so a fast-path envelope the contract rejects
+        // could never have got this far.
+        expect(result.validation.ok).toBe(true);
+        expect(result.response.actions).toEqual([{
+            kind: 'command',
+            intent: {
+                verb: 'defend',
+                subject: { type: 'any' },
+                target: { type: 'entity-ref', name: 'Northgate' },
+            },
+        }]);
+    });
+
+    it('a partial name is the model’s problem, not a guess', async () => {
+        const s = setup();
+        const { impl, calls } = stubFetch(() => jsonResponse(200, {
+            actions: [{ kind: 'refuse', reason: 'no' }],
+        }));
+
+        // "Northga" is a unique PREFIX hit the resolver would happily take.
+        // The fast path rejects every tier but exact, so this is a round trip.
+        const result = await runUtterance('defend Northga', {
+            ...s.deps, proxy: proxyDeps(impl),
+        });
+
+        expect(result.source).toBe('proxy');
+        expect(calls).toHaveLength(1);
+    });
+
+    it('a priority word or a conjunction stands aside', async () => {
+        const s = setup();
+        const { impl, calls } = stubFetch(() => jsonResponse(200, {
+            actions: [{ kind: 'refuse', reason: 'no' }],
+        }));
+
+        for (const utterance of [
+            'defend Northgate urgently',
+            'defend Northgate and attack Randtown',
+            'defend Northgate when Osprey Fen is contested',
+        ]) {
+            const result = await runUtterance(utterance, { ...s.deps, proxy: proxyDeps(impl) });
+            expect(result.source, utterance).toBe('proxy');
+        }
+        expect(calls).toHaveLength(3);
+    });
+
+    it('a name that is a FORCE refuses through the model, not through a grammar', async () => {
+        const s = setup();
+        const { impl, calls } = stubFetch(() => jsonResponse(200, {
+            actions: [{ kind: 'refuse', reason: 'that is a force' }],
+        }));
+
+        // The dry resolve comes back `refuse` (place-vs-force, contract v2), so
+        // the claim is dropped and the model gets to word it.
+        const result = await runUtterance('defend Chimera Squad', {
+            ...s.deps, proxy: proxyDeps(impl),
+        });
+
+        expect(result.source).toBe('proxy');
+        expect(calls).toHaveLength(1);
+    });
+
+    it('a question on screen is never answered by the fast path', async () => {
+        const s = setup();
+        const { impl, calls } = stubFetch(() => jsonResponse(200, {
+            actions: [{ kind: 'refuse', reason: 'no' }],
+        }));
+
+        const result = await runUtterance('defend Northgate', {
+            ...s.deps,
+            focus: {
+                primary: null, subjects: [], drilled: null,
+                openSurfaces: [], selectionCount: 0,
+                asked: { question: 'Which one?', options: ['a', 'b'] },
+            },
+            proxy: proxyDeps(impl),
+        });
+
+        expect(result.source).toBe('proxy');
+        expect(calls).toHaveLength(1);
     });
 });

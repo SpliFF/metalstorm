@@ -68,9 +68,13 @@ struct StatDb {
     }
 
     /// A faction with one member, straight through the real founding path so
-    /// the membership row is the one the store would really see.
+    /// the membership row is the one the store would really see. Binds a SIDE
+    /// key by default: attribution resolves faction → side before comparing
+    /// against a settlement's winners (F1), so a side-less test faction can
+    /// never be awarded a victory.
     std::string Found(const std::string& name, int64_t account,
-                      const std::string& seatPoi = {}) {
+                      const std::string& seatPoi = {},
+                      const std::string& sideKey = "compact") {
         WorldFactionFoundRequest r;
         r.worldId   = kW;
         r.name      = name;
@@ -78,6 +82,7 @@ struct StatDb {
         r.accountId = account;
         r.username  = "player" + std::to_string(account);
         r.seatPoiId = seatPoi;
+        r.sideKey   = sideKey;
         const auto w = WorldDirector::Load(db, kW);
         REQUIRE(w.has_value());
         const auto res = WorldFactions::Found(
@@ -102,6 +107,20 @@ struct StatDb {
         c.createdAt          = createdAt;
         REQUIRE(WorldStats::UpsertCommander(db, c));
         return c;
+    }
+
+    /// A faction row a `Commander()`-only test needs so attribution can
+    /// resolve its slug to a side (F1) — the store path without the founding
+    /// ceremony.
+    void AddSide(const std::string& factionId, const std::string& sideKey) {
+        WorldFactionRecord f;
+        f.worldId   = kW;
+        f.factionId = factionId;
+        f.name      = factionId;
+        f.archetype = kArchetypeOrder;
+        f.sideKey   = sideKey;
+        f.foundedAt = kNow;
+        REQUIRE(WorldFactions::Upsert(db, f));
     }
 
     void Settle(const std::string& poi, const std::string& winners,
@@ -263,7 +282,13 @@ TEST_CASE("W8: settlement attribution reads the winner list, not the outcome") {
     fresh.commanderId = "f"; fresh.createdAt = kNow + kDayMs;
     at = {win, lose, elsewhere, dead, fresh};
 
-    const auto awards = AttributeSettlement(s, at, r);
+    // F1: the settlement names SIDES; commanders belong to FACTIONS. The
+    // rule resolves the slug through this map before comparing — iron-order
+    // fields the winning side, grey-hand fields the losing one.
+    s.factions = "compact, free-cities";
+    const std::vector<WorldFactionSideKey> sides = {
+        {"iron-order", "compact"}, {"grey-hand", "union"}};
+    const auto awards = AttributeSettlement(s, at, sides, r);
     REQUIRE(awards.size() == 2);
     CHECK(awards[0].commanderId == "w");
     CHECK(awards[0].reason == "victory");
@@ -282,8 +307,9 @@ TEST_CASE("W8: accrual is idempotent across repeated reads") {
     StatDb h;
     h.AddPoi("paris");
     const auto rules = h.Rules();
+    h.AddSide("iron-order", "compact");
     h.Commander("cmdr-a", 1, "iron-order", "paris", 10.0);
-    h.Settle("paris", "iron-order");
+    h.Settle("paris", "compact");
 
     CHECK(WorldStats::AccrueFromSettlements(h.db, kW, rules, kNow, kWorldNow) == 1);
     const auto after = WorldStats::LoadCommander(h.db, kW, "cmdr-a");
@@ -303,9 +329,10 @@ TEST_CASE("W8: two wars at one POI are two awards") {
     StatDb h;
     h.AddPoi("paris");
     const auto rules = h.Rules();
+    h.AddSide("iron-order", "compact");
     h.Commander("cmdr-a", 1, "iron-order", "paris", 0.0);
-    h.Settle("paris", "iron-order", kNow);
-    h.Settle("paris", "iron-order", kNow + 1000);
+    h.Settle("paris", "compact", kNow);
+    h.Settle("paris", "compact", kNow + 1000);
     CHECK(WorldStats::AccrueFromSettlements(h.db, kW, rules, kNow, kWorldNow) == 2);
     CHECK(WorldStats::EventsFor(h.db, kW, "cmdr-a").size() == 2);
     const auto c = WorldStats::LoadCommander(h.db, kW, "cmdr-a");
@@ -318,8 +345,9 @@ TEST_CASE("W8: an award decays what was there before adding to it") {
     auto rules = h.Rules();
     rules.authorityDecayPerWorldDay = 0.10;
     rules.authorityFloor = 0.0;
+    h.AddSide("iron-order", "compact");
     h.Commander("cmdr-a", 1, "iron-order", "paris", 100.0);
-    h.Settle("paris", "iron-order");
+    h.Settle("paris", "compact");
 
     // Ten world days after the stored stamp: 100 → ~34.87, then +12.
     const int64_t later = kWorldNow + 10 * kDayMs;
@@ -714,10 +742,39 @@ TEST_CASE("W8: a war a player's commander wins raises their authority and rank")
     const double before = WorldStats::RankFor(h.db, kW, 1, rules, kWorldNow).total;
 
     // The whole W6 → W8 seam, end to end: a settlement row is the only input.
-    h.Settle("paris", fid);
+    h.Settle("paris", "compact");
     CHECK(WorldStats::AccrueFromSettlements(h.db, kW, rules, kNow, kWorldNow) == 1);
     const double after = WorldStats::RankFor(h.db, kW, 1, rules, kWorldNow).total;
     CHECK(after > before);
     CHECK(after - before ==
           doctest::Approx(rules.authorityPerVictory * rules.rankPerCommanderAuthority));
+}
+
+TEST_CASE("review F1: a commander whose FACTION fields the winning SIDE is awarded the victory rate") {
+    StatDb h;
+    h.AddPoi("poi-a");
+    const auto rules = h.Rules();
+    // Found() binds side "compact"; the settlement records the SIDE, exactly
+    // what WarStateSim writes into war_outcome.winnerFactions.
+    const auto fid = h.Found("Vanguard", 1, "poi-a");
+    h.Commander("cmdr-v", 1, fid, "poi-a", 10.0);
+    h.Settle("poi-a", "compact");
+    CHECK(WorldStats::AccrueFromSettlements(h.db, kW, rules, kNow, kWorldNow) == 1);
+    const auto ev = WorldStats::EventsFor(h.db, kW, "cmdr-v");
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].reason == "victory");
+    CHECK(ev[0].delta == doctest::Approx(rules.authorityPerVictory));
+}
+
+TEST_CASE("review F1: a faction with no side key is never a victor, only a defender") {
+    StatDb h;
+    h.AddPoi("poi-a");
+    const auto rules = h.Rules();
+    const auto fid = h.Found("Sideless", 1, "poi-a", /*sideKey=*/"");
+    h.Commander("cmdr-s", 1, fid, "poi-a", 10.0);
+    h.Settle("poi-a", "compact");
+    CHECK(WorldStats::AccrueFromSettlements(h.db, kW, rules, kNow, kWorldNow) == 1);
+    const auto ev = WorldStats::EventsFor(h.db, kW, "cmdr-s");
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].reason == "defeat");
 }

@@ -241,8 +241,13 @@ struct Directive {
 /// directive is that same explicit order, so it gets the same answer.
 ///
 /// `withinRadius <= 0` means no spatial filter (draw from anywhere).
+///
+/// `idleOnly` (ai-actuation F5): the SPEC may opt back into the polite
+/// default — a co-commander profile that must never yank a fighting force —
+/// and the engine now honours that choice instead of hardcoding the answer.
 StandingOrderConditions AIDirectiveConditions(float withinX, float withinZ,
-                                             float withinRadius);
+                                             float withinRadius,
+                                             bool idleOnly = false);
 
 using DirectiveChangeNotifier = std::function<void(int team)>;
 

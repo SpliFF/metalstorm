@@ -63,9 +63,18 @@
 --         entry    = { x = 8192, z = 15800 },
 --         dropZone = { x = 8192, z = 11000 },
 --         cargo    = { { def = 'ms_soldiers_s1', count = 2 } },
+--         dropRadius = 450,                -- OPTIONAL; default 200, sea 450
 --         order    = { cmd = 'FIGHT', x = 8192, z = 8192 },   -- OPTIONAL, see below
 --       },
 --     }
+--
+-- TERRAIN vs KIND (2026-09-10 review): an arrival is refused at load when its
+-- geometry cannot suit its carrier — a `sea` wave needs water at least
+-- `minWaterDepth` deep at BOTH its entry and its drop zone (it stops
+-- offshore; the cargo is unloaded within `dropRadius`, so put the drop zone
+-- within that of a beach); a `train` wave needs dry ground at both; an `air`
+-- wave needs a drop zone that suits its CARGO (dry ground unless every cargo
+-- def is naval). See terrainProblem() for the exact rules.
 --
 -- `order` is optional AND its absence is a choice: endtoend D20 finding 1 is
 -- that units with no orders never move, which is why the field exists at all
@@ -106,8 +115,40 @@ local PUBLIC_LOS = { public = true }
 local MAX_UNLOAD_SPEED = 0.5          -- elmo/frame
 
 local ARRIVE_RADIUS = 200             -- elmos: "the transport reached its dropZone"
+-- A SEA arrival stops OFFSHORE: the SHIP move class needs 12 elmos of water
+-- (gamedata/moveinfo.tdf minwaterdepth), so a landing ship's drop zone is
+-- necessarily a few hundred elmos out from the beach its cargo has to be
+-- unloaded onto, and a 200-elmo unload radius would find no dry ground for
+-- a single squad — the wave then re-issues UNLOAD_UNITS every retry period
+-- for the rest of the war. An arrival may override with `dropRadius`.
+local SEA_ARRIVE_RADIUS = 450
 local DEFAULT_DEPARTURE_RADIUS = 700  -- elmos, when a side declares no radius
 local UNLOAD_RETRY_FRAMES = 300       -- re-issue unload if cargo is still aboard
+
+-- THE BEACHING FALLBACK (2026-09-17). Widening the unload radius to
+-- SEA_ARRIVE_RADIUS was necessary and NOT sufficient: measured on a live run of
+-- scenarios/pelagic_landing.lua, a landing ship sails its lane, reaches its
+-- drop zone, is issued CMD_UNLOAD_UNITS, and the engine DOES decompose it into
+-- a concrete CMD_UNLOAD_UNIT at a dry square — and then nothing happens, for
+-- the rest of the war. CTransportCAI wants the hull close enough to the drop
+-- square to set a passenger down, and a SHIP cannot get closer than the
+-- shoreline; so the ship oscillates at 0.2 elmo/frame between the drop zone
+-- and the beach, holding its cargo, forever. Three sea waves in one match, all
+-- three stuck, 12000 frames in: the reinforcements never arrive and nothing in
+-- the log says why.
+--
+-- So after this many retries the GADGET puts the cargo ashore itself, with the
+-- same Spring.UnitDetach + Spring.SetUnitPosition pair game_train.lua uses for
+-- its own scriptless drop. It is a fallback, not the primary path: the engine
+-- gets its chances first, and an air or train wave (both of which do unload
+-- correctly — the same live run's airship emptied itself on the first try)
+-- never reaches this code.
+local BEACH_AFTER_RETRIES = 3
+
+-- How far from the stalled hull to look for somewhere to put people down, and
+-- how finely. Bounded by the arrival's own `dropRadius`.
+local BEACH_SCAN_STEP = 40
+local BEACH_SPREAD = 48               -- elmos between beached passengers
 
 -- Departures and guards do not run before this frame. Two reasons, one gate:
 -- the frame-60 guards read the STAGED board (game_scenario stages at GameStart
@@ -146,6 +187,7 @@ local expeditionary = {}    -- team -> true (§7.1)
 local committed = {}        -- team -> committed force, in cargo units
 local withdrawnUnits = {}   -- team -> count
 local withdrawnTransports = {}
+local withdrawnStrength = {}  -- team -> Σ hp/maxHp of the units that got out
 local transportsAlive = {}  -- team -> count of live is_transport units
 local stranded = {}         -- team -> true
 local outcomes = {}         -- team -> 'held'|'withdrew'|'routed'|'annihilated'
@@ -251,6 +293,100 @@ local function pointOnMap(p)
     return x >= 0 and x <= w and z >= 0 and z <= h
 end
 
+--- Ground height at a point, or nil when the engine cannot answer (a mock
+--- with no heightmap, a pre-map state). nil disables the terrain checks
+--- rather than inventing a verdict.
+local function groundAt(p)
+    if not Spring.GetGroundHeight then return nil end
+    local x, z = tonumber(p.x), tonumber(p.z)
+    if not x or not z then return nil end
+    return Spring.GetGroundHeight(x, z)
+end
+
+--- A def that can only exist afloat: the SHIP/SUB classes publish a positive
+--- `minWaterDepth`; everything that walks or drives publishes 0 (and air
+--- publishes nothing that matters — it lands anywhere).
+local function defNeedsWater(def)
+    return def ~= nil and (tonumber(def.minWaterDepth) or 0) > 0
+end
+
+--- THE TERRAIN-VS-KIND CHECK. An arrival's entry point and drop zone have to
+--- suit the carrier's own movement class, or the wave never happens and says
+--- nothing: a landing ship created on dry ground is refused by CreateUnit
+--- (nil, no log line), a landing ship whose drop zone is inland never
+--- "arrives" and re-issues its unload forever, an airship told to set an
+--- infantry squad down in open water drowns it. None of those is an error the
+--- engine reports, which is exactly the class §3.3's "validated at LOAD time,
+--- not trusted" was written for. Returns nil when fine, else a reason.
+---
+---   sea   — entry AND drop zone under water, and at least as deep as the
+---           carrier's `minWaterDepth` (SHIP = 12 elmos in moveinfo.tdf).
+---   train — entry and drop zone on land: a land train drives the whole way.
+---           There is no rail network in the map data (roads.lua carries
+---           highway/road/track classes only), so "a rail platform at the
+---           entry" cannot be checked; it is documented as the author's job.
+---   air   — the drop zone must suit the CARGO: dry ground unless every cargo
+---           def is itself a floater (a landing ship can be lifted onto water
+---           by nothing this game ships, but the rule is stated once).
+---
+--- When `Spring.TestMoveOrder` is available (the live engine) the carrier is
+--- additionally asked whether it could stand at its entry point at all —
+--- the engine's own passability answer, which also covers steepness and
+--- depth curves this file does not model.
+local function terrainProblem(kind, carrier, entry, dropZone, cargoDefs)
+    local he, hd = groundAt(entry), groundAt(dropZone)
+    if he == nil or hd == nil then return nil end
+    if kind == 'sea' then
+        local depth = math.max(0, tonumber(carrier.minWaterDepth) or 0)
+        if he >= 0 then return 'sea entry point is on dry ground (height ' .. math.floor(he) .. ')' end
+        if -he < depth then
+            return string.format('sea entry point is too shallow for %s (%d of %d elmos)',
+                                 carrier.name, math.floor(-he), depth)
+        end
+        if hd >= 0 then return 'sea dropZone is on dry ground (height ' .. math.floor(hd) .. ') — a ship stops offshore' end
+        if -hd < depth then
+            return string.format('sea dropZone is too shallow for %s (%d of %d elmos)',
+                                 carrier.name, math.floor(-hd), depth)
+        end
+    elseif kind == 'train' then
+        if he < 0 then return 'train entry point is under water' end
+        if hd < 0 then return 'train dropZone is under water' end
+    else
+        local allFloat = #cargoDefs > 0
+        for _, d in ipairs(cargoDefs) do
+            if not defNeedsWater(d) then allFloat = false end
+        end
+        if #cargoDefs > 0 and not allFloat and hd < 0 then
+            return 'air dropZone is over water (height ' .. math.floor(hd) .. ') but the cargo is not naval'
+        end
+        if allFloat and hd >= 0 then
+            return 'air dropZone is on dry ground but every cargo def needs water'
+        end
+    end
+    -- The engine's own passability answer for the entry square, which also
+    -- covers steepness and depth curves this file does not model.
+    --
+    -- NOT FOR AIR (2026-09-17, found on the first live run of
+    -- scenarios/pelagic_landing.lua). `Spring.TestMoveOrder` asks whether the
+    -- def's GROUND MoveDef could stand somewhere. An aircraft has no
+    -- movementclass at all — fable_airship is `canfly = true`, category
+    -- 'AIR MOBILE', no movedef — so the engine answers false for every square
+    -- on the map that is not incidentally walkable, and an air wave entering
+    -- over open sea (which is where aircraft enter from, on an archipelago)
+    -- was refused at load with a reason that reads like a content bug. An
+    -- air arrival's geometry constraint is the DROP ZONE suiting its cargo,
+    -- which is checked above; its entry point has none.
+    if kind ~= 'air' and Spring.TestMoveOrder and carrier.id then
+        local ex, ez = tonumber(entry.x), tonumber(entry.z)
+        local ok = Spring.TestMoveOrder(carrier.id, ex, he, ez, 0, 0, 0, true, false, true)
+        if ok == false then
+            return string.format('%s cannot stand at the entry point (%d, %d) — the engine refuses the square',
+                                 carrier.name, ex, ez)
+        end
+    end
+    return nil
+end
+
 --- §3.3's "team, or side key, resolved like war_sides". A numeric team passes
 --- through; a string is looked up as a faction key in the scenario's `sides`
 --- (the first side carrying it wins, which is how a multi-team faction reads).
@@ -336,7 +472,7 @@ local function validateArrival(scn, spec)
         return nil, 'dropZone is not on the map'
     end
 
-    local cargo, slots = {}, 0
+    local cargo, slots, cargoDefs = {}, 0, {}
     for _, c in ipairs(spec.cargo or {}) do
         if not knownDefs[c.def] then
             return nil, 'unknown cargo def "' .. tostring(c.def) .. '"'
@@ -344,7 +480,17 @@ local function validateArrival(scn, spec)
         local count = math.max(1, math.floor(tonumber(c.count) or 1))
         slots = slots + slotCost(defByName[c.def]) * count
         cargo[#cargo + 1] = { def = c.def, count = count }
+        cargoDefs[#cargoDefs + 1] = defByName[c.def]
     end
+
+    local terrainErr = terrainProblem(kind, carrier, spec.entry, spec.dropZone, cargoDefs)
+    if terrainErr then return nil, terrainErr end
+
+    local dropRadius = tonumber(spec.dropRadius)
+    if spec.dropRadius ~= nil and (not dropRadius or dropRadius <= 0) then
+        return nil, 'dropRadius must be a positive number'
+    end
+    dropRadius = dropRadius or (kind == 'sea' and SEA_ARRIVE_RADIUS or ARRIVE_RADIUS)
 
     local capacity = slotCapacity(carrier)
     if slots > capacity then
@@ -368,9 +514,19 @@ local function validateArrival(scn, spec)
         entry = { x = spec.entry.x, z = spec.entry.z },
         dropZone = { x = spec.dropZone.x, z = spec.dropZone.z },
         cargo = cargo, slots = slots,
+        dropRadius = dropRadius,
         order = spec.order,
         cargoUnits = 0,           -- filled at spawn
     }
+end
+
+--- The while-you-were-away digest's transport line (game_warlog.lua). Every
+--- emit is guarded: the digest is an observer, and a battle must not lose its
+--- lifecycle because a log line could not be composed.
+local function logEvent(subject, detail, team)
+    if GG.WarLog and GG.WarLog.Emit then
+        GG.WarLog.Emit('transport', subject, detail, team)
+    end
 end
 
 -- ============================================================
@@ -411,6 +567,17 @@ local function spawnArrival(a)
                     '" could not spawn its ' .. a.def .. ' at (' ..
                     tostring(a.entry.x) .. ', ' .. tostring(a.entry.z) ..
                     ') — the entry point is blocked. Wave dropped.')
+        -- The wave never entered, so it was never committed: leave it in the
+        -- §7.5 denominator and a side that extracts everything it actually
+        -- had still reads `routed`. Take the cargo back out and republish.
+        local n = 0
+        for _, c in ipairs(a.cargo) do n = n + c.count end
+        if n > 0 and committed[a.team] then
+            committed[a.team] = math.max(0, committed[a.team] - n)
+            Spring.SetTeamRulesParam(a.team, 'ms_committed_' .. a.team,
+                                     committed[a.team], PUBLIC_LOS)
+        end
+        logEvent(a.id, 'blocked', a.team)
         return nil
     end
 
@@ -455,7 +622,76 @@ local function spawnArrival(a)
     Spring.Echo(string.format(
         '[game_transports] arrival "%s": %s + %d cargo unit(s) for team %d entering at (%d, %d)',
         a.id, a.def, #cargoIDs, a.team, a.entry.x, a.entry.z))
+    logEvent(a.id, 'entered', a.team)
     return transportID
+end
+
+--- Nearest dry, passable square to (x, z) within `radius`, or nil.
+--- `Spring.TestMoveOrder` is consulted for the passenger's own def when the
+--- engine offers it, so an infantry squad is not beached on a cliff that only
+--- looks like land in the heightmap.
+local function findBeach(x, z, radius, passengerDefID)
+    for r = BEACH_SCAN_STEP, radius, BEACH_SCAN_STEP do
+        local steps = math.max(8, math.floor(2 * math.pi * r / BEACH_SCAN_STEP))
+        for i = 0, steps - 1 do
+            local a = (i / steps) * 2 * math.pi
+            local px, pz = x + r * math.cos(a), z + r * math.sin(a)
+            if px > 0 and pz > 0 and px < Game.mapSizeX and pz < Game.mapSizeZ then
+                local h = Spring.GetGroundHeight(px, pz)
+                if h and h > 1 then
+                    local ok = true
+                    if Spring.TestMoveOrder and passengerDefID then
+                        ok = Spring.TestMoveOrder(passengerDefID, px, h, pz,
+                                                  0, 0, 0, true, false, true) ~= false
+                    end
+                    if ok then return px, pz, h end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Put a stalled sea wave's cargo on the beach. See BEACH_AFTER_RETRIES.
+--- Returns the number of passengers actually set down.
+local function beachCargo(transportID, aboard, radius)
+    local tx, _, tz = Spring.GetUnitPosition(transportID)
+    if tx == nil then return 0 end
+    local placed = 0
+    for i, cid in ipairs(aboard) do
+        if Spring.ValidUnitID(cid) and Spring.GetUnitHealth(cid) then
+            local bx, bz = findBeach(tx, tz, radius, Spring.GetUnitDefID(cid))
+            if bx then
+                -- Fan the squad out rather than stacking it on one square: a
+                -- unit spawned inside another unit's footprint is refused or
+                -- trapped, and a beachhead that lands in a single pile is a
+                -- beachhead one artillery shell deletes.
+                --
+                -- The fan is PULLED BACK until it is still on land. A beach is
+                -- a line, not a disc: the first draft of this spread put a
+                -- passenger 48 elmos seaward of the only dry square it had
+                -- found and drowned it, which is the bug this whole fallback
+                -- exists to stop happening by other means.
+                local a = (i / math.max(1, #aboard)) * 2 * math.pi
+                local sx, sz = bx, bz
+                local spread = BEACH_SPREAD
+                while spread >= 8 do
+                    local px = bx + spread * math.cos(a)
+                    local pz = bz + spread * math.sin(a)
+                    local ph = Spring.GetGroundHeight(px, pz)
+                    if ph and ph > 1 then sx, sz = px, pz; break end
+                    spread = spread / 2
+                end
+                Spring.UnitDetach(cid)
+                Spring.SetUnitPosition(cid, sx, sz)
+                placed = placed + 1
+            end
+        else
+            -- Died in transit; detach anyway so the wave can finish.
+            pcall(Spring.UnitDetach, cid)
+        end
+    end
+    return placed
 end
 
 --- The transport reached its dropZone: unload, then apply the arrival's
@@ -469,8 +705,8 @@ local function serviceInFlight(frame)
             inFlight[transportID] = nil                 -- died or was cancelled in transit
         else
             local aboard = Spring.GetUnitIsTransporting(transportID) or {}
-            local atDrop = dist2(x, z, a.dropZone.x, a.dropZone.z)
-                           <= ARRIVE_RADIUS * ARRIVE_RADIUS
+            local radius = a.dropRadius or ARRIVE_RADIUS
+            local atDrop = dist2(x, z, a.dropZone.x, a.dropZone.z) <= radius * radius
             if atDrop then f.reachedDrop = true end
 
             -- "Empty" is NOT the same question as "arrived", and conflating
@@ -505,6 +741,7 @@ local function serviceInFlight(frame)
                     end
                 end
                 inFlight[transportID] = nil
+                logEvent(a.id, 'landed', a.team)
             elseif atDrop and #aboard > 0 then
                 local vx, _, vz = Spring.GetUnitVelocity(transportID)
                 local speed = math.sqrt((vx or 0) ^ 2 + (vz or 0) ^ 2)
@@ -512,9 +749,23 @@ local function serviceInFlight(frame)
                    and (f.unloadOrderedAt == nil
                         or frame - f.unloadOrderedAt >= UNLOAD_RETRY_FRAMES) then
                     f.unloadOrderedAt = frame
-                    Spring.GiveOrderToUnit(transportID, CMD.UNLOAD_UNITS,
-                        { a.dropZone.x, Spring.GetGroundHeight(a.dropZone.x, a.dropZone.z),
-                          a.dropZone.z, ARRIVE_RADIUS }, 0)
+                    f.unloadTries = (f.unloadTries or 0) + 1
+                    if a.kind == 'sea' and f.unloadTries > BEACH_AFTER_RETRIES then
+                        -- The engine has had BEACH_AFTER_RETRIES goes at it and
+                        -- the hull is still full. Put them ashore ourselves.
+                        local placed = beachCargo(transportID, aboard, radius)
+                        Spring.Echo(string.format(
+                            '[game_transports] arrival "%s": the engine would not unload it ' ..
+                            'after %d attempts — beached %d of %d passenger(s) by hand',
+                            a.id, f.unloadTries - 1, placed, #aboard))
+                        if placed == 0 then
+                            logEvent(a.id, 'stranded', a.team)
+                        end
+                    else
+                        Spring.GiveOrderToUnit(transportID, CMD.UNLOAD_UNITS,
+                            { a.dropZone.x, Spring.GetGroundHeight(a.dropZone.x, a.dropZone.z),
+                              a.dropZone.z, radius }, 0)
+                    end
                 end
             end
         end
@@ -569,6 +820,17 @@ local function depart(transportID, teamID)
     -- of what is left rather than of what left — which silently zeroes the
     -- world layer's settlement input.
     local carried = #aboard
+    -- VALUE, not just a head count. A squad is one sim unit whatever its
+    -- member count, and its strength is its health (squad.lua: monotonic
+    -- non-increasing), so a side that carries out four squads at 10% is not
+    -- extracting four squads' worth of materiel. The world layer's settlement
+    -- (§7.3) reads this alongside `_units`; the head count stays the §7.5
+    -- threshold input because that is what "committed" is counted in.
+    local strength = 0
+    for _, cid in ipairs(aboard) do
+        local hp, maxHp = Spring.GetUnitHealth(cid)
+        if hp and maxHp and maxHp > 0 then strength = strength + hp / maxHp end
+    end
 
     -- LEDGER FIRST, THEN THE DESTRUCTION, and the order is load-bearing.
     -- DestroyUnit runs UnitDestroyed synchronously in every other gadget, and
@@ -578,10 +840,15 @@ local function depart(transportID, teamID)
     -- question is asked, which fails the escort the side just won.
     withdrawnUnits[teamID] = (withdrawnUnits[teamID] or 0) + carried
     withdrawnTransports[teamID] = (withdrawnTransports[teamID] or 0) + 1
+    withdrawnStrength[teamID] = (withdrawnStrength[teamID] or 0) + strength
     Spring.SetTeamRulesParam(teamID, 'ms_withdrawn_' .. teamID .. '_units',
                              withdrawnUnits[teamID], PUBLIC_LOS)
     Spring.SetTeamRulesParam(teamID, 'ms_withdrawn_' .. teamID .. '_transports',
                              withdrawnTransports[teamID], PUBLIC_LOS)
+    Spring.SetTeamRulesParam(teamID, 'ms_withdrawn_' .. teamID .. '_strength',
+                             withdrawnStrength[teamID], PUBLIC_LOS)
+    logEvent(UnitDefs[Spring.GetUnitDefID(transportID)].name .. ' +' .. carried,
+             'withdrew', teamID)
 
     for _, cid in ipairs(aboard) do
         Spring.DestroyUnit(cid, false, true)     -- no wreck, no death FX
@@ -683,6 +950,7 @@ local function publishStranded(teamID)
         Spring.Echo('[game_transports] team ' .. string.format('%d', teamID) ..
                     ' is STRANDED — its last transport is gone and no arrival ' ..
                     'is scheduled, so nothing it still has on the field can leave.')
+        logEvent(string.format('team %d', teamID), 'stranded', teamID)
     elseif not strandedNow and stranded[teamID] then
         -- An arrival can un-strand a side (§3.3's reinforcement lane), so the
         -- signal is not a latch.
@@ -905,7 +1173,8 @@ end
 function GG.Transports.Committed(teamID) return committed[teamID] or 0 end
 
 function GG.Transports.Withdrawn(teamID)
-    return withdrawnUnits[teamID] or 0, withdrawnTransports[teamID] or 0
+    return withdrawnUnits[teamID] or 0, withdrawnTransports[teamID] or 0,
+           withdrawnStrength[teamID] or 0
 end
 
 --- THE EXIT ZONE, under its unified name (§7.10 / objectives §10.3).
@@ -1153,6 +1422,7 @@ function gadget:Save(state)
     state.committed = committed
     state.withdrawnUnits = withdrawnUnits
     state.withdrawnTransports = withdrawnTransports
+    state.withdrawnStrength = withdrawnStrength
     state.stranded = stranded
     state.outcomes = outcomes
     state.invalidArrivals = invalidArrivals
@@ -1174,6 +1444,7 @@ function gadget:Load(state)
     committed = state.committed or {}
     withdrawnUnits = state.withdrawnUnits or {}
     withdrawnTransports = state.withdrawnTransports or {}
+    withdrawnStrength = state.withdrawnStrength or {}
     stranded = state.stranded or {}
     outcomes = state.outcomes or {}
     invalidArrivals = state.invalidArrivals or 0

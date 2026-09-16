@@ -8,23 +8,63 @@
 --
 -- A goal is the smallest strategic unit the AI reasons about:
 --   { kind, id, source, region?, echelon, directive, value, meta }
---     kind      DEFEND | SCOUT | EXPAND | BUILD | RESERVE | OBJECTIVE | PARLEY
+--     kind      DEFEND | SCOUT | EXPAND | ATTACK | DENY | BUILD | RESERVE |
+--               OBJECTIVE | WITHDRAW | (scripted: RAID | TOLL)
 --     source    'explicit' (board) | 'implicit' (standing need) | 'bounty'
 --     directive the macro directive SHAPE to request (never a squad command)
 --     value     raw expected value BEFORE pSuccess/cost/travel (planner §3.2)
+--
+-- The slate reads the THREAT MAP (threat.lua) for every "is there an enemy
+-- near" question rather than peeking at neighbouring intel entries itself, so
+-- it and the planner argue from the same estimate. The map is built once per
+-- Picture and memoised on `picture.threat` (a Picture is a per-tick value; a
+-- spec that mutates one after building a slate must clear `picture.threat`).
+--
+-- The output is SORTED BY GOAL ID. Goals come out of `pairs()` over hash
+-- tables whose order Lua does not fix across processes (per-process string
+-- hash seed), and the planner's RNG tie-break is drawn in goal order — so an
+-- unsorted slate made "identical Picture ⇒ identical directives" true only
+-- within one VM. Sorting closes that.
+
+local Threat = require('threat')
+local Graph  = require('graph')
 
 local Slate = {}
+
+--- Truthiness for a published flag. A rulesParam arrives as a number from the
+-- engine and as a string from some readers; hand-built fixtures use `true`.
+local function flag(v)
+    return v == 1 or v == true or v == '1'
+end
+
+--- The threat map for this Picture (built once, memoised on the Picture).
+function Slate.threatFor(picture, role)
+    if not picture.threat then
+        picture.threat = Threat.build(picture, role, picture.config)
+    end
+    return picture.threat
+end
+
+--- A goal's region: the board's `region` when it names one, else the region
+-- containing its world position (protect / kill objectives publish x/z/r, not
+-- a region key — game_objectives.lua's positionHint publishes exactly one of
+-- the two). Without this a protect objective had `region = nil` and the
+-- actuator, which anchors every directive on a region polygon, skipped it
+-- silently every tick.
+local function regionForObjective(o, picture)
+    if o.region then return o.region end
+    local pos = o.pos
+    if pos and pos.x and pos.z then
+        return Graph.regionAt(picture.regions or {}, pos.x, pos.z)
+    end
+    return nil
+end
 
 --=============================================================================
 -- Explicit goals — eligible objectives from the public board (§3.1).
 -- Bounties a teammate staked are literally the human tasking the AI (§5);
 -- they carry source='bounty' so the planner's ×3 (co-commander) can find them.
 --=============================================================================
---- Truthiness for a published flag. A rulesParam arrives as a number from the
--- engine and as a string from some readers; hand-built fixtures use `true`.
-local function flag(v)
-    return v == 1 or v == true or v == '1'
-end
 
 --- Victory framing for a terminal objective (endtoend Q-E1 / D47). The board
 -- says WHICH objective ends the war; the region graph says who is currently
@@ -43,7 +83,38 @@ local function victoryMeta(o, picture, role)
     return true, { mine = mine, progress = progress }
 end
 
-local function explicitGoals(picture, role, out)
+--- Are we currently banking the terminal objective (own the prize region and
+-- the hold clock has started)? Withdrawal must never fire while this is true.
+function Slate.holdingPrize(picture, role)
+    for _, o in pairs(picture.board or {}) do
+        if o.state == 'active' and flag(o.victory) then
+            local _, vic = victoryMeta(o, picture, role)
+            if vic and vic.mine and vic.progress > 0 then return true end
+        end
+    end
+    return false
+end
+
+--- Expiry urgency (config EXPIRY_*): inside the horizon an objective's value
+-- climbs toward ×(1 + BOOST) as the clock runs out — the last chance to bank a
+-- reward outranks an equal reward with all the time in the world. Protect
+-- objectives are expiry-AS-SUCCESS (objectives/protect.lua §4.4): their value
+-- is steady until the bell, so they are exempt. Returns the multiplier and the
+-- frames remaining (nil when the objective does not expire).
+local function urgency(o, picture, config)
+    local expire = tonumber(o.expire)
+    if not expire then return 1.0, nil end
+    local remaining = expire - (picture.frame or 0)
+    if remaining < 0 then remaining = 0 end
+    if o.type == 'protect' then return 1.0, remaining end
+    local horizon = (config and config.EXPIRY_HORIZON_FRAMES) or 3600
+    local boost   = (config and config.EXPIRY_URGENCY_BOOST) or 0.5
+    if remaining >= horizon then return 1.0, remaining end
+    return 1.0 + boost * (1 - remaining / horizon), remaining
+end
+
+local function explicitGoals(picture, profile, role, config, out)
+    local teamId = role.teamId
     for id, o in pairs(picture.board or {}) do
         if o.state == 'active' and (role.explicitMode ~= 'none') then
             -- game_objectives.lua always publishes `team` as `o.forTeam or -1`
@@ -51,9 +122,11 @@ local function explicitGoals(picture, role, out)
             -- ui/lib/objectives.js's own forTeam() convention). `nil` is kept
             -- as an equivalent for hand-built test fixtures / a not-yet-read
             -- board entry.
-            local eligible = (o.team == nil) or (o.team == -1) or (o.team == role.teamId)
+            local eligible = (o.team == nil) or (o.team == -1) or (o.team == teamId)
+            local region = regionForObjective(o, picture)
             if eligible then
                 local victory, vic = victoryMeta(o, picture, role)
+                local mult, remaining = urgency(o, picture, config)
                 out[#out + 1] = {
                     kind     = 'OBJECTIVE',
                     id       = 'obj:' .. tostring(id),
@@ -61,20 +134,40 @@ local function explicitGoals(picture, role, out)
                     -- teammate staking a bounty is literally the human tasking
                     -- the AI, §5). game_objectives.lua now publishes `source`.
                     source   = (o.source == 'bounty') and 'bounty' or 'explicit',
-                    region   = o.region,
+                    region   = region,
                     echelon  = o.scope == 'strategic' and 'army' or 'platoon',
                     directive = Slate.directiveForObjective(o),
-                    value    = (o.reward or 0) + (o.bounty or 0),
+                    -- `reward` already includes the escrow total (game_objectives
+                    -- publishes reward + GG.Authority.EscrowTotal), so a staked
+                    -- bounty is priced by its stake without a second field.
+                    value    = ((o.reward or 0) + (o.bounty or 0)) * mult,
                     -- `suggested` (the soft-tasking hint published on the board,
                     -- §5.1) → planner sourceWeight ×2. It was read into the board
                     -- (picture BOARD_FIELDS) but never threaded onto the goal;
                     -- carry it on meta.suggested so the ×2 actually fires.
                     meta     = { objType = o.type, pos = o.pos, progress = o.progress,
                                  suggested = flag(o.suggested) or nil,
+                                 expire = tonumber(o.expire), remaining = remaining,
+                                 urgency = mult,
                                  -- Terminal objective: the planner weights it
                                  -- as the war rather than as its reward, and
                                  -- relaxes the pSuccess floor for it (§3.2).
                                  victory = victory, victoryState = vic },
+                }
+            elseif region and o.team ~= nil and o.team ~= -1
+                   and (profile.deny or config.DENY_FRACTION or 0) > 0
+                   and (o.type == 'protect' or o.type == 'infra' or o.type == 'escort'
+                        or o.type == 'extract') then
+                -- DENY: an objective only the ENEMY can complete is worth a
+                -- fraction of its reward to us as a place to hit — "a raid on
+                -- the enemy's town denies them the reward" (crossing_standoff
+                -- briefing). Profile `deny` says how much of a raider we are.
+                out[#out + 1] = {
+                    kind = 'DENY', id = 'deny:' .. tostring(id), source = 'implicit',
+                    region = region, echelon = 'platoon', directive = 'ASSAULT',
+                    value = (o.reward or 0) * (profile.deny or config.DENY_FRACTION),
+                    meta = { reason = 'deny-objective', objType = o.type,
+                             expire = tonumber(o.expire) },
                 }
             end
         end
@@ -102,24 +195,29 @@ local function allow(role, kind)
     return set == nil or set[kind] == true
 end
 
-local function implicitGoals(picture, profile, role, config, out)
+local function implicitGoals(picture, profile, role, config, threat, out)
     local regions = picture.regions or {}
     local intel   = picture.intel or {}
+    local tmap    = threat.regions
 
     for key, r in pairs(regions) do
+        local t       = tmap[key]
         local owned   = r.owner == role.teamId
         local neutral = r.owner == nil or r.owner == -1
-        local hasAdjacentThreat = Slate.adjacentThreat(key, r, intel)
+        local enemyOwned = not owned and not neutral
+        -- Enemy IN the region or next to it (threat map), not just next to it.
+        local threatened = t and t.enemyNear > 0 or false
 
-        -- DEFEND: owned, valuable, threat next door.
+        -- DEFEND: owned, valuable, enemy at or next door.
         if owned and allow(role, 'DEFEND')
-           and (r.value or 0) >= config.DEFEND_VALUE_MIN and hasAdjacentThreat then
+           and (r.value or 0) >= config.DEFEND_VALUE_MIN and threatened then
             out[#out + 1] = {
                 kind = 'DEFEND', id = 'def:' .. key, source = 'implicit',
                 region = key, echelon = 'army',
                 directive = r.contested and 'DEFEND_FRONT' or 'DEFEND',
                 value = (r.value or 1),
-                meta = { reason = 'adjacent-threat' },
+                meta = { reason = (t and t.enemy > 0) and 'under-attack' or 'adjacent-threat',
+                         enemyNear = t and t.enemyNear or 0 },
             }
         end
 
@@ -136,12 +234,28 @@ local function implicitGoals(picture, profile, role, config, out)
 
         -- EXPAND: neutral, valuable, adjacent to us, no visible threat.
         if neutral and allow(role, 'EXPAND') and (r.value or 0) > 0
-           and Slate.adjacentToOwned(key, r, regions, role) and not hasAdjacentThreat then
+           and Slate.adjacentToOwned(key, r, regions, role) and not threatened then
             out[#out + 1] = {
                 kind = 'EXPAND', id = 'exp:' .. key, source = 'implicit',
                 region = key, echelon = 'army', directive = 'TAKE_AND_HOLD',
                 value = (r.value or 1),
                 meta = { reason = 'open-ground' },
+            }
+        end
+
+        -- ATTACK: enemy-held ground one hop from ours. Profile `pressure`
+        -- scales it (0 = this profile never raises one); the planner's pSuccess
+        -- floor decides whether it is VIABLE against the threat map. Before
+        -- this, no implicit goal ever targeted enemy ground, so `aggression`
+        -- only ever touched an objective that happened to sit on it.
+        local pressure = profile.pressure or 0
+        if enemyOwned and allow(role, 'ATTACK') and pressure > 0
+           and (r.value or 0) > 0 and t and t.hops == 1 then
+            out[#out + 1] = {
+                kind = 'ATTACK', id = 'atk:' .. key, source = 'implicit',
+                region = key, echelon = 'army', directive = 'ASSAULT',
+                value = (r.value or 1) * pressure,
+                meta = { reason = 'pressure', enemyNear = t.enemyNear },
             }
         end
     end
@@ -161,7 +275,74 @@ local function implicitGoals(picture, profile, role, config, out)
         end
     end
 
+    Slate.transportGoals(picture, profile, role, config, threat, out)
     Slate.reserveGoal(out)
+end
+
+--=============================================================================
+-- Transport-aware goals (PLAN-metalstorm-transports.md §3.3/§3.4). Force
+-- enters a battle ONLY by arrival and value leaves it ONLY by departure, so
+-- both are strategic facts. They read an OPTIONAL `picture.transports` table:
+--   { departure = { x, z, radius, region? },   -- §3.4 withdrawal zone
+--     stranded  = bool,                         -- no transport left to leave on
+--     arrivals  = { { id, team?, eta, dropZone = {x,z}, region?, strength? } } }
+-- picture.lua does not populate it yet (nothing publishes the schedule or the
+-- zone as rulesParams — see README "engine asks"); absent, none of this fires.
+--=============================================================================
+function Slate.transportGoals(picture, profile, role, config, threat, out)
+    local t = picture.transports
+    if type(t) ~= 'table' then return end
+    local regions = picture.regions or {}
+    local frame = picture.frame or 0
+
+    -- Arrival cover: hold the drop region while a wave is inbound. A wave that
+    -- unloads into an enemy is a wave lost; a wave that lands on held ground
+    -- is reinforcement.
+    if allow(role, 'DEFEND') then
+        local cover = config.ARRIVAL_COVER_FRAMES or 1800
+        for _, a in ipairs(t.arrivals or {}) do
+            local ours = (a.team == nil) or (a.team == role.teamId)
+            local eta = tonumber(a.eta)
+            if ours and eta and eta >= frame and (eta - frame) <= cover then
+                local key = a.region
+                if not key and a.dropZone then
+                    key = Graph.regionAt(regions, a.dropZone.x, a.dropZone.z)
+                end
+                local r = key and regions[key]
+                if r then
+                    out[#out + 1] = {
+                        kind = 'DEFEND', id = 'arr:' .. tostring(a.id or key),
+                        source = 'implicit', region = key, echelon = 'platoon',
+                        directive = 'DEFEND', value = (r.value or 1),
+                        meta = { reason = 'arrival-cover', eta = eta },
+                    }
+                end
+            end
+        end
+    end
+
+    -- Withdrawal: losing, with a way home, and not banking the prize. One
+    -- goal, every package (meta.multi): the whole side falls back to the
+    -- departure zone. A withdrawn force keeps its value for the world layer
+    -- (game_transports.lua records `held`, not `annihilated`), which is the
+    -- entire point — a war you leave is a war you can come back to.
+    if t.departure and not t.stranded and allow(role, 'WITHDRAW') then
+        local ratio = profile.withdrawRatio
+        if ratio == nil then ratio = config.WITHDRAW_RATIO or 0 end
+        local losing = Threat.losing(threat, ratio, config, Slate.holdingPrize(picture, role))
+        if losing then
+            local key = t.departure.region
+            if not key then key = Graph.regionAt(regions, t.departure.x, t.departure.z) end
+            if key and regions[key] then
+                out[#out + 1] = {
+                    kind = 'WITHDRAW', id = 'withdraw', source = 'implicit',
+                    region = key, echelon = 'army', directive = 'WITHDRAW',
+                    value = (config.STRATEGIC_VALUE_SCALE or 1) * threat.totals.own,
+                    meta = { reason = 'losing', ratio = threat.ratio, multi = true },
+                }
+            end
+        end
+    end
 end
 
 --- RESERVE: always present, lowest priority — soaks uncommitted force at the
@@ -178,11 +359,12 @@ function Slate.reserveGoal(out)
 end
 
 --=============================================================================
--- Predicate stubs — real logic once the Picture is populated (regions graph,
--- intel, counters table). Written against the final Picture shape so they
--- light up without a rewrite; conservative defaults keep a blind AI calm.
+-- Predicates. Written against the final Picture shape; conservative defaults
+-- keep a blind AI calm.
 --=============================================================================
 
+--- Kept for callers/specs that ask the narrower question ("enemy NEXT DOOR");
+-- the slate itself asks the threat map, which also counts the enemy IN here.
 function Slate.adjacentThreat(key, region, intel)
     for _, nkey in ipairs(region.neighbors or {}) do
         local m = intel[nkey]
@@ -223,10 +405,9 @@ end
 --   3. There is no "factory idle" signal on the AI surface either
 --      (AI.getOwnUnits returns id/x/z/health/defId only — no build-queue or
 --      order state; see rts/Server/AI/AIScriptContext.h).
--- Needs a real counters table (a combat-resolution/game-data ask) and an
--- idle-factory read (an AI-surface ask) before this can be more than a
--- guess; both are engine/game-data gaps, not a Picture-shape problem.
-function Slate.compositionGap(picture, profile)
+-- Since the 2026-08-19 field-engineering ruling battles have no production at
+-- all, so BUILD is moot on a battle map regardless.
+function Slate.compositionGap(picture, profile)   -- luacheck: ignore
     return nil
 end
 
@@ -235,7 +416,9 @@ end
 --=============================================================================
 function Slate.build(picture, profile, role)
     local out = {}
-    explicitGoals(picture, role, out)
+    local config = picture.config or {}
+    local threat = Slate.threatFor(picture, role)
+    explicitGoals(picture, profile, role, config, out)
 
     -- NPC scripted subset (§5): a scenario hands the role a fixed slate (raid /
     -- defend home / toll a route) via scripted.lua. When one actually fires it
@@ -256,8 +439,10 @@ function Slate.build(picture, profile, role)
     if scripted then
         Slate.reserveGoal(out)
     else
-        implicitGoals(picture, profile, role, picture.config, out)
+        implicitGoals(picture, profile, role, config, threat, out)
     end
+
+    table.sort(out, function(a, b) return a.id < b.id end)
     return out
 end
 

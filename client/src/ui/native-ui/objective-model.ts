@@ -315,6 +315,76 @@ export function rankObjectives(
     });
 }
 
+// ───────────────────────── duplicate-title qualifiers ───────────────────
+
+/**
+ * Tell apart objectives whose titles COLLIDE on one stack.
+ *
+ * A title is TYPE + PLACE, so two objectives of the same type on one region
+ * read identically — `crossing_standoff` carries three "Hold Raven Basin" at
+ * once (a scripted victory objective and two generated control objectives).
+ * Every row is truthful and none can be told apart at a glance, which is the
+ * complaint U1 recorded and U2/U3/U4 each left open because it needs to know
+ * what ELSE is on the stack: qualifying every title unconditionally would make
+ * the common case worse to fix the rare one.
+ *
+ * Returns, per objective id, the qualifier to append — empty for a title that
+ * is unique. The qualifier is the FIRST of these that separates the group:
+ *
+ *   the war-ending one         "(victory)"     — the one that must never be confused
+ *   different origins          "(scenario)" / "(bounty)" / "(generated)"
+ *   different rewards          "(⬡300)"
+ *   otherwise, an ordinal      "(#2)"          — id order, so it is stable
+ *
+ * Pure: takes the titles as computed by the caller, so the chip stack and the
+ * rung-4 board qualify the same rows the same way.
+ */
+export function disambiguateTitles(
+    records: readonly ObjectiveRecord[],
+    titleOf: (o: ObjectiveRecord) => string,
+): Map<number, string> {
+    const byTitle = new Map<string, ObjectiveRecord[]>();
+    for (const o of records) {
+        const t = titleOf(o);
+        const list = byTitle.get(t);
+        if (list) list.push(o); else byTitle.set(t, [o]);
+    }
+
+    const out = new Map<number, string>();
+    for (const group of byTitle.values()) {
+        if (group.length < 2) continue;
+        const sorted = group.slice().sort((a, b) => a.id - b.id);
+
+        const victories = sorted.filter((o) => o.victory === 1);
+        const rest = sorted.filter((o) => o.victory !== 1);
+        // One victory among duplicates: name it, and qualify the rest among
+        // themselves. Two victories on one place is a scenario defect, not
+        // something to hide with an ordinal — fall through to the other rules.
+        if (victories.length === 1 && rest.length > 0) {
+            out.set(victories[0].id, '(victory)');
+            qualify(rest, out);
+        } else {
+            qualify(sorted, out);
+        }
+    }
+    return out;
+}
+
+function qualify(group: readonly ObjectiveRecord[], out: Map<number, string>): void {
+    if (group.length < 2) return;
+    const sources = new Set(group.map((o) => o.source ?? ''));
+    if (sources.size === group.length) {
+        for (const o of group) out.set(o.id, `(${o.source || 'generated'})`);
+        return;
+    }
+    const rewards = new Set(group.map((o) => Math.round(o.reward ?? 0)));
+    if (rewards.size === group.length) {
+        for (const o of group) out.set(o.id, `(⬡${Math.round(o.reward ?? 0)})`);
+        return;
+    }
+    group.forEach((o, i) => out.set(o.id, `(#${i + 1})`));
+}
+
 // ────────────────────────── state-change announcer ──────────────────────
 
 export type ObjectiveEventKind = 'appeared' | 'complete' | 'lost-race' | 'failed' | 'expired';

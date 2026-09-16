@@ -22,6 +22,37 @@
  */
 
 import type { MinimapFrameStats } from './minimap.js';
+import type { Sphere } from './orbit-rig.js';
+import {
+    diagnose,
+    luminanceVerdict,
+    mergeSubjectSpheres,
+    metresAcross,
+    resolveFraming,
+    retryFraming,
+    sphereFromArea,
+    sphereFromPosition,
+    type AttemptRecord,
+    type CaptureSubjectResult,
+    type CaptureSubjectSpec,
+} from './capture-subject.js';
+import {
+    clampFrames,
+    clampSimSpeed,
+    payloadChars,
+    sequenceMaxDim,
+    shotIntervalMs,
+    summariseSequence,
+    wireBudgetExceeded,
+    REALTIME_BURST_BUDGET_MS,
+    SEQUENCE_QUALITY,
+    type CaptureSequenceSpec,
+    type SequenceShot,
+    type SequenceSummary,
+} from './capture-sequence.js';
+
+export type { CaptureSubjectResult, CaptureSubjectSpec } from './capture-subject.js';
+export type { CaptureSequenceSpec } from './capture-sequence.js';
 
 /** A minimal subset of the lobby UI needed for `/api/exec` requests. */
 export interface TestLobbyHandle {
@@ -799,6 +830,484 @@ export class TestHarness {
      */
     async captureFrame(opts: CaptureFrameOpts = {}): Promise<CaptureFrameResult> {
         return await this.deps.workerCall('captureFrame', [opts]) as CaptureFrameResult;
+    }
+
+    /** Live entity ids for a def NAME, newest first, as the CLIENT mirror
+     *  knows them. `[]` means this client cannot show you that def — which is
+     *  a different (and more useful) statement than the server's unit list. */
+    async entitiesByDef(defName: string): Promise<number[]> {
+        return await this.deps.workerCall('entitiesByDef', [defName]) as number[];
+    }
+
+    /**
+     * **Subject → usable image, in ONE call.** The primitive every "show me
+     * this" workflow should reach for; hand-rolling camera math is what this
+     * replaces.
+     *
+     * Why it is one method and not four. Over the MCP relay each round trip
+     * costs seconds, and the sim does not wait: a guided playthrough on
+     * 2026-08-29 advanced **1,000+ sim frames** between a camera call and the
+     * screenshot call that was supposed to go with it, and the engagement it
+     * was aiming at was over by the time the shutter fell. Resolve → frame →
+     * hold → capture → check therefore all happen inside a single relay
+     * evaluation, on the browser side of the wire.
+     *
+     * What it does, in order:
+     *
+     *  1. **Resolve the subject** to a world bounding sphere — a unit id (or
+     *     several, merged), a def name (newest live instance this client
+     *     actually has), a position, or a ground rectangle. A unit that has
+     *     not reached the renderer is waited for, up to `resolveTimeoutMs`,
+     *     and then reported as unresolvable rather than framed blind.
+     *  2. **Frame from the subject's OWN radius** via the orbit rig, so a 4 m
+     *     rifleman and a 65 m submarine both fill the frame. Presets are
+     *     world-relative (`three-quarter` by default); the rig is the
+     *     ground-anchored path — free `setCameraPose` is ignored while it owns
+     *     the view.
+     *  3. **Dwell, then hold.** A short live-render dwell lets newly-visible
+     *     terrain and models draw; then the render loop is frozen so the
+     *     capture and any retry see the same world. (Freezing the SIM is the
+     *     caller's job — from the browser it would deadlock the game server's
+     *     single HTTP thread. `capture_subject` does it server-side.)
+     *  4. **Capture and judge.** `captureFrame` already guarantees a presented
+     *     frame; this adds a mean-luminance floor, and re-frames up and out
+     *     (`retryFraming`) when the frame comes back black. A frame that is
+     *     still black after the retries comes back with `ok:false` and a
+     *     `diagnosis` naming the candidate causes — never as a silent
+     *     deliverable.
+     *
+     * Always restores what it changed (render pause, and the camera view
+     * unless `restore:false`), including on failure.
+     */
+    async captureSubject(spec: CaptureSubjectSpec = {}): Promise<CaptureSubjectResult> {
+        const warnings: string[] = [];
+        const framing = resolveFraming(spec);
+        const resolveTimeoutMs = spec.resolveTimeoutMs ?? 5000;
+        const settleMs = spec.settleMs ?? 250;
+        const holdRender = spec.holdRender !== false;
+        const restore = spec.restore !== false;
+        const retries = Math.max(0, Math.min(5, spec.retries ?? 2));
+
+        // ── 1. Resolve the subject ──────────────────────────────────────
+        const r = await this.resolveCaptureSubject(spec, resolveTimeoutMs);
+        warnings.push(...r.warnings);
+        const kind = r.kind;
+        const unitIds = r.unitIds;
+        const def = r.def;
+        const hasModel = r.hasModel;
+        const target = r.target;
+        let sphere = r.sphere;
+
+        // ── 2. Frame from the subject's own bounds ──────────────────────
+        const started = await this.orbit(target, {
+            yawDeg: framing.yawDeg, pitchDeg: framing.pitchDeg,
+            follow: unitIds.length === 1,
+        }) as { anchor?: Sphere } | false;
+        if (!started || typeof started !== 'object') {
+            throw new Error('[test] captureSubject: the orbit rig refused the subject'
+                + ' (no camera, or the target has no bounds yet)');
+        }
+        let rig = await this.orbitFrame(framing.fill) as
+            { anchor: Sphere; distance: number; pitchDeg: number; yawDeg: number };
+        // The rig latched the authoritative anchor (ground height sampled for a
+        // bare x/z, model centre for a unit) — report THAT, not our estimate.
+        if (rig?.anchor) sphere = rig.anchor;
+
+        // ── 3+4. Dwell, hold, capture, judge ────────────────────────────
+        const attempts: AttemptRecord[] = [];
+        let shot: CaptureFrameResult | null = null;
+        let presentation: Awaited<ReturnType<TestHarness['presentationSnap']>> | null = null;
+        try {
+            if (settleMs > 0) await wait(settleMs);
+            if (holdRender) this.pause();
+            for (let attempt = 0; attempt <= retries; attempt++) {
+                const f = retryFraming(framing, attempt);
+                if (attempt > 0) {
+                    await this.orbitSet({ yawDeg: f.yawDeg, pitchDeg: f.pitchDeg });
+                    rig = await this.orbitFrame(f.fill) as typeof rig;
+                }
+                // V2: with the sim stopped (or stepped) the presentation
+                // cursor has no wall-clock rate to close the gap to the state
+                // the server just produced, so the shot would be of a frame
+                // older than the one we deliberately stepped to.
+                if (spec.syncPresentation) presentation = await this.presentationSnap();
+                shot = await this.captureFrame({
+                    maxDim: spec.maxDim, quality: spec.quality,
+                    format: spec.format, stats: true,
+                });
+                const verdict = luminanceVerdict(shot.stats, {
+                    luminanceFloor: spec.luminanceFloor,
+                    contrastFloor: spec.contrastFloor,
+                });
+                attempts.push({ framing: f, stats: shot.stats, verdict });
+                if (!verdict.black) break;
+            }
+        } finally {
+            if (holdRender) this.resume();
+            if (restore) await this.orbitStop().catch(() => undefined);
+        }
+
+        if (!shot) throw new Error('[test] captureSubject: no frame was captured');
+        const anchor: Sphere = sphere ?? { x: 0, y: 0, z: 0, radius: 1 };
+        const diagnosis = diagnose(attempts, {
+            revealed: spec.revealed === true,
+            underwater: anchor.y < 0,
+        });
+        const applied = attempts[attempts.length - 1].framing;
+        return {
+            dataUrl: shot.dataUrl,
+            width: shot.width, height: shot.height,
+            frameId: shot.frameId, gameFrame: shot.gameFrame,
+            stats: shot.stats,
+            subject: {
+                kind,
+                unitId: unitIds.length === 1 ? unitIds[0] : null,
+                unitIds, def,
+                sphere: anchor,
+                metresAcross: metresAcross(anchor),
+                hasModel,
+            },
+            framing: { ...applied, angle: framing.angle, distance: rig?.distance ?? 0 },
+            presentation,
+            attempts, warnings, diagnosis,
+            ok: diagnosis === null || !attempts[attempts.length - 1].verdict.black,
+        };
+    }
+
+    /**
+     * Put the presentation cursor on the newest server frame this client has
+     * actually received, discarding the jitter buffer for one shot.
+     *
+     * The capture path's companion to `sim_step`. A stopped sim has no
+     * wall-clock rate for the presentation PLL to close a gap with, so after a
+     * step the cursor sits behind the state the step just produced and a shot
+     * photographs the *previous* pose — silently, and identically to a correct
+     * shot. See PresentationClock.snapToNewest for why this is an explicit
+     * escape hatch rather than the default.
+     */
+    async presentationSnap(): Promise<{
+        ok: boolean; jumpedFrames?: number; E?: number; P?: number;
+        newestFrame?: number; gameFrame?: number; paused?: boolean;
+        simSpeed?: number; reason?: string;
+    }> {
+        return await this.deps.workerCall('presentationSnap') as {
+            ok: boolean; jumpedFrames?: number;
+        };
+    }
+
+    /**
+     * **Film a manoeuvre.** A burst of N framed shots of one subject, taken
+     * inside a SINGLE relay evaluation, with the camera re-framing on the
+     * subject between shots.
+     *
+     * Why a burst and not N calls to `captureSubject`. Each relay round trip
+     * costs seconds, so an N-shot "sequence" driven from the MCP at speed 1 is
+     * N poses at an unknown, unequal and unmeasurable spacing — real images of
+     * nothing you can reason about. Here the whole burst is one evaluation, so
+     * the inter-shot interval is wall-clock-accurate: `shotIntervalMs()` turns
+     * "3 sim frames apart at 0.1× speed" into the 1000 ms this loop sleeps.
+     *
+     * **This is the REALTIME mode, and its spacing is nominal.** It asks the
+     * wall clock for an interval and reports what the sim actually delivered
+     * (`summary.frameDeltas`) rather than assuming they match. When the
+     * spacing has to be exact — M1's turn arc, anything measured off the
+     * frames — use the MCP's `capture_sequence` in `step` mode instead: it
+     * advances the sim by `sim_step` between shots, so the spacing is exact
+     * however long the camera took. Stepping cannot be driven from here; from
+     * the browser it would deadlock the game server's single HTTP thread.
+     *
+     * Bytes. The relay's 4 MB cap is per message and this reply carries every
+     * frame, so resolution defaults DOWN with the frame count
+     * (`sequenceMaxDim`) and the burst stops early rather than returning a
+     * reply the relay will drop — `truncated` says so when it does.
+     *
+     * The failure it refuses to hide: N shots of the SAME sim frame. Every
+     * image is well-exposed and well-framed and the "film" is a still life.
+     * `summariseSequence` makes that `ok:false` with the causes named.
+     */
+    async captureSequence(spec: CaptureSequenceSpec = {}): Promise<{
+        subject: CaptureSubjectResult['subject'];
+        framing: ReturnType<typeof resolveFraming> & { distance: number };
+        shots: SequenceShot[];
+        summary: SequenceSummary;
+        requested: { frames: number; everyNthSimFrame: number; simSpeed: number; intervalMs: number };
+        truncated: boolean;
+        payloadChars: number;
+        warnings: string[];
+        ok: boolean;
+    }> {
+        const warnings: string[] = [];
+        const framing = resolveFraming(spec as Parameters<typeof resolveFraming>[0]);
+        const frames = clampFrames(spec.frames);
+        const stride = Math.max(1, Math.floor(spec.everyNthSimFrame ?? 3));
+        const simSpeed = clampSimSpeed(spec.simSpeed ?? 1);
+        const intervalMs = shotIntervalMs(stride, simSpeed);
+        const resolveTimeoutMs = spec.resolveTimeoutMs ?? 5000;
+        const settleMs = spec.settleMs ?? 250;
+        const track = spec.trackSubject !== false;
+        const sync = spec.syncPresentation !== false;
+        const maxDim = spec.maxDim ?? sequenceMaxDim(frames);
+        const quality = spec.quality ?? SEQUENCE_QUALITY;
+        // JPEG unless told otherwise. `captureFrame` defaults to PNG, which is
+        // right for one shot and wrong for a dozen: a burst of 900 px PNGs is
+        // ~1.8 MB each and hits the relay wire cap at five frames.
+        const format = spec.format ?? 'jpeg';
+
+        const r = await this.resolveCaptureSubject(spec, resolveTimeoutMs);
+        warnings.push(...r.warnings);
+
+        const started = await this.orbit(r.target, {
+            yawDeg: framing.yawDeg, pitchDeg: framing.pitchDeg,
+            follow: r.unitIds.length === 1,
+        }) as { anchor?: Sphere } | false;
+        if (!started || typeof started !== 'object') {
+            throw new Error('[test] captureSequence: the orbit rig refused the subject'
+                + ' (no camera, or the target has no bounds yet)');
+        }
+        let rig = await this.orbitFrame(framing.fill) as
+            { anchor: Sphere; distance: number };
+        let sphere = rig?.anchor ?? r.sphere;
+
+        if (intervalMs === 0) {
+            warnings.push('sim speed reads as 0 (paused) — a realtime burst has no'
+                + ' wall-clock interval to pace by, so every shot will be the same'
+                + ' frame. Use the MCP capture_sequence in step mode.');
+        }
+        if (track && r.unitIds.length !== 1) {
+            warnings.push('subject is not a single unit — the camera anchor is'
+                + ' static, so a subject that moves will leave the frame');
+        }
+
+        const shots: SequenceShot[] = [];
+        const t0 = performance.now();
+        // The relay abandons a `test` evaluation that has not answered in 8 s,
+        // taking every frame with it. Stopping short and returning what we have
+        // is strictly better than a burst that vanishes.
+        const deadline = t0 + REALTIME_BURST_BUDGET_MS;
+        let chars = 0;
+        let truncated = false;
+        try {
+            if (settleMs > 0) await wait(settleMs);
+            for (let i = 0; i < frames; i++) {
+                // Absolute deadlines, not `sleep(interval)` per iteration: the
+                // capture itself takes tens of ms and sleeping *between* shots
+                // would let that cost accumulate into the spacing.
+                if (i > 0 && intervalMs > 0) {
+                    const due = t0 + settleMs + i * intervalMs;
+                    if (due > deadline) {
+                        truncated = true;
+                        warnings.push(`stopped after ${i} of ${frames} frames — the next`
+                            + ' shot would fall outside the relay\'s 8 s main-thread'
+                            + ' budget and the whole reply would be abandoned. Use'
+                            + ' mode:"step" for a span this long.');
+                        break;
+                    }
+                    const left = due - performance.now();
+                    if (left > 0) await wait(left);
+                }
+                // Re-frame every shot: the rig follows a single unit, and a
+                // subject that is turning or walking changes its bounds.
+                if (track && r.unitIds.length === 1) {
+                    rig = await this.orbitFrame(framing.fill) as typeof rig;
+                    if (rig?.anchor) sphere = rig.anchor;
+                }
+                const snap = sync ? await this.presentationSnap() : null;
+                const shot = await this.captureFrame({
+                    maxDim, quality, format, stats: true,
+                });
+                // Budget check BEFORE appending: discovering the overflow after
+                // the reply is built is discovering it too late.
+                if (i > 0 && wireBudgetExceeded(chars, shot.dataUrl.length)) {
+                    truncated = true;
+                    warnings.push(`stopped after ${i} of ${frames} frames — the next`
+                        + ' one would push the reply past the relay wire cap. Ask for'
+                        + ' fewer frames, a smaller maxDim, or use the MCP'
+                        + ' capture_sequence, which writes each frame to disk.');
+                    break;
+                }
+                chars += shot.dataUrl.length;
+                shots.push({
+                    index: i,
+                    // The freshest ENTITY frame this client holds, when we have
+                    // it. `shot.gameFrame` comes from GameInfo — broadcast once
+                    // a game-second — so it quantises to 30 and would report a
+                    // burst of genuinely different frames as one instant.
+                    gameFrame: snap?.newestFrame ?? shot.gameFrame,
+                    clientFrame: snap?.newestFrame,
+                    frameId: shot.frameId,
+                    atMs: Math.round(performance.now() - t0),
+                    dataUrl: shot.dataUrl,
+                    width: shot.width, height: shot.height,
+                    stats: shot.stats,
+                    verdict: luminanceVerdict(shot.stats, {
+                        luminanceFloor: spec.luminanceFloor,
+                        contrastFloor: spec.contrastFloor,
+                    }),
+                });
+            }
+        } finally {
+            await this.orbitStop().catch(() => undefined);
+        }
+
+        const summary = summariseSequence(shots, {
+            expectedStride: stride, mode: 'realtime',
+        });
+        const anchor: Sphere = sphere ?? { x: 0, y: 0, z: 0, radius: 1 };
+        return {
+            subject: {
+                kind: r.kind,
+                unitId: r.unitIds.length === 1 ? r.unitIds[0] : null,
+                unitIds: r.unitIds, def: r.def,
+                sphere: anchor,
+                metresAcross: metresAcross(anchor),
+                hasModel: r.hasModel,
+            },
+            framing: { ...framing, distance: rig?.distance ?? 0 },
+            shots, summary,
+            requested: { frames, everyNthSimFrame: stride, simSpeed, intervalMs },
+            truncated,
+            payloadChars: payloadChars(shots.map((x) => x.dataUrl)),
+            warnings,
+            ok: summary.ok,
+        };
+    }
+
+    /**
+     * Subject spec → the bounding sphere and rig target that frame it.
+     *
+     * Shared by `captureSubject` (one shot) and `captureSequence` (a burst),
+     * because "which unit did you mean, and has its MODEL arrived yet" is the
+     * half of framing that is easy to get subtly wrong. The trap it encodes:
+     * `getEntityBounds` answers with the DEF-RADIUS FALLBACK while a model
+     * template is still loading, and framing off that is the wrong-zoom bug
+     * itself (V1 caught a 17 m heavy reporting as 2.5 m), so resolution waits
+     * for the template, not merely for the entity.
+     */
+    private async resolveCaptureSubject(
+        spec: CaptureSubjectSpec | CaptureSequenceSpec,
+        resolveTimeoutMs: number,
+    ): Promise<{
+        kind: CaptureSubjectResult['subject']['kind'];
+        unitIds: number[];
+        def: string | null;
+        target: number | { x: number; z: number; y?: number; radius?: number };
+        sphere: Sphere | null;
+        hasModel: boolean | null;
+        warnings: string[];
+    }> {
+        const warnings: string[] = [];
+        let kind: CaptureSubjectResult['subject']['kind'];
+        let unitIds: number[] = [];
+        let def: string | null = null;
+        let target: number | { x: number; z: number; y?: number; radius?: number };
+        let hasModel: boolean | null = null;
+        let sphere: Sphere | null = null;
+
+        if (spec.def) {
+            kind = 'def';
+            def = spec.def;
+            const found = await this.waitForDefEntities(spec.def, resolveTimeoutMs);
+            if (found.length === 0) {
+                throw new Error(`[test] captureSubject: no live entity of def "${spec.def}"`
+                    + ` reached this client within ${resolveTimeoutMs} ms.`
+                    + ' Spawn it first, check the def name, or pass unitId/position.');
+            }
+            if (found.length > 1) {
+                warnings.push(`${found.length} live "${spec.def}" — framing the newest`
+                    + ` (id ${found[0]}); pass unitIds to frame them all.`);
+            }
+            unitIds = [found[0]];
+            target = found[0];
+        } else if (spec.unitIds?.length || spec.unitId !== undefined) {
+            unitIds = spec.unitIds?.length ? [...spec.unitIds] : [spec.unitId as number];
+            kind = unitIds.length > 1 ? 'units' : 'unit';
+            target = unitIds[0];
+        } else if (spec.area) {
+            kind = 'area';
+            const s = sphereFromArea(spec.area);
+            target = { x: s.x, z: s.z, radius: s.radius };
+        } else if (spec.position) {
+            kind = 'position';
+            const s = sphereFromPosition(spec.position);
+            target = spec.position.y === undefined
+                ? { x: s.x, z: s.z, radius: s.radius }
+                : { x: s.x, y: s.y, z: s.z, radius: s.radius };
+        } else {
+            throw new Error('[test] captureSubject needs a subject:'
+                + ' unitId, unitIds, def, position or area.');
+        }
+
+        if (unitIds.length) {
+            const bounds = await this.waitForBounds(unitIds, resolveTimeoutMs);
+            const resolved = bounds.filter((b) => b !== null) as NonNullable<
+                Awaited<ReturnType<TestHarness['entityBounds']>>>[];
+            if (resolved.length === 0) {
+                throw new Error(`[test] captureSubject: unit ${unitIds.join(', ')} has no`
+                    + ` client-side bounds after ${resolveTimeoutMs} ms —`
+                    + ' it is not streamed to this client (dead, out of LOS, or never spawned).');
+            }
+            if (resolved.length < unitIds.length) {
+                warnings.push(`${unitIds.length - resolved.length} of ${unitIds.length}`
+                    + ' units are not streamed to this client and were left out of the framing');
+            }
+            sphere = mergeSubjectSpheres(resolved);
+            hasModel = resolved.every((b) => b.hasModel === true) ? true
+                : resolved.some((b) => b.hasModel === false) ? false
+                : resolved.some((b) => b.hasModel === null) ? null : true;
+            if (hasModel === false) {
+                warnings.push('procedural FALLBACK shape — this def has no model loaded,'
+                    + ' so the image shows a placeholder, not the art');
+            } else if (hasModel === null) {
+                warnings.push('model template still loading — the shape may be a placeholder');
+            }
+            // A multi-unit subject needs a static anchor: the rig follows ONE
+            // target, and following unit[0] would let the others leave frame.
+            if (resolved.length > 1 && sphere) {
+                target = { x: sphere.x, y: sphere.y, z: sphere.z, radius: sphere.radius };
+            }
+        }
+        return { kind, unitIds, def, target, sphere, hasModel, warnings };
+    }
+
+    /** Poll `entitiesByDef` until it answers, or the budget runs out. Defs
+     *  stream on demand, so a just-spawned unit is legitimately absent for a
+     *  tick or two — this is the wait that makes spawn→capture honest. */
+    private async waitForDefEntities(defName: string, timeoutMs: number): Promise<number[]> {
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        for (;;) {
+            const ids = await this.entitiesByDef(defName);
+            if (ids.length) return ids;
+            if (Date.now() >= deadline) return [];
+            await wait(100);
+        }
+    }
+
+    /**
+     * Poll `entityBounds` for each id until every one resolves *and* its model
+     * template has settled, or time runs out. Returns per-id results in the
+     * order asked, nulls included.
+     *
+     * The `hasModel === null` wait is not fussiness. While a template is still
+     * loading, `getEntityBounds` returns the DEF radius around the origin — a
+     * fallback that is nothing like the model's real extent — and framing off
+     * it reproduces the exact failure this whole primitive exists to remove:
+     * a just-spawned 17 m heavy came back as "2.5 m across" and was
+     * photographed from 34 elmos. Measured against a freshly spawned def, the
+     * template lands well inside the default budget.
+     */
+    private async waitForBounds(
+        unitIds: readonly number[], timeoutMs: number,
+    ): Promise<(Awaited<ReturnType<TestHarness['entityBounds']>>)[]> {
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        const unsettled = (
+            out: (Awaited<ReturnType<TestHarness['entityBounds']>>)[],
+        ): boolean => out.some((b) => b === null || b.hasModel === null);
+        let out = await Promise.all(unitIds.map((id) => this.entityBounds(id)));
+        while (unsettled(out) && Date.now() < deadline) {
+            await wait(100);
+            out = await Promise.all(unitIds.map((id) => this.entityBounds(id)));
+        }
+        return out;
     }
 
     /** Save the current canvas to a downloaded PNG file. */

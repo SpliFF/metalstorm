@@ -6,11 +6,18 @@ return mk{
     movementclass = 'VEH',
     baseHp = 1400, baseMass = 500, baseSpeed = 2.6, baseSquad = 8,
     baseFootprint = 2, formation = 'wedge',
-    -- M2 member spacing (metres): hull LENGTH per the DESIGN-GUIDE tanks row,
-    -- used as a circumscribed circle so two hulls never interpenetrate at any
-    -- relative heading. s1/s3 are the measured forge models (4.5 m tankette,
-    -- 12 m tracked heavy); s2/s4 are the table.
-    sizes = { 4.5, 8.5, 12, 26 },
+    -- M2 member spacing (metres): hull LENGTH, used as a circumscribed circle
+    -- so two hulls never interpenetrate at any relative heading.
+    -- APPLIED 2026-09-17 (units-assets review 2026-09-10 finding 4): every
+    -- row is now the SHIPPED hull's measured z extent — 4.8 / 9.9 / 13.2 /
+    -- 20.3 m — not the DESIGN-GUIDE row. The table's 8.5 let s2 members clip
+    -- (9.9 m hulls at 8.5 m spacing) and its 26 made the s4 dreadnought
+    -- over-reserve a 13-cell footprint for a 20.3 m hull. The player sees the
+    -- hull, and M2's contract is "two of them never interpenetrate".
+    -- Moves the golden radii pinned by
+    -- LuaRules/Gadgets/tests/squad_extents_spec.lua AND
+    -- client/squads/member-spacing.test.js — both were re-derived with it.
+    sizes = { 4.8, 9.9, 13.2, 20.3 },
     -- Turn RATES are left alone: at 8 elmos = 1 m the four scales already turn
     -- in 0.6-1.3 hull lengths, which is right for a tracked vehicle. What was
     -- wrong is that they BRAKED to do it, so the radius they actually drove was

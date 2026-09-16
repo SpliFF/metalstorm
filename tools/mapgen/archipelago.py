@@ -698,6 +698,21 @@ SHIPPED_REACHABILITY = {
     "frost_reach": reach.SPLIT,
     "dune_reach": reach.SPLIT,
     "verdant_shoals": reach.SPLIT,
+    # 2026-09-17: pelagic_expanse was MISSING here, so it fell through to
+    # reach.DEFAULT_INTENT ("connected") and shipped a mapinfo.lua that
+    # declared a connectivity it does not have. It is the same 9-island
+    # archipelago recipe as skerry_reach at a different seed;
+    # `regions_from_map.py data/maps/pelagic_expanse --verify` reads its eight
+    # starts in SIX disconnected VEH components (INFANTRY 4, HEAVY 7). A stale
+    # declaration is the more dangerous of the two failures the gate catches,
+    # because it SILENCES the gate — verify_scenario_maps.py inherits this exit
+    # code, so a war offered on this map failed a check about the map. Found
+    # while authoring scenarios/pelagic_landing.lua.
+    "pelagic_expanse": reach.SPLIT,
+    # pelagic_vastness reads the same way: 8 starts in 8 disconnected VEH
+    # components, declared "connected". Measured 2026-09-17 with the same
+    # --verify run; no war targets it yet, so nothing was failing on it.
+    "pelagic_vastness": reach.SPLIT,
 }
 
 # The classes each terrain's split claim speaks for (PLAN-maps M9o / lane
@@ -1579,11 +1594,20 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
 
 
 def main():
+    global MAP_SIZE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=None,
                     help="map package dir (default content/maps/<id>)")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--map-size", dest="map_size", type=float,
+                    default=MAP_SIZE,
+                    help="map edge in elmos (default %(default)s). The "
+                         "erosion/settlement grids keep their 8-elmo cell, so "
+                         "cost and memory scale with the square of this — and "
+                         "the ENGINE loads the heightmap monolithically "
+                         "(SQUARE_SIZE=8 is hardcoded server-side), so sizes "
+                         "past ~32768 produce packages nothing can open yet.")
     ap.add_argument("--landmass", type=float, default=0.34,
                     help="fraction of map area above the waterline (0..1)")
     ap.add_argument("--islands", type=int, default=9,
@@ -1765,6 +1789,8 @@ def main():
                          "fake it) and assert byte-identical packages; honours "
                          "--seed/--landmass/--islands/--fast/--with-features")
     args = ap.parse_args()
+
+    MAP_SIZE = float(args.map_size)
 
     if args.selftest:
         if args.preview_only or args.no_package:

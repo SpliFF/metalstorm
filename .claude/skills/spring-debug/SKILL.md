@@ -26,7 +26,7 @@ Five habits this surface replaces — do not fall back to the old folklore:
 
 | Tool | What it does | When to use |
 |------|-------------|-------------|
-| `launch_scenario` | **Scenario-first launch, no lobby UI and no login.** `{scenarioId, gameId='metalstorm', ai='null', side?, mapId?, players?, roomName='mcp:<id>', wait='ticking', headless?, idleGraceSeconds?, force?}` → `{roomId, port, sessions, browserUrl, scenario, phase, frame, notes}`. Resolves the scenario, builds the `/api/rooms/direct` manifest in memory (scenario as the **top-level** field — as a modoption it is silently overwritten by the map default), POSTs it, waits on `probe_game`. Add **`openBrowser:true`** (+ `browserHeadless`, default true) to launch a client too and reach `wait:'ticking'` in this one call — the browser is tracked and `end_game` closes it, and its report lands under `browser`. Browserless, pass `wait:'ready'` — `'ticking'` is unreachable on the default human roster | **The default way to start a metalstorm game.** One call, host seated on the scenario's first side, AIs on the rest, and (with `openBrowser`) a connected client |
+| `launch_scenario` | **Scenario-first launch, no lobby UI and no login.** `{scenarioId, gameId='metalstorm', ai='null', side?, mapId?, players?, modoptions?, roomName='mcp:<id>', wait='ticking', waitTimeoutMs?, headless?, skipBriefing?, idleGraceSeconds?, force?}` → `{roomId, port, sessions, browserUrl, scenario, phase, frame, notes}`. Resolves the scenario, builds the `/api/rooms/direct` manifest in memory (scenario as the **top-level** field — as a modoption it is silently overwritten by the map default), POSTs it, waits on `probe_game`. Add **`openBrowser:true`** (+ `browserHeadless`, default true) to launch a client too and reach `wait:'ticking'` in this one call — the browser is tracked and `end_game` closes it, and its report lands under `browser`. Browserless, pass `wait:'ready'` — `'ticking'` is unreachable on the default human roster | **The default way to start a metalstorm game.** One call, host seated on the scenario's first side, AIs on the rest, and (with `openBrowser`) a connected client |
 | `launch_direct` | **Raw-manifest launch** — the manual sibling of `launch_scenario`. `{manifestName? and/or manifest?, overrides?, wait='ticking', timeoutMs=120000, clearCache?, idleGraceSeconds?}` → `{roomId, port, roomName, sessions, players, aiSlots, browserUrl, phase, frame, notes}`. Merge order: file → `manifest` deep-merged (objects recurse, **arrays/scalars replace**) → `overrides` shallow-merged last. A bad `manifestName` lists the real ones. `name` is **idempotent by replacement**; unnamed ⇒ the shared `"dev:direct"`, so concurrent lanes must set distinct names | Custom rosters, modoptions, `sessionKind`, or idle timers — anything `launch_scenario` doesn't synthesise |
 | `open_client` | **Open a browser and connect it to a room** — the missing half of the relay tools, which all need a connected admin client. `{roomId? \| url?, headless=true, width=1280, height=800, waitReady=true, waitReadyMs=60000}` → `{pid, roomId, url, headless, profileDir, connected, clientId, readyState}`. `{roomId}` reuses the attach URL **remembered from that room's launch** (the host session token is issued once by `/api/rooms/direct` and cannot be rebuilt, so a room this server did not launch needs an explicit `url` — the refusal says so). Returns only once the relay actually answers: `connected:true` is a real client, not just a started process | Attaching a client to a room you launched earlier, or to any URL |
 | `close_client` | Close browsers this server opened: `{pid}` \| `{roomId}` \| `{all:true}`, `timeoutMs=5000`. SIGTERM to the process **group** → poll → SIGKILL. Read the `outcome`: `exited` clean, `killed_after_timeout` = SIGTERM ignored, `kill_failed` = needs a human. **Refuses any pid it did not launch** | Closing a client without ending the game |
@@ -50,14 +50,41 @@ Five habits this surface replaces — do not fall back to the old folklore:
 | `validate_scenario` | **Offline** — replicates BOTH scenario parsers (lobby bare-`lua_State` discovery + `game_scenario.lua`'s GameStart `validate()`) with no stack running. `{scenarioId \| luaSource, gameId='metalstorm', passability?}` → `{ok, findings[{severity, rule, path, message}], counts, defsSource}` | Before writing or launching any scenario. `skipped` findings mean **not checked**, never "fine" |
 | `write_scenario` | Validate → write `scenarios/<id>.lua` → resync the lobby → **confirm** it is offered. `{scenarioId, luaSource, gameId?, overwrite?, force?, resync=true}` → `{written, file, findings, resync, offered}`. Errors always block; warnings block unless `force`. Refuses the `gen_` prefix | Authoring a scenario. Without the resync the picker and `launch_scenario` cannot see the file at all |
 | `list_scenarios` | Discovery view + generated-war provenance (seed, params, createdBy), rows tagged `source: authored\|generated`. `{gameId?}` | "What wars exist, and where did this one come from?" |
-| `generate_scenario` | Wraps the admin generator route. `{mapId, seed?, sides?, towns?, outposts?, bases?, mines?, sites?, relics?, wrecks?, bridges?, hostility?, roster?}`. Seed defaults to `sum(ord(c) for c in mapId)`, so a re-run is an **idempotent upsert**; a 422 carries the generator's own `REJECTED` line | Making a new war for a map without hand-authoring one |
+| `generate_scenario` | Wraps the admin generator route. `{mapId, seed?, sides?, towns?, outposts?, bases?, mines?, sites?, relics?, wrecks?, bridges?, works?, harbour?, shanty?, hostility?, roster?, coverage?, player?}`. Seed defaults to `sum(ord(c) for c in mapId)`, so a re-run is an **idempotent upsert**; a 422 carries the generator's own `REJECTED` line | Making a new war for a map without hand-authoring one |
 | `restart_lobby` | Restart the lobby server in-place (re-exec, same PID, preserves game servers) | After rebuilding spring-lobby binary |
 | `restart_logserver` | Restart the log server (:8010) in-place (re-exec, same PID) | After rebuilding spring-logserver, or if the log pipeline stops responding |
-| `restart_game` | Restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
+| `restart_game` | `{roomId?}` — restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
 | `restart_client` | Restart the Vite client pane (:8012) via the mprocs control channel; `{clearCache?}` also wipes `client/node_modules/.vite` | After editing a worker-imported client file (`entity-renderer.ts`, `game-processor.ts`) that Vite serves stale |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
-This server also exposes the browser relay tools (`client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` — these **run code in a connected browser and return the answer**, falling back to printing a chrome-devtools snippet when one of the relay's three gates refuses) and the server-side test verbs (`spawn_unit`, `give_order`, `set_los`, `set_cheats`, `set_unit_invulnerable`, `get_unit_def`, `list_unit_defs`, `get_weapon_def`, `clear_defs_cache`, etc.) — documented in the **`spring-test`** skill and [docs/debugging-tools.md](../../../docs/debugging-tools.md#available-tools), plus performance profiling in [docs/debugging-performance.md](../../../docs/debugging-performance.md).
+This server also exposes **`capture_subject`** — the one call from "show me this unit / def / place" to a usable image, with the framing, the sim hold and the black-frame check done for you (see [Looking at something](#looking-at-something-filming-motion-and-the-camera) below; reach for it before any hand-rolled camera + screenshot pair) — plus the browser relay tools (`client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` — these **run code in a connected browser and return the answer**, falling back to printing a chrome-devtools snippet when one of the relay's three gates refuses) and the server-side test verbs — documented in the **`spring-test`** skill and [docs/debugging-tools.md](../../../docs/debugging-tools.md#available-tools), plus performance profiling in [docs/debugging-performance.md](../../../docs/debugging-performance.md).
+
+Def / cheat verbs not covered by spring-test's table (argument names verified against `server.js` 2026-09-10):
+
+| Tool | Args |
+|------|------|
+| `get_unit_def` / `get_weapon_def` | `{gameId, name? \| defId?}` — one def from the baked cache |
+| `list_unit_defs` | `{gameId, pattern?, full?, limit?}` — the authority for def names (there is no `ms_scout`; families are `ms_<class>_s1..s4`) |
+| `clear_defs_cache` | `{gameId?}` — wipe `data/games/<id>/cache/defs/` after changing the C++ defs serializer |
+| `set_los` / `set_cheats` | `{enable?, roomId?}` — omit `enable` to *report* the current state (the field is `enable`, not `enabled`) |
+| `set_unit_invulnerable` | `{unitId, invulnerable?, roomId?}` |
+| `spawn_at_camera` | `{defName, team?, count?, offset?}` — relays only the camera read, spawns server-side |
+
+**77 tools as of 2026-09-17.** The list above is a map, not the source of truth — `tools/debug-mcp/tools.js` is (the schemas moved out of `server.js` so `gen-docs.mjs` can render them without booting a stdio server), and `tools/claude-config/check-skills.sh` diffs every skill against it.
+
+The world, AI and natural-language tools landed 2026-09-17 and have skills of
+their own — they are listed here only so this table is not silently a subset:
+
+| Family | Tools | Skill |
+|--------|-------|-------|
+| World layer | `world_status`, `world_pois`, `world_factions`, `world_claims`, `world_commit`, `world_commit_cancel`, `world_seasons`, `world_pause`, `world_notifications` | **world-layer** |
+| AI players | `ai_list`, `ai_health`, `ai_directives`, `ai_guidance`, `ai_context` | **ai-player** |
+| Natural language | `nl_command` | **ai-player** |
+
+Reach for those skills rather than this table: each family has traps that are
+not visible in a tool name (`world_status {detail:'stats'}` is a write;
+`nl_command` parses and never executes; `ai_guidance` reporting
+`applied:false` is the gadget refusing, which is usually the answer you wanted).
 
 ## Self-diagnosis: SQLite binding & SPRING_DB (read this when probes look wrong)
 
@@ -132,38 +159,24 @@ The three **C++** restart tools (`restart_lobby`/`restart_logserver`/`restart_ga
 - **Log server** (`restart_logserver`): use if `get_logs`/`search_logs` start failing with `fetch failed`. Also via `SIGHUP` or `POST /api/logs/restart`.
 - **Game server** (`restart_game`): broadcasts `GameRestarting` to clients, which reload and reconnect. Also via `SIGHUP` or `POST /api/restart` on the game port. Use instead of end→relaunch when iterating on server code.
 
-## Camera control
+## Looking at something, filming motion, and the camera
 
-The camera lives **only in the browser** (the `RTSCamera` instance, `client/src/core/rts-camera.ts`). There are no camera MCP tools — drive it through the relay (`browser_test` / `client_eval({target:'test'})`) or a chrome-devtools `evaluate_script`. `window.test.*` is **the** surface — there is no `window.camera`; it was documented for years but never installed. Read the live pose with `window.test.cameraPose()` → `{pos:{x,y,z}, lookAt:{x,y,z}}`. Camera calls settle before they resolve, so a screenshot straight after one is safe; for framing that must not drift use `test.withStableCamera(fn)` (locks input, re-checks the pose afterwards and reports drift) or `test.lockInput(true)`.
+**If the goal is "look at X", the one call is `capture_subject`** (`{def|unitId|unitIds|position|area, spawn?, angle?}`) —
+it resolves the subject, frames it from its own model bounds, orders
+spawn → LOS on → settle → pause → capture, checks the pixels and leads its
+metadata with a verdict (`capture: OK` / `UNUSABLE`). Anything that only
+exists *while moving* is `capture_sequence` / `order_and_film` (`step` mode
+= exact sim-frame spacing, `realtime` = wall-clock burst, hard ~6.5 s ceiling)
+with `step_sim {frames}` as the primitive. The camera lives only in the
+browser (`window.test.camera*` — there is no `window.camera`), positions are
+positive `[0,mapX]×[0,mapZ]` with no flip, and unit-targeting camera calls are
+viewport-bound (use server positions from `list_units`/`exec_lua`).
 
-### Coordinate system (read this first)
-World positions are **positive** in `[0, mapX] × [0, mapZ]` (Option A — handedness is a *direction/basis* convention, not positional; see `PLAN-coordinate-system-option-a.md`). The camera shares the server's world coordinates — **no flip**. So a value from `Spring.GetUnitPosition(id)` feeds straight into the camera. `heading = 0` faces −Z; the map grows in +X/+Z.
+Angle presets, the paused-sim/no-fresh-spawns trap, the wall-clock clip clock,
+`presentationSnap`, the FX 7000-elmo cull and the full hand-rolled camera
+recipe: **[capture-and-camera.md](capture-and-camera.md)**. Committed example
+shots: `tools/debug-mcp/shots/README.md`.
 
-### Canonical methods (all on `window.test`)
-- **World point:** `cameraSnapToGround(x, z, {height, pitchDeg, durationMs})` — look-at lands on `(x, groundY, z)` with explicit framing. **Preferred** for precise, deterministic control.
-- `focusOn(x, z, durationMs)` — pans to world `(x, z)` but **keeps the current camera→look-at offset/distance**, so a far/zoomed-out camera stays far. Takes **two** world coords.
-- **A unit:** `cameraSnapToUnit(unitId, …)` / `focus(unitId)` — but see the viewport caveat below.
-- **A group:** `cameraFitUnits([id,…], {pitchDeg, padding, durationMs})` — frames the bounding box. The player-facing tracking camera (`setTrackingCamera(true)`, `T` key) re-fits the live **selection** every tick via the same path.
-
-### Pitfalls (all hit in practice)
-1. `focusOn(x, z)` takes **two world coords**. `focusOn(unitId)` is a bug — the id is read as `x`, `z` is `undefined`, and the camera flies off-map. To target a unit use `cameraSnapToUnit(id)` / `focus(id)`.
-2. **Never** set `scene.activeCamera.position` / `.setTarget(...)` directly. `RTSCamera` keeps its own `lookAt`; bypassing it desyncs that state, and the *next* animated `focusOn` computes `offset = camera.position − lookAt` from the stale value and hurls the camera thousands of elmos off-map (e.g. `x = −13197`). Always go through `window.test`.
-3. Animated moves (`durationMs > 0`) preserve the current offset/distance. For a tight, deterministic frame use `cameraSnapToGround` / `cameraSnapToUnit` with explicit `height` + `pitchDeg` and `durationMs: 0`.
-4. The game camera controller does **not** fight a programmatic pose **unless tracking is on** (`window.test.setTrackingCamera(false)` to be sure) — tracking re-fits the selection every tick and will override your pose.
-
-### Unit/group targeting is viewport-bound — use server positions
-`cameraSnapToUnit` / `cameraFitUnits` / `focus(unitId)` resolve positions via the client's `getEntityPosition` — an **internal** renderer method (interpolated, viewport-streamed state), **not** a Spring API. The server **viewport-filters unit state**: it streams only units near the registered viewport. (Projectiles are *broadcast* to every client, so FX appear even where units don't.) So an off-screen unit — or a `spawn_unit`-spawned test unit the viewport never covered — has no client position, and these methods fail with `no client-side position for unit N`.
-
-Reliable recipe — get the authoritative position from the server, then point the camera:
-```js
-const r = await window.test.lua('local x,y,z=Spring.GetUnitPosition(ID) return x..","..z');
-const [x, z] = r.split(',').map(Number);
-await window.test.cameraSnapToGround(x, z, { height: 700, pitchDeg: 60, durationMs: 0 });
-```
-From the MCP side the same position comes from `list_units` or `exec_lua` (scope `LuaRules`, `return Spring.GetUnitPosition(ID)`) — server-authoritative and viewport-independent.
-
-### FX visibility
-The forward FX light pool culls emissions **> 7000 elmos** from the camera. (Since the ×8 world-scale adoption, 8 elmos = 1 m, so 7000 elmos ≈ 875 m — camera `height` numbers from pre-scale notes are ~8× off in metres.) To see projectile / weapon-FX lights (and faithful deferred projectile lights), the camera must be near the action — frame the combat first, then observe.
 
 ## Browser automation
 
@@ -192,3 +205,12 @@ mprocs' control port, and `cleanup_stack` refuses to kill the lobby.
 
 If probes look wrong while the game demonstrably runs, re-read
 "Self-diagnosis: SQLite binding & SPRING_DB" above.
+
+## Traps that outlive any one tool
+
+- **Every room refuses with `Wire schema mismatch (client X, server Y)` on a clean tree** → `build/release/spring-server` predates a regenerated `rts/Server/ProtocolSchemaHash.h`. The lobby spawns the **release** binary whenever it exists, so a debug-only rebuild is invisible: `cmake --build build/release --target spring-server`, then `end_game` + relaunch (`list_stack {probeHashes:true}` proves it).
+- **Wakeups/polls are capped at 120 s** (`ScheduleWakeup`) — chain `wait_for_game`/`probe_game` calls, never one long sleep. `wait_for_game`'s own `timeoutMs` default is 120 s for the same reason.
+- **`pgrep -f <pattern>` matches the Bash tool's own zsh wrapper**, so a "still running" loop waits on itself. Use `list_stack`/`list_processes`, or `pgrep -x spring-server`.
+- **A headless `--headless-run` never writes a checkpoint on its own stop condition** (`ExitReason::HeadlessRun` is refused); only SIGTERM (`ExitReason::Signal`) checkpoints. `end_game` sends SIGTERM for exactly this reason — read `outcome:"checkpointed"` in its report.
+- **`lobby.currentRoom.state >= 4` never fires in an in-game client** — it has left the room SSE feed. Readiness is `client_ready` / `test.readyState()` / a rising `get_frame`.
+- **Two SQL writers on one handle corrupt SQLite in-process** (macOS libsqlite3 is `THREADSAFE=2`): `query_db` is read-only by design; never `sqlite3` a write into `data/spring-server.db` while the lobby is up — use the routes.

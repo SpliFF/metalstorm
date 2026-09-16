@@ -23,6 +23,7 @@
 
 #include "Server/WorldDirector.h"
 #include "Server/WorldEconomy.h"
+#include "Server/WorldEscrow.h"
 #include "Server/WorldFactions.h"
 #include "Server/WorldSeasons.h"
 #include "Server/WorldStats.h"
@@ -42,6 +43,7 @@ struct SeasonDb {
         WorldFactions::EnsureTables(db);
         WorldStats::EnsureTables(db);  // also ensures WorldEconomy's tables
         WorldSeasons::EnsureTables(db);
+        WorldEscrow::EnsureTables(db);
         REQUIRE(WorldDirector::SeedDefaultWorld(db, kNow) == kW);
     }
     ~SeasonDb() { sqlite3_close(db); }
@@ -59,6 +61,11 @@ struct SeasonDb {
         REQUIRE(WorldDirector::Upsert(db, *w));
     }
 
+    /// Raw surgery for crash-window simulations the API refuses to produce.
+    void Exec(const char* sql) {
+        REQUIRE(sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+    }
+
     void AddPoi(const std::string& id, const std::string& owner) {
         WorldPoiRecord p;
         p.worldId = kW;
@@ -70,13 +77,15 @@ struct SeasonDb {
             REQUIRE(WorldDirector::SetPoiOwner(db, kW, id, owner));
     }
 
-    std::string Found(const std::string& name, int64_t account) {
+    std::string Found(const std::string& name, int64_t account,
+                      const std::string& sideKey = "compact") {
         WorldFactionFoundRequest r;
         r.worldId   = kW;
         r.name      = name;
         r.archetype = kArchetypeOrder;
         r.accountId = account;
         r.username  = "player" + std::to_string(account);
+        r.sideKey   = sideKey;
         const auto w = WorldDirector::Load(db, kW);
         REQUIRE(w.has_value());
         const auto res = WorldFactions::Found(
@@ -85,12 +94,24 @@ struct SeasonDb {
         return res.faction->factionId;
     }
 
+    /// A faction "had force in that war": one engaged escrow row keyed by the
+    /// room — what P2's digest attribution reads (EngagedOrSettledForRoom).
+    void Engage(const std::string& factionId, uint32_t roomId) {
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO world_escrow (world_id, staging_id, faction_id, "
+                 "room_id, state, transports, squads, committed_by_account_id, "
+                 "created_at) VALUES ('%s', %u, '%s', %u, 'engaged', 1, 1, 7, 1)",
+                 kW, roomId, factionId.c_str(), roomId);
+        REQUIRE(sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+    }
+
     void Settle(const std::string& poiId, const std::string& factionsCsv,
-               int64_t recordedAtReal) {
+               int64_t recordedAtReal, uint32_t roomId = 1) {
         WorldSettlementRecord s;
         s.worldId    = kW;
         s.poiId      = poiId;
-        s.roomId     = 1;
+        s.roomId     = roomId;
         s.outcome    = "victory_objective";
         s.factions   = factionsCsv;
         s.recordedAt = recordedAtReal;
@@ -182,6 +203,36 @@ TEST_CASE("W12: a season does not roll over before its configured length elapses
     CHECK(WorldSeasons::CurrentSeason(h.db, kW)->seasonNumber == 1);
 }
 
+TEST_CASE("review F17: seasonLengthWorldMs <= 0 disables seasons rather than rolling every tick") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", 0.0);
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+    // Disabled means no season is ever opened, and a tick far in the future
+    // still rolls nothing.
+    CHECK(!WorldSeasons::CurrentSeason(h.db, kW).has_value());
+    CHECK(!WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 100 * kDayMs, kNow + 1)
+               .rolledOver);
+}
+
+TEST_CASE("review F3: a world whose active season vanished re-opens season N+1, never season 1") {
+    SeasonDb h;
+    h.SetConfig("seasonLengthWorldMs", static_cast<double>(1 * kDayMs));
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
+    REQUIRE(WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 2 * kDayMs, kNow + 1)
+                .rolledOver);
+    // Simulate the crash window an older build could leave behind: the
+    // active season closed, nothing opened after it.
+    h.Exec("UPDATE world_seasons SET state='ended', ended_world_ms=1 "
+           "WHERE season_number=2");
+    REQUIRE(!WorldSeasons::CurrentSeason(h.db, kW).has_value());
+    WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 3 * kDayMs, kNow + 2);
+    const auto cur = WorldSeasons::CurrentSeason(h.db, kW);
+    REQUIRE(cur.has_value());
+    // Continuing the numbering — a season-1 insert would collide with the
+    // UNIQUE(world_id, season_number) index forever.
+    CHECK(cur->seasonNumber == 3);
+}
+
 TEST_CASE("W12: a season rolls over once its configured length elapses") {
     SeasonDb h;
     h.SetConfig("seasonLengthWorldMs", static_cast<double>(10 * kDayMs));
@@ -236,9 +287,14 @@ TEST_CASE("W12: the digest credits settlements to their winning faction(s), and 
     const auto remnant  = h.Found("Remnant", 2);
     WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
 
-    h.Settle("poi-a", vanguard, kNow + 10);
-    h.Settle("poi-b", vanguard + "," + remnant, kNow + 20);  // a joint win
-    h.Settle("poi-c", "", kNow + 30);                        // operator retire — no winner
+    // Winners are SIDE keys (what war_outcome writes); the factions earn
+    // their credit by having had force engaged in the winning side's war.
+    h.Engage(vanguard, 11);
+    h.Settle("poi-a", "compact", kNow + 10, 11);
+    h.Engage(vanguard, 12);
+    h.Engage(remnant, 12);
+    h.Settle("poi-b", "compact", kNow + 20, 12);             // a joint win
+    h.Settle("poi-c", "", kNow + 30, 13);                    // operator retire — no winner
 
     const auto r = WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 2 * kDayMs, kNow + 40);
     REQUIRE(r.rolledOver);
@@ -255,6 +311,13 @@ TEST_CASE("W12: the digest credits settlements to their winning faction(s), and 
     const auto unclaimed = DigestOf(digests, "");
     REQUIRE(unclaimed.has_value());
     CHECK(unclaimed->settlementsWon == 1);  // poi-c
+
+    // The archive still says which SIDE took the field, in its own bucket —
+    // never under a bare side key a faction digest could collide with.
+    const auto side = DigestOf(digests, "side:compact");
+    REQUIRE(side.has_value());
+    CHECK(side->settlementsWon == 2);
+    CHECK(!DigestOf(digests, "compact").has_value());
 }
 
 TEST_CASE("W12: a settlement recorded in a LATER season is not credited to the one that already closed") {
@@ -263,11 +326,13 @@ TEST_CASE("W12: a settlement recorded in a LATER season is not credited to the o
     const auto vanguard = h.Found("Vanguard", 1);
     WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
 
-    h.Settle("poi-a", vanguard, kNow + 10);
+    h.Engage(vanguard, 21);
+    h.Settle("poi-a", "compact", kNow + 10, 21);
     WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 2 * kDayMs, kNow + 20);  // closes season 1
 
     // A second settlement, recorded after season 1 closed.
-    h.Settle("poi-b", vanguard, kNow + 30);
+    h.Engage(vanguard, 22);
+    h.Settle("poi-b", "compact", kNow + 30, 22);
     const auto r2 =
         WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 4 * kDayMs, kNow + 40);
     REQUIRE(r2.rolledOver);
@@ -452,16 +517,17 @@ TEST_CASE("phase 3: the season archive body serves an ended season's digests, an
     h.AddPoi("poi-a", red);
     WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow, kNow);
 
-    // One settlement won by red, one unclaimed, both during season 1.
-    h.Settle("poi-a", red, kNow + 10);
-    h.Settle("poi-a", "", kNow + 11);
+    // One settlement won by red's side (red engaged), one unclaimed.
+    h.Engage(red, 31);
+    h.Settle("poi-a", "compact", kNow + 10, 31);
+    h.Settle("poi-a", "", kNow + 11, 32);
     REQUIRE(WorldSeasons::Tick(h.db, kW, h.Rules(), kWorldNow + 10 * kDayMs, kNow + 20).rolledOver);
 
     const auto archived = WorldSeasons::SeasonArchiveJson(h.db, kW, 1);
     REQUIRE_FALSE(archived.contains("error"));
     CHECK(archived["season"]["number"].get<int>() == 1);
     CHECK(archived["season"]["state"].get<std::string>() == "ended");
-    REQUIRE(archived["digests"].size() == 2);
+    REQUIRE(archived["digests"].size() == 3);  // red, unclaimed, side:compact
     bool sawRed = false, sawUnclaimed = false;
     for (const auto& d : archived["digests"]) {
         if (d["factionId"].is_null()) {
