@@ -30,6 +30,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Fresh-process re-capture (`--resume-verify`)](#fresh-process-re-capture---resume-verify)
   - [Resuming across a balance patch](#resuming-across-a-balance-patch-gamedatamigrationslua)
   - [The two-def-load harness](#the-two-def-load-harness-toolsscriptsdef-reconcile-resumesh)
+- [Gadget Lua Tests (`make test-gadget-lua`)](#gadget-lua-tests-make-test-gadget-lua)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -214,6 +215,38 @@ condition and keeps the ordinary per-tool error paths.
 
 ### Available Tools
 
+> **The full reference is [mcp-tools.md](mcp-tools.md)** — every tool, every
+> argument, generated from the schemas themselves (`cd tools/debug-mcp && npm
+> run docs`), so it cannot drift from what a caller actually gets. The table
+> below stays here for the narrative: the tools worth knowing about and the
+> traps attached to them.
+
+**Four rules across the whole surface**, each of them a thing that has bitten:
+
+- **Every network call has a deadline.** A lobby that accepts the connection and
+  never answers used to hang a tool for ever. 15 s default on any fetch that
+  brings no signal of its own (`SPRING_MCP_HTTP_TIMEOUT_MS`); 60 s for
+  `/api/exec` (`SPRING_MCP_EXEC_TIMEOUT_MS`); the browser relay gets its own
+  `timeoutMs` + 5 s; `api_request` takes a `timeoutMs` (default 30 s, clamped
+  0.5–300 s); `world_notifications` derives one from `listenMs`.
+- **`roomId` is a room id, not a port.** An ENDED room keeps its port, and ports
+  get reused — `roomId:7` on a dead room used to answer from whichever server
+  had since bound `:9100`. An explicit `roomId` is now **refused** when the row
+  is ended, hibernated or its pid is gone (naming the room squatting the port),
+  and a value that looks like a port is told so. Omitting `roomId` auto-picks
+  the single live room and never a dead one.
+- **Session tokens are redacted.** `launch_scenario` / `launch_direct` return
+  their `sessions` map with the bearer tokens replaced unless you pass
+  `revealTokens:true`. `browserUrl` deliberately keeps its `#token=` fragment —
+  that fragment *is* the attach mechanism. `world_notifications` never returns
+  its SSE stream ticket at all.
+- **Schemas and handlers cannot drift.** `npm run check` (`self-check.mjs`)
+  diffs every `inputSchema` against the `args.<name>` reads in its handler, in
+  both directions: read-but-not-declared (undiscoverable, and the near-miss typo
+  check cannot protect a name it has not heard of) and declared-but-not-read
+  (the whitelist-emitter trap, where a new knob validates and then goes
+  nowhere). It runs as part of `make test-debug-mcp`.
+
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `get_logs` | `roomId`, `game`, `level`, `section`, `scope`, `sinceMinutes`, `limit` | Fetch recent log entries; `roomId` scopes to one game instance |
@@ -248,6 +281,13 @@ condition and keeps the ordinary per-tool error paths.
 | `capture_sequence` | ONE of `unitId` \| `unitIds[]` \| `def` \| `position` \| `area`; plus `frames` (2-60, default 6), `everyNthSimFrame` (default 3), `mode` (`step`\|`realtime`), `simSpeed`, `name`, `outDir`, `inlineFrames`, `spawn`, `angle`, `yawDeg`, `pitchDeg`, `fill`, `maxDim`, `quality`, `reveal`, `trackSubject`, `streamSettleMs`, `roomId`, `clientId` | **Film a manoeuvre → N images on disk, in one call.** Same subject selectors and auto-framing as `capture_subject`, re-framed before every shot so a moving subject stays in frame — see [Filming motion](#filming-motion-capture_sequence--step_sim--order_and_film). Frames are written to disk (the 4 MB wire cap is per message); the metadata's first line is the verdict, and N shots of the same instant is `UNUSABLE`, not a film |
 | `order_and_film` | `unitId` (required); `move{x,z,y?}` \| `attack:<id>` \| `order{cmdId,params[],opts?}`; plus every `capture_sequence` argument and `speedThreshold`, `turnThreshold`, `onsetTimeoutMs`, `onsetPollFrames` | **Give an order, wait for the motion to actually start, then film it.** Closes the gap between order-acknowledged and unit-moving — the gap where hand-driven tooling loses the subject. Onset counts **rotation as well as translation**, because a tank reversing course barely translates. A unit that never moves is filmed anyway and labelled |
 | `browser_test`, `evaluate_widget_lua`, `spawn_at_camera` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md). Since P7 these **relay for real** over `/api/client/eval` and return the answer; the paste-into-chrome-devtools snippet is now only the fallback when a gate refuses |
+| `world_status`, `world_pois`, `world_factions`, `world_claims`, `world_seasons` | all take an optional `world` selector; see [mcp-tools.md](mcp-tools.md#the-world-layer) | **Reading the [world layer](world-layer.md)** — the persistent metagame above individual battles. `world_status` is the entry point (clock, season, config; `detail:"pois"\|"stats"\|"factions"\|"all"` for more). Note `detail:"stats"` **settles commander authority accrual on the way past** — idempotent, but it is a write. Every documented error code is mapped to a sentence saying what to do about it, with `have`/`need` and the side keys carried through rather than swallowed |
+| `world_commit`, `world_commit_cancel` | `poi` (required), `transports`, `squads`, `origin` / `stagingId` (required) | **Driving the world loop without curl** (the out-of-lane ask this pair exists for). `world_commit` opens or joins a staging window at a POI; the war room is created when the window **ends**, not at commit. The force leaves your faction's pool into a WorldEscrow row immediately — `world_commit_cancel` refunds it before contact, and a war that ends with **no verdict** settles the escrow as `voided`. Your faction comes from your membership, never from the body. Refusals worth knowing: `window_closed` (the window ended between your read and this write — re-read `world_pois`), `same_side`/`no_side`, `too_much_force`, `no_battle_map`. `claims/file`'s `insufficient_authority` is a **403** |
+| `world_pause` | `action` (`pause`\|`resume`), `reason` | Admin. Freezes **world-clock progression only** — running battles keep going, so this is not a way to freeze a war |
+| `world_notifications` | `listenMs` (100–120000, default `10000`), `kinds`, `includeOther` | There is no REST route for world events: they ride the identified chat SSE stream. This trades the token for a stream ticket and listens for a bounded window, returning `world-staging` / `world-poi` / `world-season`. **Silence is not failure** — a late commit joining an already-open window fires nothing, and you only receive events for wars you have a stake in. The ticket is a credential and is never echoed back |
+| `ai_list`, `ai_health`, `ai_directives`, `ai_context` | `team`, `roomId` (+ `includeGroups` on directives) | **Reading the AI brains.** Fixed, fengari-tested Lua programs (`lua-snippets.js`) rather than a hand-typed `exec_lua` per question. `ai_health` reports which rulesParams the brain has written and which are **missing by name** — a brain that never started leaves the whole list missing, and that absence is the diagnosis. There is no single `ai_health` param in the tree; the tool composes the answer. `ai_context` returns the NL context built from the sim, which is usually why an utterance resolved to the wrong place |
+| `ai_guidance` | `op` (required: `stance`\|`paint`\|`lock`\|`delegate`\|`fund`\|`roe`\|`veto`), `value`, `regionKey`, `groupId`, `objectiveId`, `amount`, `rateCap`, `goalId`, `team`, `playerId`, `roomId` | **The one AI write.** Encodes the order into `game_ai_guidance.lua`'s own RecvLuaMsg wire format (byte-pinned against the fixture the TS and Lua sides share) and delivers it **through `gadgetHandler:RecvLuaMsg` as a player seated on the team** — so it exercises the same path a browser does, including the gadget's validation, instead of poking the store into a state the real path could never reach. Reports whether the gadget's change sequence actually moved: `applied:false` means the gadget **rejected** it, which is the answer you want |
+| `nl_command` | `utterance` (required), `team`, `context`, `focus`, `history`, `roomId` | **A parse, not an execution.** `POST /api/nl/command` on the **game** server turns the utterance into a validated intent envelope; running it is client-side (`nl-executor.ts`), so nothing in the sim changes. With no `context`, one is built from the sim for `team`. `503 nl-disabled` means that game server has no `SPRING_NL_API_KEY`/`ANTHROPIC_API_KEY` — the route is registered but off, **not** compiled out. The server's caps (500-char utterance, 4 history entries, 16 KB body) are mirrored locally so a refusal names the field instead of arriving as a code after a round trip. **There is still no way to EXECUTE an utterance in a live client** from here — `command-console.js`'s `runUtteranceText` is file-local; exposing `window.test.nl()` is an open out-of-lane ask |
 
 **The three gates on every relayed tool.** All of them fall back to printing a
 snippet rather than erroring, and the fallback line names which gate refused:
@@ -1675,6 +1715,21 @@ refuses to attach. The tree is cloned instead (`cp -Rc`, ~0.2 s on APFS).
 
 Read the arm table the script prints, not the exit code of any single server: every
 headless run exits 134 in the static-destruction abort (PLAN-replay T2-b).
+
+---
+
+## Gadget Lua Tests (`make test-gadget-lua`)
+
+| Family | cwd | busted args |
+|---|---|---|
+| authority | `LuaRules/Gadgets/authority` | `.` |
+| civilians / objectives / parley / regions | `LuaRules/Gadgets/<name>` | `tests/` |
+| gadgets-mock | `LuaRules/Gadgets` | `tests/` |
+| scenario | `data/games/metalstorm` | 11 scenario-cwd specs by name |
+
+`ai/` already covered by `make test-ai-lua`. `gadgets-mock` (149 known errors) and `scenario` (3 failures/1 error) carry known pre-existing red — reported, not fixed.
+
+Exit status is a **regression gate**, not a strict all-green check: each family's fail/error counts are compared against `tools/scripts/gadget-baseline.json`, and the target only exits non-zero if a family gets worse than its recorded baseline (or is missing from it). Run one family with `make test-gadget-lua FAMILY=<name>`; rewrite the baseline (a deliberate act, not something routine testing should ever do) with `make test-gadget-lua-baseline`.
 
 ---
 

@@ -10,8 +10,8 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-    bindFocusReferences, focusContextFor, findSubjectDeictic, findTargetDeictic,
-    isSubjectDeictic, isTargetDeictic,
+    bindFocusReferences, focusContextFor, focusViewFrom, focusViewFromContext,
+    findSubjectDeictic, findTargetDeictic, isSubjectDeictic, isTargetDeictic,
 } from './nl-focus.js';
 import type { NLFocusView } from './focus-model.js';
 import type { NLResponse } from './nl-envelope.js';
@@ -253,5 +253,200 @@ describe('the focus as the model sees it', () => {
         expect(focusContextFor(view())).toEqual({
             subjects: [], surfaces: [], selected: 0,
         });
+    });
+});
+
+// ────────────────── the focus PORT: whatever shape it arrives in ──────────────────
+
+/**
+ * `focusViewFrom` is the seam between the NL layer and whoever owns the focus,
+ * and it is the only place in the layer that looks at a focus store's shape.
+ * Four producers feed it and they do not agree with each other: the TS
+ * `FocusModel` (`nlFocus()`), lane 9's `lib/focus.js` store (`getFocus()`), an
+ * already-normalised snapshot, and the WIRE shape a fixture board or a replayed
+ * eval payload carries (`surfaces`/`selected` rather than
+ * `openSurfaces`/`selectionCount`).
+ *
+ * These tests exist because the alternative to feature-detecting here is a
+ * second focus store inside the NL layer, and two stores that disagree about
+ * what is selected is how the wrong army moves.
+ */
+describe('focusViewFrom feature-detects its producer', () => {
+    const wire = {
+        primary: { kind: 'town', label: 'Randtown', place: 'Randtown' },
+        subjects: [{ kind: 'squad', label: 'Chimera Squad' }],
+        drilled: { kind: 'town', label: 'Randtown', place: 'Randtown' },
+        surfaces: ['command-console'],
+        selected: 8,
+    };
+
+    it('reads a FocusModel through nlFocus()', () => {
+        const snap = focusViewFrom({ nlFocus: () => wire });
+        expect(snap?.drilled?.place).toBe('Randtown');
+        expect(snap?.selectionCount).toBe(8);
+    });
+
+    it('reads lane 9’s store through getFocus()', () => {
+        const snap = focusViewFrom({ getFocus: () => wire });
+        expect(snap?.subjects.map((s) => s.label)).toEqual(['Chimera Squad']);
+        expect(snap?.openSurfaces).toEqual(['command-console']);
+    });
+
+    it('accepts the wire shape directly, mapping surfaces/selected', () => {
+        const snap = focusViewFrom(wire);
+        expect(snap?.openSurfaces).toEqual(['command-console']);
+        expect(snap?.selectionCount).toBe(8);
+    });
+
+    it('accepts an already-normalised snapshot unchanged', () => {
+        const snap = focusViewFrom(view({ drilled: town('Randtown'), selectionCount: 3 }));
+        expect(snap?.drilled?.label).toBe('Randtown');
+        expect(snap?.selectionCount).toBe(3);
+    });
+
+    it('infers primary from a single subject, and refuses to from several', () => {
+        expect(focusViewFrom({ subjects: [{ kind: 'squad', label: 'Chimera Squad' }] })?.primary?.label)
+            .toBe('Chimera Squad');
+        expect(focusViewFrom({
+            subjects: [{ kind: 'squad', label: 'Chimera Squad' }, { kind: 'squad', label: 'Basilisk Squad' }],
+        })?.primary).toBeNull();
+    });
+
+    it('carries contract v2’s camera place, asked and brief target', () => {
+        const snap = focusViewFrom({
+            subjects: [],
+            drilled: {
+                kind: 'proposal', label: 'Ceasefire at Osprey Fen',
+                place: 'Osprey Fen', target: 'Raider column near Osprey Fen',
+            },
+            camera: { place: 'Northgate' },
+            asked: { question: 'Which one?', options: ['a', 'b'] },
+        });
+        expect(snap?.cameraPlace).toBe('Northgate');
+        expect(snap?.asked).toEqual({ question: 'Which one?', options: ['a', 'b'] });
+        expect(snap?.drilled?.target).toBe('Raider column near Osprey Fen');
+    });
+
+    it('drops a malformed brief rather than carrying a half one', () => {
+        // A producer mid-refactor sends a brief with no label. Binding against
+        // it would produce `target: {name: undefined}`, which the validator
+        // rejects three layers later with a message about the wrong thing.
+        const snap = focusViewFrom({ subjects: [{ kind: 'squad' }, { kind: 'squad', label: 'Ok' }] });
+        expect(snap?.subjects.map((s) => s.label)).toEqual(['Ok']);
+    });
+
+    it('a primitive is null, not a throw', () => {
+        for (const input of [null, undefined, 42, 'focus', true, () => {}]) {
+            expect(focusViewFrom(input)).toBeNull();
+        }
+    });
+
+    it('an object with no focus fields is an EMPTY focus, not null', () => {
+        // Deliberate, and the distinction does not matter downstream: the
+        // binder treats a null focus and an empty one identically (a pronoun
+        // with nothing to point at refuses either way). What it must not do is
+        // throw on a producer that has come up but has nothing selected yet.
+        for (const input of [{}, [], { unrelated: 1 }]) {
+            expect(focusViewFrom(input)).toEqual({
+                primary: null, subjects: [], drilled: null,
+                openSurfaces: [], selectionCount: 0,
+            });
+        }
+    });
+
+    it('round-trips through the wire shape without losing a field', () => {
+        const snap = focusViewFrom(wire)!;
+        expect(focusViewFromContext(focusContextFor(snap))).toEqual(snap);
+    });
+});
+
+// ─────────────────────────── target elision (contract v2) ───────────────────────────
+
+describe('a verb with no target at all', () => {
+    const bare = (verb: string): NLResponse => ({
+        actions: [{ kind: 'command', intent: { verb: verb as 'attack', subject: { type: 'any' } } }],
+    });
+
+    it('takes the drilled panel’s place, and says the focus supplied it', () => {
+        const { response, bindings } = bindFocusReferences(bare('attack'), view({ drilled: town('Randtown') }));
+        expect(intentOf(response).target).toEqual({ type: 'entity-ref', name: 'Randtown' });
+        expect(bindings).toEqual([{
+            actionIndex: 0, slot: 'target', phrase: '',
+            label: 'Randtown', source: 'drilled', elided: true,
+        }]);
+    });
+
+    it('elides for every verb that can take a place', () => {
+        for (const verb of ['attack', 'secure', 'defend', 'hold', 'patrol', 'screen', 'scout', 'reinforce', 'build']) {
+            const { response } = bindFocusReferences(bare(verb), view({ drilled: town('Randtown') }));
+            expect(intentOf(response).target, verb).toEqual({ type: 'entity-ref', name: 'Randtown' });
+        }
+    });
+
+    it('never elides for withdraw or escort', () => {
+        // `withdraw`'s empty target is the departure zone, and an open town must
+        // not turn "pull back" into "pull back INTO the town". `escort`'s
+        // drilled thing is what would be escorted, not where to.
+        for (const verb of ['withdraw', 'escort']) {
+            const { response, bindings } = bindFocusReferences(bare(verb), view({ drilled: town('Randtown') }));
+            expect(intentOf(response).target, verb).toBeUndefined();
+            expect(bindings, verb).toEqual([]);
+        }
+    });
+
+    it('elides from the DRILLED panel only, never from the camera or the selection', () => {
+        const fromCamera = bindFocusReferences(bare('attack'), view({ cameraPlace: 'Northgate' }));
+        expect(intentOf(fromCamera.response).target).toBeUndefined();
+
+        const fromSelection = bindFocusReferences(
+            bare('attack'), view({ subjects: [town('Randtown')], selectionCount: 1 }));
+        expect(intentOf(fromSelection.response).target).toBeUndefined();
+    });
+
+    it('leaves the sentence alone when nothing is drilled', () => {
+        const before = bare('attack');
+        const { response, bindings } = bindFocusReferences(before, view());
+        expect(response).toBe(before);       // same object: nothing to bind
+        expect(bindings).toEqual([]);
+    });
+
+    it('a drilled panel with no PLACE supplies nothing', () => {
+        // A squad's panel is a thing, not somewhere. Guessing its centroid
+        // would aim the order at a position the player never named.
+        const { response } = bindFocusReferences(bare('attack'), view({ drilled: squad('Chimera Squad') }));
+        expect(intentOf(response).target).toBeUndefined();
+    });
+});
+
+// ─────────────────────────── the events query (contract v2) ───────────────────────────
+
+describe('"what’s happening there"', () => {
+    const near = (name: string): NLResponse => ({
+        actions: [{ kind: 'query', query: { op: 'events', near: name } }],
+    });
+    const queryOf = (r: NLResponse) => {
+        const a = r.actions[0];
+        if (a.kind !== 'query') throw new Error(`expected a query, got ${a.kind}`);
+        return a.query;
+    };
+
+    it('binds its place by the same rule an order’s target uses', () => {
+        const { response } = bindFocusReferences(near('there'), view({ drilled: town('Randtown') }));
+        expect(queryOf(response)).toEqual({ op: 'events', near: 'Randtown' });
+    });
+
+    it('leaves a named place alone', () => {
+        const before = near('Slag Forge');
+        expect(bindFocusReferences(before, view({ drilled: town('Randtown') })).response).toBe(before);
+    });
+
+    it('refuses by name when the pronoun has no antecedent', () => {
+        const { response } = bindFocusReferences(near('there'), view());
+        expect(refusalOf(response)).toMatch(/there/);
+    });
+
+    it('a query with no `near` at all is untouched', () => {
+        const before: NLResponse = { actions: [{ kind: 'query', query: { op: 'events' } }] };
+        expect(bindFocusReferences(before, view({ drilled: town('Randtown') })).response).toBe(before);
     });
 });

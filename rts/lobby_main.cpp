@@ -44,6 +44,9 @@
 #include "Server/WarSideMaintenance.h"
 #include "Server/WarSlotReservation.h"
 #include "Server/WarSummary.h"
+#include "Server/Standing.h"
+#include "Server/Mentorship.h"
+#include "Server/Journey.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
@@ -470,6 +473,12 @@ static std::string gReplayDir;
 /// see FriendPresence.h for why, and for what a lobby restart costs.
 static PresenceTracker gPresence;
 
+/// Where games live (`--games-dir`). File scope for the same reason
+/// `gReplayDir` is: `spawnGameServer` needs it to decide whether the game it
+/// is about to launch ships a mentor AI, and it is a static function hundreds
+/// of lines above `main`'s local.
+static std::string gGamesDir = "data/games";
+
 /// Rooms that are WATCHING a replay rather than hosting a game (PLAN-replay
 /// task 4c), roomId → the `.msr` basename being served.
 ///
@@ -704,6 +713,82 @@ static GameServerInstance spawnGameServer(
       spec += ":" + slot.profile;
     aiArgStorage.push_back(std::move(spec));
   }
+  // ── Mentor auto-seat (PLAN-beta-journey.md §(d)) ───────────────────────
+  //
+  // A Recruit on a side with no Veteran+ human gets the suggest-only
+  // co-commander. Decided HERE, at spawn, and not at enlist (which is what
+  // the `RoomManager.cpp` TODO this replaces proposed): whether a Recruit
+  // needs a mentor depends on who else is on their side, and the roster is
+  // only final at the moment it is turned into `--player` arguments.
+  //
+  // Metalstorm-only by construction rather than by a game-id comparison: the
+  // seat is a `strategos` AI running its `mentor` profile, so the test is
+  // whether THIS game ships that profile. A game without one simply never
+  // gets the branch.
+  //
+  // Never on a replay: the recording's roster is the authority, and adding an
+  // AI the recording did not have would diverge on the first frame.
+  if (!isReplay) {
+    const std::filesystem::path mentorProfile =
+        std::filesystem::path(gGamesDir) / gameId / "AI" / "strategos" /
+        "profiles" / "mentor.lua";
+    std::error_code mpEc;
+    if (std::filesystem::exists(mentorProfile, mpEc)) {
+      // Tier is derived from `users.standing` (Standing.h), read here with a
+      // short-lived read-only handle rather than through the lobby's
+      // `Database` — `spawnGameServer` is a static function reached from five
+      // call sites and taking a Database& would thread a parameter through
+      // all of them for one query that runs once per process launch.
+      struct SideCensus { bool recruit = false; bool veteran = false; };
+      std::map<uint8_t, SideCensus> census;
+      sqlite3 *accounts = nullptr;
+      if (sqlite3_open_v2(dbPath.c_str(), &accounts, SQLITE_OPEN_READONLY,
+                          nullptr) == SQLITE_OK) {
+        sqlite3_stmt *st = nullptr;
+        if (sqlite3_prepare_v2(accounts,
+                               "SELECT standing FROM users WHERE username=?",
+                               -1, &st, nullptr) == SQLITE_OK) {
+          for (const auto &p : playerRoster) {
+            if (p.isSpectator)
+              continue;
+            int standing = 0;
+            sqlite3_reset(st);
+            sqlite3_bind_text(st, 1, p.username.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(st) == SQLITE_ROW)
+              standing = sqlite3_column_int(st, 0);
+            const int tier = Standing::TierFor(standing);
+            auto &c = census[p.team];
+            if (tier == 0)
+              c.recruit = true;
+            if (tier >= 2)
+              c.veteran = true;
+          }
+        }
+        sqlite3_finalize(st);
+      }
+      if (accounts)
+        sqlite3_close(accounts);
+
+      for (const auto &[team, c] : census) {
+        if (!c.recruit || c.veteran)
+          continue;
+        // `-1` start position: the mentor commands nothing of its own and is
+        // never staged an army, so a real start box would be a slot taken
+        // away from a side the scenario sized.
+        const std::string spec =
+            "strategos:" + std::to_string(static_cast<int>(team)) + ":-1:mentor";
+        if (std::find(aiArgStorage.begin(), aiArgStorage.end(), spec) !=
+            aiArgStorage.end())
+          continue;
+        aiArgStorage.push_back(spec);
+        SLOG(SPRING_LOG_NOTICE,
+             "room %u: seating the mentor AI on team %d — a Recruit is on a "
+             "side with no Veteran",
+             roomId, static_cast<int>(team));
+      }
+    }
+  }
+
   // Room modoptions → one "--modoption key=value" pair each. (§5)
   std::vector<std::string> modOptArgStorage;
   modOptArgStorage.reserve(modOptions.size());
@@ -1122,6 +1207,8 @@ int main(int argc, char *argv[]) {
 
   // --- Database ---
   Database db;
+  gGamesDir = gamesDir;
+
   if (!db.Open(dbPath)) {
     SLOG(SPRING_LOG_ERROR, "failed to open database");
     springlog_shutdown();
@@ -2185,6 +2272,8 @@ int main(int argc, char *argv[]) {
 
   // --- HTTP auth endpoints ---
   HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+  // PLAN-beta-journey.md §(b): /api/account/{me,profile}. Lobby-only.
+  HttpAuth::RegisterAccountRoutes(net, db);
 
   // Version endpoint — clients use this to get the build stamp for
   // cache-busting
@@ -3723,6 +3812,18 @@ int main(int argc, char *argv[]) {
       // permanent allegiance is only legible if the allegiance is visible.
       if (!p.factionId.empty())
         pj["faction"] = p.factionId;
+      // Tier (PLAN-beta-journey.md §(b)), so the room screen can say who is a
+      // Recruit before the mission starts — that is what makes the mentor
+      // offer, and the "you'll join as support" badge, legible. Derived from
+      // `users.standing` on read, never stored on the membership: a room row
+      // carrying a stale tier would disagree with the sim the moment the
+      // account's standing moved.
+      if (const auto u = db.FindUser(p.username)) {
+        pj["tier"] = Standing::TierFor(u->standing);
+        pj["tier_name"] = Standing::TierName(Standing::TierFor(u->standing));
+        if (!u->callsign.empty())
+          pj["callsign"] = u->callsign;
+      }
       j["players"].push_back(std::move(pj));
     }
     j["ai_slots"] = nlohmann::json::array();
@@ -5752,6 +5853,266 @@ int main(int argc, char *argv[]) {
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
+      });
+
+  // ── The mentorship routes (PLAN-beta-journey.md §(d)) ────────────────────
+  //
+  // Every rule that decides whether a mentorship may move lives in
+  // Mentorship.h (one live row per mentee, who may answer an offer, who may
+  // end one); these handlers do nothing but resolve the two accounts and map
+  // a Status onto a status code. The two rules that are NOT there, because
+  // they are lobby facts rather than relation facts, are enforced here: a
+  // mentor must be tier ≥ 2, and both parties must share a faction.
+  //
+  // POST rather than GET for the recruit list, and that is not a choice:
+  // NetworkServer never hands a GET handler the Authorization header
+  // (NetworkServer.h — a non-Public GET degrades to loopback-only), and this
+  // list is scoped to the CALLER's faction and gated on the caller's tier, so
+  // it cannot be served without knowing who is asking.
+
+  //
+  // Registered per DISCOVERED GAME as an exact pattern rather than once as
+  // `/api/factions/*`: the prefix already carries a wildcard GET serving the
+  // faction list, and NetworkServer matches exact routes first, so one exact
+  // path per game is what keeps the two from colliding.
+  for (const auto &recruitGame : availableGames) {
+  net.AddHttpPost(
+      "/api/factions/" + recruitGame.id + "/recruits", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const auto me = db.FindUserById(userId);
+        if (!me)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (Standing::TierFor(me->standing) < 2)
+          return HttpAuth::JsonResponse(
+              403,
+              R"({"error":"mentoring is a Veteran privilege","required_tier":2})");
+        const std::string faction = me->factionId.value_or("");
+        if (faction.empty())
+          return HttpAuth::JsonResponse(
+              409, R"({"error":"your account has no faction"})");
+
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        // Where every account currently seated in a live war was last seen.
+        // Gathered once for the whole list, like the deploy route's friend
+        // set: it is a read per ROOM, not per candidate.
+        std::unordered_map<int64_t, std::pair<uint32_t, int64_t>> warSeen;
+        for (const auto *room : rooms.GetAllRooms()) {
+          if (!room)
+            continue;
+          for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), room->id))
+            if (b.lastSeenAt > warSeen[b.accountId].second)
+              warSeen[b.accountId] = {room->id, b.lastSeenAt};
+        }
+        std::unordered_map<int64_t, uint32_t> inRoom;
+        for (const auto *room : rooms.GetAllRooms())
+          if (room)
+            for (const auto &p : room->players)
+              inRoom[static_cast<int64_t>(p.playerId)] = room->id;
+
+        nlohmann::json out = nlohmann::json::array();
+        sqlite3_stmt *st = nullptr;
+        if (sqlite3_prepare_v2(db.Handle(),
+                               "SELECT id, username, standing, callsign FROM users "
+                               "WHERE faction_id = ? AND is_banned = 0 AND "
+                               "is_dev = 0 ORDER BY standing ASC, id ASC",
+                               -1, &st, nullptr) == SQLITE_OK) {
+          sqlite3_bind_text(st, 1, faction.c_str(), -1, SQLITE_TRANSIENT);
+          while (sqlite3_step(st) == SQLITE_ROW) {
+            const int64_t id = sqlite3_column_int64(st, 0);
+            if (id == static_cast<int64_t>(userId))
+              continue;
+            const int tier = Standing::TierFor(sqlite3_column_int(st, 2));
+            // Tier ≤ 1: a Veteran does not need mentoring, and offering to
+            // one is the shape that turns a mentorship into a ladder.
+            if (tier > 1)
+              continue;
+            // Already spoken for — Mentorship::Offer would refuse it anyway,
+            // so listing them would be an offer button that cannot work.
+            if (Mentorship::ActiveFor(db.Handle(), id))
+              continue;
+            PresenceFacts f;
+            if (const auto w = warSeen.find(id); w != warSeen.end()) {
+              f.warRoomId = w->second.first;
+              f.warLastSeen = w->second.second;
+            }
+            if (const auto r = inRoom.find(id); r != inRoom.end())
+              f.roomId = r->second;
+            f.lobbyLastSeen = gPresence.LastSeen(id);
+            const PresenceState presence = DecidePresence(f, now);
+            if (presence == PresenceState::Offline)
+              continue;
+            const char *uname =
+                reinterpret_cast<const char *>(sqlite3_column_text(st, 1));
+            const char *cs =
+                reinterpret_cast<const char *>(sqlite3_column_text(st, 3));
+            nlohmann::json row;
+            row["user_id"] = id;
+            row["username"] = uname ? uname : "";
+            row["callsign"] = (cs && *cs) ? cs : (uname ? uname : "");
+            row["tier"] = tier;
+            row["tier_name"] = Standing::TierName(tier);
+            row["presence"] = PresenceStateToString(presence);
+            out.push_back(std::move(row));
+          }
+        }
+        sqlite3_finalize(st);
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+  }
+
+  /// Status → (code, message). One table, so the five routes below cannot
+  /// disagree about what "already mentored" means to a client.
+  auto mentorshipError = [](Mentorship::Status st) -> HttpResponse {
+    switch (st) {
+      case Mentorship::Status::AlreadyMentored:
+        return HttpAuth::JsonResponse(
+            409, R"({"error":"that player already has a mentor"})");
+      case Mentorship::Status::SelfMentor:
+        return HttpAuth::JsonResponse(
+            400, R"({"error":"you cannot mentor yourself"})");
+      case Mentorship::Status::NotFound:
+        return HttpAuth::JsonResponse(404,
+                                      R"({"error":"no such mentorship"})");
+      case Mentorship::Status::NotYours:
+        return HttpAuth::JsonResponse(
+            403, R"({"error":"you are not part of that mentorship"})");
+      case Mentorship::Status::Failed:
+      case Mentorship::Status::OK:
+        break;
+    }
+    return HttpAuth::JsonResponse(500, R"({"error":"could not be recorded"})");
+  };
+
+  // POST /api/mentor/offer {mentee_id} — tier ≥2, same faction.
+  net.AddHttpPost(
+      "/api/mentor/offer", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const int64_t menteeId = j.value("mentee_id", int64_t{0});
+        const auto me = db.FindUserById(userId);
+        const auto mentee = menteeId > 0 ? db.FindUserById(menteeId)
+                                         : std::nullopt;
+        if (!me || !mentee)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        if (Standing::TierFor(me->standing) < 2)
+          return HttpAuth::JsonResponse(
+              403,
+              R"({"error":"mentoring is a Veteran privilege","required_tier":2})");
+        // Same faction, for the reason §1b makes allegiance permanent: a
+        // mentor issues orders at tier+∞ over their mentee, and the one place
+        // that must never reach is across the front.
+        if (me->factionId.value_or("") != mentee->factionId.value_or("") ||
+            !me->factionId)
+          return HttpAuth::JsonResponse(
+              409, R"({"error":"you fight for different factions"})");
+        const auto res = Mentorship::Offer(db.Handle(), me->id, mentee->id,
+                                           static_cast<int64_t>(std::time(nullptr)));
+        if (res.status != Mentorship::Status::OK)
+          return mentorshipError(res.status);
+        nlohmann::json out;
+        out["id"] = res.id;
+        out["state"] = "offered";
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/mentor/respond {id, accept} — the MENTEE answers.
+  net.AddHttpPost(
+      "/api/mentor/respond", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const int64_t id = j.value("id", int64_t{0});
+        const bool accept = j.value("accept", false);
+        const auto st = Mentorship::Respond(db.Handle(), id, userId, accept,
+                                            static_cast<int64_t>(std::time(nullptr)));
+        if (st != Mentorship::Status::OK)
+          return mentorshipError(st);
+        nlohmann::json out;
+        out["id"] = id;
+        out["state"] = accept ? "active" : "ended";
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/mentor/ai — the mentee opts into the AI fallback. Lands active
+  // immediately (Mentorship::Offer's AI branch): asking for it IS accepting.
+  net.AddHttpPost(
+      "/api/mentor/ai", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const auto res = Mentorship::Offer(db.Handle(), Mentorship::kAiMentorId,
+                                           userId,
+                                           static_cast<int64_t>(std::time(nullptr)));
+        if (res.status != Mentorship::Status::OK)
+          return mentorshipError(res.status);
+        nlohmann::json out;
+        out["id"] = res.id;
+        out["kind"] = "ai";
+        out["state"] = "active";
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/mentor/end {mentee_id?} — either party walks out. Omitting
+  // `mentee_id` ends the caller's OWN mentorship, which is the mentee's case
+  // and the one that must never need a lookup first.
+  net.AddHttpPost(
+      "/api/mentor/end", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const int64_t menteeId = j.value("mentee_id", static_cast<int64_t>(userId));
+        const auto st = Mentorship::End(db.Handle(), menteeId, userId,
+                                        static_cast<int64_t>(std::time(nullptr)));
+        if (st != Mentorship::Status::OK)
+          return mentorshipError(st);
+        return HttpAuth::JsonResponse(200, R"({"state":"ended"})");
+      });
+
+  // POST /api/mentor/endorse {mentee_id} — +15 standing, once a day.
+  //
+  // The rate limit is Mentorship::Endorse's INSERT OR IGNORE, and a repeat on
+  // the same day is deliberately a 200 with `awarded:false` rather than an
+  // error: the mentor did nothing wrong, and a failure here would read as
+  // "the endorsement was lost".
+  net.AddHttpPost(
+      "/api/mentor/endorse", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const int64_t menteeId = j.value("mentee_id", int64_t{0});
+        if (menteeId <= 0 || !db.FindUserById(menteeId))
+          return HttpAuth::JsonResponse(404, R"({"error":"no such player"})");
+        // Only the mentee's ACTUAL mentor may endorse them — otherwise the
+        // once-a-day cap is per pair and any account can mint +15 a day for
+        // any other.
+        const auto live = Mentorship::ActiveFor(db.Handle(), menteeId);
+        if (!live || live->state != "active" || live->mentorId != static_cast<int64_t>(userId))
+          return HttpAuth::JsonResponse(
+              403, R"({"error":"you are not mentoring that player"})");
+        const bool awarded = Mentorship::Endorse(
+            db.Handle(), userId, menteeId,
+            static_cast<int64_t>(std::time(nullptr)));
+        if (awarded)
+          db.AddStanding(menteeId, Journey::kStandingPerEndorsement, 0);
+        nlohmann::json out;
+        out["awarded"] = awarded;
+        out["standing"] = awarded ? Journey::kStandingPerEndorsement : 0;
+        return HttpAuth::JsonResponse(200, out.dump());
       });
 
   // GET /api/games/<id>/resources.json — Spring's gamedata/resources.lua
@@ -8428,6 +8789,109 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, resp.dump());
       });
 
+  // ── POST /api/rooms/solo {scenario} (PLAN-beta-journey.md §(c)) ─────────
+  //
+  // The player-facing half of `/api/rooms/direct`. A first mission has to be
+  // reachable by a Recruit who is neither an admin nor on localhost, and
+  // `?play=tutorial_01` had no route to land on — the manifest path is
+  // dev-gated precisely because a manifest is arbitrary process creation.
+  //
+  // What makes this safe is that the CALLER supplies one string. The map, the
+  // sides, the AI and the modoptions all come from the scenario file, and the
+  // scenario must have been authored for a single human
+  // (Journey::SoloAllowed). So the widest thing a player can ask for here is
+  // "boot one of the missions this install ships for one player" — and the
+  // boot itself is still `runDirectStart`, so there is no second
+  // room-creation path to drift.
+  net.AddHttpPost(
+      "/api/rooms/solo", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const auto me = db.FindUserById(userId);
+        if (!me)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        auto j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        const std::string scenarioId = j.value("scenario", "");
+        if (scenarioId.empty())
+          return HttpAuth::JsonResponse(400,
+                                        R"({"error":"scenario is required"})");
+        std::string gameId = j.value("game", "");
+        if (gameId.empty()) {
+          const GameDiscovery::GameInfo *g =
+              GameDiscovery::DefaultPlayable(availableGames);
+          if (g == nullptr)
+            return HttpAuth::JsonResponse(
+                503, R"({"error":"no playable game is installed"})");
+          gameId = g->id;
+        }
+        const ScenarioDiscovery::ScenarioInfo *info =
+            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+        if (info == nullptr)
+          return HttpAuth::JsonResponse(404,
+                                        R"({"error":"no such scenario"})");
+        if (!Journey::SoloAllowed(info->tutorial, info->solo, info->retired))
+          return HttpAuth::JsonResponse(
+              403,
+              R"({"error":"that mission is not authored for a solo start"})");
+        if (info->mapId.empty())
+          return HttpAuth::JsonResponse(
+              409, R"({"error":"that mission declares no map"})");
+
+        // The manifest, built here and not by the caller. The host is the
+        // only human; every other side the scenario declares — playable or
+        // NPC — gets an AI seat, because the one thing a solo mission must
+        // not do is leave the opposing army unowned.
+        nlohmann::json manifest;
+        // Unique per start: `runDirectStart` REPLACES a standing room of the
+        // same name, so a name derived only from the scenario would make two
+        // players' first missions kill each other.
+        manifest["name"] = "solo:" + scenarioId + ":" + me->username;
+        manifest["map"] = info->mapId;
+        manifest["game"] = gameId;
+        manifest["scenario"] = scenarioId;
+        const auto playable = ScenarioDiscovery::PlayableSides(*info);
+        const uint8_t hostTeam = playable.empty() ? uint8_t{0} : playable.front().team;
+        manifest["players"] = nlohmann::json::array();
+        manifest["players"].push_back(
+            {{"username", me->username}, {"team", hostTeam}});
+        // The AI the game ships, not a hard-coded id. `null` is the engine's
+        // do-nothing plugin and is what `runDirectStart`'s own solo-team
+        // safety net would fall back to anyway.
+        std::string aiId = "null";
+        if (const auto ait = aisByGame.find(gameId); ait != aisByGame.end())
+          for (const auto &ai : ait->second)
+            if (ai.id == "strategos") {
+              aiId = ai.id;
+              break;
+            }
+        manifest["aiSlots"] = nlohmann::json::array();
+        for (const auto &side : info->sides) {
+          if (side.team == hostTeam)
+            continue;
+          manifest["aiSlots"].push_back({{"aiId", aiId}, {"team", side.team}});
+        }
+
+        auto result = runDirectStart(manifest);
+        if (!result.ok)
+          return HttpAuth::JsonResponse(
+              400, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
+
+        nlohmann::json resp =
+            nlohmann::json::parse(roomToJson(rooms.GetRoom(result.roomId)));
+        // The caller's own session token, and nobody else's: the manifest
+        // declares exactly one human, and `/api/rooms/direct`'s full
+        // `sessions` map is a dev affordance this route deliberately does not
+        // inherit.
+        const auto tokIt = result.sessions.find(me->username);
+        if (tokIt != result.sessions.end())
+          resp["session"] = tokIt->second;
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, resp.dump());
+      });
+
   // ─────────────── Replay browser (PLAN-replay.md task 4c) ───────────────
   //
   // T4a-2, stated in §7.13: "the lobby has no replay-serving surface at all —
@@ -9396,6 +9860,54 @@ int main(int argc, char *argv[]) {
           removeGameServer(roomId);
           SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                roomId, inst.pid);
+
+          // ── Standing accrual (PLAN-beta-journey.md §0) ──────────────
+          //
+          // The mission is over the moment its process is: this branch runs
+          // exactly once per server exit, before the room is recycled or
+          // deleted, which is the only point in the lobby that is both
+          // once-per-mission and still holding the roster.
+          //
+          // Who took part is read from both halves, for the same reason the
+          // war browser reads both: a skirmish's players are in the room, a
+          // war's fighters are in the bindings and were never in it. Deduped
+          // by account id, so a player who is in both is paid once.
+          //
+          // Dev accounts are skipped. They are minted by `/api/rooms/direct`
+          // and by every harness that boots a room, and a standing ladder
+          // whose top is the test fixtures is not a ladder.
+          {
+            WarSummary finalSummary;
+            const bool haveSummary = warSummaryFor(roomId, finalSummary);
+            std::unordered_map<std::string, int> credited;
+            if (haveSummary)
+              for (const auto &c : finalSummary.credits)
+                credited[c.username] = c.objectives;
+
+            std::set<int64_t> paid;
+            auto accrue = [&](int64_t accountId, const std::string &username) {
+              if (accountId <= 0 || !paid.insert(accountId).second)
+                return;
+              const auto u = db.FindUserById(accountId);
+              if (!u || u->isDev)
+                return;
+              const auto cit = credited.find(username);
+              const Journey::Accrual a = Journey::SessionAccrual(
+                  cit == credited.end() ? 0 : cit->second);
+              db.AddStanding(accountId, a.standing, a.sessions);
+              SLOG(SPRING_LOG_INFO,
+                   "standing: '%s' +%d for finishing room %u (%d objective(s) "
+                   "credited)",
+                   username.c_str(), a.standing, roomId,
+                   cit == credited.end() ? 0 : cit->second);
+            };
+            if (const auto *ended = rooms.GetRoom(roomId))
+              for (const auto &p : ended->players)
+                if (!p.isSpectator)
+                  accrue(static_cast<int64_t>(p.playerId), p.username);
+            for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), roomId))
+              accrue(b.accountId, b.username);
+          }
 
           // PLAN-replay task 4c: a replay room has no next game. Its server
           // exits when the recording runs out, and recycling it to Filling

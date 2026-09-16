@@ -94,6 +94,22 @@ export function contextFor(m: BattleMoment): MomentContext {
     return { subject, place };
 }
 
+/**
+ * Is this moment inside the player's scope (PLAN-beta.md "Mentorship")?
+ *
+ * Under mentorship the notices are cut to the squads the player is responsible
+ * for, so the first missions are about the handful of units they can actually
+ * act on rather than the whole faction's battle. A moment with no unit ids we
+ * recognise (an enemy reinforcement wave elsewhere on the map) is exactly the
+ * chatter being filtered out, so it fails the test rather than passing by
+ * default. With no assignments there is nothing to scope TO and everything is
+ * in scope — a filter that hid everything would be worse than no filter.
+ */
+export function momentInScope(m: BattleMoment, assigned: ReadonlySet<number>): boolean {
+    if (assigned.size === 0) return true;
+    return m.unitIds.some((id) => assigned.has(id));
+}
+
 /** The ref a moment is addressed by — a place on the map, which is what makes
  *  it travellable everywhere it is rendered (U0 §5). */
 export function momentRefFor(m: BattleMoment, ctx: MomentContext): FocusRef {
@@ -175,10 +191,18 @@ function mountNotices(ctx: WidgetContext): void {
 
     const announce = (): void => {
         const all = uiStore.getBattleMoments();
+        const scoped = uiStore.isChatterFiltered()
+            ? new Set(uiStore.getMyAssignments())
+            : new Set<number>();
         for (const m of all) {
             byId.set(m.id, m);
             if (m.id <= announced) continue;
             announced = m.id;
+            // Out of scope ⇒ no notice AND no edge pointer: byId still holds
+            // it, but nothing was announced, so `applyMarkers` has nothing to
+            // point at. "Show everything" on the mentor card empties `scoped`
+            // and the next moment announces normally.
+            if (!momentInScope(m, scoped)) continue;
             const mctx = contextFor(m);
             if (!momentHeadline(m, mctx)) continue;   // no wording ⇒ no notice
             lane.push({

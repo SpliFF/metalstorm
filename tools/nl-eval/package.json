@@ -1,0 +1,13 @@
+{
+  "name": "spring-nl-eval",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Prompt/producer eval harness for the Metalstorm NL command layer. Its own package.json because there is no root one — this directory is a standalone node program that reads the shipped prompt, schema and vocabulary off disk and needs no dependencies at all.",
+  "scripts": {
+    "nl-eval": "node run-eval.mjs",
+    "nl-eval:offline": "node run-eval.mjs --fake offline-parser",
+    "nl-eval:offline-gate": "node run-eval.mjs --fake offline-parser --baseline offline-baseline.json",
+    "nl-eval:dry": "node run-eval.mjs --dry-run"
+  }
+}

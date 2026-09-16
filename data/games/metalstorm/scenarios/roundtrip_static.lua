@@ -47,8 +47,17 @@ return {
     world = {
         map     = 'green_flat_x34_v3',
         regions = {
-            { key = '2:2', team = 0 },
-            { key = '6:6', team = 1 },
+                        -- 2026-09-17: these were grid keys ('2:2' / '6:6' / '4:4') from
+            -- when green_flat shipped no region graph. It ships
+            -- mapdata/regions.lua now, so game_regions.lua selects the NAMED
+            -- graph provider and a grid key resolves to nothing:
+            -- SetControllingTeam was a no-op and the control objectives below
+            -- could never complete. Found by
+            -- LuaRules/Gadgets/tests/scenario_references_spec.lua, which is
+            -- what that sweep is for. Keys below are from the map's own
+            -- mapdata/regions.lua; the bastion coordinates did not move.
+{ key = 'west_bastion', team = 0 },
+            { key = 'east_reach', team = 1 },
         },
     },
 
@@ -78,8 +87,8 @@ return {
     -- objective gadgets' own Lua tables are live synced state under the walk,
     -- and this is the only fixture that exercises them without movement noise.
     objectives = {
-        { type = 'control', scope = 'tactical', forTeam = 0, region = '2:2', reward = 60 },
-        { type = 'control', scope = 'tactical', forTeam = 1, region = '6:6', reward = 60 },
+        { type = 'control', scope = 'tactical', forTeam = 0, region = 'west_bastion', reward = 60 },
+        { type = 'control', scope = 'tactical', forTeam = 1, region = 'east_reach', reward = 60 },
     },
 
     orders    = {},   -- MUST stay empty: see the file note
