@@ -917,15 +917,11 @@ bool RoomManager::EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t te
     player->team = team;
     player->ready = false;  // Reset ready state on enlist
 
-    // TODO(PLAN-metalstorm-onboarding §3): Auto-add mentor AI for first-session accounts.
-    // Hook point: if Database::GetSessionCount(playerId) <= 1 (or last_login IS NULL),
-    // call AddAISlot(roomId, playerId, "strategos", "Mentor", team) to spawn the
-    // suggest-only co-commander (profiles/mentor.lua). Requires:
-    //   1. Database::GetSessionCount() or similar first-session signal
-    //   2. Passing Database* to EnlistSpectator, or accessing via a member field
-    //   3. Game-specific check (mentor is Metalstorm-only; other games may not have it)
-    // Deferred: the session-tracking infrastructure doesn't exist yet. When implemented,
-    // insert the check + AddAISlot call here, before PersistMembersLocked.
+    // The mentor AI is NOT seated here (PLAN-beta-journey.md §(d)). It is
+    // decided at spawn, from the final roster, in lobby_main's
+    // `spawnGameServer`: whether a Recruit needs one depends on whether their
+    // side already holds a Veteran+ human, and at enlist time the rest of the
+    // roster has not arrived yet. RoomManager also stays database-free.
 
     PersistMembersLocked(it->second);
     return true;
