@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     TurretAimController,
     slewAngle,
+    stepSlew,
     matchAimSlots,
     DEFAULT_SLEW_DEG_PER_SEC,
     DISENGAGE_MS,
@@ -11,10 +12,10 @@ import {
     type UnitAimPieces,
     type AimVec,
     type AimPieceDescriptor,
+    type SlewState,
 } from './turret-aim-controller.js';
 
 const DEG2RAD = Math.PI / 180;
-const RATE = DEFAULT_SLEW_DEG_PER_SEC * DEG2RAD; // rad/s
 
 /** Recording sink: last pose pushed per unit (null once cleared). */
 class FakeSink implements AimPoseSink {
@@ -56,6 +57,7 @@ interface Cfg {
     simDriven?: boolean;
     rate?: number;
     weaponDefIds?: readonly number[] | null;
+    weaponAoeVelocity?: (weaponDefId: number) => { aoe: number; projectileSpeed: number } | undefined;
 }
 
 const SINGLE_TURRET_PIECES: UnitAimPieces = {
@@ -72,6 +74,7 @@ function makeDeps(cfg: Cfg): { deps: TurretAimDeps; cfg: Cfg } {
         simDriven: cfg.simDriven ?? false,
         rate: cfg.rate,
         weaponDefIds: 'weaponDefIds' in cfg ? cfg.weaponDefIds : null,
+        weaponAoeVelocity: cfg.weaponAoeVelocity,
     };
     const deps: TurretAimDeps = {
         unitPose: () => state.unit ?? null,
@@ -80,6 +83,7 @@ function makeDeps(cfg: Cfg): { deps: TurretAimDeps; cfg: Cfg } {
         simDrivesPieces: () => state.simDriven ?? false,
         slewRateDegPerSec: () => state.rate,
         weaponDefIds: () => state.weaponDefIds ?? null,
+        weaponAoeVelocity: state.weaponAoeVelocity,
     };
     return { deps, cfg: state };
 }
@@ -237,32 +241,108 @@ describe('TurretAimController — track', () => {
     });
 });
 
-describe('TurretAimController — slew clamp', () => {
-    it('never turns faster than the rate cap in one tick', () => {
+describe('stepSlew — accel-limited turret lag', () => {
+    const RATE_CAP = DEFAULT_SLEW_DEG_PER_SEC * DEG2RAD;
+
+    it('ramps up rather than snapping straight to the rate cap', () => {
+        // A 180° retarget: the first tick must move LESS than a constant-rate
+        // slew would (rate*dt) — acceleration is ramping, not instant.
+        let s: SlewState = { yaw: 0, rate: 0 };
+        s = stepSlew(s, Math.PI, 1 / 60, RATE_CAP);
+        expect(Math.abs(s.yaw)).toBeLessThan(RATE_CAP / 60);
+        expect(Math.abs(s.rate)).toBeLessThan(RATE_CAP);
+    });
+
+    it('never exceeds the acceleration cap regardless of how large the error is', () => {
+        const accelCap = RATE_CAP * 5; // SLEW_ACCEL_RATIO, mirrored here
+        let s: SlewState = { yaw: 0, rate: 0 };
+        const dt = 1 / 60;
+        for (let i = 0; i < 300; i++) {
+            const prevRate = s.rate;
+            s = stepSlew(s, Math.PI, dt, RATE_CAP); // a full-range retarget every tick
+            const accel = Math.abs(s.rate - prevRate) / dt;
+            expect(accel).toBeLessThanOrEqual(accelCap + 1e-6);
+        }
+    });
+
+    it('is a no-op with no NaN at dt=0', () => {
+        const s0: SlewState = { yaw: 0.4, rate: 0.2 };
+        const s1 = stepSlew(s0, Math.PI, 0, RATE_CAP);
+        expect(s1.yaw).toBeCloseTo(s0.yaw, 10);
+        expect(s1.rate).toBeCloseTo(s0.rate, 10);
+        expect(s1.yaw).not.toBeNaN();
+        expect(s1.rate).not.toBeNaN();
+    });
+
+    it('eventually converges and snaps exactly onto a stationary target', () => {
+        let s: SlewState = { yaw: 0, rate: 0 };
+        for (let i = 0; i < 300; i++) s = stepSlew(s, Math.PI / 2, 1 / 60, RATE_CAP);
+        expect(s.yaw).toBe(Math.PI / 2);
+        expect(s.rate).toBe(0);
+    });
+
+    it('honours a per-unit slew-rate override as the eventual rate/angle cap', () => {
+        const override = 60 * DEG2RAD;
+        let s: SlewState = { yaw: 0, rate: 0 };
+        let maxRate = 0;
+        for (let i = 0; i < 300; i++) {
+            s = stepSlew(s, Math.PI / 2, 1 / 60, override);
+            maxRate = Math.max(maxRate, Math.abs(s.rate));
+        }
+        expect(maxRate).toBeLessThanOrEqual(override + 1e-9);
+        expect(s.yaw).toBeCloseTo(Math.PI / 2, 5);
+    });
+});
+
+describe('TurretAimController — recoil kick', () => {
+    it('kicks the barrel along its local Z axis on a fired shot with a known weapon', () => {
+        const pieces: UnitAimPieces = {
+            slots: [{
+                slot: 1,
+                turret: { idx: 1, px: 0, py: 10, pz: 0 },
+                barrel: { idx: 2, px: 0, py: 0, pz: 5 },
+            }],
+        };
+        const { deps } = makeDeps({
+            pieces, target: { x: 100, y: 0, z: 0 },
+            weaponAoeVelocity: () => ({ aoe: 24, projectileSpeed: 650 / 30 }),
+        });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onFired(fired(undefined, { weaponDefId: 1 }), 0);
+        c.tick(0);  // prime: dt=0
+        c.tick(1);  // dt=1ms — recoil is fresh, barrel pushed back
+        const barrelPose = sink.poses.get(OWNER)?.get(2);
+        expect(barrelPose).toBeDefined();
+        expect(barrelPose!.pz).toBeGreaterThan(5); // rest pz=5, kicked backward (+Z)
+    });
+
+    it('kicks the turret at reduced weight when the slot has no barrel', () => {
+        const pieces: UnitAimPieces = { slots: [{ slot: 1, turret: { idx: 1, px: 0, py: 3, pz: 2 } }] };
+        const { deps } = makeDeps({
+            pieces, target: { x: 100, y: 0, z: 0 },
+            weaponAoeVelocity: () => ({ aoe: 24, projectileSpeed: 650 / 30 }),
+        });
+        const sink = new FakeSink();
+        sink.known.add(OWNER);
+        const c = new TurretAimController(deps, sink);
+        c.onFired(fired(undefined, { weaponDefId: 1 }), 0);
+        c.tick(0);  // prime: dt=0
+        c.tick(1);  // dt=1ms
+        const turretPose = sink.poses.get(OWNER)?.get(1);
+        expect(turretPose!.pz).toBeGreaterThan(2);
+    });
+
+    it('applies no kick when the dep is not supplied (existing behaviour unchanged)', () => {
         const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 } });
         const sink = new FakeSink();
         sink.known.add(OWNER);
         const c = new TurretAimController(deps, sink);
-        c.onFired(fired(), 0);
-        c.tick(0);            // prime: dt = 0, yaw stays 0
-        expect(sink.turretYaw(OWNER)).toBeCloseTo(0, 6);
-        c.tick(100);          // dt = 100 ms → exactly one rate step
-        expect(sink.turretYaw(OWNER)).toBeCloseTo(RATE * 0.1, 5);
-        const afterOne = sink.turretYaw(OWNER)!;
-        c.tick(200);
-        // Second step advances by the same clamped amount, not to target.
-        expect(sink.turretYaw(OWNER)! - afterOne).toBeCloseTo(RATE * 0.1, 5);
-    });
-
-    it('honours a per-unit slew-rate override', () => {
-        const { deps } = makeDeps({ target: { x: 100, y: 0, z: 0 }, rate: 60 });
-        const sink = new FakeSink();
-        sink.known.add(OWNER);
-        const c = new TurretAimController(deps, sink);
-        c.onFired(fired(), 0);
+        c.onFired(fired(undefined, { weaponDefId: 1 }), 0);
         c.tick(0);
-        c.tick(100);
-        expect(sink.turretYaw(OWNER)).toBeCloseTo(60 * DEG2RAD * 0.1, 5);
+        c.tick(1);
+        expect(sink.poses.get(OWNER)?.get(1)?.pz).toBe(0);
     });
 });
 
