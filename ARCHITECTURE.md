@@ -982,6 +982,7 @@ precedence on who may issue an order), `game_ai_caretaker`, `game_ai_guidance`,
 `squad`, `tick`, …)
 plus the `objectives/`, `regions/`, `parley/`, `authority/` and `civilians/`
 subtrees each gadget family delegates to (with their own `tests/`).
+`objectives/parley.lua` is the agreement objective type: a Mission whose victory is an accepted pact (`scenarios/recon_01.lua`).
 
 | Path | Purpose |
 |------|---------|

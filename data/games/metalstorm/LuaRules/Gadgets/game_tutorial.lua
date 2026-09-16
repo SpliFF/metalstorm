@@ -25,6 +25,8 @@
 --                                           --   (type/region/reward/holdFrames…).
 --                                           --   Never `victory` — the scenario
 --                                           --   file owns the terminal objective.
+--     parley = { kind = 'intel', toTeam = 1, -- optional: a proposal the coach card
+--                regionKeys = { 'raven_basin' } } -- offers to send on the player's behalf
 --     timeoutFrames = 2700 }                -- optional: after this long the beat
 --                                           --   publishes `tutorial_hint = 'stuck'`
 --                                           --   (the widget promotes Skip). Never
@@ -47,6 +49,9 @@
 --   { kind = 'units', def = 'ms_soldiers_s1', min = 3 }   team owns >= min live units
 --                                                of that def (an arrival has landed)
 --   { kind = 'parley' }                          the team sent a parley proposal
+--   { kind = 'pact', pact = 'intel' }            a proposal involving the team (of
+--                                                that kind, if given) was ACCEPTED
+--                                                since the beat started
 --   { kind = 'guidance', field = 'delegated' }   the team's AI-guidance store has a
 --                                                non-empty `field` (stance / delegated
 --                                                / region_paint / asset_locks / roe)
@@ -63,6 +68,7 @@
 --   tutorial_show_x/_z   resolved "Show me" point (region centroids resolved here so
 --                        the widget needs no map knowledge); tutorial_show_panel
 --   tutorial_objective   the beat's live objective id (the board shows it)
+--   tutorial_parley_kind/_to/_regions   the beat's offered proposal, if any
 --   tutorial_hint        'stuck' after timeoutFrames, else cleared
 --   tutorial_rev         increments on every publish — the widget's change key
 --
@@ -105,7 +111,7 @@ local LOG = '[game_tutorial] '
 local WAIT_KINDS = {
     ack = true, client = true, presence = true, region = true, objective = true,
     charge = true, award = true, withdrawn = true, units = true, parley = true,
-    guidance = true, frames = true,
+    guidance = true, frames = true, pact = true,
 }
 
 local CLIENT_CHECKS = { selection = true, drilldown = true, menu = true, console = true, none = true }
@@ -124,6 +130,7 @@ local beatObjectiveId = nil
 local beatObjectiveDone = false
 local hint = nil
 local counters = { charge = 0, award = 0, parley = 0 }
+local parleyCountAtStart = 0    -- proposals published before the current beat
 local pollGate = Tick.new(POLL_PERIOD)
 
 local function echo(msg) Spring.Echo(LOG .. msg) end
@@ -176,6 +183,10 @@ local function validateBeats(list)
                     problems[#problems + 1] = 'wait.guidance needs a string "field"'
                 end
             end
+            if b.parley ~= nil and (type(b.parley) ~= 'table' or type(b.parley.kind) ~= 'string'
+                                    or type(b.parley.toTeam) ~= 'number') then
+                problems[#problems + 1] = '"parley" needs a string "kind" and a number "toTeam"'
+            end
             if b.objective ~= nil then
                 if type(b.objective) ~= 'table' or type(b.objective.type) ~= 'string' then
                     problems[#problems + 1] = '"objective" must be a table with a string "type"'
@@ -201,6 +212,7 @@ local PUBLISHED = {
     'tutorial_beat', 'tutorial_beat_id', 'tutorial_title', 'tutorial_text', 'tutorial_wait',
     'tutorial_check', 'tutorial_show_x', 'tutorial_show_z', 'tutorial_show_panel',
     'tutorial_objective', 'tutorial_hint',
+    'tutorial_parley_kind', 'tutorial_parley_to', 'tutorial_parley_regions',
 }
 
 local function set(key, value)
@@ -248,6 +260,10 @@ local function publish()
         set('tutorial_show_panel', panel)
         set('tutorial_objective', beatObjectiveId)
         set('tutorial_hint', hint)
+        local pr = b.parley
+        set('tutorial_parley_kind', pr and pr.kind or nil)
+        set('tutorial_parley_to', pr and pr.toTeam or nil)
+        set('tutorial_parley_regions', pr and pr.regionKeys and table.concat(pr.regionKeys, ',') or nil)
     else
         for _, k in ipairs(PUBLISHED) do set(k, nil) end
     end
@@ -311,6 +327,7 @@ local function startBeat(i, frame)
     beatStartFrame = frame
     hint = nil
     counters.charge, counters.award, counters.parley = 0, 0, 0
+    parleyCountAtStart = tonumber(Spring.GetGameRulesParam('parley_count')) or 0
     -- A fresh gate so the first poll of a new beat lands one period in, not
     -- on whatever phase the previous beat left behind.
     pollGate = Tick.new(POLL_PERIOD)
@@ -368,6 +385,23 @@ local function guidanceHas(field)
     return v ~= '' and v ~= false
 end
 
+--- An accepted pact involving the learning team, published since the beat
+--- started (game_parley.lua's `parley_<id>_*` params), of `kind` if given.
+local function pactAccepted(kind)
+    local n = tonumber(Spring.GetGameRulesParam('parley_count')) or 0
+    for id = parleyCountAtStart + 1, n do
+        local p = 'parley_' .. id .. '_'
+        local state = Spring.GetGameRulesParam(p .. 'state')
+        if (state == 'active' or state == 'fulfilled')
+            and (kind == nil or Spring.GetGameRulesParam(p .. 'kind') == kind) then
+            local from = tonumber(Spring.GetGameRulesParam(p .. 'from'))
+            local to = tonumber(Spring.GetGameRulesParam(p .. 'to'))
+            if from == team or to == team then return true end
+        end
+    end
+    return false
+end
+
 --- True when the current beat's sim-side wait is satisfied. 'ack' and
 --- 'client' beats are never satisfied here — only the wire finishes them.
 local function waitSatisfied(b, frame)
@@ -391,6 +425,8 @@ local function waitSatisfied(b, frame)
         return unitsOfDef(w.def) >= (w.min or 1)
     elseif k == 'parley' then
         return counters.parley >= (w.min or 1)
+    elseif k == 'pact' then
+        return pactAccepted(w.pact)
     elseif k == 'guidance' then
         return guidanceHas(w.field)
     elseif k == 'frames' then
