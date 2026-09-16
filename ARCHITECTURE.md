@@ -775,6 +775,10 @@ Five named buses, each with independent volume + enable state persisted to `loca
 
 Voice acquisition applies Recoil's per-channel cap with strict-greater-priority eviction (`AudioChannel.cpp:100-126` parity).
 
+#### Audio sourcing (`tools/audiogen`)
+
+Manifest-driven pipeline (`manifest.json` → `build.py`) that renders every file under `data/games/metalstorm/sounds/**` via ffmpeg-only layered synthesis (`synth.py`/`recipes.py`), writes the `ASSETS.md` "## Audio" rows before each file lands, and produces a per-category loudness report (`docs/reviews/beta/audio-loudness.md`) via `ffmpeg ebur128`. `validate.py` is the gate: manifest consistency, `sounds.lua` loads, every `weapon-fx.json` `fireSound`/`impactSound` resolves.
+
 #### Content prep (`tools/audioconverter`)
 
 Standalone ffmpeg-driven CLI. `gameconverter` walks a game's `sounds/**` and `LuaUI/Sounds/**`, re-encodes every `.wav/.ogg/.mp3/.flac/.m4a` to a sibling `.webm` (Opus) at category-specific bitrates (sfx 64 kbps mono, ui 48 kbps mono, music 96 kbps stereo), then prunes the source. The runtime never sees a non-`.webm` audio file. ffmpeg is located at CMake configure time; `-DSPRING_SKIP_AUDIOCONVERTER=ON` opts the target out for hosts that don't run content prep.
