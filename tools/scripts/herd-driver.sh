@@ -1,0 +1,20 @@
+#!/bin/bash
+# Dumb taskherd driver: fires one runnable step every INTERVAL seconds while slots are free.
+# No scheduler exists; the hourly LaunchAgent stays disabled. Stop: touch .tasks/driver.stop
+REPO="${REPO:-/Users/shannon/WarriorHut/Projects/springrts-web}"
+INTERVAL="${INTERVAL:-120}"
+export PATH="$HOME/.nvm/versions/node/v22.13.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+LOG="$REPO/.tasks/logs/driver.log"
+mkdir -p "$REPO/.tasks/logs"
+echo "$(date '+%F %T') driver start pid $$ interval ${INTERVAL}s" >> "$LOG"
+while true; do
+  if [ -f "$REPO/.tasks/driver.stop" ]; then echo "$(date '+%F %T') stop file seen, exiting" >> "$LOG"; exit 0; fi
+  if [ -f "$REPO/.tasks/PAUSED" ] || [ -f "$REPO/.tasks/pause" ]; then sleep "$INTERVAL"; continue; fi
+  line=$(taskherd status -C "$REPO" 2>/dev/null | head -1)
+  max=$(echo "$line" | sed -n 's/.*max \([0-9]*\).*/\1/p'); running=$(echo "$line" | sed -n 's/.*running \([0-9]*\).*/\1/p')
+  if [ -n "$max" ] && [ -n "$running" ] && [ "$running" -lt "$max" ]; then
+    out=$(taskherd run -C "$REPO" 2>&1 | tail -3 | tr '\n' ' ')
+    echo "$(date '+%F %T') running=$running/$max run: $out" >> "$LOG"
+  fi
+  sleep "$INTERVAL"
+done
