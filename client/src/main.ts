@@ -2351,7 +2351,7 @@ async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
 /// boot time. Order of precedence:
 ///   1. `?game=<id>` URL query parameter (browser link, dev override)
 ///   2. `springrts-game-id` localStorage key (sticky across reloads)
-///   3. none (engine default UI)
+///   3. the beta's one game (`metalstorm`)
 ///
 /// CLI startup of the client (e.g. `npm run dev -- --game papertanks`)
 /// is forwarded into the URL by the host launcher, so the same path
@@ -2365,7 +2365,7 @@ function resolveInitialGameId(): string | null {
         localStorage.setItem('springrts-game-id', fromUrl);
         return fromUrl;
     }
-    return localStorage.getItem('springrts-game-id');
+    return localStorage.getItem('springrts-game-id') || 'metalstorm';
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

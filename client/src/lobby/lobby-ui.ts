@@ -99,6 +99,8 @@ import {
 import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
 import { WorldScreen } from './world-screen.js';
 
+/// The beta ships one game; every entry screen is styled and titled for it.
+const DEFAULT_GAME_ID = 'metalstorm';
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
 export type LobbyScreen = 'welcome' | 'login' | 'intro' | 'hub' | 'browser' | 'room' | 'game';
@@ -944,16 +946,15 @@ export class LobbyUI {
         else if (this.container.style.display === 'block') this.container.style.display = 'flex';
     }
 
-    /// The game the lobby is styling itself for — `?game=` or the sticky
-    /// key main.ts writes — or none (engine default).
+    /// The game the lobby is styling itself for — `?game=`, the sticky
+    /// key main.ts writes, else the beta's one game.
     private entryGameId(): string {
         const fromUrl = new URLSearchParams(window.location.search).get('game');
-        return fromUrl || localStorage.getItem('springrts-game-id') || '';
+        return fromUrl || localStorage.getItem('springrts-game-id') || DEFAULT_GAME_ID;
     }
 
     private gameTitle(): string {
         const id = this.entryGameId();
-        if (!id) return 'Spring RTS Web';
         const known = this.availableGames.find(g => g.id === id)?.displayName;
         return known || id.charAt(0).toUpperCase() + id.slice(1);
     }
