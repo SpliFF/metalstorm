@@ -7,6 +7,17 @@ hud-drilldown/war-surfaces); the second (this one) is the first pair of eyes
 on pres-fx, pres-atmos, pres-ui-ds, pres-audio and pres-decals after they
 landed on `main`.
 
+## Lane land status (checked via `tasks_status` after capturing)
+
+`pres-decals` is **`[3/4] blocked`** — 3 commits ahead of `main`, gated at land
+review, never merged. That's why no ribbon-trail/decal code exists on this
+clone's `main` snapshot; it's not a gap in this pass, the lane just isn't in
+yet. `pres-ui-ds` is **`[2/4] blocked`** — only step 0 (art direction, tokens,
+steel-plate base) is on `main` (commit `92162cf581`); the "UI2 fixes incl.
+`var(--nui-bg)` panels" step is done but also gated, unmerged. Everything
+below about pres-ui-ds reflects step 0 only. `pres-fx`, `pres-atmos`,
+`pres-audio`, `pres-anim` are fully landed (`idle`/`done`).
+
 ## Defect table
 
 | Lane | Screenshot | Defect | Severity |
@@ -23,7 +34,7 @@ landed on `main`.
 ## Not done this fire (stated plainly)
 
 - **pres-fx XL900 perf number** (`profile` render p95 ≤ 8.5 ms on Medium): NOT reproduced. `manifests/xl900_fill.json` only boots `meridian_basin` with a bare 2-player/1-AI roster — the actual 900-unit population from PLAN-perf.md's M19 tranche table has no committed spawn script anywhere in the repo (grepped for `perRow`, `xl900`, `grid-helper` — nothing). Reconstructing it by hand means ~12 `spawn_unit` calls building ~10,600 members, which is exactly the kind of memory/GPU load this machine crashed under earlier this session (see RESUME NOTE). Skipped as a resource-risk call, not an oversight. `browser_test.perfDump()` **does** exist and works (verified) — a future fire with headroom should use it against a real XL900 population.
-- **pres-decals figure-8 test** (ribbon trails / float RTT / pattern shader, tasks 1-4): not started — ran out of session budget after the above. `give_order` waypoint driving (the noted TOOLING GAP workaround) was not attempted.
+- **pres-decals figure-8 test** (ribbon trails / float RTT / pattern shader, tasks 1-4): not attempted — `tasks_status` shows `pres-decals [3/4] blocked`, 3 commits ahead of `main` at an unacked land gate. There is nothing to screenshot on `main` yet; re-run this check once it lands.
 - **pres-atmos water Fresnel/foam close-up**: inconclusive. Every visible water body on `meridian_basin` from an admin/spectator camera sat under fog-of-war "never explored" shading (a crosshatch dither + blue desaturation, present identically at Medium and High, so it's FOW rendering, not a quality-preset artifact) — couldn't get a clean, LOS-lit shot of water in the time available. `water-surface.ts`'s own log line (`water plane: procedural scroll-bump + Fresnel + shore foam`) confirms it's wired, just not visually confirmed here.
 - **hud-drilldown screenshot plan items 2-5** (ledger open, enemy-force chip, squad drill actions, Battle▾ tab focus): only item 1 (rest state) has a shot. Plan lives at `docs/reviews/2026-09-10/hud-drilldown.md` §Screenshot plan.
 
