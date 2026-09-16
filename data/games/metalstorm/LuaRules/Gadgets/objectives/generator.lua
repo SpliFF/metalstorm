@@ -46,7 +46,16 @@ end
 
 --- Called alongside clearActive to keep ruleCounts accurate (cap enforcement
 --- counts CURRENTLY-active systemic objectives per rule, not lifetime total).
+---
+--- F13: idempotent per dedupKey. A linked pair (E4 — the escort+kill race) is
+--- TWO objectives sharing ONE systemicKey and one `ruleCounts` increment, and
+--- resolving either half mutually resolves the other — so both halves call in
+--- here and the cap fell by 2 per pair. Over a war that drives the rule's
+--- count negative-by-clamp to 0 and lifts its cap entirely. The live-entry
+--- lookup is the natural guard: the first call clears it, the second finds
+--- nothing to release and does nothing.
 function generator.onResolved(state, ruleKey, dedupKey)
+    if dedupKey and state.systemicActive[dedupKey] == nil then return end
     generator.clearActive(state, dedupKey)
     if ruleKey and state.ruleCounts[ruleKey] then
         state.ruleCounts[ruleKey] = math.max(0, state.ruleCounts[ruleKey] - 1)

@@ -89,6 +89,17 @@ local function validArea(a)
        and type(a.r) == 'number' and a.r > 0
 end
 
+--- F14: `quorum` is a count of things, so it must be a whole number in
+--- 1..roster. 0 or negative makes a "keep N alive" objective unfailable; more
+--- than the roster makes it unwinnable. Neither was rejected, and neither is
+--- visible at the board — the objective simply never resolves the way its
+--- author meant.
+local function validQuorum(q, n)
+    if q == nil then return true end
+    if type(q) ~= 'number' or q ~= math.floor(q) then return false end
+    return q >= 1 and q <= n
+end
+
 function escort.validateParams(params)
     if type(params) ~= 'table' then return false, 'params required' end
     local payload = payloadOf(params)
@@ -101,6 +112,9 @@ function escort.validateParams(params)
     local dir = params.direction
     if dir ~= nil and dir ~= 'outbound' and dir ~= 'inbound' then
         return false, "direction must be 'outbound' or 'inbound'"
+    end
+    if not validQuorum(params.quorum, #payload) then
+        return false, 'quorum must be a whole number in 1..' .. #payload
     end
     return true
 end
