@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TrailStore, tessellateTrail, writeRibbonIndices } from './decal-trails.js';
+import { TrailStore, tessellateTrail, writeRibbonIndices, GaitTracker } from './decal-trails.js';
 
 const W = 24; // track width used throughout
 
@@ -187,5 +187,49 @@ describe('tessellateTrail', () => {
         const s = new TrailStore();
         s.append(1, 0, 0, 0, W);
         expect(tessellateTrail(s.trails()[0], fade)).toEqual([]);
+    });
+});
+
+describe('GaitTracker', () => {
+    it('alternates left/right starting on the left', () => {
+        const g = new GaitTracker();
+        expect(g.step(1, 0, 0).side).toBe(-1);
+        expect(g.step(1, 10, 0).side).toBe(1);
+        expect(g.step(1, 20, 0).side).toBe(-1);
+        expect(g.step(1, 30, 0).side).toBe(1);
+    });
+
+    it('measures stride as distance from the previous stamp, 0 for the first', () => {
+        const g = new GaitTracker();
+        expect(g.step(1, 0, 0).stride).toBe(0);
+        expect(g.step(1, 30, 40).stride).toBe(50); // 3-4-5 triangle
+        expect(g.step(1, 30, 52).stride).toBe(12);
+    });
+
+    it('tracks units independently', () => {
+        const g = new GaitTracker();
+        g.step(1, 0, 0);
+        expect(g.step(2, 0, 0).side).toBe(-1); // unit 2's first stamp, unaffected by unit 1
+        expect(g.step(1, 10, 0).side).toBe(1);
+        expect(g.step(2, 10, 0).side).toBe(1);
+    });
+
+    it('resets to the left after close, so a reused id starts fresh (E2)', () => {
+        const g = new GaitTracker();
+        g.step(7, 0, 0);
+        g.step(7, 10, 0); // now due on the right
+        g.close(7);
+        const step = g.step(7, 100, 100); // reused id
+        expect(step.side).toBe(-1);
+        expect(step.stride).toBe(0); // no memory of the prior position
+    });
+
+    it('clear() forgets every unit', () => {
+        const g = new GaitTracker();
+        g.step(1, 0, 0);
+        g.step(2, 0, 0);
+        g.clear();
+        expect(g.step(1, 5, 5).side).toBe(-1);
+        expect(g.step(2, 5, 5).side).toBe(-1);
     });
 });

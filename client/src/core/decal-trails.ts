@@ -224,6 +224,57 @@ export class TrailStore {
     }
 }
 
+/** One alternating footfall's gait info, from {@link GaitTracker.step}. */
+export interface GaitStep {
+    /** -1 = left foot, 1 = right foot; strictly alternates per unit. */
+    side: -1 | 1;
+    /** Straight-line distance from this unit's previous stamp, elmos (0 for
+     *  the first stamp of a fresh/reused id) — the stride the print's
+     *  kick-back berm scales against. */
+    stride: number;
+}
+
+interface GaitEntry {
+    side: -1 | 1;
+    x: number;
+    z: number;
+}
+
+/**
+ * Per-unit gait state for discrete FOOT/CLAW stamps (PLAN-decal-tracks §4):
+ * each network segment is ONE footfall, alternating left/right from a step
+ * counter, with the stride measured from the unit's previous stamp so the
+ * bake can scale the kick-back berm to how hard the unit is actually
+ * striding. Separate from {@link TrailStore} (continuous tread/wheel
+ * ribbons) — foot/claw marks stay discrete stamps; this only tracks which
+ * side is due next and how far since the last one. Pure state machine, no
+ * geometry, no Babylon — kills Q7's identical-stamp rubber-stamp rows.
+ */
+export class GaitTracker {
+    private units = new Map<number, GaitEntry>();
+
+    /** Record one footfall and return its gait info. Alternates `side` on
+     *  every call for a given unit, starting on the left. */
+    step(unitId: number, x: number, z: number): GaitStep {
+        const prev = this.units.get(unitId);
+        const side: -1 | 1 = prev ? (prev.side === -1 ? 1 : -1) : -1;
+        const stride = prev ? Math.hypot(x - prev.x, z - prev.z) : 0;
+        this.units.set(unitId, { side, x, z });
+        return { side, stride };
+    }
+
+    /** Forget a unit's gait state (EntityDestroy — E2): a reused id starts
+     *  fresh on the left, matching {@link TrailStore.close}'s contract. */
+    close(unitId: number): void {
+        this.units.delete(unitId);
+    }
+
+    /** Forget every unit (map change / reconnect). */
+    clear(): void {
+        this.units.clear();
+    }
+}
+
 /**
  * Tessellate a trail into ribbon stations along a centripetal Catmull-Rom
  * spline through its points. Centripetal (α=0.5) is the variant that cannot
