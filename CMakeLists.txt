@@ -829,6 +829,10 @@ if(TEST_SOURCES)
         # and is deliberately NOT here; it is verified on the running stack.
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AISpawn.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIDiscovery.cpp
+        # AI1/F11: BuildAISnapshot needs a live sim, but the rulesParam
+        # visibility rule beside it is pure — test_ai_snapshot_params.cpp
+        # drives AISnapshotGameParamVisible directly.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIStateSnapshot.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
