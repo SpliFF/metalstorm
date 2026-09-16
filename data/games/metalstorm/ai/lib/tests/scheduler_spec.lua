@@ -62,4 +62,33 @@ describe("lib.scheduler", function()
         assert.are.equal(2, s:observe(0, { hops = 0, engineTier = 2 }))
         assert.are.equal(600, s:period())
     end)
+
+    it("answers an alert early, but never closer together than minGap", function()
+        -- A faction that has already stretched all the way out (nothing in
+        -- contact for long enough to have walked the dwell ladder down).
+        local s = Scheduler.new({ base = 150, minGap = 30, floor = 3 })
+        s:observe(0, { hops = nil })
+        assert.is_true(s:due(0))
+        assert.are.equal(1800, s:period(), 'a faction nobody is fighting thinks once a minute')
+        -- Without an alert, the next tick is a minute away: the whole reason
+        -- tools/ai-eval measured a garrison reacting to an overrun 310 frames
+        -- late, with no contact callin to wake it (F4).
+        assert.is_false(s:due(600))
+        assert.is_true(s:due(600, true), 'a cheap poll noticed something; think NOW')
+        assert.are.equal(1, s.alerts)
+        -- An alert storm cannot turn the AI into a per-frame thinker on the
+        -- sim thread: minGap is the floor.
+        assert.is_false(s:due(610, true))
+        assert.is_false(s:due(629, true))
+        assert.is_true(s:due(630, true))
+    end)
+
+    it("still ticks on period when no alert ever comes", function()
+        local s = Scheduler.new({ base = 150 })
+        assert.is_true(s:due(0))
+        assert.is_false(s:due(100, false))
+        assert.is_true(s:due(150, false))
+        assert.are.equal(0, s.alerts, 'a scheduled tick is not an alert')
+    end)
+
 end)

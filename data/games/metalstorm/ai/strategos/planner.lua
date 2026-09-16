@@ -712,6 +712,31 @@ end
 local TRUST_VALUE_WEIGHT       = 5    -- authority-equivalent value per trust point
 local CEASEFIRE_BASE_VALUE     = 30   -- ceasefires save future order-cost/losses
 local DEMAND_CREDIBILITY_FLOOR = 0.55 -- comply when we'd likely lose the fight anyway
+local DOMINANT_RATIO           = 2.0  -- "clearly winning / clearly losing" on the map
+local TRIBUTE_POOL_FRACTION    = 0.25 -- of the team pool, when buying peace
+local MIN_TRIBUTE              = 20   -- below this an offer is an insult, not a bribe
+local PEACE_DURATION_FRAMES    = 5400 -- 3 min: long enough to re-form, short enough to mean it
+local BLEEDING_HEALTH          = 0.65 -- mean unit health ratio below which we are hurt
+
+--- Total own force vs total KNOWN enemy force, map-wide.
+--
+-- Prefers the threat map the planner already built this tick; falls back to
+-- summing the ledger against decayed intel, because a parley poll can happen
+-- BETWEEN strategic ticks (main.lua's PARLEY_POLL_FRAMES) and there is no
+-- threat map then. Enemy strength is confidence-weighted: we negotiate from
+-- what we know, not from what we fear.
+local function relativeStrength(picture)
+    local t = picture.threat
+    if t and t.totals and ((t.totals.own or 0) + (t.totals.enemy or 0)) > 0 then
+        return t.totals.own or 0, t.totals.enemy or 0
+    end
+    local ours, theirs = 0, 0
+    for _, b in pairs(picture.ledger or {}) do ours = ours + (b.strength or 0) end
+    for _, m in pairs(picture.intel or {}) do
+        theirs = theirs + (m.strength or 0) * (m.confidence or 1)
+    end
+    return ours, theirs
+end
 
 local function regionStrength(picture, region, mine)
     if not region then return 0 end
@@ -745,6 +770,18 @@ local function evaluateOne(p, picture, profile)
     end
 
     if p.kind == 'ceasefire' or p.kind == 'safe_passage' then
+        -- Relative strength first, trust second (ai-actuation, lane 4 ask):
+        -- standing down is cheap when you are losing and expensive when you
+        -- are winning, and no amount of goodwill makes it otherwise. Both
+        -- gates need a KNOWN enemy: with an empty intel memory we are blind,
+        -- not dominant, and fall through to the trust/aggression valuation.
+        local ours, theirs = relativeStrength(picture)
+        if theirs > 0 and ours >= theirs * DOMINANT_RATIO then
+            return 'reject'   -- we are winning: a pause only lets them re-form
+        end
+        if theirs > 0 and ours * DOMINANT_RATIO <= theirs then
+            return 'accept'   -- we are losing: any pause is profit
+        end
         local value = CEASEFIRE_BASE_VALUE + trust * TRUST_VALUE_WEIGHT
                      - (profile.aggression or 1.0) * 20   -- aggressive profiles discount standing down
         return (value >= 0) and 'accept' or 'reject'
@@ -755,8 +792,23 @@ local function evaluateOne(p, picture, profile)
         if (t.payer or 'from') == 'from' then return 'accept' end   -- they pay us — pure upside
         -- We'd be the payer: only worth it with healthy trust (buying real
         -- peace) relative to the amount asked.
-        local worth = (trust * TRUST_VALUE_WEIGHT) - (t.amount or 0)
-        return (worth >= 0) and 'accept' or 'reject'
+        local budget = trust * TRUST_VALUE_WEIGHT
+        local amount = t.amount or 0
+        if amount <= budget then return 'accept' end
+        -- Too dear as asked — but a rejection is not free either: it starts
+        -- the gadget's 2 min per-counterparty cooldown, so the next word on
+        -- the subject is theirs. COUNTER at what we can actually pay (the
+        -- lesser of what the trust is worth and a quarter of the pool), and
+        -- only slam the door when even that is nothing.
+        local pool = math.floor(((picture.economy or {}).teamPool or 0) * TRIBUTE_POOL_FRACTION)
+        local affordable = math.floor(math.min(budget, pool))
+        if affordable >= MIN_TRIBUTE and affordable < amount then
+            return 'counter', { kind = 'tribute', terms = {
+                payer = t.payer, amount = affordable,
+                duration = t.duration, perMinute = t.perMinute,
+            } }
+        end
+        return 'reject'
     end
 
     if p.kind == 'joint_objective' then
@@ -773,15 +825,128 @@ local function evaluateOne(p, picture, profile)
 end
 
 --- Evaluate every pending (offered/countered) proposal addressed to our own
--- team. Returns { {id=, decision='accept'|'reject'}, ... } — main.lua feeds
--- each straight into Actuators:respondProposal(id, decision).
+-- team. Returns { {id=, decision='accept'|'reject'|'counter', extra=?}, ... }
+-- — main.lua feeds each straight into
+-- Actuators:respondProposal(id, decision, extra); `extra` is
+-- { kind?, terms? } for a counter and nil otherwise.
 function Planner.evaluateProposals(picture, profile, role)
     local teamId = role and role.teamId
     local out = {}
     for _, p in ipairs((picture.parley or {}).proposals or {}) do
         if p.toTeam == teamId and (p.state == 'offered' or p.state == 'countered') then
-            out[#out + 1] = { id = p.id, decision = evaluateOne(p, picture, profile) }
+            local decision, extra = evaluateOne(p, picture, profile)
+            out[#out + 1] = { id = p.id, decision = decision, extra = extra }
         end
+    end
+    return out
+end
+
+--=============================================================================
+-- Origination (ai-actuation lane-4 ask). main.lua's handleParley has called
+-- this hook since the parley verbs landed; until now the function did not
+-- exist and the AI could only ever ANSWER. An AI that never opens its mouth
+-- cannot buy itself out of a losing war.
+--
+-- Deliberately narrow. Two situations, one proposal at a time, and only ever
+-- to a team we can see on the map or have already talked to:
+--   * losing badly  → tribute-for-peace (we pay), out of a quarter of the pool
+--   * both bleeding at rough parity → ceasefire
+-- Everything else is silence. The actuator's deference rule (a co-commander
+-- never binds its humans), its one-per-tick limit, and the gadget's own fee /
+-- live-cap / cooldown all still apply on top.
+--=============================================================================
+
+--- Teams we could plausibly address: whoever owns ground next to ours, plus
+-- anyone already on our parley board. Both are public, fog-honest reads —
+-- there is no "list every team" capability and we do not invent one.
+local function counterparties(picture, teamId)
+    local seen = {}
+    local regions = picture.regions or {}
+    local mine = {}
+    for key, r in pairs(regions) do
+        if r.owner == teamId then mine[key] = true end
+    end
+    for key in pairs(mine) do
+        for _, nkey in ipairs((regions[key] and regions[key].neighbors) or {}) do
+            local owner = regions[nkey] and regions[nkey].owner
+            if owner and owner ~= -1 and owner ~= teamId then
+                seen[owner] = (seen[owner] or 0) + 1
+            end
+        end
+    end
+    for other in pairs((picture.parley or {}).trust or {}) do
+        seen[other] = seen[other] or 0
+    end
+    return seen
+end
+
+--- Is anything already pending between us and `other`? Opening a second
+-- conversation while the first is unanswered is how an AI burns its four
+-- live-proposal slots and its counterparty's patience.
+local function pendingWith(picture, teamId, other)
+    for _, p in ipairs((picture.parley or {}).proposals or {}) do
+        if (p.state == 'offered' or p.state == 'countered')
+                and ((p.fromTeam == teamId and p.toTeam == other)
+                  or (p.fromTeam == other and p.toTeam == teamId)) then
+            return true
+        end
+    end
+    return false
+end
+
+--- Mean health ratio of our force: `strength` is Σ (0-1 health ratios) and
+-- `count` the head count, so their quotient is how hurt we are. No count
+-- published (older picture shape) → unknown, and unknown is not "bleeding".
+local function bleeding(picture)
+    local strength, count = 0, 0
+    for _, b in pairs(picture.ledger or {}) do
+        strength = strength + (b.strength or 0)
+        count = count + (b.count or 0)
+    end
+    if count == 0 then return false end
+    return (strength / count) < BLEEDING_HEALTH
+end
+
+function Planner.originateProposals(picture, profile, role)
+    local out = {}
+    local teamId = role and role.teamId
+    if teamId == nil then return out end
+
+    local ours, theirs = relativeStrength(picture)
+    if theirs <= 0 then return out end          -- we know of no enemy: nothing to negotiate
+
+    -- The counterparty with the most ground against ours; ties broken by team
+    -- id so two runs of the same Picture propose to the same team.
+    local best, bestScore = nil, -1
+    local cands = counterparties(picture, teamId)
+    local keys = {}
+    for other in pairs(cands) do keys[#keys + 1] = other end
+    table.sort(keys)
+    for _, other in ipairs(keys) do
+        if cands[other] > bestScore then best, bestScore = other, cands[other] end
+    end
+    if best == nil or pendingWith(picture, teamId, best) then return out end
+
+    local aggression = profile.aggression or 1.0
+
+    if ours * DOMINANT_RATIO <= theirs then
+        -- Losing badly: buy time with money, which is the one thing a losing
+        -- side still has. Paying is the point — `payer = 'from'` is US.
+        local amount = math.floor(((picture.economy or {}).teamPool or 0) * TRIBUTE_POOL_FRACTION)
+        if amount >= MIN_TRIBUTE then
+            out[#out + 1] = { kind = 'tribute', toTeam = best,
+                              terms = { payer = 'from', amount = amount,
+                                        duration = PEACE_DURATION_FRAMES } }
+        end
+        return out
+    end
+
+    -- Rough parity and we are hurt: a ceasefire costs both sides nothing they
+    -- were going to win anyway. An aggressive profile would rather bleed.
+    if aggression < 1.5 and bleeding(picture)
+            and ours < theirs * DOMINANT_RATIO and theirs < ours * DOMINANT_RATIO then
+        out[#out + 1] = { kind = 'ceasefire', toTeam = best,
+                          terms = { duration = PEACE_DURATION_FRAMES } }
     end
     return out
 end

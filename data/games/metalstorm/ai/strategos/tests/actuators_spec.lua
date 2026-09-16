@@ -486,6 +486,38 @@ describe("actuators — parley verbs (interaction §6.2 over I1)", function()
         assert.are.equal('tribute', fields.kind)
     end)
 
+    it("a counter carries its TERMS, not just its kind", function()
+        -- Without the terms a counter could only re-send the number it was
+        -- objecting to: GG.Parley.Respond defaults `extra.terms` to the
+        -- ORIGINAL proposal's. So the planner's "counter at what we can
+        -- actually pay" needs every term name on the wire (the same flat
+        -- field set `parley.propose` uses — game_parley.lua decodes both with
+        -- one function).
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:respondProposal({ id = 8, kind = 'tribute' }, 'counter',
+            { kind = 'tribute', terms = { amount = 50, payer = 'to', duration = 900,
+                                          perMinute = true, regionKey = 'r1' } }))
+        local cmd, fields = lastMessage(log)
+        assert.are.equal('parley.respond', cmd)
+        assert.are.equal('counter', fields.decision)
+        assert.are.equal('tribute', fields.kind)
+        assert.are.equal('50', fields.amount)
+        assert.are.equal('to', fields.payer)
+        assert.are.equal('900', fields.duration)
+        assert.are.equal('1', fields.perMinute)
+        assert.are.equal('r1', fields.regionKey)
+    end)
+
+    it("sends no terms on an accept or a reject", function()
+        local log = makeAI()
+        local act = Actuators.new({ role = fullSideRole(), profile = {} })
+        assert.is_true(act:respondProposal({ id = 9, kind = 'tribute' }, 'accept',
+            { terms = { amount = 50 } }))
+        local _, fields = lastMessage(log)
+        assert.is_nil(fields.amount, 'terms only mean something on a counter')
+    end)
+
     it("refuses an unknown decision without touching the wire", function()
         local log = makeAI()
         local act = Actuators.new({ role = fullSideRole(), profile = {} })

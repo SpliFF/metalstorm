@@ -19,8 +19,19 @@ Scheduler.__index = Scheduler
 Scheduler.TIER_FULL    = 0
 Scheduler.TIER_DORMANT = 3
 
+--- ALERTS. LOD escalation is only *observed* on a strategic tick, so a
+-- faction that has stretched to a 1 800-frame period cannot answer an attack
+-- for up to a minute — and there are no event callins to wake it (F4: the
+-- runtime dispatches `onUpdate` and nothing else). tools/ai-eval measured
+-- exactly that: a dormant garrison took 310 frames to start withdrawing from
+-- a region being overrun. So `due()` takes an optional ALERT: something the
+-- caller noticed with a cheap poll on an ordinary `onUpdate` (a jump in
+-- visible enemies is the usual one), which forces a strategic tick early —
+-- never closer together than `minGap`, so an alert storm cannot turn the AI
+-- into a per-frame thinker on the sim thread.
+--
 --- cfg: { base = 150, mult = {[0]=1,[1]=1,[2]=4,[3]=12}, floor = 0, ceil = 3,
---         dwell = {[0]=150,[1]=300,[2]=900} }
+--         dwell = {[0]=150,[1]=300,[2]=900}, minGap = 30 }
 function Scheduler.new(cfg)
     cfg = cfg or {}
     local self = setmetatable({}, Scheduler)
@@ -29,10 +40,12 @@ function Scheduler.new(cfg)
     self.floor = cfg.floor or Scheduler.TIER_FULL
     self.ceil  = cfg.ceil  or Scheduler.TIER_DORMANT
     self.dwell = cfg.dwell or { [0] = 150, [1] = 300, [2] = 900 }
+    self.minGap = cfg.minGap or 30      -- 3 × the runtime's 10-frame callin
     self.tierNow = self.floor
     self.want, self.wantSince = nil, nil
     self.lastTick = nil
     self.ticks = 0
+    self.alerts = 0
     return self
 end
 
@@ -58,13 +71,29 @@ function Scheduler:tier() return self.tierNow end
 
 --- Is a strategic tick due at `frame`? Marks it taken when true. The first
 -- call is always due (a fresh VM thinks immediately).
-function Scheduler:due(frame)
-    if self.lastTick ~= nil and (frame - self.lastTick) < self:period() then
-        return false
+--
+-- `alert` (truthy) = the caller's cheap poll saw something that cannot wait
+-- for the current period: tick now, unless we already ticked inside `minGap`.
+-- Alerts are counted so a reporter can say how much of the AI's thinking was
+-- reactive.
+function Scheduler:due(frame, alert)
+    if self.lastTick == nil then
+        self.lastTick, self.ticks = frame, self.ticks + 1
+        return true
     end
-    self.lastTick = frame
-    self.ticks = self.ticks + 1
-    return true
+    local since = frame - self.lastTick
+    if since >= self:period() then
+        self.lastTick = frame
+        self.ticks = self.ticks + 1
+        return true
+    end
+    if alert and since >= self.minGap then
+        self.lastTick = frame
+        self.ticks = self.ticks + 1
+        self.alerts = self.alerts + 1
+        return true
+    end
+    return false
 end
 
 --- Feed this tick's observation. opts: { hops = contact hops | nil,

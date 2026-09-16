@@ -1,0 +1,58 @@
+{
+    "id": "outmatched-withdrawal",
+    "title": "Overrun at home",
+    "why": "Six heavies walk into the AI's own region at frame 600 against three defenders. A garrison should leave through its departure zone; a stalwart profile should not; a strategos should at least not pretend the ground is quiet. The scored quantity is what it does with the ground it cannot hold, and how fast.",
+    "frames": 1800,
+    "team": 0,
+    "player": 7,
+    "pool": 60,
+    "map": { "width": 2048, "height": 2048 },
+    "regions": "tools/ai-eval/fixtures/world/three-region.json",
+    "power": "tools/ai-eval/fixtures/world/power.json",
+    "params": [
+        { "scope": "game", "key": "region_north_ridge_team", "value": 0 },
+        { "scope": "game", "key": "region_central_basin_team", "value": 1 },
+        { "scope": "game", "key": "region_south_marsh_team", "value": -1 },
+        { "scope": "game", "key": "objective_count", "value": 0 },
+        { "scope": "team", "key": "ms_departure_0_x", "value": 120 },
+        { "scope": "team", "key": "ms_departure_0_z", "value": 1900 },
+        { "scope": "team", "key": "ms_departure_0_r", "value": 400 }
+    ],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 300, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 320, "health": 1.0, "hasCommands": false },
+            { "id": 3, "defId": 101, "x": 380, "y": 0, "z": 340, "health": 1.0, "hasCommands": false }
+        ]
+    },
+    "timeline": [
+        {
+            "frame": 600,
+            "event": { "kind": "overrun", "region": "north_ridge", "id": "line-broken",
+                       "answeredBy": ["Withdraw", "Fallback", "DefendFront"] },
+            "enemies": [
+                { "id": 91, "defId": 103, "x": 500, "z": 300, "health": 1.0 },
+                { "id": 92, "defId": 103, "x": 540, "z": 340, "health": 1.0 },
+                { "id": 93, "defId": 103, "x": 580, "z": 380, "health": 1.0 },
+                { "id": 94, "defId": 103, "x": 620, "z": 420, "health": 1.0 },
+                { "id": 95, "defId": 103, "x": 660, "z": 460, "health": 1.0 },
+                { "id": 96, "defId": 103, "x": 700, "z": 500, "health": 1.0 }
+            ]
+        }
+    ],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" }
+    ],
+    "expectByAi": {
+        "garrison": [
+            { "check": "reactionWithin", "frames": 160 },
+            { "check": "hasDirectiveTypeAfter", "type": "Withdraw", "frame": 600 },
+            { "check": "withdrawsThrough", "x": 120, "z": 1900, "why": "the published departure zone (P7), not a guessed map edge" }
+        ],
+        "null": [
+            { "check": "maxDirectives", "value": 0 }
+        ]
+    }
+}

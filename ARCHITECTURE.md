@@ -972,6 +972,11 @@ subtrees each gadget family delegates to (with their own `tests/`).
 | `ai/strategos/` | The game's server-side Lua AI (strategic, directive-only; parley verbs real since 2026-09-10). |
 | `ai/lib/` | Reusable, engine-agnostic AI-player library (picture/regions/authority/directives/actuator/scheduler/reporter + `testing/fake_engine.lua`); `vendor/` holds byte-identical copies of the synced cost/wire specs, pinned by `lib/tests/vendor_drift_spec.lua` — re-copy after editing an original. Not an AI itself (AIDiscovery skips it). |
 | `ai/garrison/` | A second, simpler AI player (defender/NPC) built on `ai/lib` — proves the library; `lib` is a tracked symlink because the AI sandbox cannot `require` across plugins. |
+| `tools/ai-eval/` | The AI scoreboard (`make test-ai-eval`): every AI plugin × every fixture, one `lua` process per cell against `ai/lib/testing/fake_engine.lua`, scored on directives that survived the drain, authority actually charged, reaction latency and floor violations; gated against a committed `baseline.json`. `content/engine/ai/null` runs in the matrix as the no-op control. Scorer (`score.mjs`) is pure and has its own `node --test` suite. |
+
+**Writing an AI player: [docs/ai-players.md](docs/ai-players.md)** — the engine
+surface census, the design laws (authority, fog, no unit puppetry), the
+`ai/lib` module map, the three testing levels and the open engine proposals.
 
 Review reports from the 2026-09-10 fifteen-lane sweep (findings, fixes,
 uncompiled C++ proposals, not-done lists) live under `docs/reviews/2026-09-10/`

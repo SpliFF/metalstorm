@@ -118,4 +118,31 @@ describe("an AI virtual player on the human funnel", function()
         assert.are.equal(20, counter.fromTeam)
         assert.are.equal(10, counter.toTeam)
     end)
+
+    it("a counter may restate the TERMS, not only the kind", function()
+        -- The AI's evaluator counters a tribute it cannot afford with one it
+        -- can (ai/strategos/planner.lua). GG.Parley.Respond defaults
+        -- `extra.terms` to the ORIGINAL proposal's, so if the wire dropped the
+        -- terms the counter would repeat the very amount it was objecting to.
+        local world, gadgetObj = newWorld()
+        GG.Parley.Propose(10, 1, 20, 'tribute', { amount = 500, payer = 'to', duration = 1800 })
+        gadgetObj:RecvLuaMsg(Wire.encode('parley.respond', {
+            id = 1, decision = 'counter', kind = 'tribute',
+            amount = 50, payer = 'to', duration = 1800,
+        }), 8)
+        assert.are.equal('countered', GG.Parley.Get(1).state)
+        local counter = GG.Parley.Get(2)
+        assert.is_table(counter)
+        assert.are.equal(50, counter.terms.amount, 'the counter states its own number')
+        assert.are.equal('to', counter.terms.payer)
+        assert.are.equal(20, counter.fromTeam)
+    end)
+
+    it("a counter with no terms still falls back to the original's", function()
+        local world, gadgetObj = newWorld()
+        GG.Parley.Propose(10, 1, 20, 'tribute', { amount = 500, payer = 'to', duration = 1800 })
+        gadgetObj:RecvLuaMsg(Wire.encode('parley.respond', { id = 1, decision = 'counter' }), 8)
+        assert.are.equal(500, GG.Parley.Get(2).terms.amount)
+    end)
+
 end)

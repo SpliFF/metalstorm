@@ -296,10 +296,12 @@ local function handleParley(frame, picture, role)
         end
     end
 
-    -- Originate (the hook the pure core drives; absent today — lane 4 may add
-    -- `Planner.originateProposals(picture, profile, role) -> { {kind, toTeam,
-    -- terms}, ... }`). The actuator's per-tick rate limit and deference rule
-    -- apply; the gadget's fee/caps/cooldown apply after that.
+    -- Originate (the hook the pure core drives — `Planner.originateProposals`,
+    -- landed 2026-09-17: tribute-for-peace when losing badly, a ceasefire at
+    -- parity when our force is bleeding, and silence otherwise). Still
+    -- feature-detected, so a core without it is not an error. The actuator's
+    -- per-tick rate limit and deference rule apply; the gadget's
+    -- fee/caps/cooldown apply after that.
     if type(Planner.originateProposals) == 'function' then
         for _, o in ipairs(Planner.originateProposals(picture, self.profile, role) or {}) do
             local ok, why = self.actuators:propose(o.kind, o.toTeam, o.terms)
