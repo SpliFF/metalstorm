@@ -62,6 +62,10 @@ function generator.onResolved(state, ruleKey, dedupKey)
     end
 end
 
+--- Exported so the economy harness (authority/economy_sim.lua) sweeps the REAL
+--- density multipliers rather than a second copy of them that can drift.
+generator.DENSITY = DENSITY
+
 local function densityFor(mo)
     return DENSITY[mo] or DENSITY.normal
 end
