@@ -119,6 +119,28 @@ export interface DirectiveSummary {
     expiresAtFrame: number;
 }
 
+/**
+ * Tier names, index = tier (PLAN-beta.md "Standing"). The sim publishes the
+ * NUMBER as `rank_<playerId>`; every player-facing string uses these words.
+ */
+export const TIER_NAMES = ['Recruit', 'Regular', 'Veteran', 'Officer', 'Commander'] as const;
+
+export function tierName(tier: number): string {
+    return TIER_NAMES[Math.max(0, Math.min(TIER_NAMES.length - 1, Math.trunc(tier)))];
+}
+
+/** Who last issued an order on an assigned unit over the responsible player's
+ *  head (`assign_<unitID>_by`). */
+export interface AssignmentOrderBy {
+    playerId: number;
+    callsign: string;
+    tier: number;
+    /** "order from Vega (Officer)" — the one line the HUD renders. */
+    line: string;
+}
+
+const ASSIGN_KEY = /^assign_(\d+)$/;
+
 export class UIStore {
     // State mirrors
     private gameRulesParams = new Map<string, number | string>();
@@ -173,6 +195,21 @@ export class UIStore {
      * 1 Hz tick, and a widget that does not is unaffected by it changing.
      */
     private gameFrame = 0;
+
+    /**
+     * Who the local session is, in the sim's terms (playerNum + teamId).
+     *
+     * The store needs it because the journey layer's params are SCOPED BY
+     * PLAYER — `assign_<unitID>` names a playerNum, `rank_/mentor_/callsign_`
+     * are keyed by one — so "is this mine?" is a store question, not a
+     * per-widget one. Fed by integration.ts at session init; -1 until then,
+     * which reads as "nothing is assigned to me" rather than player 0's units.
+     */
+    private localPlayerId = -1;
+    private localTeamId = -1;
+    /** Mentor card's "Show everything" — lifts the chatter filter for this
+     *  session only. Never persisted: it is a look, not a setting. */
+    private showEverything = false;
 
     // Subscription management
     private subscribers = new Map<string[], Set<Subscriber>>();
@@ -308,6 +345,110 @@ export class UIStore {
         return this.getDirectives().filter(d => d.groupId === groupId);
     }
 
+    // ─── Journey layer: assignment, standing, mentorship ───
+    //
+    // Contract with `game_assignment.lua` / `game_teams.lua` BY NAME ONLY
+    // (PLAN-beta.md "Command scope"): team-scope `assign_<unitID>`,
+    // `assign_<unitID>_by`, `assign_rev`; game-scope `rank_<pid>`,
+    // `mentor_<pid>`, `callsign_<pid>`.
+
+    /** Fed by integration.ts at session init. */
+    setLocalIdentity(playerId: number, teamId: number): void {
+        this.localPlayerId = Number.isFinite(playerId) ? playerId : -1;
+        this.localTeamId = Number.isFinite(teamId) ? teamId : -1;
+    }
+
+    getLocalPlayerId(): number { return this.localPlayerId; }
+
+    /** Standing tier of a player, 0 when the sim has not published one. */
+    rankOf(playerId: number): number {
+        const raw = this.gameRulesParams.get(`rank_${playerId}`);
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    /** Display name of a player. Falls back to the roster name, then to
+     *  "player <n>" — a missing callsign must never render as "undefined". */
+    callsignOf(playerId: number): string {
+        const raw = this.gameRulesParams.get(`callsign_${playerId}`);
+        if (raw !== undefined && String(raw) !== '') return String(raw);
+        return this.players.get(playerId)?.name ?? `player ${playerId}`;
+    }
+
+    /** The mentor watching `playerId`: a playerNum, -1 for the AI mentor, or
+     *  undefined when there is none. */
+    mentorOf(playerId: number): number | undefined {
+        const raw = this.gameRulesParams.get(`mentor_${playerId}`);
+        if (raw === undefined || raw === '') return undefined;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : undefined;
+    }
+
+    /** Is the local player under mentorship (human or AI)? */
+    isMentored(): boolean {
+        return this.localPlayerId >= 0 && this.mentorOf(this.localPlayerId) !== undefined;
+    }
+
+    /**
+     * The unit ids this player is RESPONSIBLE for (PLAN-beta.md: responsibility,
+     * never ownership — the team still owns every unit).
+     *
+     * Empty for a player with no carve (a SOLO mission, or any tier ≥1 player
+     * commanding the whole team roster), and the HUD treats empty as "scope me
+     * to nothing" — i.e. no filtering at all.
+     */
+    getMyAssignments(): number[] {
+        if (this.localPlayerId < 0) return [];
+        const params = this.teamRulesParams.get(this.localTeamId);
+        if (!params) return [];
+        const out: number[] = [];
+        for (const [key, value] of params) {
+            const m = ASSIGN_KEY.exec(key);
+            if (m && Number(value) === this.localPlayerId) out.push(Number(m[1]));
+        }
+        return out.sort((a, b) => a - b);
+    }
+
+    /** Scope a selection to the player's own squads. A player with no
+     *  assignments is unscoped, so this is identity for everyone above tier 0
+     *  and for every solo mission. */
+    filterToAssignments(unitIds: readonly number[]): number[] {
+        const mine = this.getMyAssignments();
+        if (mine.length === 0) return [...unitIds];
+        const set = new Set(mine);
+        return unitIds.filter((id) => set.has(id));
+    }
+
+    /** "order from <callsign> (<tier>)" for a unit a superior last ordered. */
+    assignedBy(unitId: number): AssignmentOrderBy | null {
+        const raw = this.teamRulesParam(this.localTeamId, `assign_${unitId}_by`);
+        if (raw === undefined || raw === '') return null;
+        const playerId = Number(raw);
+        if (!Number.isFinite(playerId) || playerId < 0) return null;
+        const callsign = this.callsignOf(playerId);
+        const tier = this.rankOf(playerId);
+        return { playerId, callsign, tier, line: `order from ${callsign} (${tierName(tier)})` };
+    }
+
+    /**
+     * Should external chatter be hidden right now?
+     *
+     * On while the player is under mentorship, off the moment they ask to see
+     * everything. The point is focus on ONE voice during the first missions,
+     * so it is deliberately not a rank gate: a mentored veteran gets it too.
+     */
+    isChatterFiltered(): boolean {
+        return !this.showEverything && this.isMentored();
+    }
+
+    /** Mentor card's toggle. */
+    setShowEverything(on: boolean): void {
+        this.showEverything = on;
+        this.notifySubscribers(['gameRulesParams']);
+    }
+
+    getShowEverything(): boolean { return this.showEverything; }
+
     // ─── Update methods (called by native UI loader / connection) ───
 
     /** Update game rules params batch */
@@ -371,7 +512,12 @@ export class UIStore {
 
     /** Update selection */
     updateSelection(unitIds: number[], cmdDescs?: any[]): void {
-        this.selection.unitIds = unitIds;
+        // Command scope: a player with assigned squads sees a HUD scoped to
+        // them, so a box over the whole field selects THEIR squads and not the
+        // faction's (PLAN-beta.md "Command scope"). Unassigned units stay
+        // selectable by the engine — this is HUD scoping, not an order gate;
+        // the refusal lives in `game_assignment.lua:AllowCommand`.
+        this.selection.unitIds = this.filterToAssignments(unitIds);
         if (cmdDescs) {
             this.selection.cmdDescs = cmdDescs;
         }
@@ -516,6 +662,7 @@ export class UIStore {
         this.battleMarkers = [];
         this.briefing = null;
         this.orgGroups = [];
+        this.showEverything = false;
         // A stale frame would make the next match's first countdowns tick from
         // the last match's clock.
         this.gameFrame = 0;
