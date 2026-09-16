@@ -48,6 +48,10 @@ if (typeof window !== 'undefined') {
     (window as unknown as { __msUiStore?: unknown }).__msUiStore = uiStore;
 }
 import { WidgetLoader } from './widget-loader.js';
+import { travelTo } from './camera-travel.js';
+import { uiActionRegistry } from './ui-action-registry.js';
+// Game-dir widgets (tutorial-guide.js "Show me") feature-detect this: camera travel + open-a-panel by name.
+(globalThis as any).__nativeUi = { travelTo: (x: number, z: number) => travelTo({ x, z }).ok, open: (name: string) => uiActionRegistry.apply('open', name).ok };
 import { startEntityIndexProducer } from './entity-index-producer.js';
 import { bindSelectionToFocus, focusModel } from './focus-model.js';
 import { censusCacheHolder } from './query-engine.js';

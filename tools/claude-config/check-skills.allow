@@ -1,0 +1,95 @@
+# check-skills.allow — names in the skills that are legitimately not repo symbols.
+# One per line, `#` comments. Keep this SHORT: every entry is a name the drift
+# check can no longer protect, so an entry needs a reason that is not "it was
+# easier". Format: a bare token, `tool.argument`, `test.method`, or a path.
+
+# --- Tools belonging to OTHER MCP servers ---------------------------------
+# The chrome-devtools MCP (declared in .mcp.json, not built here), named by
+# game-browser-test and by the fallback snippets the relay tools print.
+evaluate_script
+take_screenshot
+take_snapshot
+handle_dialog
+list_console_messages
+list_network_requests
+new_page
+navigate_page
+select_page
+performance_start_trace
+performance_stop_trace
+
+# --- taskherd MCP (user-level server, ~/.claude.json) ----------------------
+tasks_status
+tasks_add
+tasks_block
+tasks_fork
+tasks_note
+tasks_ack
+tasks_options
+tasks_init
+
+# --- Result strings and enum values, not identifiers ----------------------
+# end_game / close_client outcomes, quoted so a reader can match them in output.
+exited_without_checkpoint
+killed_after_timeout
+kill_failed
+not_running
+sigterm_fallback
+no_battle_map
+window_closed
+same_side
+no_side
+already_held
+insufficient_authority
+not_your_commitment
+side_mismatch
+no_such_season
+no_world
+world_database_unavailable
+nl_disabled
+co_commander
+observed_only
+deny_area
+
+# --- Unit/feature def names used as EXAMPLES -------------------------------
+# Several are named precisely to say they do NOT exist (the def-naming trap in
+# spring-debug: there is no `ms_scout`, the families are `ms_<class>_s1..s4`).
+ms_scout
+ms_scout_buggy
+ms_supply_truck
+ms_technical
+ms_grain_silo
+ms_tank_farm
+ms_timber_yard
+ms_tanks_s2
+fable_mech
+fable_airship
+crossing_standoff
+meridian_basin
+green_flat_x34_v3
+
+# --- Lua rulesParams and wire verbs (LuaRules strings, not C++ symbols) ----
+ai_profile
+ai_slate_kinds
+ai_slate_home
+ai_slate_targets
+ai_slate_route
+ai_slate_reach
+ai_caretaker
+team_active_humans
+team_leader
+authority_pool
+authority_player
+guidance_intent_count
+intent_goal_id
+world_staging
+allowClientEval
+openBrowser
+browserHeadless
+skipBriefing
+
+# --- Map ids -----------------------------------------------------------------
+# `data/maps/*` is PROCESSED MAP OUTPUT and gitignored (map assets are
+# force-added case by case), so a map id is never resolvable from a clean
+# checkout however correct it is. Ids only — never a claim about a file.
+scorched_crossing_v2

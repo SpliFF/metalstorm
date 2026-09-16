@@ -183,6 +183,102 @@ describe("§7.7 heavy costs more slots than light", function()
         assert.is_true(world.echoed('air dropZone is over water'))
     end)
 
+    it("lets an AIR wave enter over open water", function()
+        -- 2026-09-17, found on the first live run of
+        -- scenarios/pelagic_landing.lua: terrainProblem() asked
+        -- Spring.TestMoveOrder whether the CARRIER could stand on its entry
+        -- square, for every kind. An aircraft has no ground movedef, so the
+        -- engine answers false over water — and the natural entry for an air
+        -- wave on an archipelago is exactly that. The wave was dropped at
+        -- load, with a reason that reads like a content bug. An air arrival's
+        -- geometry constraint is its DROP ZONE suiting its cargo; its entry
+        -- has none.
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ kind = 'air',
+                                   entry = { x = 500, z = 500 },
+                                   dropZone = { x = 9000, z = 9000 } }) },
+        }))
+        world.heightAt = function(x, z)
+            return (x == 500 and z == 500) and -30 or 12   -- sea entry, dry drop
+        end
+        g:GameStart()
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+    end)
+
+    it("still refuses a SEA wave whose entry square the engine will not take", function()
+        -- The other half of the same change: the TestMoveOrder guard is kept
+        -- for ship and train carriers, which DO have a movedef, because it is
+        -- the only thing that catches depth curves and steepness this file
+        -- does not model.
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',
+                                   entry = { x = 500, z = 500 },
+                                   dropZone = { x = 9000, z = 9000 } }) },
+        }))
+        world.setWater(20)
+        world.heightAt = function() return -20 end
+        -- The engine refuses every square for this hull.
+        _G.Spring.TestMoveOrder = function() return false end
+        g:GameStart()
+        assert.are.equal(1, world.rp('war_arrival_invalid'))
+        assert.is_true(world.echoed('cannot stand at the entry point'))
+    end)
+
+    it("beaches a SEA wave's cargo itself when the engine will not unload it", function()
+        -- 2026-09-17, measured on a live run of scenarios/pelagic_landing.lua:
+        -- SEA_ARRIVE_RADIUS was necessary and not sufficient. The ship sails
+        -- its lane, reaches the drop zone, is issued CMD_UNLOAD_UNITS, the
+        -- engine decomposes it into a concrete CMD_UNLOAD_UNIT on a dry
+        -- square — and nothing happens, because CTransportCAI wants the hull
+        -- near that square and a SHIP cannot get closer than the shoreline.
+        -- Three sea waves in one match sat full at 0.2 elmo/frame for 12000
+        -- frames. After BEACH_AFTER_RETRIES the gadget puts them ashore.
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',
+                                   entry = { x = 500, z = 500 },
+                                   dropZone = { x = 9000, z = 9000 } }) },
+        }))
+        -- Open sea, with a beach starting 200 elmos east of the drop zone.
+        world.heightAt = function(x) return x >= 9200 and 9 or -30 end
+        g:GameStart()
+        assert.are.equal(0, world.rp('war_arrival_invalid'))
+        world.run(g, 320)
+        local transportID
+        for id, u in pairs(world.units) do
+            if u.defID == mock.LANDING_SHIP then transportID = id end
+        end
+        world.moveTo(transportID, 8900, 9000)          -- offshore, inside dropRadius
+        -- Four retry periods: three go to the engine, the fourth beaches.
+        world.run(g, 300 * 6)   -- 300 = UNLOAD_RETRY_FRAMES
+        assert.is_true(#world.beached > 0,
+            'the wave was never put ashore — it would hold its cargo forever')
+        for _, b in ipairs(world.beached) do
+            assert.is_true(world.heightAt(b.x, b.z) > 0,
+                'beached a passenger at ' .. b.x .. ',' .. b.z .. ', which is under water')
+        end
+        assert.is_true(world.echoed('beached'))
+    end)
+
+    it("never beaches an AIR wave — the engine unloads those correctly", function()
+        -- The fallback is a fallback. The same live run's airship emptied
+        -- itself on the first CMD_UNLOAD_UNITS, so an air wave must keep
+        -- going through the engine however long it takes.
+        local world, g = mock.new(scenario({
+            arrivals = { arrival({ kind = 'air',
+                                   entry = { x = 500, z = 500 },
+                                   dropZone = { x = 9000, z = 9000 } }) },
+        }))
+        g:GameStart()                                   -- flat dry map
+        world.run(g, 320)
+        local transportID
+        for id, u in pairs(world.units) do
+            if u.defID == mock.AIRSHIP then transportID = id end
+        end
+        world.moveTo(transportID, 9000, 9000)
+        world.run(g, 300 * 6)   -- 300 = UNLOAD_RETRY_FRAMES
+        assert.are.equal(0, #world.beached)
+    end)
+
     it("gives a SEA wave the offshore unload radius and records extracted strength", function()
         local world, g = mock.new(scenario({
             arrivals = { arrival({ def = 'ms_landing_ship', kind = 'sea',

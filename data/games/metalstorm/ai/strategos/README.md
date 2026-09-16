@@ -52,6 +52,9 @@ ai/strategos/
                     structurally has no squad cmd
   roles.lua         full_side / co_commander / npc policy tables               [PURE]
   profiles/         default · aggressive · caretaker · mentor · npc_raider     [PURE]
+                    (data, plus two optional hooks: `scriptedSlate` and
+                    `evaluateProposal(p, ctx)` — the parley override, where
+                    `ctx.attacking[team]` is "this tick's plan points at them")
   tests/            busted specs driving the pure core against fixture Pictures
 ```
 

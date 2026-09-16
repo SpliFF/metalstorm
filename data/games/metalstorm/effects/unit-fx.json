@@ -8,11 +8,16 @@
     "a unit's bindings.json references these SLOT names via this map instead ",
     "of hardcoding effect names, so class-wide retunes are one edit here).",
     "",
-    "Every value is an effect name in effects/library.json (validated by the ",
-    "cross-ref check). Slots: death, damageSmoke (health<0.5), ",
-    "damageSmokeHeavy (health<0.25), burning (health<0.1 / wreck), moveDust ",
-    "(MOVING, rateScale velocity), contactPlant (onContactPlant — gait-phase ",
-    "foot plants, PLAN-metalstorm-flow §4), wake (ships MOVING), thruster ",
+    "Every visual value is an effect name in effects/library.json (validated ",
+    "by the cross-ref check). `sound` is a gamedata/sounds.lua SoundItem key ",
+    "played at the death position (client/src/core/unit-fx-dispatch.ts), one ",
+    "of death_infantry|vehicle_light|vehicle_heavy|aircraft|ship|building — ",
+    "a name gamedata/sounds.lua doesn't define yet just resolves to nothing, ",
+    "so this can be authored ahead of the audio pass that adds the rows.",
+    "Slots: death, sound, damageSmoke (health<0.5), damageSmokeHeavy ",
+    "(health<0.25), burning (health<0.1 / wreck), moveDust (MOVING, ",
+    "rateScale velocity), contactPlant (onContactPlant — gait-phase foot ",
+    "plants, PLAN-metalstorm-flow §4), wake (ships MOVING), thruster ",
     "(aircraft engine), buildFx (engineer constructing). null = none.",
     "",
     "Resolution order (mirrors weapon-fx.json): exact `units[<def>]` entry -> ",
@@ -25,32 +30,36 @@
   "version": 1,
 
   "byClass": {
-    "soldiers":           { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
-    "engineers":          { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": "build_sparks" },
-    "mechs":              { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
-    "tanks":              { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "artillery":          { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "fighters":           { "death": "death_aircraft",   "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
-    "bombers":            { "death": "death_aircraft",   "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
-    "ships":              { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
-    "subs":               { "death": "death_sub",        "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "staticdefense":      { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "radar":              { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "civilians":          { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
-    "civvehicles":        { "death": "death_vehicle_s1", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "buildings_military": { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
-    "buildings_civilian": { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null }
+    "soldiers":           { "death": "death_infantry",   "sound": "death_infantry",      "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "engineers":          { "death": "death_infantry",   "sound": "death_infantry",      "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": "build_sparks" },
+    "mechs":              { "death": "death_vehicle_s2", "sound": "death_vehicle_light",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "tanks":              { "death": "death_vehicle_s2", "sound": "death_vehicle_light",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "artillery":          { "death": "death_vehicle_s2", "sound": "death_vehicle_light",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "fighters":           { "death": "death_aircraft",   "sound": "death_aircraft",            "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
+    "bombers":            { "death": "death_aircraft",   "sound": "death_aircraft",            "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
+    "ships":              { "death": "death_ship",       "sound": "death_ship",                "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "subs":               { "death": "death_sub",        "sound": "death_ship",                "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "staticdefense":      { "death": "death_building",   "sound": "death_building",            "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "radar":              { "death": "death_building",   "sound": "death_building",            "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "civilians":          { "death": "death_infantry",   "sound": "death_infantry",      "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "civvehicles":        { "death": "death_vehicle_s1", "sound": "death_vehicle_light",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "buildings_military": { "death": "death_building",   "sound": "death_building",            "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "buildings_civilian": { "death": "death_building",   "sound": "death_building",            "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null }
   },
 
   "scaleOverrides": {
-    "_doc": "Per-class per-scale death escalation. Scale 4 = super-heavy: the staged dreadnought death for land armour; buildings/ships keep their class death at every scale for now (STUB tuning).",
-    "tanks":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
-    "mechs":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
-    "artillery": { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
+    "_doc": "Per-class per-scale death escalation. Scale 4 = super-heavy: the staged dreadnought death for land armour; buildings/ships keep their class death at every scale for now (STUB tuning). `sound` steps up to vehicle_heavy at s3/s4, matching the visual escalation.",
+    "tanks":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3", "sound": "death_vehicle_heavy" }, "4": { "death": "death_dreadnought", "sound": "death_vehicle_heavy" } },
+    "mechs":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3", "sound": "death_vehicle_heavy" }, "4": { "death": "death_dreadnought", "sound": "death_vehicle_heavy" } },
+    "artillery": { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3", "sound": "death_vehicle_heavy" }, "4": { "death": "death_dreadnought", "sound": "death_vehicle_heavy" } },
     "staticdefense": { "4": { "death": "death_building" } }
   },
 
   "units": {
-    "_doc": "Exact def-name overrides — highest precedence. Empty until specific defs demand bespoke deaths (e.g. a named scenario hero)."
+    "_doc": "Exact def-name overrides — highest precedence. Used by defs whose names do not parse as ms_<class>_s<n>: the four civilian hulls in units/civships.lua (2026-09-17) take the ships row verbatim — a ferry dies and wakes like a ship, whatever class its customparams carry.",
+    "ms_fishing_trawler":    { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_ferry":              { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_cargo_tramp":        { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_salvage_crane_ship": { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null }
   }
 }

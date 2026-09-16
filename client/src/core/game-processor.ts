@@ -107,7 +107,10 @@ import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
-import { createNativeFxGamePass, type NativeFxGamePass } from './native-fx/fx-game-loader.js';
+import {
+    createNativeFxGamePass, NATIVE_FX_QUALITY_TIERS, type NativeFxGamePass,
+} from './native-fx/fx-game-loader.js';
+import { UnitFxDispatch } from './unit-fx-dispatch.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -525,6 +528,30 @@ let gpCombatFX: CombatFX | null = null;
 /// Metalstorm native-FX pass (native-fx/fx-game-loader.ts). Null on games
 /// that ship no effects/ library — every non-Metalstorm game today.
 let gpNativeFx: NativeFxGamePass | null = null;
+/// Unit-side FX dispatch (death/damage-smoke/move-dust, unit-fx-dispatch.ts,
+/// PLAN-beta-presentation L-FX step 6). Built alongside gpNativeFx — needs
+/// its resolved unit-fx.json and its NativeFxSink.
+let gpUnitFx: UnitFxDispatch | null = null;
+
+/// Empty entity iterator — the FX construction block's default before/if
+/// gpCtx.entityRenderer isn't up yet, so UnitFxDispatch.tick()'s sweep has
+/// something to iterate.
+function* EMPTY_ENTITIES(): IterableIterator<[number, { defId: number; healthScale: number }]> {}
+
+/// L-FX step 6: play a plain named SoundItem (gamedata/sounds.lua) at a
+/// world position — the same synthesised-event path onUiSound's "named"
+/// branch uses (below), reused here for unit-fx-dispatch.ts's death sound.
+/// A name gamedata/sounds.lua doesn't define yet (e.g. before pres-audio's
+/// death_* rows land) just resolves to nothing on main — no error, per
+/// SoundEventPlayer.playResolved's empty-path fallthrough.
+function gpPlayNamedSound(name: string, x: number, y: number, z: number): void {
+    const ref: SoundRefInfo = { id: -1, path: '', category: -1, volume: 1, pitch: 1, name };
+    const e: SoundEventInfo = {
+        soundId: -1, sourceDefId: 0, sourceKind: 3,
+        x, y, z, volume: 1, pitch: 1, priority: 128, team: 255, channel: AudioChannel.Battle,
+    };
+    postToMain({ type: 'gp:audioSoundEvents', events: [{ e, ref }] });
+}
 /// How long a native impact's ground scar lives (seconds). The art brief
 /// asks for persistent scarring; the decal overlay fades them out.
 const NATIVE_FX_SCAR_TTL_S = 90;
@@ -640,6 +667,12 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
         weaponDefIds: (id) => {
             const defId = r.getEntityDefId(id);
             return defId === undefined ? null : gpDefCache?.getUnitDef(defId)?.weaponDefIds ?? null;
+        },
+        // recoil-driver.ts's kick input: aoe/projectileSpeed straight off the
+        // fired weapon's def, so RecoilDriver.kick() fires on every shot.
+        weaponAoeVelocity: (weaponDefId) => {
+            const wd = gpDefCache?.getWeaponDef(weaponDefId);
+            return wd ? { aoe: wd.aoe, projectileSpeed: wd.projectileSpeed } : undefined;
         },
     }, r);
     gpClipPolicy = new ClipAutoPolicy({
@@ -839,6 +872,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (!gpScene) return;  // shutdown raced the fetch
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
+
+    // L-AUDIO: hand mapinfo.lua's sound.preset to main, which owns the
+    // AudioContext and picks the master reverb IR (setReverbPreset).
+    postToMain({ type: 'gp:soundPreset', preset: map.soundPreset });
 
     // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
     // mex snap. Spring's metalmap is half the heightmap resolution: each cell
@@ -1484,6 +1521,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     attackerId: 0, targetId: entityId, weaponDefId: 0,
                     result: 3, damage: 500, x, y, z,
                 }]);
+                // L-FX step 6: unit-class death burst + sound. defId comes
+                // from `meta`, read above BEFORE removeEntity() drops it.
+                if (meta) gpUnitFx?.onDeath(entityId, meta.defId, x, y, z);
+                gpUnitFx?.remove(entityId);
                 // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
                 removeUnitFromLiveState(entityId);
             });
@@ -1661,6 +1702,19 @@ function gpConnect(msg: GpInitToWorker): void {
                 gpSchedule(frame, 'combatFx', () => {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
+                    // L-FX step 6 / pres-anim contract: hit-flinch nudges the
+                    // target away from the attacker via MotionLeanRegistry.
+                    // impulse(). result===0 is Hit (see CombatFX.onCombatEvents).
+                    if (ev.result === 0 && ev.attackerId) {
+                        const atk = gpCtx.entityRenderer?.getEntityPosition(ev.attackerId);
+                        const tgt = gpCtx.entityRenderer?.getEntityPosition(ev.targetId);
+                        if (atk && tgt) {
+                            const dx = tgt.x - atk.x, dz = tgt.z - atk.z;
+                            const len = Math.hypot(dx, dz) || 1;
+                            gpUnitFx?.onHit(ev.targetId, dx / len, dz / len,
+                                Math.min(ev.damage / 50, 3));
+                        }
+                    }
                 });
                 // PLAN-metalstorm-squad-casualties §4/§5: a hit on a squad unit
                 // is a victim-selection hint (impact position) and — if the
@@ -2937,26 +2991,55 @@ export function gpInit(msg: GpInitToWorker): void {
     // without an effects/ library resolves to null and every dispatch site
     // keeps the CEG path it has today. Once up, a weapon def that authors NO
     // CEG and resolves through effects/weapon-fx.json draws natively instead.
-    createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '')
-        .then((pass) => {
-            if (!pass || !gpCombatFX) { pass?.dispose(); return; }
-            gpNativeFx = pass;
-            // Impact scars ride the decal overlay's existing snapshot shape —
-            // no new decal API (PLAN-beta-presentation L-DECALS contract).
-            pass.setScarSink((x, y, z, radius) => {
-                gpDecalOverlay?.onSnapshot([{
-                    x, y, z, radius,
-                    ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
-                    r: 0.5, g: 0.5, b: 0.5, a: 1,
-                }]);
-            });
-            projectileRenderer.setNativeFx(pass);
-            combatFX.setNativeFx(pass);
-            combatFX.setLightPool(gpCtx.fxLightPool);
-            (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
-            postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
-        })
-        .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+    // L-FX step 5: `gfx.nativeFx` is the kill switch (Low preset off) — skip
+    // building the pass at all rather than build-then-disable, same
+    // restart-only semantics as `gfx.particleQuality` (both read once here).
+    if (clientSettings.getBool('gfx.nativeFx', true)) {
+        const qualityTier = clientSettings.getInt('gfx.particleQuality', NATIVE_FX_QUALITY_TIERS.length - 1);
+        createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '', qualityTier)
+            .then((pass) => {
+                if (!pass || !gpCombatFX) { pass?.dispose(); return; }
+                gpNativeFx = pass;
+                // Impact scars ride the decal overlay's existing snapshot shape —
+                // no new decal API (PLAN-beta-presentation L-DECALS contract).
+                pass.setScarSink((x, y, z, radius) => {
+                    gpDecalOverlay?.onSnapshot([{
+                        x, y, z, radius,
+                        ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
+                        r: 0.5, g: 0.5, b: 0.5, a: 1,
+                    }]);
+                });
+                projectileRenderer.setNativeFx(pass);
+                combatFX.setNativeFx(pass);
+                combatFX.setLightPool(gpCtx.fxLightPool);
+                // L-FX step 5: live count-scale re-tune on later particleQuality
+                // changes (the pool-capacity half stays restart-only).
+                clientSettings.subscribe('gfx.particleQuality',
+                    (v) => pass.setQuality(Number(v)));
+                // L-FX step 6: unit-side death/damage-smoke/move-dust dispatch.
+                // Hit-flinch (getMotionLean) and the move-dust rate
+                // (getUnitSpeed) ride pres-anim's MotionLeanRegistry.impulse /
+                // WheelSpinDriver.spinning.
+                gpUnitFx = new UnitFxDispatch({
+                    unitFx: pass.unitFx,
+                    sink: pass,
+                    getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
+                    getEntities: () => gpCtx.entityRenderer?.getEntities() ?? EMPTY_ENTITIES(),
+                    getEntityPosition: (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null,
+                    playNamedSound: (name, x, y, z) => gpPlayNamedSound(name, x, y, z),
+                    getMotionLean: () => gpMotionLean,
+                    getUnitSpeed: (id) => gpWheelSpin?.spinning(id) ?? 0,
+                    // Share the LOD/budget fence with the legacy per-frame
+                    // entity-script path (entity-fx-fence.ts) rather than a
+                    // second independent budget — one combined 3-5ms/frame
+                    // ceiling, one entityFxFenceDump() debug surface.
+                    fence: getEntityFxFence(),
+                });
+                (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
+                postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
+            })
+            .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+    }
 
     // Dynamic feature renderer — getRuntime()-spawned features (wrecks, debris,
     // reclaim removals). Map-placed features load once via renderMapFeatures
@@ -3165,6 +3248,7 @@ export function gpInit(msg: GpInitToWorker): void {
         gpCegRuntime?.tick(fxDt);
         gpNativeFx?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
+        gpUnitFx?.tick(fxDt, camera.position.x, camera.position.y, camera.position.z);
         gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
         {
@@ -4292,6 +4376,7 @@ export function gpShutdown(): void {
     gpCegRuntime = null;
     gpNativeFx?.dispose();
     gpNativeFx = null;
+    gpUnitFx = null;
     delete (globalThis as Record<string, unknown>).__nativeFx;
     gpBuildBeamRenderer?.dispose();
     gpBuildBeamRenderer = null;

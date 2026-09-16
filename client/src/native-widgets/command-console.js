@@ -179,6 +179,14 @@ function init(ctx) {
     setupVoice();
     bindSummonKey();
 
+    // `window.test.nl(utterance)` — the console path as a test hook, for the
+    // spring-debug `nl_command` tool, which can PARSE an utterance into an
+    // envelope but has no way to run one. Same sentence, same envelope, same
+    // executor as typing it: this forwards to `runUtteranceText` and changes
+    // nothing about it. Registered here (the harness is on `window` well
+    // before any widget mounts) and removed in dispose().
+    if (window.test) window.test.nl = (utterance) => runUtteranceText(utterance);
+
     console.log('[command-console] Initialized (summon with ' + SUMMON_LABEL + ')');
 }
 
@@ -540,6 +548,7 @@ function dispose() {
     state.greeted = false;
     state.pendingConfirm = null;
     focusModel.closeSurface('command-console');
+    if (window.test?.nl) delete window.test.nl;
     document.getElementById('command-console-style')?.remove();
 
     console.log('[command-console] Disposed');

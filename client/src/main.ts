@@ -9,7 +9,7 @@
 // GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
 import './core/ktx2-config.js';
 import { DefCache } from './core/def-cache.js';
-import { AudioManager } from './core/audio.js';
+import { AudioManager, resolveReverbPreset } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
 import { MusicDirector } from './core/music-director.js';
 import { AnimatedCursor } from './core/animated-cursor.js';
@@ -1461,6 +1461,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // Open the music gate on the first transition (scene is live).
                 if (musicDirector && !musicArmed) { musicDirector.arm(); musicArmed = true; }
                 musicDirector?.handleMusicEvent(m.state, m.fadeMs);
+                break;
+            // L-AUDIO: mapinfo.lua's sound.preset, parsed worker-side —
+            // picks the master reverb IR. Empty/unset defaults to 'open'.
+            case 'gp:soundPreset':
+                void audioManager?.setReverbPreset(resolveReverbPreset(m.preset), soundContentBaseUrl);
                 break;
             // The worker parsed gamedata/sounds.lua and posted its SoundItems
             // map. Ingest it so the AudioManager can resolve a SoundEvent's

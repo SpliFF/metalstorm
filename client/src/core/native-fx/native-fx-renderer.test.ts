@@ -16,7 +16,7 @@ import {
     NativeFxRenderer, NATIVE_FX_SHADER_FILES, mat4Perspective,
     type NativeFxSources,
 } from './native-fx-renderer.js';
-import { MUZZLE_FLOATS } from './effect-compiler.js';
+import { MUZZLE_FLOATS, TRACER_FLOATS } from './effect-compiler.js';
 
 interface StubGl {
     gl: WebGL2RenderingContext;
@@ -131,5 +131,33 @@ describe('NativeFxRenderer.renderInto', () => {
         expect(names).toContain('clear');
         expect(names).toContain('blitFramebuffer');
         expect(names).toContain('drawArrays');   // the composite triangle
+    });
+});
+
+describe('NativeFxRenderer pool capacities (gfx.particleQuality, L-FX step 5)', () => {
+    it('sizes a pool\'s GPU buffer from the capacities override, not the POOL default', () => {
+        const s = stubGl();
+        const sources: NativeFxSources = {};
+        for (const f of NATIVE_FX_SHADER_FILES) sources[f] = `// ${f}`;
+        new NativeFxRenderer(s.gl, sources, {
+            atlas: {} as WebGLTexture, atlasCols: 8, atlasRows: 8,
+            trailStrips: { smoketrail: {} as WebGLTexture },
+        }, { tracer: 2 });
+
+        const sizes = s.calls
+            .filter((c) => c.name === 'bufferData' && c.args[0] === s.gl.ARRAY_BUFFER)
+            .map((c) => c.args[1]);
+        expect(sizes).toContain(2 * TRACER_FLOATS * 4);
+        // The default 256-row tracer pool must NOT have been allocated.
+        expect(sizes).not.toContain(256 * TRACER_FLOATS * 4);
+    });
+
+    it('an unnamed pool keeps its POOL default', () => {
+        const s = stubGl();
+        const r = makeRenderer(s);   // no capacities override
+        s.reset();
+        r.spawnMuzzles(new Float32Array(MUZZLE_FLOATS), 1);
+        // Default capacity (128) never throws on a first-row spawn.
+        expect(() => r.spawnMuzzles(new Float32Array(MUZZLE_FLOATS), 1)).not.toThrow();
     });
 });
