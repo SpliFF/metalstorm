@@ -35,6 +35,11 @@
  *   B,A  spare
  * Both channels saturate at 1.0 = the cap; that bounds heavily-worked ground.
  *
+ * Continuous vehicle tracks (tread/wheel) do NOT go through the mark list: they
+ * accumulate as per-unit polyline trails (decal-trails.ts) and bake as one
+ * joint-free ribbon strip each, keyed on world arc length (PLAN-decal-tracks
+ * §2). Scars and discrete prints (foot/claw) remain marks.
+ *
  * Fade / "global reset": additive blending can't subtract over time, so fade
  * comes from a periodic age-scaled REBUILD — every REBUILD_INTERVAL_S each
  * target is cleared and the whole live mark list (a ring buffer of marks with
@@ -56,6 +61,7 @@ import {
     Vector3,
 } from '@babylonjs/core';
 import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
+import { TrailStore, tessellateTrail, writeRibbonIndices } from './decal-trails.js';
 
 /** Fine-window texture dimension (square). The window covers `winElmos` of
  *  world, so texel = winElmos / FINE_DIM; the window size is chosen from zoom
@@ -333,6 +339,76 @@ void main() {
 }
 `;
 
+// --- Ribbon path (PLAN-decal-tracks §2) ------------------------------------
+// Continuous tracks (tread/wheel) are ONE triangle strip per unit trail instead
+// of a chain of overlapping quads: no interior joints to double-stamp (Q1), a
+// spline-smooth centreline (Q2), and a world-space arc-length pattern parameter
+// that never resets at a joint (Q3). Geometry comes from decal-trails.ts; this
+// material is the same additive depth/darkening blit, driven by per-VERTEX
+// attributes rather than per-instance quad params.
+const RIBBON_VERT = /* glsl */ `
+precision highp float;
+attribute vec3 position;    // x = world X, y = world Z (elmos), z unused
+attribute vec4 ribbon;      // x=across -1..1  y=arc length s (elmos)  z=fade  w=kind
+attribute vec3 ribbon2;     // x=width (elmos) y=darkAmp z=depthAmp
+uniform vec2 uOrigin;
+uniform vec2 uInvExtent;
+varying vec4 vRibbon;
+varying vec3 vRibbon2;
+void main() {
+    vec2 tuv = (position.xy - uOrigin) * uInvExtent;
+    vRibbon = ribbon;
+    vRibbon2 = ribbon2;
+    gl_Position = vec4(tuv * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+const RIBBON_FRAG = /* glsl */ `
+precision highp float;
+varying vec4 vRibbon;       // x=across -1..1  y=s  z=fade  w=kind
+varying vec3 vRibbon2;      // x=width y=darkAmp z=depthAmp
+
+void main() {
+    float across = vRibbon.x;
+    float s      = vRibbon.y;
+    float fade   = vRibbon.z;
+    float kind   = vRibbon.w;
+    float width  = max(1.0, vRibbon2.x);
+
+    // Side feather so the band edge isn't a hard line.
+    float edge = 1.0 - smoothstep(0.84, 1.0, abs(across));
+
+    float shape;
+    if (kind < 1.5) {
+        // TREAD: two ruts at the real gauge, with a rung ripple whose pitch is
+        // WORLD-constant (elmos), so rungs keep their spacing and phase through
+        // joints and turns — the whole point of keying on s.
+        float rutL = exp(-pow((across + 0.46) / 0.10, 2.0));
+        float rutR = exp(-pow((across - 0.46) / 0.10, 2.0));
+        float ruts = clamp(rutL + rutR, 0.0, 1.0);
+        float pitch = max(6.0, width * 0.5);      // elmos between rungs
+        float rung = 0.88 + 0.12 * sin(s / pitch * 6.2831853);
+        shape = edge * smoothstep(0.10, 0.40, ruts) * rung;
+    } else {
+        // WHEEL / bike: one narrow central rut.
+        float d = across / 0.16;
+        shape = edge * smoothstep(0.05, 0.30, clamp(1.0 - d * d, 0.0, 1.0));
+    }
+
+    float depth = shape * vRibbon2.z * fade;
+    float dark  = shape * vRibbon2.y * fade;
+    if (depth < 0.004 && dark < 0.004) discard;
+    gl_FragColor = vec4(depth, dark, 0.0, 0.0);
+}
+`;
+
+/** Per-pass amplitudes for a ribbon (same values the chained-quad path used, so
+ *  accumulated traffic darkens at the same rate — minus the joint double-add). */
+const RIBBON_DARK_AMP = 0.18;
+const RIBBON_DEPTH_AMP = 0.06;
+/** Floats per ribbon vertex: position(3) + ribbon(4) + ribbon2(3). */
+const RIBBON_POS = 3, RIBBON_A = 4, RIBBON_B = 3;
+
 interface PendingMark {
     /** world centre (elmos) */
     cx: number;
@@ -404,9 +480,19 @@ export class DecalOverlay {
      *  trackTypeId). Empty until {@link setTrackTypes} is called; an unknown
      *  id then falls back to TREAD. */
     private trackCategories: number[] = [];
-    /** Last track-segment world position per unit, for connecting consecutive
-     *  continuous (tread/wheel) segments into one elongated quad. */
-    private lastTrackPos = new Map<number, { x: number; z: number }>();
+    /** Continuous (tread/wheel) tracks as per-unit polyline trails, baked as
+     *  ribbons instead of chained quads (PLAN-decal-tracks §2). */
+    private trailStore = new TrailStore();
+    private ribbonMesh: Mesh;
+    private ribbonMat: ShaderMaterial;
+    /** Persistent ribbon geometry buffers (grown on demand, never per frame). */
+    private ribbonVerts = new Float32Array(0);
+    private ribbonAttrA = new Float32Array(0);
+    private ribbonAttrB = new Float32Array(0);
+    private ribbonIdx = new Uint32Array(0);
+    /** Built once per frame (both targets share it), like frameRebuildBatch. */
+    private frameRibbonBuilt = false;
+    private ribbonIndexCount = 0;
     /** world extent in elmos. */
     private worldW = 1;
     private worldH = 1;
@@ -459,6 +545,24 @@ export class DecalOverlay {
         // darken) and saturate at 1.0 = the cap. Fade comes from the age-scaled
         // rebuild (additive can't subtract over time), not this blend.
         this.blitMat.alphaMode = Constants.ALPHA_ONEONE;
+
+        this.ribbonMat = new ShaderMaterial(
+            'decalRibbon', scene,
+            { vertexSource: RIBBON_VERT, fragmentSource: RIBBON_FRAG },
+            {
+                attributes: ['position', 'ribbon', 'ribbon2'],
+                uniforms: ['uOrigin', 'uInvExtent'],
+                needAlphaBlending: true,
+            },
+        );
+        this.ribbonMat.backFaceCulling = false;
+        this.ribbonMat.alphaMode = Constants.ALPHA_ONEONE;
+        this.ribbonMesh = new Mesh('decalRibbonStrip', scene);
+        this.ribbonMesh.material = this.ribbonMat;
+        this.ribbonMesh.isPickable = false;
+        this.ribbonMesh.alwaysSelectAsActiveMesh = true;
+        this.ribbonMesh.layerMask = BLIT_LAYER;
+        this.ribbonMesh.isVisible = false;
 
         this.blitMesh = buildUnitQuadXY(scene, 'decalBlitQuad');
         this.blitMesh.material = this.blitMat;
@@ -520,13 +624,14 @@ export class DecalOverlay {
     private attachTargetRender(t: TargetState, isLast: boolean): void {
         // Set the render list here (after blitMesh is constructed) — see the
         // note in makeTarget about the init-order trap.
-        t.rtt.renderList = [this.blitMesh];
+        t.rtt.renderList = [this.blitMesh, this.ribbonMesh];
         t.rtt.activeCamera = this.rttCamera;
         t.rtt.onBeforeRenderObservable.add(() => this.prepareTarget(t));
         t.rtt.onAfterRenderObservable.add(() => {
             this.blitMesh.thinInstanceCount = 0;
+            this.ribbonMesh.isVisible = false;
             // Both targets have consumed this frame's rebuild batch (if any).
-            if (isLast) this.frameRebuildBatch = null;
+            if (isLast) { this.frameRebuildBatch = null; this.frameRibbonBuilt = false; }
         });
     }
 
@@ -554,6 +659,7 @@ export class DecalOverlay {
         if (this.disposed) return;
         this.elapsed += dtSeconds;
         this.sinceRebuild += dtSeconds;
+        this.trailStore.tick(dtSeconds);
         // Re-bake the whole overlay from the mark list either when new marks
         // arrived (debounced by MARK_REBUILD_S so a burst coalesces into one
         // re-bake) or periodically to advance the fade. Each re-bake is a clean
@@ -564,6 +670,7 @@ export class DecalOverlay {
         if (dirtyReady || fadeReady) {
             this.sinceRebuild = 0;
             this.dirty = false;
+            this.trailStore.retire();
             this.coarse.rebuild = true;
             this.fine.rebuild = true;
         }
@@ -708,45 +815,13 @@ export class DecalOverlay {
         const kind = KIND_TRACK_BASE + cat;
 
         if (cat === TRACK_TREAD || cat === TRACK_WHEEL) {
-            // CONTINUOUS tracks: connect this segment to the unit's previous
-            // one into a single elongated quad (length = travel since the last
-            // segment), so the strip stays unbroken on turns and at speed
-            // instead of dropping isolated square stamps that gap + jag.
-            const last = this.lastTrackPos.get(ev.unitId);
-            this.lastTrackPos.set(ev.unitId, { x: ev.x, z: ev.z });
-            if (last) {
-                const dx = ev.x - last.x;
-                const dz = ev.z - last.z;
-                const len = Math.hypot(dx, dz);
-                // Drop degenerate / implausibly long links (a long gap means the
-                // unit was out of LOS, died + a new one reused the id, or
-                // teleported — bridging it would draw one giant streak).
-                if (len > 1e-3 && len < w * 8) {
-                    const tx = dx / len, tz = dz / len;          // travel unit vec
-                    // Overlap the joint slightly so consecutive segments meet
-                    // seamlessly (the shader no longer feathers strip ends).
-                    const halfLen = len * 0.5 + w * 0.15;
-                    const halfW = w * 0.5;
-                    // World half-axes: across ⟂ travel = (tz,-tx); along = travel.
-                    this.emit({
-                        cx: (last.x + ev.x) * 0.5,
-                        cz: (last.z + ev.z) * 0.5,
-                        axx: tz * halfW, axz: -tx * halfW,
-                        azx: tx * halfLen, azz: tz * halfLen,
-                        kind,
-                        // Light + shallow per pass; accumulates additively as
-                        // more vehicles drive the same ground (capped at the
-                        // plugin's max). One pass ≈ a faint groove; ~6 passes
-                        // reach the darkening cap. Depth stays shallow vs scars.
-                        darkAmp: 0.18,
-                        depthAmp: 0.06,
-                        // Rung frequency = rungs over this segment, chosen for a
-                        // constant ~world spacing regardless of segment length.
-                        treadFreq: Math.max(1, len / Math.max(6, w * 0.5)),
-                    });
-                }
+            // CONTINUOUS tracks feed the unit's trail polyline; the bake draws
+            // the whole trail as one ribbon (PLAN-decal-tracks §2), so there
+            // are no per-segment quads and no joints to double-stamp.
+            if (this.trailStore.append(ev.unitId, ev.x, ev.z, ev.trackTypeId, w)) {
+                this.dirty = true;
             }
-            return; // first sighting (no last pos) lays nothing; the next links
+            return;
         }
 
         // DISCRETE prints (foot / claw): one square stamp per segment, oriented
@@ -770,6 +845,12 @@ export class DecalOverlay {
             depthAmp: 0.1,
             treadFreq: 4.0,
         });
+    }
+
+    /** Close a unit's trail when it dies (PLAN-decal-tracks §8 E2 / P-d): its
+     *  ribbon stops growing and fades out, and a reused id starts fresh. */
+    onEntityDestroy(unitId: number): void {
+        this.trailStore.close(unitId);
     }
 
     /** Build (once per frame) the age-scaled batch of all live marks, pruning
@@ -805,10 +886,81 @@ export class DecalOverlay {
             this.uInvExtent.set(1 / t.extentX, 1 / t.extentZ);
             this.blitMat.setVector2('uOrigin', this.uOrigin);
             this.blitMat.setVector2('uInvExtent', this.uInvExtent);
+            this.ribbonMat.setVector2('uOrigin', this.uOrigin);
+            this.ribbonMat.setVector2('uInvExtent', this.uInvExtent);
             this.uploadBatch(this.getRebuildBatch());
+            this.buildRibbons();
+            this.ribbonMesh.isVisible = this.ribbonIndexCount > 0;
         } else {
             this.uploadBatch([]);        // nothing to draw — texture persists
+            this.ribbonMesh.isVisible = false;
         }
+    }
+
+    /** Tessellate every live trail into one shared triangle-strip mesh (once
+     *  per frame, shared by both targets). Each station contributes two
+     *  vertices at centre ± normal·halfWidth; consecutive stations form a quad
+     *  from those SAME vertices, so a trail has no interior seam to double-add
+     *  (Q1) and the pattern parameter `s` runs continuously along it (Q3). */
+    private buildRibbons(): void {
+        if (this.frameRibbonBuilt) return;
+        this.frameRibbonBuilt = true;
+
+        const fade = (birth: number) => this.trailStore.fadeAt(birth);
+        const trails = this.trailStore.drawable();
+        const strips: { stations: ReturnType<typeof tessellateTrail>; halfW: number; kind: number }[] = [];
+        let stationCount = 0;
+        for (const t of trails) {
+            const st = tessellateTrail(t, fade);
+            if (st.length < 2) continue;
+            const cat = this.trackCategories[t.trackTypeId] ?? TRACK_TREAD;
+            strips.push({ stations: st, halfW: t.width * 0.5, kind: KIND_TRACK_BASE + cat });
+            stationCount += st.length;
+        }
+
+        const vertCount = stationCount * 2;
+        const idxCount = (stationCount - strips.length) * 6; // (n-1) quads per strip
+        this.ribbonIndexCount = Math.max(0, idxCount);
+        if (vertCount === 0 || idxCount <= 0) {
+            this.ribbonIndexCount = 0;
+            return;
+        }
+        this.growRibbonBuffers(vertCount, idxCount);
+
+        const pos = this.ribbonVerts, a = this.ribbonAttrA, b = this.ribbonAttrB, idx = this.ribbonIdx;
+        let v = 0, ii = 0;
+        for (const strip of strips) {
+            const base = v;
+            for (const p of strip.stations) {
+                for (let side = 0; side < 2; side++) {
+                    const across = side === 0 ? -1 : 1;
+                    const o3 = v * RIBBON_POS, o4 = v * RIBBON_A, o2 = v * RIBBON_B;
+                    pos[o3] = p.x + p.nx * strip.halfW * across;
+                    pos[o3 + 1] = p.z + p.nz * strip.halfW * across;
+                    pos[o3 + 2] = 0;
+                    a[o4] = across; a[o4 + 1] = p.s; a[o4 + 2] = p.fade; a[o4 + 3] = strip.kind;
+                    b[o2] = strip.halfW * 2; b[o2 + 1] = RIBBON_DARK_AMP; b[o2 + 2] = RIBBON_DEPTH_AMP;
+                    v++;
+                }
+            }
+            ii = writeRibbonIndices(strip.stations.length, base, idx, ii);
+        }
+
+        this.ribbonMesh.setVerticesData('position', pos.subarray(0, vertCount * RIBBON_POS), true, RIBBON_POS);
+        this.ribbonMesh.setVerticesData('ribbon', a.subarray(0, vertCount * RIBBON_A), true, RIBBON_A);
+        this.ribbonMesh.setVerticesData('ribbon2', b.subarray(0, vertCount * RIBBON_B), true, RIBBON_B);
+        this.ribbonMesh.setIndices(idx.subarray(0, ii), vertCount, true);
+    }
+
+    /** Grow the persistent ribbon buffers to fit (never shrink — steady-state
+     *  rebuilds then allocate nothing). */
+    private growRibbonBuffers(verts: number, indices: number): void {
+        if (this.ribbonVerts.length < verts * RIBBON_POS) {
+            this.ribbonVerts = new Float32Array(verts * RIBBON_POS);
+            this.ribbonAttrA = new Float32Array(verts * RIBBON_A);
+            this.ribbonAttrB = new Float32Array(verts * RIBBON_B);
+        }
+        if (this.ribbonIdx.length < indices) this.ribbonIdx = new Uint32Array(indices);
     }
 
     /** Upload a batch of marks as thin instances of the unit quad. */
@@ -853,9 +1005,11 @@ export class DecalOverlay {
         }
         this.blitMesh.dispose();
         this.blitMat.dispose();
+        this.ribbonMesh.dispose();
+        this.ribbonMat.dispose();
         this.rttCamera.dispose();
         this.marks = [];
-        this.lastTrackPos.clear();
+        this.trailStore.clear();
     }
 }
 

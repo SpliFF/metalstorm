@@ -1447,6 +1447,9 @@ function gpConnect(msg: GpInitToWorker): void {
                 // PRESENTATION frame, so the notice lands with the explosion
                 // rather than ~D frames before the body arrives.
                 gpBattleEvents.noteDeath(entityId, x, z, frame);
+                // PLAN-decal-tracks §8 E2: close the track trail so a recycled
+                // id doesn't bridge a ribbon from the dead unit's last position.
+                gpDecalOverlay?.onEntityDestroy(entityId);
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 // PLAN-metalstorm-squads.md §6 (H2): cascade the squad's members
                 // + clear buffered state so a recycled id can't resurrect it.
