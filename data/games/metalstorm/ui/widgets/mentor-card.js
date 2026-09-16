@@ -21,9 +21,11 @@
  *  Long enough that an offer already in flight can land first. */
 export const AI_OFFER_MS = 30_000;
 
-/** The accounts lane's route (PLAN-beta.md §(d)). Relative: a game-dir widget
- *  is fetched as a standalone module and has no access to the client's config,
- *  and the lobby API is same-origin with the page in every deployment. */
+/** The accounts lane's route (PLAN-beta.md §(d)). Relative: resolved against
+ *  `ctx.api.lobbyBase` by `ctx.api.fetch`, which also attaches the bearer the
+ *  lobby actually checks — the lobby has no cookie auth, so the plain
+ *  `fetch(..., {credentials:'include'})` this used to be always 401s
+ *  (journey-lobby-routes fire 2). */
 const AI_MENTOR_ROUTE = '/api/mentor/ai';
 
 function esc(s) {
@@ -145,9 +147,8 @@ export default {
     this.error = 'Asking for an AI mentor…';
     this._render();
     try {
-      const res = await fetch(AI_MENTOR_ROUTE, {
+      const res = await this.ctx.api.fetch(AI_MENTOR_ROUTE, {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
