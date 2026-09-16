@@ -21,6 +21,11 @@ const GUARDED = [
     resolve(CLIENT, 'src/native-widgets/command-composer.css'),
     resolve(CLIENT, 'src/native-widgets/command-console.css'),
     resolve(REPO, 'data/games/metalstorm/ui/metalstorm.ui.css'),
+    resolve(CLIENT, 'src/ui/lobby/lobby.css'),
+    resolve(CLIENT, 'src/lobby/world-map.css'),
+    resolve(CLIENT, 'src/lobby/world-screen.css'),
+    resolve(CLIENT, 'src/ui/briefing/briefing.css'),
+    resolve(CLIENT, 'src/ui/game-over/game-over.css'),
 ];
 
 /** Strip /* ... *​/ comments: a hex quoted in prose is documentation. */
@@ -49,6 +54,9 @@ describe('design tokens', () => {
         }
         // moment-hud.ts sets this one inline, per pointer.
         defined.add('--nui-edge-angle');
+        // world-map-controller.ts sets this one inline, per claim marker; the
+        // CSS side always carries a --nui-accent fallback.
+        defined.add('--wm-accent');
 
         const missing = new Set<string>();
         for (const file of [...GUARDED, resolve(CLIENT, 'src/ui/native-ui/tokens.css')]) {
