@@ -11,6 +11,7 @@ local function fakeWorld(overrides)
     local nextId = 1
     local w = {
         frame = 0, tick = 0,
+        scenario = function() return nil end,
         contestedRegions = function() return {} end,
         regionValue = function() return 0 end,
         civilianDistrictsUnderThreat = function() return {} end,
@@ -146,6 +147,40 @@ describe("control rule (contested region)", function()
         world.tick = 1
         generator.tick(world, state)   -- tick 1: would fire, but Create rejects it
         assert.is_nil(state.systemicActive['control:r1'])
+    end)
+end)
+
+-- ============================================================
+-- Scenario gating: the systemic generator must stay out of a scripted
+-- tutorial/solo Mission (journey-tutorial found objective_count=2 at frame 0
+-- in scenarios/tutorial_01.lua — the generator posting into a Mission whose
+-- whole point is a scripted beat list).
+-- ============================================================
+describe("scenario gating (tutorial/solo)", function()
+    it("suppresses every rule when the scenario declares tutorial or solo", function()
+        for _, scn in ipairs({ { tutorial = true }, { solo = true } }) do
+            local state = generator.newState()
+            local world = fakeWorld({
+                scenario = function() return scn end,
+                contestedRegions = function() return { 'r1' } end,
+            })
+            generator.tick(world, state)   -- tick 0: would seed the debounce clock
+            world.tick = 1
+            generator.tick(world, state)   -- tick 1: would fire, but the scenario blocks it
+            assert.are.equal(0, #world._created)
+        end
+    end)
+
+    it("still runs normally when the scenario has no tutorial/solo flag", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            scenario = function() return { tutorial = false } end,
+            contestedRegions = function() return { 'r1' } end,
+        })
+        generator.tick(world, state)   -- tick 0: seeds the debounce clock
+        world.tick = 1
+        generator.tick(world, state)   -- tick 1: debounce satisfied, fires
+        assert.are.equal(1, #world._created)
     end)
 end)
 

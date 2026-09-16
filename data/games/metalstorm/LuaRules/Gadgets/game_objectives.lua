@@ -1013,6 +1013,12 @@ end
 local function buildWorld(frame, tick, ctx)
     return {
         frame = frame, tick = tick,
+        -- The scenario table, the way game_scenario/game_tutorial read it
+        -- (`GG.Scenario.data`) — the generator's own gate against a scripted
+        -- tutorial/solo Mission (F-tutorial-gen).
+        scenario = function()
+            return GG.Scenario and GG.Scenario.data
+        end,
         contestedRegions = function()
             return GG.Regions and GG.Regions.GetContested() or {}
         end,
