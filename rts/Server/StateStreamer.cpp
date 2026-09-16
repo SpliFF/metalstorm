@@ -4,6 +4,7 @@
 #include "Simulation.h"
 #include "Protocol.h"
 #include "ClientSession.h"
+#include "BroadcastTap.h"
 #include "EntityStateSerializer.h"
 #include "PieceStateSerializer.h"
 #include "BuildActivitySerializer.h"
@@ -137,6 +138,20 @@ void StateStreamer::Tick(int /*frameNum*/) {
     // still runs the full pipeline once — clients get the final board state
     // streamed alongside the game-over GameInfo, not the state from up to
     // three frames earlier.
+    // Broadcast keyframe (PLAN-beta-broadcast.md S1). The `K` marker is
+    // written FIRST so every byte the re-join produces this tick lands behind
+    // it, then the tap's latches are cleared so the pipeline below re-sends
+    // full state instead of deltas. 1800 is a multiple of the 30-frame full
+    // snapshot cadence, so a keyframe frame is always a snapshot frame too.
+    if (ctx.broadcastTap != nullptr && ctx.broadcastTap->Active()) {
+        const int tapFrame = ctx.sim.GetFrameNum();
+        ctx.broadcastTap->SetFrame(tapFrame);
+        if (ctx.broadcastTap->MaybeKeyframe(tapFrame)) {
+            if (ClientSession* tap = ctx.sessions.GetSession(broadcast::kTapClientId))
+                EmitJoinBundle(*tap);
+        }
+    }
+
     const bool wasOver = gameOverSent;
     CheckWinCondition(0);
     if (wasOver) {
@@ -167,6 +182,28 @@ void StateStreamer::Tick(int /*frameNum*/) {
     StreamLosBitmaps(0);
 }
 
+void StateStreamer::EmitJoinBundle(ClientSession& session) {
+    broadcast::ResetJoinLatches(session);
+    // Force the next team-stats broadcast to rewind every per-team cursor and
+    // re-send the full history — the same rewind a newly connected client
+    // triggers, reached here without one.
+    lastStatBroadcastClients = -1;
+    // The complete LOS set, every ally team on one tick, rather than the
+    // 4-teams-per-second round robin StreamLosBitmaps runs: a watcher landing
+    // on this keyframe must see a whole world, not one that fills in over the
+    // following four seconds.
+    const int curFrame = ctx.sim.GetFrameNum();
+    if (intelEvents != nullptr && losHandler != nullptr && curFrame > 0) {
+        const int activeAllyTeams = teamHandler.ActiveAllyTeams();
+        for (int at = 0; at < activeAllyTeams; ++at) {
+            auto bitmap = intelEvents->BuildLosBitmap(at, static_cast<uint32_t>(curFrame));
+            if (!bitmap.empty())
+                ctx.rtcServer.SendStream(session.clientId, StreamClass::Vision,
+                                         bitmap.data(), bitmap.size());
+        }
+    }
+}
+
 // Re-announce a declared result to everyone still connected, on a slow
 // cadence, for as long as the finished server lives.
 //
@@ -192,7 +229,7 @@ void StateStreamer::ReannounceGameOver() {
     if ((postGameTicks++ % kPostGameResendTicks) != 0)
         return;
     auto& rtcServer = ctx.rtcServer;
-    if (rtcServer.GetClientCount() <= 0)
+    if (!ctx.HasStreamConsumers())
         return;
     auto gameOver = Protocol::BuildGameInfo(
         ctx.mapId, ctx.gameId, gs->speedFactor,
@@ -295,7 +332,7 @@ void StateStreamer::StreamResources(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 10) == 0 && rtcServer.GetClientCount() > 0) {
+    if (curFrame >= 0 && (curFrame % 10) == 0 && ctx.HasStreamConsumers()) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             if (session.team < 0) return;
             CTeam* team = teamHandler.Team(session.team);
@@ -330,7 +367,7 @@ void StateStreamer::StreamCommandQueues(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0) {
+    if (curFrame >= 0 && (curFrame % 30) == 0 && ctx.HasStreamConsumers()) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             if (session.team < 0) return;
 
@@ -401,7 +438,7 @@ void StateStreamer::BroadcastGameInfo(int) {
     auto& rtcServer = ctx.rtcServer;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 30) == 0 && rtcServer.GetClientCount() > 0 && !gameOverSent) {
+    if (curFrame >= 0 && (curFrame % 30) == 0 && ctx.HasStreamConsumers() && !gameOverSent) {
         const float3& wv = envResHandler.GetCurrentWindVec();
         // gs->speedFactor is the live sim-speed multiplier (set by
         // the `speed <N>` server command via LuaExecEngine). Broadcast
@@ -426,7 +463,7 @@ void StateStreamer::StreamEntityState(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
+    if (curFrame >= 0 && (curFrame % 3) == 0 && ctx.HasStreamConsumers()) {
         bool isFullSnapshot = (curFrame % 30) == 0;
 
         // PLAN-long-uptime S5 task 6: has the sim handed a used unit id back
@@ -533,7 +570,7 @@ void StateStreamer::StreamPieceState(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
+    if (curFrame >= 0 && (curFrame % 3) == 0 && ctx.HasStreamConsumers()) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
             if (session.role == "spectator") {
@@ -585,7 +622,7 @@ void StateStreamer::StreamBuildActivity(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     int curFrame = sim.GetFrameNum();
-    if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
+    if (curFrame >= 0 && (curFrame % 3) == 0 && ctx.HasStreamConsumers()) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
             if (session.role == "spectator") {
@@ -922,7 +959,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !volleyDrain.empty()
         || !fieldDrain.empty()
         || !seismicDrain.empty();
-    if (hasAny && rtcServer.GetClientCount() > 0) {
+    if (hasAny && ctx.HasStreamConsumers()) {
         const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
 
         // PLAN-latency L3 — pre-filter emission tally, summarised every
@@ -1257,7 +1294,7 @@ void StateStreamer::BroadcastDecals(int) {
     serverTrackEmitter.Emit(sim.GetFrameNum());
     auto scarDrain = scarEvents.Drain();
     auto trackDrain = trackSegmentEvents.Drain();
-    if ((!scarDrain.empty() || !trackDrain.empty()) && rtcServer.GetClientCount() > 0) {
+    if ((!scarDrain.empty() || !trackDrain.empty()) && ctx.HasStreamConsumers()) {
         const uint32_t decalFrame = static_cast<uint32_t>(sim.GetFrameNum());
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
@@ -1314,7 +1351,7 @@ void StateStreamer::BroadcastHeightmapUpdates(int) {
         // Always drain (bounds memory even with no clients connected);
         // only build + broadcast when someone is listening.
         auto dirty = readMap->DrainServerDirtyHeightRects();
-        if (!dirty.empty() && rtcServer.GetClientCount() > 0) {
+        if (!dirty.empty() && ctx.HasStreamConsumers()) {
             int x1 = dirty[0].x1, z1 = dirty[0].z1;
             int x2 = dirty[0].x2, z2 = dirty[0].z2;
             for (const auto& r : dirty) {
@@ -1346,7 +1383,7 @@ void StateStreamer::BroadcastHeightmapUpdates(int) {
 void StateStreamer::BroadcastSendToUnsynced(int) {
     auto& rtcServer = ctx.rtcServer;
     auto syncEvents = sendToUnsyncedEvents.Drain();
-    if (!syncEvents.empty() && rtcServer.GetClientCount() > 0) {
+    if (!syncEvents.empty() && ctx.HasStreamConsumers()) {
         for (const auto& ev : syncEvents) {
             auto msg = Protocol::BuildSendToUnsyncedEvent(ev);
             rtcServer.BroadcastReliable(msg.data(), msg.size());
@@ -1368,7 +1405,7 @@ void StateStreamer::BroadcastSendToUnsynced(int) {
 void StateStreamer::BroadcastPlayerTeamEvents(int) {
     auto& rtcServer = ctx.rtcServer;
     auto ptEvents = playerTeamEvents.Drain();
-    if (!ptEvents.empty() && rtcServer.GetClientCount() > 0) {
+    if (!ptEvents.empty() && ctx.HasStreamConsumers()) {
         auto msg = Protocol::BuildPlayerTeamEventBatch(ptEvents);
         rtcServer.BroadcastStream(StreamClass::Control, msg.data(), msg.size(), kEventLaneControl);
     }
@@ -1388,7 +1425,7 @@ void StateStreamer::BroadcastTeamStats(int) {
     auto& rtcServer = ctx.rtcServer;
     auto& sim = ctx.sim;
     if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % GAME_SPEED) == 0 &&
-        rtcServer.GetClientCount() > 0) {
+        ctx.HasStreamConsumers()) {
         const int activeTeams = teamHandler.ActiveTeams();
         if (static_cast<int>(lastSentStatFinalized.size()) < activeTeams)
             lastSentStatFinalized.resize(activeTeams, 0);
@@ -1476,7 +1513,7 @@ void StateStreamer::BroadcastRulesParams(int) {
         lastTeamParams[t] = team->modParams;
     }
 
-    if (rtcServer.GetClientCount() == 0)
+    if (!ctx.HasStreamConsumers())
         return;  // baselines updated; nothing to send
 
     // PLAN-long-uptime S1: periodically reclaim interned ids for keys nothing
@@ -1672,7 +1709,7 @@ void StateStreamer::BroadcastUnitLifecycle(int) {
     auto& sessions = ctx.sessions;
     if (unitLifecycleEvents != nullptr) {
         auto lifecycle = unitLifecycleEvents->Drain();
-        if (!lifecycle.empty() && rtcServer.GetClientCount() > 0) {
+        if (!lifecycle.empty() && ctx.HasStreamConsumers()) {
             // Partition: public events (FromFactory/Taken/Given) go
             // out as one broadcast; Created is per-session filtered.
             std::vector<UnitLifecycleEventData> publicEvents;
@@ -1735,7 +1772,7 @@ void StateStreamer::BroadcastFeatureLifecycle(int) {
         std::vector<FeatureRemovedEventData> featRemoved;
         featureLifecycleEvents->Drain(featSpawns, featRemoved);
         if ((!featSpawns.empty() || !featRemoved.empty())
-            && rtcServer.GetClientCount() > 0)
+            && ctx.HasStreamConsumers())
         {
             auto msg = Protocol::BuildFeatureLifecycleBatch(
                 featSpawns, featRemoved);
@@ -1756,7 +1793,7 @@ void StateStreamer::BroadcastUnitCommands(int) {
     auto& sessions = ctx.sessions;
     if (unitCommandEvents != nullptr) {
         auto cmdEvents = unitCommandEvents->Drain();
-        if (!cmdEvents.empty() && rtcServer.GetClientCount() > 0) {
+        if (!cmdEvents.empty() && ctx.HasStreamConsumers()) {
             sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
                 std::vector<UnitCommandEventData> filtered;
                 filtered.reserve(cmdEvents.size());
@@ -1799,7 +1836,7 @@ void StateStreamer::StreamLosBitmaps(int) {
     if (curFrame > 0 && (curFrame % GAME_SPEED) == 0
         && intelEvents != nullptr
         && losHandler != nullptr
-        && rtcServer.GetClientCount() > 0)
+        && ctx.HasStreamConsumers())
     {
         const uint32_t frameNo = static_cast<uint32_t>(curFrame);
         const int activeAllyTeams = teamHandler.ActiveAllyTeams();
