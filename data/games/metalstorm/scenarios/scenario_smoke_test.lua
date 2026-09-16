@@ -31,9 +31,18 @@ return {
     world = {
         map     = 'green_flat_x34_v3',
         regions = {
-            { key = '2:2', team = 0 },   -- team 0's home bastion, preset friendly
-            { key = '6:6', team = 1 },   -- team 1's home bastion, preset friendly
-            -- '4:4' (map centre) intentionally left uncontrolled — the
+                        -- 2026-09-17: these were grid keys ('2:2' / '6:6' / '4:4') from
+            -- when green_flat shipped no region graph. It ships
+            -- mapdata/regions.lua now, so game_regions.lua selects the NAMED
+            -- graph provider and a grid key resolves to nothing:
+            -- SetControllingTeam was a no-op and the control objectives below
+            -- could never complete. Found by
+            -- LuaRules/Gadgets/tests/scenario_references_spec.lua, which is
+            -- what that sweep is for. Keys below are from the map's own
+            -- mapdata/regions.lua; the bastion coordinates did not move.
+{ key = 'west_bastion', team = 0 },   -- team 0's home bastion, preset friendly
+            { key = 'east_reach', team = 1 },   -- team 1's home bastion, preset friendly
+            -- 'central_plaza' (map centre) intentionally left uncontrolled — the
             -- control objective below contests it.
         },
 
@@ -100,8 +109,8 @@ return {
     },
 
     objectives = {
-        { type = 'control', scope = 'tactical',  forTeam = 0,   region = '2:2', reward = 60 },
-        { type = 'control', scope = 'strategic', forTeam = nil, region = '4:4', reward = 150 },
+        { type = 'control', scope = 'tactical',  forTeam = 0,   region = 'west_bastion', reward = 60 },
+        { type = 'control', scope = 'strategic', forTeam = nil, region = 'central_plaza', reward = 150 },
     },
 
     orders   = {},   -- no standalone standing orders in this fixture
