@@ -168,6 +168,12 @@ than it can actually see**, and a scout that merely enters a chunk reveals all
 doubles `chunkQuads` to 512, so a chunk is **4096 elmos on a side** and a single
 250-elmo civilian truck reveals a 16.8 M elmo² square — a **84× over-reveal**.
 
+**Measured live on `meridian_basin`** (K0's slice map, 16384 elmos, `mapx =
+2048`): the plan gives `chunkQuads = 256`, `8×8` chunks, and a chunk is
+**2048 elmos on a side** — 4× the area of the 8 k example above. A 450-elmo
+line unit that enters a chunk there reveals **6.5× more ground than it can
+see**; the 250-elmo civilian truck reveals **21×**.
+
 This is a real defect of the default, not a rounding error, and the design
 records it rather than hiding it.
 
@@ -524,5 +530,39 @@ Enable with `terrainknowledge=1` in the modoptions (read via
 `CGameSetup::GetModOptions()`, the same path as
 `standingorder_default_ttl_frames`).
 
-A client debug handle (`window.debugConsole` → `terrainKnowledge`) forces the
-gate on locally for capture work without a server flag.
+A client debug handle — `window.__gp('__terrainKnowledge.only([[0,0],[1,0]])')`
+/ `.reveal(cx,cz)` / `.all()` / `.stats()` — forces the gate on locally for
+capture work without a server flag. It synthesises a 0x0A message rather than
+reaching into the gate, so it drives the same code path the wire does.
+
+---
+
+## 11. K0 slice — what was measured
+
+Live, on `meridian_basin` (16384 elmos, 2049² corners → 8×8 chunks of 256
+quads, chunk = 2048 elmos), a fresh room on the player path (a newly
+registered non-admin browser account, not a dev identity):
+
+| observation | value |
+| --- | --- |
+| terrain meshes built | 128 (64 chunks × LOD0+LOD1) |
+| gate state on a **stock** server | `active: false` — no 0x0A ever arrives, terrain path unchanged |
+| drawn chunks, mask = 4 known | **4 of 64**; curtain built, 16 verts (4 quads) |
+| drawn chunks after revealing one more | **5 of 64**; curtain 24 verts — the frontier moved |
+| curtain at the map rim | **none** — the rim is not a knowledge frontier |
+| cost of a mask change (5 chunks) | 12 ms, once |
+| cost of a mask change (all 64) | 35 ms, once |
+| `entity` phase p95, 5 chunks known | 0.400 ms |
+| `entity` phase p95, 64 chunks known | 0.400 ms |
+| `entity` phase mean | 0.2488 → 0.2570 ms (inside the 0.1 ms timer quantum) |
+| `render` phase mean | 4.50 → 4.77 ms going 5 → 64 chunks — knowledge mode draws **fewer** |
+
+The `entity` numbers are the point: there is no per-frame or per-entity
+knowledge work to measure, because none exists. The only cost is the one-off
+on a mask change, and it is bounded by the chunk count.
+
+Screenshots: `.tasks/notes/assets/terrain-knowledge-k0/`. The frontier reads
+as known ground → opaque grey curtain → void. **Two honest caveats visible in
+them:** map features are still drawn beyond the frontier (leak L5, K1's to
+close), and `meridian_basin`'s forest is dense enough that a player-height
+frontier shot is obscured by trees — the legible captures are elevated.
