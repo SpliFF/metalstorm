@@ -49,6 +49,7 @@
 #include "Server/SyncedInputJournal.h"
 #include "Server/ReplayFile.h"
 #include "Server/BroadcastTap.h"
+#include "Server/BroadcastRelay.h"
 #include "Server/ReplayPlayer.h"
 #include "Server/ReplayControlDeck.h"
 #include "Server/ReplayStateBroadcast.h"
@@ -342,6 +343,10 @@ int main(int argc, char* argv[])
     // delayed spectating, and a mission may write both.
     std::string broadcastOutPath;
     std::string replayFilePath;
+    // PLAN-beta-broadcast.md lane S2: relay a `.msb` to watchers behind a delay.
+    std::string broadcastInPath;
+    int broadcastDelaySec    = broadcast::kMinBroadcastDelaySec;
+    int devBroadcastFloorSec = broadcast::kMinBroadcastDelaySec;
     std::string replayVerifyRef;
     bool replayVerify = false;
     int replaySeekFrame = 0;
@@ -555,6 +560,17 @@ int main(int argc, char* argv[])
             broadcastOutPath = argv[++i];
         } else if (arg == "--journal-file" && i + 1 < argc) {
             journalFilePath = argv[++i];
+        } else if (arg == "--broadcast" && i + 1 < argc) {
+            broadcastInPath = argv[++i];
+        } else if (arg == "--broadcast-delay-seconds" && i + 1 < argc) {
+            broadcastDelaySec = std::atoi(argv[++i]);
+        } else if (arg == "--dev-broadcast-floor" && i + 1 < argc) {
+            // The ONLY thing that can lower the one-hour floor, and it is a
+            // flag with "dev" in its name for exactly that reason. A modoption
+            // must never reach this: modoptions are written by whoever spawns
+            // the room, and the delay is what stops a broadcast leaking intel
+            // into a mission that is still being fought.
+            devBroadcastFloorSec = std::atoi(argv[++i]);
         } else if (arg == "--replay" && i + 1 < argc) {
             replayFilePath = argv[++i];
         } else if (arg == "--replay-seek" && i + 1 < argc) {
@@ -927,6 +943,61 @@ int main(int argc, char* argv[])
              journalFilePath.c_str());
     }
 
+    // ── Broadcast relay boot (PLAN-beta-broadcast.md lane S2) ──────────────
+    //
+    // Everything up to map/game load happens exactly as it does for a replay,
+    // and for the same reason: a watching client fetches its heightmap, its
+    // map info and its def cache over HTTP from THIS process, so the content
+    // routes have to have something to serve. What does NOT happen is the rest
+    // — no GameStart (suppressed at `startsGameAtSetup` below), no roster, no
+    // AI slots, no sim tick. A relay is a memcpy and a clock.
+    if (!broadcastInPath.empty()) {
+        if (!replayFilePath.empty()) {
+            SLOG(SPRING_LOG_ERROR,
+                "--broadcast and --replay are mutually exclusive (each of them "
+                "supplies the feed, and this invocation asks for two)");
+            return 1;
+        }
+        broadcast::Summary bs = broadcast::LoadSummary(broadcastInPath);
+        if (!bs.ok) {
+            SLOG(SPRING_LOG_ERROR, "--broadcast: %s", bs.error.c_str());
+            return 1;
+        }
+        const replay::Header& bh = bs.header;
+        broadcast::SetRelaying(true);
+        // The floor is applied HERE, once, to the argv value — every cursor
+        // then answers to the clamped number and none of them can widen it.
+        const int enforced =
+            broadcast::ClampDelaySeconds(broadcastDelaySec, devBroadcastFloorSec);
+        broadcast::SetDelaySeconds(enforced);
+        if (enforced != broadcastDelaySec) {
+            SLOG(SPRING_LOG_NOTICE,
+                "broadcast: requested delay %d s raised to the enforced %d s",
+                broadcastDelaySec, enforced);
+        }
+        if (devBroadcastFloorSec < broadcast::kMinBroadcastDelaySec) {
+            SLOG(SPRING_LOG_WARNING,
+                "broadcast: --dev-broadcast-floor lowered the %d s floor to "
+                "%d s — THIS IS A TEST BUILD SETTING, never a live one",
+                broadcast::kMinBroadcastDelaySec, devBroadcastFloorSec);
+        }
+
+        if (mapId.empty())       mapId = bh.mapId;
+        if (gameId.empty())      gameId = bh.gameId;
+        if (gameVersion.empty()) gameVersion = bh.gameVersion;
+        if (CGameSetup::GetModOptions().empty()) {
+            for (const auto& kv : bh.modOptions)
+                CGameSetup::SetModOption(kv.first, kv.second);
+        }
+        SLOG(SPRING_LOG_NOTICE,
+            "broadcast: %s — %llu records, %zu keyframes, frames %d..%d, "
+            "map=%s game=%s, delay %d s%s",
+            broadcastInPath.c_str(), (unsigned long long)bs.recordCount,
+            bs.keyframes.size(), bs.firstFrame, bs.EndFrame(),
+            bh.mapId.c_str(), bh.gameId.c_str(), enforced,
+            bs.truncated ? " [LIVE or truncated]" : " [complete]");
+    }
+
     // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
     DevBuildGate::WarnOnly("spring-server");
 
@@ -1188,8 +1259,11 @@ int main(int argc, char* argv[])
     // The one expression both GameStart sites branch on: with no roster to
     // wait for, or no waiting to do, the game starts during set-up rather
     // than from CheckAndFireGameStart in the loop.
+    // A relay never starts a game: the world its watchers see is bytes off a
+    // log, and a GameStart here would run a real mission's Lua under them.
     const bool startsGameAtSetup =
-        SessionStartsGameAtSetup(sessionKind, rosterPlayersNeeded);
+        SessionStartsGameAtSetup(sessionKind, rosterPlayersNeeded) &&
+        !broadcast::IsRelaying();
 
     // C1: per-client handshake gate. A client must send a protocol-compatible
     // Handshake before its AuthRequest is honoured.
@@ -2720,6 +2794,164 @@ int main(int argc, char* argv[])
     /// (wars task 4, D1). The condition holds for every pass of the wind-down,
     /// and the log is where an operator looks for the resolve it precedes.
     bool hibernateDeferLogged = false;
+
+    // ── Broadcast relay loop (PLAN-beta-broadcast.md lane S2) ──────────────
+    //
+    // This REPLACES the game loop; it does not run beside it. There is no
+    // sim to tick, no journal window to open, no GameStart to wait for — the
+    // process is a file, a clock and a fan-out. HTTP/QUIC are served from the
+    // network thread as always, so the content routes a watcher fetches its
+    // map and defs from keep answering throughout.
+    if (broadcast::IsRelaying()) {
+        struct RelayWatcher {
+            std::unique_ptr<broadcast::Reader> reader;
+            broadcast::BroadcastCursor cursor;
+            int playerNum = -1;
+            uint64_t lastStateMs = 0;
+        };
+        std::unordered_map<ClientID, RelayWatcher> watchers;
+
+        const broadcast::Summary summary = broadcast::LoadSummary(broadcastInPath);
+        // One extra reader tracks the newest frame the delay lets ANYONE see.
+        // Shared, because the edge is a property of the clock, not of a watcher.
+        broadcast::Reader edgeReader;
+        std::string edgeErr;
+        broadcast::LiveEdgeTracker edge;
+        if (edgeReader.Open(broadcastInPath, edgeErr)) edge.Attach(&edgeReader);
+
+        auto nowMs = []() -> uint64_t {
+            using namespace std::chrono;
+            return static_cast<uint64_t>(duration_cast<milliseconds>(
+                system_clock::now().time_since_epoch()).count());
+        };
+
+        SLOG(SPRING_LOG_NOTICE,
+            "broadcast relay: serving %s on port %d, %d s behind live",
+            broadcastInPath.c_str(), port, broadcast::DelaySeconds());
+
+        while (keepRunning.load()) {
+            const uint64_t t = nowMs();
+            const uint64_t liveEdgeMs =
+                broadcast::LiveEdgeMs(t, broadcast::DelaySeconds());
+            edge.Advance(liveEdgeMs);
+
+            for (auto& msg : rtcServer.DrainInbound()) {
+                // ReplayControl is the playback bar, and it is answered HERE
+                // rather than in ClientMessageHandler: the cursors live in this
+                // loop, one per watcher, and there is no shared deck to consult.
+                if (PeekClientPayloadType(msg) ==
+                        SpringWeb::ClientPayload_ReplayControl) {
+                    auto wIt = watchers.find(msg.clientId);
+                    auto* cm = Protocol::ParseClientMessage(msg.data.data(),
+                                                            msg.data.size());
+                    const auto* rc = cm ? cm->payload_as_ReplayControl() : nullptr;
+                    if (wIt == watchers.end() || rc == nullptr) continue;
+                    std::vector<broadcast::Emission> out;
+                    switch (rc->action()) {
+                        case SpringWeb::ReplayControlAction_Pause:
+                            wIt->second.cursor.SetPaused(true); break;
+                        case SpringWeb::ReplayControlAction_Resume:
+                            wIt->second.cursor.SetPaused(false); break;
+                        case SpringWeb::ReplayControlAction_SetSpeed:
+                            wIt->second.cursor.SetSpeed(rc->speed()); break;
+                        case SpringWeb::ReplayControlAction_Seek: {
+                            // The bar speaks frames; the log is ordered by wall
+                            // time. Frames advance at GAME_SPEED, so the two are
+                            // one multiplication apart from the log's own start.
+                            const int64_t deltaFrames =
+                                static_cast<int64_t>(rc->frame()) - summary.firstFrame;
+                            const int64_t targetMs =
+                                static_cast<int64_t>(summary.firstWallMs) +
+                                (deltaFrames * 1000) / GAME_SPEED;
+                            wIt->second.cursor.Seek(
+                                targetMs < 0 ? 0 : static_cast<uint64_t>(targetMs),
+                                liveEdgeMs, out);
+                            break;
+                        }
+                        // POV is not a broadcast control: a `.msb` carries what
+                        // a GLOBAL spectator was sent and nothing else, so there
+                        // is no other fog on the file to switch to.
+                        default: break;
+                    }
+                    for (const auto& e : out)
+                        rtcServer.SendStream(msg.clientId,
+                                             static_cast<StreamClass>(e.cls),
+                                             e.payload.data(), e.payload.size(),
+                                             e.lane);
+                    wIt->second.lastStateMs = 0;   // force a state refresh
+                    continue;
+                }
+                msgHandler.HandleMessage(msg);
+            }
+
+            for (ClientID dcId : rtcServer.DrainDisconnects()) {
+                watchers.erase(dcId);
+                sessions.RemoveSession(dcId);
+                handshakedClients.erase(dcId);
+            }
+
+            // A watcher becomes real when ClientMessageHandler has given it a
+            // reserved spectator player number; that is the one signal that it
+            // authenticated. It joins AT the live edge — the oldest thing it is
+            // allowed to see — rather than at the start of a two-hour mission.
+            sessions.ForEachSession([&](ClientID id, ClientSession& sess) {
+                if (sess.replaySpectatorPlayerNum < 0) return;
+                if (watchers.count(id)) return;
+                RelayWatcher w;
+                w.reader = std::make_unique<broadcast::Reader>();
+                std::string oerr;
+                if (!w.reader->Open(broadcastInPath, oerr)) {
+                    SLOG(SPRING_LOG_ERROR, "broadcast: watcher %u: %s",
+                         id, oerr.c_str());
+                    return;
+                }
+                w.playerNum = sess.replaySpectatorPlayerNum;
+                w.cursor.Attach(w.reader.get(), liveEdgeMs, t);
+                auto& slot = watchers.emplace(id, std::move(w)).first->second;
+                // Seek to the edge so the join lands on a keyframe: a watcher
+                // dropped at an arbitrary offset would see deltas against a
+                // world it was never sent.
+                std::vector<broadcast::Emission> out;
+                slot.cursor.Seek(liveEdgeMs, liveEdgeMs, out);
+                for (const auto& e : out)
+                    rtcServer.SendStream(id, static_cast<StreamClass>(e.cls),
+                                         e.payload.data(), e.payload.size(), e.lane);
+                SLOG(SPRING_LOG_NOTICE,
+                    "broadcast: watcher %u (playerNum %d) attached at frame %d "
+                    "(%zu records of join bundle)",
+                    id, slot.playerNum, slot.cursor.CurrentFrame(), out.size());
+            });
+
+            for (auto& [id, w] : watchers) {
+                std::vector<broadcast::Emission> out;
+                w.cursor.Pump(t, liveEdgeMs, out);
+                for (const auto& e : out)
+                    rtcServer.SendStream(id, static_cast<StreamClass>(e.cls),
+                                         e.payload.data(), e.payload.size(), e.lane);
+                if (t - w.lastStateMs < 1000) continue;
+                w.lastStateMs = t;
+                Protocol::BroadcastStateFields f;
+                f.startFrame    = summary.firstFrame;
+                f.endFrame      = summary.EndFrame();
+                f.liveEdgeFrame = edge.Frame();
+                f.currentFrame  = w.cursor.CurrentFrame();
+                f.behindSeconds = static_cast<int32_t>(
+                    (t - std::min(t, w.cursor.VirtualWallMs())) / 1000);
+                f.paused        = w.cursor.Paused();
+                f.speed         = w.cursor.Speed();
+                f.truncated     = summary.truncated;
+                f.playerNum     = w.playerNum;
+                f.gameId        = summary.header.gameId;
+                f.mapId         = summary.header.mapId;
+                auto sm = Protocol::BuildBroadcastState(f);
+                rtcServer.SendReliable(id, sm.data(), sm.size());
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        }
+        SLOG(SPRING_LOG_NOTICE, "broadcast relay: stopping (%zu watcher(s))",
+             watchers.size());
+    }
 
     while (keepRunning.load()) {
         // --- Pacing ---

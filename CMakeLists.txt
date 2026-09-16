@@ -766,6 +766,8 @@ if(TEST_SOURCES)
         # PLAN-beta-broadcast.md S1: the `.msb` container. Reuses replay::Header
         # and links nothing else, so test_broadcast_log.cpp is a plain doctest.
         ${CMAKE_SOURCE_DIR}/rts/Server/BroadcastLog.cpp
+        # S2: the relay cursor. Pure policy over BroadcastLog, no sim.
+        ${CMAKE_SOURCE_DIR}/rts/Server/BroadcastRelay.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         # M4 NL proxy: the token bucket, the request gate and the prompt

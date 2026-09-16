@@ -1929,6 +1929,22 @@ Every 1800 frames the streamer writes a `K` and re-emits the tap's join bundle
 a tapped mission must keep streaming with nobody connected. Playback is a memcpy and a
 clock, never a sim — the relay that serves it is PLAN-beta-broadcast.md lane S2.
 
+### Broadcast relay (delayed spectating)
+
+`spring-server --broadcast <log> --broadcast-delay-seconds N` (`rts/Server/BroadcastRelay.{h,cpp}`)
+boots like `--replay` up to map/game load so the content routes answer, then never fires
+GameStart and never ticks the sim: each watcher gets its own `broadcast::Reader` and
+`BroadcastCursor` (byte offset, virtual wall clock, speed, paused) over the same `.msb`, paced
+by wall-clock deltas, and a backward seek jumps to the nearest `K` and catches up with
+Control/Vision/Bulk uncapped plus only the last State record per lane. The delay is enforced
+here and nowhere else — `liveEdgeMs = now - delay`, no record past it is ever emitted, seeks
+clamp to it, and the floor `kMinBroadcastDelaySec = 3600` is compiled in and lowerable only by
+`--dev-broadcast-floor` (never a modoption). Inbound is an **allow-list**
+(`ClientMessageHandler`: Handshake, AuthRequest, Ping, ReplayControl; ViewportUpdate ignored,
+everything else dropped), watchers take the replay spectator seat (team -1, reserved player
+number, absent from `playerHandler`), and `ReplayState` carries
+`broadcast`/`behind_seconds`/`live_edge_frame` with `controller_player_num` = the watcher's own.
+
 ### Replay browsing
 
 The lobby serves what it recorded. `POST /api/replays/list` returns a row per
