@@ -884,6 +884,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
 
+    // L-AUDIO: hand mapinfo.lua's sound.preset to main, which owns the
+    // AudioContext and picks the master reverb IR (setReverbPreset).
+    postToMain({ type: 'gp:soundPreset', preset: map.soundPreset });
+
     // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
     // mex snap. Spring's metalmap is half the heightmap resolution: each cell
     // covers 2 heightmap squares = 2 × squareSize elmos. Ports input-manager
