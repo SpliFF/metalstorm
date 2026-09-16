@@ -763,6 +763,9 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
+        # PLAN-beta-broadcast.md S1: the `.msb` container. Reuses replay::Header
+        # and links nothing else, so test_broadcast_log.cpp is a plain doctest.
+        ${CMAKE_SOURCE_DIR}/rts/Server/BroadcastLog.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         # M4 NL proxy: the token bucket, the request gate and the prompt
