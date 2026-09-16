@@ -56,7 +56,7 @@ local function newWorld(opts)
             local tbl = world.teamRulesParams[t]; return tbl and tbl[k]
         end,
         GetGaiaTeamID = function() return 99 end,
-        GetTeamList = emptyList,
+        GetTeamList = function() return world.teamList or {} end,
         GetPlayerList = emptyList,
         GetAllUnits = function()
             local out = {}
@@ -126,7 +126,7 @@ local function newWorld(opts)
             -- hand, so nothing the generator produces can perturb a count.
             GetContested = emptyList,
             Value = function() return 0 end,
-            Neighbors = emptyList,
+            Neighbors = function(key) return (world.neighbors or {})[key] or {} end,
             Owner = function() return nil end,
         },
         Authority = {
@@ -560,5 +560,46 @@ describe("reward normalisation", function()
         GG.Authority.Stake(5, id, 200)
         _G.gadget:UnitDestroyed(81, nil, 3, 2, nil, 2)
         assert.are.equal(250, world.totalAwarded())   -- 100×0.5 + 200 untouched
+    end)
+end)
+
+-- ============================================================
+-- The comeback valve's published number (gameplay rule (b))
+-- ============================================================
+describe("objective_comeback publication", function()
+    --- Ownership is read through GG.Regions.ControllingTeam per key, so the
+    --- world's single `regionOwner` is not enough here — override the accessor.
+    local function worldWithRegions(ownerByKey)
+        local world = newWorld()
+        world.teamList = { 0, 1, 99 }        -- 99 is gaia and must not be published
+        GG.Regions.Keys = function()
+            local out = {}
+            for k in pairs(ownerByKey) do out[#out + 1] = k end
+            table.sort(out)
+            return out
+        end
+        GG.Regions.ControllingTeam = function(key) return ownerByKey[key] end
+        return world
+    end
+
+    it("publishes a multiplier per team every eval tick", function()
+        local world = worldWithRegions({ a = 0, b = 0, c = 1, d = 1 })
+        world.evalAt(90)
+        assert.are.equal(1.0, world.gameRulesParams['objective_comeback_0'])
+        assert.are.equal(1.0, world.gameRulesParams['objective_comeback_1'])
+    end)
+
+    it("publishes above 1.0 for the team that is behind", function()
+        local world = worldWithRegions({ a = 0, b = 0, c = 0, d = 1 })
+        world.evalAt(90)
+        assert.are.equal(1.0, world.gameRulesParams['objective_comeback_0'])
+        assert.is_true(world.gameRulesParams['objective_comeback_1'] > 1.0)
+        assert.is_true(world.gameRulesParams['objective_comeback_1'] <= 1.5)
+    end)
+
+    it("never publishes one for gaia", function()
+        local world = worldWithRegions({ a = 0, b = 1 })
+        world.evalAt(90)
+        assert.is_nil(world.gameRulesParams['objective_comeback_99'])
     end)
 end)

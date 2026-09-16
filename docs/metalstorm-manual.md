@@ -55,7 +55,12 @@ Objectives are the game (`game_objectives.lua`, six types):
 | `extract` | two-phase: secure, then evacuate |
 | `infra` | timed survival, or an open-ended income building paying `rewardPerMinute` |
 
-A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: six rules (control, district, escort, infra, transport, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+
+Two of those rules exist to shape how a match FEELS rather than to supply it (both landed 2026-09-17):
+
+- **The chain.** Complete a `control` and the board immediately offers the adjacent region you do not own, scoped to your team, at **+25 %** reward and on a **3-minute** clock. Every other generator rule is reactive — something became contested, something took damage, a convoy appeared — so nothing rewarded pressing an advantage. The chain is an offer, not a requirement; declining it costs nothing and the short clock keeps a declined chain off the board.
+- **The comeback valve.** Objectives are the only primary authority income, so losing ground loses income, which buys fewer orders, which loses more ground. For a team behind on **owned regions**, team-scoped systemic rewards scale by `1 + deficit` capped at **×1.5**, and the liveness backstop gives it a fresh objective after one eval tick instead of two. Open races are never scaled (there is no behind team to price them for), the leader's rewards are never cut, nothing costs less, and no authority is minted directly — a team still has to go and complete the objective. The multiplier is published publicly as `objective_comeback_<team>`, so it reads as a stated rule rather than as the game quietly helping someone.
 
 **Victory** (`game_gameover.lua`): the engine's last-team-standing fallback is deliberately disabled for Metalstorm. A **scenario is a war template**, and it declares which objective is terminal via `victory = true`. Completing it drives `active → winding_down (10 s grace) → resolving → GameOver`, with winners collected **by faction** across all that faction's teams. A scenario with no victory objective never ends in-session — players leave by detaching, and the war persists (hibernation is a server property, not a war state). Unresolved objectives at war end settle per `objectives/warend.lua` (complete → paid; anything else → its terminal state with war-end escrow).
 

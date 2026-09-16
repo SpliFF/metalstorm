@@ -640,6 +640,13 @@ function resolveObjective(o, state, completingTeam, ctx, escrowOutcome)
     if o.systemicKey then
         Generator.onResolved(genState, o.systemicRule, o.systemicKey)
     end
+    -- Gameplay rule (a): a completed control chains into the next region. The
+    -- generator only QUEUES it here — creating an objective from inside a
+    -- resolution would mutate activeList under the snapshot walk that resolve
+    -- cascades depend on.
+    if state == 'complete' then
+        Generator.onCompleted(genState, o)
+    end
 
     -- F10: the bounty cap counts LIVE bounties, not lifetime ones. Without
     -- this a commander who staked four bounties could never stake another for
@@ -1099,10 +1106,48 @@ local function buildWorld(frame, tick, ctx)
             end
             return nil
         end,
+        -- The chain rule (gameplay rule (a)) walks the region graph from the
+        -- region that was just taken; the comeback valve (rule (b)) counts
+        -- what each side owns. Both answer empty/neutral without GG.Regions,
+        -- which disables them rather than raising — the same "ready, awaiting
+        -- content" shape the civilian rules have.
+        regionNeighbors = function(key)
+            if not (GG.Regions and GG.Regions.Neighbors) then return {} end
+            return GG.Regions.Neighbors(key) or {}
+        end,
+        regionOwner = function(key)
+            return GG.Regions and GG.Regions.ControllingTeam(key) or nil
+        end,
+        ownedRegionCount = function(team)
+            if not GG.Regions then return 0 end
+            local n = 0
+            for _, key in ipairs(GG.Regions.Keys()) do
+                if GG.Regions.ControllingTeam(key) == team then n = n + 1 end
+            end
+            return n
+        end,
         modOptions = function() return Spring.GetModOptions() end,
         create = function(def) return GG.Objectives.Create(def) end,
         createLinkedPair = function(defA, defB) return GG.Objectives.CreateLinkedPair(defA, defB) end,
     }
+end
+
+--- Publish each team's comeback multiplier (gameplay rule (b)) as
+--- `objective_comeback_<team>`, a public game rulesParam.
+---
+--- Public, not team-scoped: a valve nobody can see is a valve players invent
+--- explanations for. The leading side seeing "the other lot are on x1.4" is
+--- the point — it reads as a stated rule rather than as the game quietly
+--- helping someone, and it tells the leader to close the match out.
+---
+--- Published every eval tick rather than on change: it is one SetGameRulesParam
+--- per team per 3 s, and a client that joins mid-war otherwise waits for the
+--- next territory swing to learn the number.
+local function publishComeback(world)
+    for _, teamID in ipairs(world.teams()) do
+        Spring.SetGameRulesParam('objective_comeback_' .. teamID,
+                                 Generator.comebackScale(world, teamID), PUBLIC)
+    end
 end
 
 -- ============================================================
@@ -1206,7 +1251,9 @@ function gadget:GameFrame(frame)
     --
     -- nil means "no gameover gadget in this game" → active, generate.
     if (GG.WarState or 'active') == 'active' then
-        Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+        local world = buildWorld(frame, evalTick, ctx)
+        Generator.tick(world, genState)
+        publishComeback(world)
     end
 
     -- Resolve-retention: clear rulesParams for objectives past the 30s window,

@@ -240,6 +240,21 @@ local function newScriptedWorld(sim, objectiveType, density)
             return sim.liveCountByTeam[team] or 0
         end,
         nearestNeutralOrContestedRegion = function() return 'r_backstop' end,
+        -- A small ring of regions with an ownership split, so the two 2026-09-10
+        -- gameplay rules are in the measurement rather than dark: the chain
+        -- rule walks `regionNeighbors` from a region just taken, and the
+        -- comeback valve reads `ownedRegionCount`. The split is deliberately
+        -- uneven — a perfectly level board leaves the valve at x1.0 and the
+        -- grid would report on a lever that never engaged.
+        regionNeighbors = function(key) return sim.regionRing[key] or {} end,
+        regionOwner = function(key) return sim.regionOwner[key] end,
+        ownedRegionCount = function(team)
+            local n = 0
+            for _, owner in pairs(sim.regionOwner) do
+                if owner == team then n = n + 1 end
+            end
+            return n
+        end,
         modOptions = function() return { objective_density = density } end,
         create = function(def) return sim:onCreated(def) end,
         createLinkedPair = function(escortDef, killDef)
@@ -336,10 +351,20 @@ function M.newSim(opts)
         tick = 0, frame = 0,
         convoySeq = 0,
         infraHealth = {},
+        regionRing = {}, regionOwner = {},
         firstBrokeFrame = nil,
         created = 0, completed = 0, expired = 0,
         decayBurned = 0,
     }, Sim)
+
+    -- An eight-region ring, split 5/3 in the first team's favour: enough of a
+    -- gap that the valve engages (and is visible in the grid) without pinning
+    -- it at its cap.
+    local RING = { 'r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8' }
+    for i, key in ipairs(RING) do
+        sim.regionRing[key] = { RING[i % #RING + 1], RING[(i - 2) % #RING + 1] }
+        sim.regionOwner[key] = (i <= 5) and 0 or 1
+    end
 
     for t = 1, cfg.teams do
         local team = t - 1
@@ -380,6 +405,7 @@ function Sim:onCreated(def, linkedTo)
 
     local rec = {
         handle = handle, team = team, reward = def.reward or 0,
+        objType = def.type, params = def.params,
         systemicKey = def.systemicKey, systemicRule = def.systemicRule,
         resolveAtTick = self.tick + self.cfg.resolveTicks,
         completes = self.rng() < self.cfg.completionRate,
@@ -431,6 +457,18 @@ function Sim:resolve(rec, outcome)
         self.completed = self.completed + 1
         self:mint(rec.team, rec.reward + Escrow.total(self.escrow, rec.handle))
         Escrow.settle(self.escrow, rec.handle, 'complete')
+        -- Gameplay rule (a): a completed control chains into the next region.
+        -- The registry calls this from resolveObjective; the harness has to
+        -- too, or the chain rule is dark in every cell.
+        Generator.onCompleted(self.genState, {
+            type = rec.objType, completedBy = rec.team,
+            reward = rec.reward, params = rec.params,
+        })
+        -- Taking a region is what moves the valve, so the sim has to model the
+        -- flip as well as pay for it — otherwise the ownership split is frozen
+        -- and the comeback multiplier never changes over a whole war.
+        local key = rec.params and rec.params.regionKey
+        if key and self.regionOwner[key] ~= nil then self.regionOwner[key] = rec.team end
     else
         self.expired = self.expired + 1
         -- Every staker is "active" in this model (nobody disconnects), so an
