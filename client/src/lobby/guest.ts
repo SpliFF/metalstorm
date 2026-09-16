@@ -151,3 +151,31 @@ export function isGuestName(username: string): boolean {
 export function displayGuestName(username: string): string {
     return isGuestName(username) ? `Guest ${username.slice(-4)}` : username;
 }
+
+// ── Chosen nicknames (PLAN-beta-journey.md §(a)) ────────────────────────────
+
+/// The server's `GuestAccounts::ValidNickname` rule, mirrored so the welcome
+/// screen can refuse before the round trip: 2–32 of `[A-Za-z0-9_-]`, and not
+/// the generated `guest-` prefix.
+export function validNickname(name: string): boolean {
+    return /^[A-Za-z0-9_-]{2,32}$/.test(name) && !name.toLowerCase().startsWith('guest-');
+}
+
+export type GuestNicknameOutcome =
+    | { kind: 'ok'; data: GuestResponse; nicknameChosen: boolean }
+    /// 409 `name_taken`: a registered player owns it. Fixed by choosing another.
+    | { kind: 'name-taken'; message: string }
+    | { kind: 'failed'; message: string };
+
+export function classifyGuestResponse(
+    resp: UpgradeResponseLike,
+    data: (GuestResponse & { error?: string; name_taken?: boolean; nickname_chosen?: boolean }) | null,
+): GuestNicknameOutcome {
+    if (resp.ok && data && typeof data.token === 'string' && data.token) {
+        return { kind: 'ok', data, nicknameChosen: data.nickname_chosen === true };
+    }
+    if (resp.status === 409 || data?.name_taken === true) {
+        return { kind: 'name-taken', message: data?.error ?? 'That name belongs to a registered player' };
+    }
+    return { kind: 'failed', message: data?.error ?? 'Could not sign you in' };
+}

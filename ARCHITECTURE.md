@@ -377,6 +377,9 @@ ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
 | `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
+| `ui/lobby/{welcome,intro,hub}/` | Entry flow templates + own CSS (PLAN-beta-journey §(e)): welcome (Watch as <callsign> / Sign up / Log in), 3-slide intro, Recruit hub. Metalstorm overrides under `data/games/metalstorm/ui/lobby/`. |
+| `ui/lobby/hub/entry-flow.ts` | Pure entry decisions: `decideEntry` (intro / hub / browser), `soloBootRoute` (`/api/rooms/solo` vs dev direct), commander kinds. |
+| `ui/help/` | Player help drawer: `openHelp(topic)` renders `docs/player-guide.md` (guide-md.ts subset renderer), "Start the tutorial" → `?play=tutorial_01`. |
 | `ui/hud/hud.html+css` | In-game HUD (entity count, selection, quit button). Owns the `.hud-*` class prefix — **not** the native-UI design system, which is `.nui-*` (see below). |
 | `ui/quit-confirm/` | Quit confirmation overlay. |
 | `ui/game-over/` | Game over results overlay. |
