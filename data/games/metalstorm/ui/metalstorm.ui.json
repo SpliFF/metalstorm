@@ -101,7 +101,44 @@
       ]
     },
     {
+      "id": "mentor-card",
+      "entry": "widgets/mentor-card.js",
+      "mount": "left",
+      "title": "Mentor",
+      "nlAliases": [
+        "mentor",
+        "mentor card",
+        "my mentor",
+        "mentorship"
+      ],
+      "_chrome": "PLAN-beta.md \"Mentorship\". The one place the relationship is visible: who is watching, what they have ordered, and the \"Show everything\" toggle that lifts the chatter filter. It renders nothing at all while there is no mentorship EXCEPT the one 30-second offer of an AI mentor, so a player who never enters one never sees a panel.",
+      "subscribes": [
+        "gameRulesParams",
+        "teamRulesParams",
+        "playerRoster"
+      ],
+      "hideForSpectator": true
+    },
+    {
+      "id": "tutorial-guide",
+      "entry": "widgets/tutorial-guide.js",
+      "mount": "left",
+      "title": "Guide",
+      "_note": "Written by the tutorial lane (PLAN-beta-journey.md lane E). The entry is listed ahead of the file so the manifest does not have to change when it lands; until then the dynamic import 404s and the loader logs one failed-widget line and carries on — every other widget still mounts.",
+      "nlAliases": [
+        "guide",
+        "tutorial",
+        "coach"
+      ],
+      "subscribes": [
+        "gameRulesParams",
+        "selection"
+      ],
+      "hideForSpectator": true
+    },
+    {
       "id": "scoreboard-panel",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/scoreboard-panel.js",
       "mount": "menu:statistics",
       "title": "Scoreboard",
@@ -118,6 +155,7 @@
     },
     {
       "id": "parley-panel",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/parley-panel.js",
       "mount": "menu:diplomacy",
       "title": "Parley",
@@ -137,6 +175,7 @@
     },
     {
       "id": "ai-command-panel",
+      "revealOn": "me:rank >= 3",
       "entry": "widgets/ai-command-panel.js",
       "mount": "menu:reports",
       "title": "AI Command",
@@ -155,6 +194,7 @@
     },
     {
       "id": "event-log",
+      "revealOn": "me:rank >= 1",
       "entry": "widgets/event-log.js",
       "builtin": true,
       "_builtin_note": "Mounted from client/src/ui/native-ui/moment-hud.ts's `eventLog` export — the notices and the log render the same BattleMoment records through the same phrasing, so they share a module by construction.",

@@ -28,3 +28,9 @@ RULES OF ENGAGEMENT
 PICKING A SUBJECT
 
 `selection` means what the player currently has selected — use it when they say "these", "them", "this squad". `entity-ref` names one group or unit from the context. `class-count` is "two tank squads" — a count of groups of a class, and the game picks which. `idle-filter` is "any idle infantry". `any` is the unqualified order ("defend Northgate" with nothing selected) — the game tasks whoever is free. `ai` hands the order to the AI commander rather than to units.
+
+TASKING SOMEONE YOU MENTOR
+
+A player of Veteran standing or above, or anyone's mentor, can hand a task to a named player: "task Raven: hold Storm Sound", "give Raven the bridge", "Raven, take Northgate". That is one `command` action with the `ai` subject and the verb `objectives.createBounty`, carrying the callsign as `player` and the place as the target — never a movement order, because the units are not yours to move: a task is something the other player chooses how to do.
+
+The callsign must appear verbatim in the context payload's player list, exactly like a place name (rule 1): a task handed to a name nobody is called goes nowhere, so that is a `refuse` naming the callsign you could not find. The place obeys rule 3 unchanged. A player who is not yours to task — no mentorship, standing below Veteran — is a `refuse` too, in one sentence: "you cannot task Raven yet."
