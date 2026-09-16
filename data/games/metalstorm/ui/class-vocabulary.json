@@ -510,6 +510,25 @@
         "cranes",
         "quay"
       ]
+    },
+    "civships": {
+      "display": "Civilian Ship",
+      "plural": "civilian ships",
+      "synonyms": [
+        "civilian ship",
+        "civilian ships",
+        "civilian boat",
+        "civilian boats",
+        "ferry",
+        "ferries",
+        "trawler",
+        "trawlers",
+        "freighter",
+        "freighters",
+        "tramp",
+        "crane ship",
+        "salvage ship"
+      ]
     }
   },
   "_roles": "A role is a SPOKEN grouping that spans classes (or a slice of one by scale) — \"our main base needs more air defense\". `matches` entries are AND-ed within an entry and OR-ed across entries; `scale` pins one ms_scale, `scaleMin`/`scaleMax` bound the range. A role resolving to more than one class cannot fill the single-class `idle-filter` subject the current compile table exposes, so the local slot-filler leaves it unmatched rather than guessing one branch; the M1 envelope carries roles properly.",

@@ -51,6 +51,10 @@
   },
 
   "units": {
-    "_doc": "Exact def-name overrides — highest precedence. Empty until specific defs demand bespoke deaths (e.g. a named scenario hero)."
+    "_doc": "Exact def-name overrides — highest precedence. Used by defs whose names do not parse as ms_<class>_s<n>: the four civilian hulls in units/civships.lua (2026-09-17) take the ships row verbatim — a ferry dies and wakes like a ship, whatever class its customparams carry.",
+    "ms_fishing_trawler":    { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_ferry":              { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_cargo_tramp":        { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "ms_salvage_crane_ship": { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null }
   }
 }

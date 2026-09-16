@@ -481,7 +481,8 @@ DECOR = {
 # tarp and no cart in this game, and none is coming from the lanes that have
 # landed. model-integration §M3 shipped the game's first eight featuredefs and
 # they are three wrecks, two bridges and three ancient-tech relics — nothing
-# street-scale. So four of the five kinds resolve to NOTHING, on purpose and
+# street-scale (the 2026-09-17 wave added sixteen more, and every one of
+# those is a relic, a span or a lighthouse — still nothing street-scale). So four of the five kinds resolve to NOTHING, on purpose and
 # visibly (`StagedTown.prop_gaps` reports them by name), and the fifth uses
 # the brief's own escape hatch: "supply-dump-style dressing". `ms_supply_dump`
 # is a real M2 building that reads as stacked goods, which is what a crate
@@ -542,6 +543,15 @@ LANDMARKS = [
     {"def": "ms_dig_site",       "where": "edge", "weight": 1.5, "metres": (12, 12)},
     {"def": "ms_monolith_spire", "where": "edge", "weight": 0.8, "metres": (9, 9)},
     {"def": "ms_vault_door",     "where": "edge", "weight": 0.4, "metres": (20, 16)},
+    # The batch-04 RUINS (features/ancient.lua, 2026-09-17): the relics that
+    # read as landscape rather than as a prize. A pylon or a line of obelisks
+    # on the outskirts is the same story the spire tells — the town is built
+    # on old ground — at a scale a town edge can hold. The caches and war
+    # machines are deliberately NOT here; they are scenario_templates'
+    # ANCIENT_SITES prizes, one placer block per def.
+    {"def": "ms_anc_shield_pylon",  "where": "edge", "weight": 0.8, "metres": (11, 11)},
+    {"def": "ms_anc_obelisk_field", "where": "edge", "weight": 0.8, "metres": (26, 6)},
+    {"def": "ms_anc_aqueduct",      "where": "edge", "weight": 0.5, "metres": (10, 30)},
 ]
 
 # Chance a town has ANY landmark, then how many it may have. Tuned so that

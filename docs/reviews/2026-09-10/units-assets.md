@@ -94,8 +94,27 @@ Cannons satisfy v²/g ≥ range. Per-scale HP/speed/DPS for the 11×4 classes: r
 > CLOSED 2026-09-17 by the forge run on this lane: the three barricade split
 > models, `ms_trench_segment` and the `ms_engineers_s3` rig are built, wired and
 > censused, and the pinned tanks/mechs/soldiers `sizes` corrections are applied
-> with both golden tables re-derived. Still open from this list: wiring the 30
-> orphan models as defs/features. See the lane's 2026-09-17 commit.
+> with both golden tables re-derived. See the lane's 2026-09-17 commit.
+>
+> FINDING 9 CLOSED-OUT 2026-09-17 (second fire): 20 of the 30 orphans are wired,
+> 10 are left with a reason. Decision per model:
+>
+> | model | decision | where | placer |
+> |---|---|---|---|
+> | ms_anc_archive / reactor / foundry / vault_complex / gate / beacon | featuredef (relic) | features/ancient.lua | scenario_templates.ANCIENT_SITES (prize + guardians) |
+> | ms_anc_lance_battery / siege_platform / storm_caster / interdictor | featuredef (relic, dormant weapon) | features/ancient.lua | ANCIENT_SITES |
+> | ms_anc_obelisk_field / shield_pylon / aqueduct | featuredef (relic, ruin) | features/ancient.lua | town_templates.LANDMARKS (edge) |
+> | ms_ancient_hulk | featuredef (relic, hulk) | features/ancient.lua | none — wants a coast; no coastal placer exists |
+> | ms_anc_bridge_span | featuredef (span, seated: positive deck_top) | features/bridges.lua | BRIDGE_SPANS['ancient'], hand-authored only (as rail) |
+> | ms_lighthouse | featuredef (landmark) | features/landmarks.lua (new) | none — coastal |
+> | ms_fishing_trawler / ms_ferry / ms_cargo_tramp / ms_salvage_crane_ship | unit def (civilian hull, SHIP) | units/civships.lua (new) | none — ms_defs reads no SHIP file (as transports.lua); hand-authored scenarios |
+> | ms_anc_titan / warden / custodian / sentinel / barge / harvester | LEFT | — | built as units (walk/idle clips); they are the worldbuilding plan's discoverable-not-buildable legacy class, which has no weapon rungs, no discovery flow and no balance sheet. A feature would make a statue of a war machine; a def would invent a balance sheet. Needs a design decision. |
+> | ms_dreadnought / ms_river_monitor / ms_patrol_boat / ms_arsenal_barge | LEFT | — | armed hulls that duplicate a ships.lua rung (s4 flagship = fable_battleship, s2 = ms_ships_s2, s1 = ms_ships_s1) or need a class that does not exist (naval rocket artillery). `_builder.lua` has no per-faction hull-variant mechanism; adding four one-off warship defs means four balance sheets and a variant convention. Needs a design decision. |
+>
+> Every new featuredef is spawned once by scenarios/scenario_smoke_test.lua
+> (game_features_spec asserts completeness). Census after: 118 defs / 24
+> features / 10 orphans, 0 FAIL. Unit-fx rows for the four hulls; `civships`
+> added to ui/class-vocabulary.json (+ the pinned list in its vitest).
 
 - Task 2(c) forge builds: none built. Queue with stems/budgets: `ms_barricade_wall` /
   `ms_barricade_corner` / `ms_barricade_gate` (split the `ms_barricade_set` sample with root offsets
@@ -107,12 +126,13 @@ Cannons satisfy v²/g ≥ range. Per-scale HP/speed/DPS for the 11×4 classes: r
   checkout), `bash $FORGE/bin/new-workspace.sh <ws> <stem> <sample>`, `build.sh` → copy
   out/*.gltf,*.bin,*.ktx2 into models/, ASSETS.md row, `check_unit_defs.py` + `check_model_scale.py`.
 - tanks/mechs/soldiers `sizes` corrections (PROPOSED comments in the files; need both golden tables).
-- Wiring the 30 orphan models (naval civilians, `ms_anc_*`) as defs/features (lane 12 features?).
+- ~~Wiring the 30 orphan models (naval civilians, `ms_anc_*`) as defs/features~~ DONE 2026-09-17 for 20; the 10 armed/automaton hulls are gated on a design decision (see the close-out above).
 
 ## Next milestones
 - Make `check_unit_defs.py` a CI step next to `check_model_scale.py`; port the models/ scan into
   `assets-manifest.ts` so the licence gate is real again.
 - Apply the pinned clearance corrections with a single golden-table update on both ports.
-- Barricade split + trench segment (drill-down build menu content), then orphan-model wiring.
+- ~~Barricade split + trench segment (drill-down build menu content), then orphan-model wiring.~~ DONE 2026-09-17 (20/30 wired; see finding 9 close-out).
+- Decide the legacy-unit class (six `ms_anc_*` automata) and the four armed naval hulls: faction hull variants vs one-off hero defs vs stay unwired.
 - Decide `ms_engineers_s3`: either a rig model or revert the def to INFANTRY.
 - `MS_RAILGUN_S1`: wire to a def (ms_tanks_s2 alt?) or drop.

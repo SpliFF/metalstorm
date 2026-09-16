@@ -33,8 +33,16 @@ shipped inventory a cluster can draw on is:
                          ms_courier_car, ms_fuel_tanker, ms_expedition_rig,
                          ms_command_s2, plus the ms_<class>_s<1..4> families
     features (§M3)       ms_colossus_wreck, ms_tank_wreck, ms_train_wreck,
-                         ms_road_bridge, ms_rail_bridge, ms_vault_door,
-                         ms_dig_site, ms_monolith_spire
+                         ms_road_bridge, ms_rail_bridge, ms_anc_bridge_span,
+                         ms_vault_door, ms_dig_site, ms_monolith_spire, and
+                         (2026-09-17, units-assets finding 9) the batch-04
+                         relics ms_anc_archive / reactor / foundry /
+                         vault_complex / gate / beacon / interdictor /
+                         lance_battery / siege_platform / storm_caster (prize
+                         sites, ANCIENT_SITES below), ms_anc_obelisk_field /
+                         shield_pylon / aqueduct (town-edge landmarks,
+                         town_templates.LANDMARKS), ms_ancient_hulk and
+                         ms_lighthouse (coastal — no automatic placer)
 
 THE CONTENT GAPS ARE CLOSED (2026-08-06, PLAN-metalstorm-model-integration §M4).
 The note that used to sit here said there was no mine, port, road or bridge def
@@ -390,8 +398,35 @@ ANCIENT_SITES = {
     "ms_vault_door": {"noun": "Vault"},
     "ms_dig_site":   {"noun": "Dig"},
     "ms_monolith_spire": {"noun": "Spire"},
+    # The batch-04 wave (features/ancient.lua, 2026-09-17): the caches an
+    # expedition is mounted to TAKE, and the dormant war machines. Every one
+    # blocks at region centre like the three above; the foundry's 27 x 26 cell
+    # shadow is the reason place_relics tries the next region rather than
+    # failing when a centre cannot clear it.
+    "ms_anc_archive":        {"noun": "Archive"},
+    "ms_anc_reactor":        {"noun": "Reactor"},
+    "ms_anc_vault_complex":  {"noun": "Vaults"},
+    "ms_anc_gate":           {"noun": "Gate"},
+    "ms_anc_beacon":         {"noun": "Beacon"},
+    "ms_anc_foundry":        {"noun": "Foundry"},
+    "ms_anc_lance_battery":  {"noun": "Battery"},
+    "ms_anc_siege_platform": {"noun": "Platform"},
+    "ms_anc_storm_caster":   {"noun": "Caster"},
+    "ms_anc_interdictor":    {"noun": "Interdictor"},
 }
-ANCIENT_DRAW_ORDER = ["ms_monolith_spire", "ms_vault_door", "ms_dig_site"]
+# The three originals keep the head of the order, so every scenario that asks
+# for the default one relic (or the two/three a hand-written --relics asked
+# for before the wave landed) draws exactly what it drew before; the new
+# sites are reached only by a larger ask — or by --coverage, which forces
+# len(ANCIENT_SITES) and places as many as the map has regions to spare.
+# Ordered by legibility then bulk: silhouettes a player can name from across
+# a region first, the district-sized foundry last among the caches.
+ANCIENT_DRAW_ORDER = ["ms_monolith_spire", "ms_vault_door", "ms_dig_site",
+                      "ms_anc_beacon", "ms_anc_gate", "ms_anc_archive",
+                      "ms_anc_reactor", "ms_anc_vault_complex",
+                      "ms_anc_lance_battery", "ms_anc_siege_platform",
+                      "ms_anc_storm_caster", "ms_anc_interdictor",
+                      "ms_anc_foundry"]
 
 # The band squatting on a relic. Anarchic archetype (worldbuilding §4 amendment,
 # the Reaver garrison/raid/toll template), which is what ms_technical is FOR —
@@ -446,6 +481,10 @@ WRECK_FIELD = [
 BRIDGE_SPANS = {
     "road": "ms_road_bridge",
     "rail": "ms_rail_bridge",
+    # 36 m monolithic arc, features/bridges.lua. Like rail: named so the
+    # def is verified at generation time and available to a hand-authored
+    # scenario, never chosen by the automatic crossing placer.
+    "ancient": "ms_anc_bridge_span",
 }
 BRIDGE_NOUN = "Crossing"
 

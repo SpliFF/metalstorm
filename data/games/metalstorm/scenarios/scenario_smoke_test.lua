@@ -75,6 +75,39 @@ return {
             { def = 'ms_vault_door',     x = 8200, z = 6000, facing = 'south' },
             { def = 'ms_monolith_spire', x = 8600, z = 6000 },
             { def = 'ms_dig_site',       x = 9000, z = 6000, facing = 'west'  },
+
+            -- Batch-04 relics + the batch-03 hulk (features/ancient.lua, the
+            -- 2026-09-17 wave). A second row south of the first, stepped by
+            -- each footprint so no two shadows touch: the foundry alone is
+            -- 54 x 52 m (432 x 416 elmos), the hulk 24 x 105 m. Still clear
+            -- of the '4:4' centre region (8192..10240 on both axes) — this
+            -- row runs z = 5000, x = 4000..7700 — and of the fight lines.
+            { def = 'ms_anc_foundry',        x = 4000, z = 5000 },
+            { def = 'ms_anc_vault_complex',  x = 4500, z = 5000, facing = 'south' },
+            { def = 'ms_anc_gate',           x = 4900, z = 5000 },
+            { def = 'ms_anc_reactor',        x = 5250, z = 5000 },
+            { def = 'ms_anc_archive',        x = 5550, z = 5000 },
+            { def = 'ms_anc_interdictor',    x = 5850, z = 5000 },
+            { def = 'ms_anc_siege_platform', x = 6150, z = 5000, facing = 'east' },
+            { def = 'ms_anc_storm_caster',   x = 6400, z = 5000 },
+            { def = 'ms_anc_lance_battery',  x = 6650, z = 5000, facing = 'south' },
+            { def = 'ms_anc_beacon',         x = 6880, z = 5000 },
+            { def = 'ms_anc_shield_pylon',   x = 7080, z = 5000 },
+            { def = 'ms_anc_obelisk_field',  x = 7380, z = 5000 },
+            -- A two-segment run of arcade: the aqueduct publishes its own
+            -- 30 m chain_pitch (features/ancient.lua), exactly as the spans do.
+            { def = 'ms_anc_aqueduct',       x = 7700, z = 5000, facing = 'north', chain = 2 },
+            -- The hulk is 105 m along its local Z; laid east-west on its own
+            -- row so its shadow (24 x 104 m) crosses nothing.
+            { def = 'ms_ancient_hulk',       x = 6000, z = 4400, facing = 'east' },
+
+            -- The ancient span (features/bridges.lua): chained at its own 36 m
+            -- pitch, y = 0 like the two steel spans — and unlike them it is
+            -- SEATED (positive deck_top), so the same y holds on dry ground.
+            { def = 'ms_anc_bridge_span', x = 7600, z = 7000, facing = 'north', chain = 2, y = 0 },
+
+            -- Civilian landmark (features/landmarks.lua).
+            { def = 'ms_lighthouse', x = 9400, z = 6000 },
         },
     },
 
