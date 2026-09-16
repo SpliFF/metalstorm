@@ -75,7 +75,8 @@
     padding: 4px 8px;
     background: var(--nui-bg-sunken);
     border: 1px solid var(--nui-border-sunken);
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
     color: var(--nui-text-dim);
     font: italic var(--nui-font-mono);
     /* One line, ellipsised — a growing preview would push the panel back up
@@ -111,7 +112,7 @@
     font-weight: 600;
 }
 .composer-status:empty { display: none; }
-.composer-status.is-ok { color: var(--nui-good, #6fcf7f); }
+.composer-status.is-ok { color: var(--nui-good); }
 .composer-status.is-error { color: var(--nui-bad); }
 
 /* Icon-only preset buttons (task 6) — narrow so they don't crowd out the
@@ -126,9 +127,9 @@
    the button that reveals it needs a visible "currently open" cue distinct
    from plain hover, same accent used for a filled slot chip. */
 #accel-toggle-btn.is-active {
-    background: rgba(74, 158, 255, 0.18);
+    background: var(--nui-accent-wash);
     border-color: var(--nui-accent-dim);
-    color: #cfe4ff;
+    color: var(--nui-accent);
 }
 
 /* ── Free-text accelerator row (task 7) ───────────────────────────────
@@ -150,9 +151,9 @@
    same alert colour as the cost-refused/insufficient-authority state. */
 .composer-stale-notice {
     padding: 4px 8px;
-    background: rgba(224, 103, 103, 0.12);
-    border: 1px solid #6d3535;
-    border-radius: 2px;
+    background: var(--nui-bad-wash);
+    border: 1px solid var(--nui-bad-fill);
+    border-radius: var(--nui-radius);
     color: var(--nui-bad);
     font-size: 11px;
 }
@@ -164,7 +165,7 @@
     align-items: center;
     gap: 6px;
     padding: 2px 2px 2px 8px;
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
 }
 .composer-preset-item:hover { background: var(--nui-accent-dim); }
 .composer-preset-name {
@@ -185,13 +186,13 @@
     padding: 0;
     background: none;
     border: none;
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
     color: var(--nui-text-faint);
     font-size: 13px;
     line-height: 1;
     cursor: pointer;
 }
-.composer-preset-delete:hover { background: rgba(224, 103, 103, 0.25); color: var(--nui-bad); }
+.composer-preset-delete:hover { background: var(--nui-bad-wash); color: var(--nui-bad); }
 
 /* ── Slot-picker menus ──────────────────────────────────────────────── */
 
@@ -226,7 +227,7 @@
     color: var(--nui-text-faint);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--nui-track);
 }
 
 /* Target search field sits at the top of its result menu. */

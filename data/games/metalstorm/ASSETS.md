@@ -268,3 +268,32 @@ of `models/` directly). Cell text must escape `|` as `\|`.
 | models/ms_airbase_{diffuse,orm,emissive,team,normals}.ktx2 | ms_airbase | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Painted by `tools/fable-model-forge/paint_ms_airbase.py` at 2048² (RNG seed 90210) via `prefabs/paintlib.py`. Worn concrete apron with off-white airfield markings (~+37% on small grid cells — a deliberate exception to tone-on-tone, noted as a baker-sprinkle artifact, not chased), corrugated patched-steel hangar, hazard bands at door jambs, rust/soot/grime weathering. Team via `team_panel(..., base=(120,124,128))` + apron `roundel_star` in mask R only. Emissive: amber cab windows + work glow, red-amber beacon, warm floodlight cores — zero blue-dominant pixels. Encoded UASTC+Zstd+mips by `encode.mjs`. |
 | models/ms_engineers_s4.gltf (+.bin) | ms_engineers_s4 | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Procedural glTF by `tools/fable-model-forge/gen_ms_engineers_s4.py` (dims/zones/clip in `ms_engineers_s4_layout.py`). Prompt: "unit art final slice — engineers s4 mobile fabrication platform, single vast tracked crawler" (2026-08-20). The s4 tier of the engineers family (s1–s3 are humanoid hi-vis figures) carries the family read — hi-vis + hazard + tools — onto a vehicle: measured **19.90 m long (z) × 10.50 m wide (x)**, hull deck 3.3 m, cab top 7.4 m, crane-boom pulley 9.93 m; ground contact Y = 0 (lowest chamfer vertex 0.12 m — underside faces skipped). Two vast full-length track pods (drive wheels texture-suggested), glazed forward crew cab, open-sided fabrication bay amidships with amber welding glow, slewing crane aft, gas-bottle racks, crates, floodlights, rotating beacon. 1644 tris (budget 3000), 2048² atlas. 3 pieces: `body` → `crane_base` (0, 3.3, 6.5) → `crane_boom` (0, 2.3, −1.2) — UNARMED, no turret/barrel/muzzle anywhere, `getAimPieces` → `null` by design. **One clip, and it renders** (squad_size 1): `idle` 10 s seamless crane yaw sweep 0→+25→0→−25→0° with a −2.5° boom bob; boom clears the bay roof by ≥0.4 m through the full sweep. Stem matches the `_builder.lua` default — no unitdef change, no override. |
 | models/ms_engineers_s4_{diffuse,orm,emissive,team,normals}.ktx2 | ms_engineers_s4 | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Painted by `tools/fable-model-forge/paint_ms_engineers_s4.py` at 2048² (RNG seed 90210) via `prefabs/paintlib.py`. Patched-plate scavenger hull with hi-vis orange/yellow trim and hazard chevrons, mud/rust on the track pods (lightened in the one fix pass so the pods don't bake near-black), tone-on-tone deck plating. "ENG-04"/"04" stencils use mirrored twin zones so both ±x faces read correctly. Team via `team_panel(..., base=(120,124,128))`: pod stripe, cab panel, deck ID square, crane square — mask R only. Emissive all warm/amber (cab glow, floodlights, weld pool, beacon, markers) — zero blue-dominant pixels. Encoded UASTC+Zstd+mips by `encode.mjs`. |
+
+## Fonts
+
+Deliberately BELOW the manifest table: `parseAssetsManifest` ends the table at
+the first non-table line, and the licence gate's allowed-string list covers
+art assets only — OFL is not one of its classes. Fonts are UI assets under
+`client/public/fonts/`, not game content, and are recorded here because this
+is the project's one licence ledger.
+
+All five are **SIL Open Font License 1.1** (OFL-1.1): free to use, embed and
+self-host in a commercial or GPL product, with one obligation — the font
+files are not renamed to a Reserved Font Name and are not sold on their own.
+Both hold. Subsetting is explicitly permitted by OFL §1.
+
+Files are the **latin subset** woff2 Google Fonts serves (`unicode-range`
+U+0000–00FF plus punctuation/currency), fetched 2026-09-17 from
+`fonts.gstatic.com` via the `css2` API; unmodified bytes, no re-encoding.
+
+| File (client/public/fonts/) | Family / weight | Upstream | Designer | License |
+|---|---|---|---|---|
+| barlow-condensed-600-latin.woff2 | Barlow Condensed 600 | [Barlow](https://github.com/jpt/barlow) · [Google Fonts](https://fonts.google.com/specimen/Barlow+Condensed) | Jeremy Tribby | OFL-1.1 |
+| barlow-condensed-700-latin.woff2 | Barlow Condensed 700 | [Barlow](https://github.com/jpt/barlow) · [Google Fonts](https://fonts.google.com/specimen/Barlow+Condensed) | Jeremy Tribby | OFL-1.1 |
+| barlow-400-latin.woff2 | Barlow 400 | [Barlow](https://github.com/jpt/barlow) · [Google Fonts](https://fonts.google.com/specimen/Barlow) | Jeremy Tribby | OFL-1.1 |
+| ibm-plex-mono-400-latin.woff2 | IBM Plex Mono 400 | [plex](https://github.com/IBM/plex) · [Google Fonts](https://fonts.google.com/specimen/IBM+Plex+Mono) | Mike Abbink, Bold Monday | OFL-1.1 |
+| ibm-plex-mono-500-latin.woff2 | IBM Plex Mono 500 | [plex](https://github.com/IBM/plex) · [Google Fonts](https://fonts.google.com/specimen/IBM+Plex+Mono) | Mike Abbink, Bold Monday | OFL-1.1 |
+
+Declared by `client/src/ui/native-ui/tokens.css` (`@font-face`,
+`font-display: swap`); the art direction that chose them is
+`data/games/metalstorm/art/DIRECTION.md`.
