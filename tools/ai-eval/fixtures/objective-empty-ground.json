@@ -1,0 +1,60 @@
+{
+    "id": "objective-empty-ground",
+    "title": "A reward only the board explains",
+    "why": "`frontier` carries region value 0 — DEFEND doesn't apply (not ours), EXPAND doesn't apply (not neutral), and ATTACK's own gate (`(r.value or 0) > 0`) excludes it too, so nothing in the STANDING slate ever sends a directive there. A control objective posts on it at frame 300 anyway, defended by a token force a massed package can clear. The only way an AI issues a directive on this ground, ever, is by reading the board — this is the isolate the ai-eval report's first run couldn't get from objective-next-door, where the same directive would have fired from the implicit EXPAND goal regardless of the board (docs/reviews/2026-09-10/ai-framework.md 'What the first run found' #3).",
+    "frames": 1800,
+    "team": 0,
+    "player": 7,
+    "pool": 60,
+    "map": { "width": 2048, "height": 2048 },
+    "regions": "tools/ai-eval/fixtures/world/two-region.json",
+    "power": "tools/ai-eval/fixtures/world/power.json",
+    "params": [
+        { "scope": "game", "key": "region_homeland_team", "value": 0 },
+        { "scope": "game", "key": "region_frontier_team", "value": 1 },
+        { "scope": "game", "key": "objective_count", "value": 0 }
+    ],
+    "initial": {
+        "own": [
+            { "id": 1, "defId": 101, "x": 300, "y": 0, "z": 900, "health": 1.0, "hasCommands": false },
+            { "id": 2, "defId": 101, "x": 340, "y": 0, "z": 940, "health": 1.0, "hasCommands": false },
+            { "id": 3, "defId": 101, "x": 380, "y": 0, "z": 980, "health": 1.0, "hasCommands": false },
+            { "id": 4, "defId": 101, "x": 420, "y": 0, "z": 1020, "health": 1.0, "hasCommands": false },
+            { "id": 5, "defId": 101, "x": 460, "y": 0, "z": 1060, "health": 1.0, "hasCommands": false }
+        ],
+        "enemies": [
+            { "id": 90, "defId": 102, "x": 1700, "z": 900, "health": 1.0 },
+            { "id": 91, "defId": 102, "x": 1750, "z": 950, "health": 1.0 }
+        ]
+    },
+    "timeline": [
+        {
+            "frame": 300,
+            "event": { "kind": "objective", "region": "frontier", "id": "reward-posted" },
+            "params": [
+                { "scope": "game", "key": "objective_count", "value": 1 },
+                { "scope": "game", "key": "objective_1_type", "value": "control" },
+                { "scope": "game", "key": "objective_1_state", "value": "active" },
+                { "scope": "game", "key": "objective_1_reward", "value": 200 },
+                { "scope": "game", "key": "objective_1_team", "value": -1 },
+                { "scope": "game", "key": "objective_1_region", "value": "frontier" },
+                { "scope": "game", "key": "objective_1_scope", "value": "region" }
+            ]
+        }
+    ],
+    "expect": [
+        { "check": "booted" },
+        { "check": "noViolations" },
+        { "check": "noErrors" }
+    ],
+    "expectByAi": {
+        "strategos": [
+            { "check": "reactionWithin", "frames": 160 },
+            { "check": "hasDirectiveTypeAfter", "type": "Assault", "frame": 300, "region": "frontier",
+              "why": "frontier's region value is 0 — every implicit goal that could ever anchor a directive here is gated out (see `why` above); a directive appearing here can only be the published objective" }
+        ],
+        "null": [
+            { "check": "maxDirectives", "value": 0 }
+        ]
+    }
+}

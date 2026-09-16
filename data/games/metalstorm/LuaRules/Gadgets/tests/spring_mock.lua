@@ -30,10 +30,13 @@ function M.new()
         gaiaTeam = 99,             -- a team id that never collides with test teams
     }
 
-    function world.setPlayer(playerID, teamID, active, spectator, isAI)
+    function world.setPlayer(playerID, teamID, active, spectator, isAI, opts)
         world.players[playerID] = {
             team = teamID, active = active ~= false, spectator = spectator == true,
             isAI = isAI == true,
+            -- Lobby per-player custom options (tier/mentor/callsign) ride the
+            -- same 11th GetPlayerInfo return isAI does.
+            opts = opts,
         }
     end
 
@@ -91,7 +94,9 @@ function M.new()
             if getOpts then
                 -- Mirror LuaSyncedRead.cpp: 11th return is the player-options
                 -- table, carrying isAI="1" only for a virtual AI player.
-                local opts = p.isAI and { isAI = '1' } or {}
+                local opts = {}
+                for k, v in pairs(p.opts or {}) do opts[k] = v end
+                if p.isAI then opts.isAI = '1' end
                 return 'player' .. playerID, p.active, p.spectator, team,
                        team, 0, 0, '', 0, false, opts, false
             end

@@ -1,0 +1,709 @@
+{
+    "defs": {
+        "1": {
+            "class": "fable_showcase",
+            "dps": 0,
+            "hp": 1200,
+            "name": "fable_airship"
+        },
+        "2": {
+            "class": "fable_showcase",
+            "dps": 1030.91,
+            "hp": 24000,
+            "name": "fable_battleship"
+        },
+        "3": {
+            "class": "fable_showcase",
+            "dps": 90,
+            "hp": 1100,
+            "name": "fable_bomber"
+        },
+        "4": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 26000,
+            "name": "fable_carrier"
+        },
+        "5": {
+            "class": "fable_showcase",
+            "dps": 262.909,
+            "hp": 14000,
+            "name": "fable_colossus"
+        },
+        "6": {
+            "class": "fable_showcase",
+            "dps": 0,
+            "hp": 16000,
+            "name": "fable_factory"
+        },
+        "7": {
+            "class": "fable_showcase",
+            "dps": 242.5,
+            "hp": 900,
+            "name": "fable_fighter"
+        },
+        "8": {
+            "class": "fable_showcase",
+            "dps": 537.5,
+            "hp": 24000,
+            "name": "fable_heavy"
+        },
+        "9": {
+            "class": "fable_showcase",
+            "dps": 537.5,
+            "hp": 24000,
+            "name": "fable_heavy_anarchic"
+        },
+        "10": {
+            "class": "fable_showcase",
+            "dps": 537.5,
+            "hp": 24000,
+            "name": "fable_heavy_dynasty"
+        },
+        "11": {
+            "class": "fable_showcase",
+            "dps": 537.5,
+            "hp": 24000,
+            "name": "fable_heavy_order"
+        },
+        "12": {
+            "class": "fable_showcase",
+            "dps": 537.5,
+            "hp": 24000,
+            "name": "fable_heavy_resistance"
+        },
+        "13": {
+            "class": "fable_showcase",
+            "dps": 137.5,
+            "hp": 800,
+            "name": "fable_mech"
+        },
+        "14": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 2000,
+            "name": "fable_tank"
+        },
+        "15": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 2000,
+            "name": "fable_tank_anarchic"
+        },
+        "16": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 2000,
+            "name": "fable_tank_dressed"
+        },
+        "17": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 2000,
+            "name": "fable_tank_dynasty"
+        },
+        "18": {
+            "class": "fable_showcase",
+            "dps": 225,
+            "hp": 2000,
+            "name": "fable_tank_resistance"
+        },
+        "19": {
+            "class": "fable_showcase",
+            "dps": 50,
+            "hp": 7000,
+            "name": "fable_train_cargo"
+        },
+        "20": {
+            "class": "fable_showcase",
+            "dps": 305,
+            "hp": 9500,
+            "name": "fable_train_engine"
+        },
+        "21": {
+            "class": "fable_showcase",
+            "dps": 250,
+            "hp": 7000,
+            "name": "fable_train_gun"
+        },
+        "22": {
+            "class": "fable_showcase",
+            "dps": 100,
+            "hp": 7500,
+            "name": "fable_train_troop"
+        },
+        "23": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 15000,
+            "name": "ms_airbase"
+        },
+        "24": {
+            "class": "artillery",
+            "dps": 64,
+            "hp": 700,
+            "name": "ms_artillery_s1",
+            "scale": "1"
+        },
+        "25": {
+            "class": "artillery",
+            "dps": 70,
+            "hp": 1400,
+            "name": "ms_artillery_s2",
+            "scale": "2"
+        },
+        "26": {
+            "class": "artillery",
+            "dps": 100,
+            "hp": 2800,
+            "name": "ms_artillery_s3",
+            "scale": "3"
+        },
+        "27": {
+            "class": "artillery",
+            "dps": 150,
+            "hp": 5600,
+            "name": "ms_artillery_s4",
+            "scale": "4"
+        },
+        "28": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 6000,
+            "name": "ms_barricade_set"
+        },
+        "29": {
+            "class": "bombers",
+            "dps": 50,
+            "hp": 800,
+            "name": "ms_bombers_s1",
+            "scale": "1"
+        },
+        "30": {
+            "class": "bombers",
+            "dps": 90,
+            "hp": 1600,
+            "name": "ms_bombers_s2",
+            "scale": "2"
+        },
+        "31": {
+            "class": "bombers",
+            "dps": 218.571,
+            "hp": 3200,
+            "name": "ms_bombers_s3",
+            "scale": "3"
+        },
+        "32": {
+            "class": "bombers",
+            "dps": 288.571,
+            "hp": 4500,
+            "name": "ms_bombers_s4",
+            "scale": "4"
+        },
+        "33": {
+            "class": "civvehicles",
+            "dps": 0,
+            "hp": 350,
+            "name": "ms_civbus"
+        },
+        "34": {
+            "class": "civilians",
+            "dps": 0,
+            "hp": 200,
+            "name": "ms_civilians"
+        },
+        "35": {
+            "class": "civvehicles",
+            "dps": 0,
+            "hp": 400,
+            "name": "ms_civtruck"
+        },
+        "36": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 30000,
+            "name": "ms_command_nexus"
+        },
+        "37": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 4000,
+            "name": "ms_command_post"
+        },
+        "38": {
+            "class": "command",
+            "dps": 90,
+            "hp": 1600,
+            "name": "ms_command_s2",
+            "scale": "2"
+        },
+        "39": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 1200,
+            "name": "ms_comms_relay"
+        },
+        "40": {
+            "class": "courier",
+            "dps": 50,
+            "hp": 260,
+            "name": "ms_courier_car"
+        },
+        "41": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 4500,
+            "name": "ms_depot"
+        },
+        "42": {
+            "class": "engineers",
+            "dps": 0,
+            "hp": 480,
+            "name": "ms_engineers_s1",
+            "scale": "1"
+        },
+        "43": {
+            "class": "engineers",
+            "dps": 0,
+            "hp": 600,
+            "name": "ms_engineers_s2",
+            "scale": "2"
+        },
+        "44": {
+            "class": "engineers",
+            "dps": 0,
+            "hp": 1200,
+            "name": "ms_engineers_s3",
+            "scale": "3"
+        },
+        "45": {
+            "class": "engineers",
+            "dps": 0,
+            "hp": 2400,
+            "name": "ms_engineers_s4",
+            "scale": "4"
+        },
+        "46": {
+            "class": "expedition",
+            "dps": 0,
+            "hp": 520,
+            "name": "ms_expedition_rig"
+        },
+        "47": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 5000,
+            "name": "ms_field_workshop"
+        },
+        "48": {
+            "class": "fighters",
+            "dps": 163.333,
+            "hp": 500,
+            "name": "ms_fighters_s1",
+            "scale": "1"
+        },
+        "49": {
+            "class": "fighters",
+            "dps": 165,
+            "hp": 1000,
+            "name": "ms_fighters_s2",
+            "scale": "2"
+        },
+        "50": {
+            "class": "fighters",
+            "dps": 242.5,
+            "hp": 2000,
+            "name": "ms_fighters_s3",
+            "scale": "3"
+        },
+        "51": {
+            "class": "fighters",
+            "dps": 350.909,
+            "hp": 3200,
+            "name": "ms_fighters_s4",
+            "scale": "4"
+        },
+        "52": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 18000,
+            "name": "ms_foundry"
+        },
+        "53": {
+            "class": "tanker",
+            "dps": 0,
+            "hp": 380,
+            "name": "ms_fuel_tanker"
+        },
+        "54": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 12000,
+            "name": "ms_garrison"
+        },
+        "55": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 4000,
+            "name": "ms_grain_silo"
+        },
+        "56": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 5000,
+            "name": "ms_habitat"
+        },
+        "57": {
+            "class": "landing_ship",
+            "dps": 0,
+            "hp": 2600,
+            "name": "ms_landing_ship"
+        },
+        "58": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 900,
+            "name": "ms_market_stalls"
+        },
+        "59": {
+            "class": "mechs",
+            "dps": 90,
+            "hp": 900,
+            "name": "ms_mechs_s1",
+            "scale": "1"
+        },
+        "60": {
+            "class": "mechs",
+            "dps": 137.5,
+            "hp": 1800,
+            "name": "ms_mechs_s2",
+            "scale": "2"
+        },
+        "61": {
+            "class": "mechs",
+            "dps": 295.909,
+            "hp": 3600,
+            "name": "ms_mechs_s3",
+            "scale": "3"
+        },
+        "62": {
+            "class": "mechs",
+            "dps": 601.818,
+            "hp": 14000,
+            "name": "ms_mechs_s4",
+            "scale": "4"
+        },
+        "63": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 4000,
+            "name": "ms_meeting_hall"
+        },
+        "64": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 3500,
+            "name": "ms_metal_pit"
+        },
+        "65": {
+            "class": "civilians",
+            "dps": 50,
+            "hp": 300,
+            "name": "ms_militia"
+        },
+        "66": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 2500,
+            "name": "ms_mooring_mast"
+        },
+        "67": {
+            "class": "balloon",
+            "dps": 0,
+            "hp": 300,
+            "name": "ms_obs_balloon"
+        },
+        "68": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 3000,
+            "name": "ms_oil_derrick"
+        },
+        "69": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 3500,
+            "name": "ms_pontoon_wharf"
+        },
+        "70": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 3000,
+            "name": "ms_port_crane"
+        },
+        "71": {
+            "class": "radar",
+            "dps": 0,
+            "hp": 300,
+            "name": "ms_radar_s1",
+            "scale": "1"
+        },
+        "72": {
+            "class": "radar",
+            "dps": 0,
+            "hp": 600,
+            "name": "ms_radar_s2",
+            "scale": "2"
+        },
+        "73": {
+            "class": "radar",
+            "dps": 0,
+            "hp": 1200,
+            "name": "ms_radar_s3",
+            "scale": "3"
+        },
+        "74": {
+            "class": "radar",
+            "dps": 0,
+            "hp": 2400,
+            "name": "ms_radar_s4",
+            "scale": "4"
+        },
+        "75": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 5000,
+            "name": "ms_rail_platform"
+        },
+        "76": {
+            "class": "scout",
+            "dps": 0,
+            "hp": 240,
+            "name": "ms_scout_buggy"
+        },
+        "77": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 2200,
+            "name": "ms_shanty_block"
+        },
+        "78": {
+            "class": "ships",
+            "dps": 137.5,
+            "hp": 2500,
+            "name": "ms_ships_s1",
+            "scale": "1"
+        },
+        "79": {
+            "class": "ships",
+            "dps": 370.909,
+            "hp": 7500,
+            "name": "ms_ships_s2",
+            "scale": "2"
+        },
+        "80": {
+            "class": "ships",
+            "dps": 482.909,
+            "hp": 10000,
+            "name": "ms_ships_s3",
+            "scale": "3"
+        },
+        "81": {
+            "class": "ships",
+            "dps": 740,
+            "hp": 24000,
+            "name": "ms_ships_s4",
+            "scale": "4"
+        },
+        "82": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 20000,
+            "name": "ms_shipyard"
+        },
+        "83": {
+            "class": "soldiers",
+            "dps": 50,
+            "hp": 960,
+            "name": "ms_soldiers_s1",
+            "scale": "1"
+        },
+        "84": {
+            "class": "soldiers",
+            "dps": 90,
+            "hp": 800,
+            "name": "ms_soldiers_s2",
+            "scale": "2"
+        },
+        "85": {
+            "class": "soldiers",
+            "dps": 136.667,
+            "hp": 1000,
+            "name": "ms_soldiers_s3",
+            "scale": "3"
+        },
+        "86": {
+            "class": "soldiers",
+            "dps": 210.833,
+            "hp": 2400,
+            "name": "ms_soldiers_s4",
+            "scale": "4"
+        },
+        "87": {
+            "class": "staticdefense",
+            "dps": 90,
+            "hp": 4800,
+            "name": "ms_staticdefense_s1",
+            "scale": "1"
+        },
+        "88": {
+            "class": "staticdefense",
+            "dps": 270.909,
+            "hp": 14400,
+            "name": "ms_staticdefense_s2",
+            "scale": "2"
+        },
+        "89": {
+            "class": "staticdefense",
+            "dps": 410.909,
+            "hp": 26000,
+            "name": "ms_staticdefense_s3",
+            "scale": "3"
+        },
+        "90": {
+            "class": "staticdefense",
+            "dps": 270,
+            "hp": 45000,
+            "name": "ms_staticdefense_s4",
+            "scale": "4"
+        },
+        "91": {
+            "class": "subs",
+            "dps": 100,
+            "hp": 2800,
+            "name": "ms_subs_s1",
+            "scale": "1"
+        },
+        "92": {
+            "class": "subs",
+            "dps": 137.5,
+            "hp": 3200,
+            "name": "ms_subs_s2",
+            "scale": "2"
+        },
+        "93": {
+            "class": "subs",
+            "dps": 181.818,
+            "hp": 6800,
+            "name": "ms_subs_s3",
+            "scale": "3"
+        },
+        "94": {
+            "class": "subs",
+            "dps": 261.818,
+            "hp": 14000,
+            "name": "ms_subs_s4",
+            "scale": "4"
+        },
+        "95": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 2000,
+            "name": "ms_supply_dump"
+        },
+        "96": {
+            "class": "supply",
+            "dps": 0,
+            "hp": 420,
+            "name": "ms_supply_truck"
+        },
+        "97": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 5000,
+            "name": "ms_tank_farm"
+        },
+        "98": {
+            "class": "tanks",
+            "dps": 91.6667,
+            "hp": 2400,
+            "name": "ms_tanks_s1",
+            "scale": "1"
+        },
+        "99": {
+            "class": "tanks",
+            "dps": 190.909,
+            "hp": 7200,
+            "name": "ms_tanks_s2",
+            "scale": "2"
+        },
+        "100": {
+            "class": "tanks",
+            "dps": 315,
+            "hp": 13000,
+            "name": "ms_tanks_s3",
+            "scale": "3"
+        },
+        "101": {
+            "class": "tanks",
+            "dps": 620,
+            "hp": 30000,
+            "name": "ms_tanks_s4",
+            "scale": "4"
+        },
+        "102": {
+            "class": "technical",
+            "dps": 77.7778,
+            "hp": 480,
+            "name": "ms_technical"
+        },
+        "103": {
+            "class": "sites",
+            "dps": 0,
+            "hp": 2500,
+            "name": "ms_timber_yard"
+        },
+        "104": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 4000,
+            "name": "ms_transit_hub"
+        },
+        "105": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 1500,
+            "name": "ms_watchtower"
+        },
+        "106": {
+            "class": "buildings",
+            "dps": 0,
+            "hp": 6000,
+            "name": "ms_water_works"
+        },
+        "107": {
+            "class": "wz_baseline",
+            "dps": 0,
+            "hp": 20000,
+            "name": "wz_building"
+        },
+        "108": {
+            "class": "wz_baseline",
+            "dps": 50,
+            "hp": 400,
+            "name": "wz_cyborg"
+        },
+        "109": {
+            "class": "wz_baseline",
+            "dps": 190.909,
+            "hp": 1800,
+            "name": "wz_tank"
+        },
+        "110": {
+            "class": "wz_baseline",
+            "dps": 90,
+            "hp": 700,
+            "name": "wz_wheeled"
+        }
+    }
+}

@@ -8,11 +8,72 @@ Claude API — `npx vitest run` and `spring-tests` are hermetic, and must stay
 that way. This directory is the one place a live call is allowed to live, and
 you have to run it on purpose.
 
-The one exception is `score.mjs`, which is pure (no fs, no network, no clock)
-and *is* covered by the ordinary suite via `score.test.mjs`. That split is the
-whole design: the scoring is the part most likely to be quietly wrong in a way
-that flatters the prompt, so it is tested for free, while the part that spends
-money stays opt-in.
+The exceptions are the pure parts — `score.mjs`, `score-instructions.mjs` and
+the offline replay — which touch no network and are covered by the ordinary
+suite. That split is the whole design: the scoring is the part most likely to be
+quietly wrong in a way that flatters the prompt, so it is tested for free, while
+the part that spends money stays opt-in.
+
+(Until 2026-09-17 this paragraph was a claim rather than a fact: `score.test.mjs`
+existed but was in no vitest project, and the client suite's `src/**` include
+never reached it. There is now an `nl-eval` project in `client/vite.config.ts`,
+so `npx vitest run` from `client/` really does cover it. A suite in no gate is
+not a gate.)
+
+## The two arms
+
+The model arm (below) can report but can never gate: it needs a key and spends
+money, and §8 forbids an API call in CI. So there is a second, **offline** arm
+that gates:
+
+```sh
+cd client && npx vitest run src/ui/native-ui/nl-offline-eval.test.ts   # the gate
+node tools/nl-eval/run-eval.mjs --fake offline-parser                  # the same numbers, as a report
+```
+
+It runs every golden fixture through the client's OWN producers — the
+deterministic fast path (`nl-fast-path.ts`) first, then the offline parser — and
+scores the envelopes with the same `scoreEnvelope` the model arm uses. No fetch,
+no key, no clock, no randomness: the same numbers on every machine, every run.
+`offline-baseline.json` is committed beside this file and the suite fails on any
+category that loses ground.
+
+The CLI form is a REPLAY, not a second implementation: `nl-offline-eval.test.ts`
+under `NL_OFFLINE_BASELINE=write` emits `offline-recording.json`, and
+`--fake offline-parser` scores that. Recomputing the envelopes in JS would mean
+a paraphrase of two TypeScript modules, and this directory has already learned
+once what a paraphrase costs (see "The prompt is the same document on both
+sides", below).
+
+Three numbers, reported separately because they move independently:
+
+- **pass rate per category** — how much of the corpus the client understands
+  with the proxy switched off.
+- **fast-path absorption** — the fraction claimed before the model is asked. A
+  LATENCY number, never a quality one: a rise is only good news if the pass rate
+  held.
+- **offline coverage** — the fraction that produced something other than a
+  refusal.
+
+## The prompt, scored offline
+
+```sh
+node tools/nl-eval/instructions-eval.mjs                          # score the shipped document
+node tools/nl-eval/instructions-eval.mjs --candidate draft.md     # compare a rewrite, exit 3 if it is not better
+node tools/nl-eval/instructions-eval.mjs --save-baseline
+```
+
+This measures **coverage**: for every construct the corpus and the shipped
+schema require, does `nl-instructions.md` name it, and does it show it in an
+example? It does not measure what the model does with the document — wording,
+ordering and emphasis are all invisible to it, and judging those is the
+LLM-judged arm's job. It is worth having because the failure it catches is the
+one that actually happened twice: the prompt drifting behind the contract.
+
+`instructions-baseline.json` is committed, and `score-instructions.test.mjs`
+fails if the shipped document stops teaching something the baseline says it
+teaches.
+
 
 ## Running it
 
@@ -44,6 +105,7 @@ node tools/nl-eval/run-eval.mjs --baseline build/nl-eval/baseline.json
 | `--tolerance <n>` | `0` | Per-category slack, in fixtures |
 | `--save-baseline` | off | Also write `build/nl-eval/baseline.json` |
 | `--verbose` | off | With `--dry-run`, print the first request body |
+| `--fake offline-parser` | off | Replay the recorded OFFLINE arm instead of calling the API. No key, no spend, deterministic |
 
 Every run writes `build/nl-eval/report-<timestamp>.json` and
 `build/nl-eval/latest.json` — the full per-fixture detail, including which
@@ -115,8 +177,13 @@ Verify it, don't assume it. Both sides print an FNV-1a of the assembled prompt:
 ```sh
 node tools/nl-eval/run-eval.mjs --dry-run | grep 'system prompt'
 ./build/<preset>/spring-tests -tc="the prompt built from the SHIPPED*" -s | grep fnv1a
-# 41039 bytes, fnv1a=d22eb3a91b064e3f — on both
+# 49845 bytes, fnv1a=d2ef8c916a5cdee8 — on both
 ```
+
+(The 2026-09-17 contract-v2 rewrite of `nl-instructions.md` moved this from
+41039 / `d22eb3a91b064e3f`. The C++ side reads the same file, so it follows
+automatically — the number above has NOT been verified against a build in this
+session; it is the JS side's, and a build session should confirm the two agree.)
 
 If they differ, diff the documents rather than guessing:
 `--dump-prompt <path>` on this side, `SPRING_NL_DUMP_PROMPT=<path>` on that one.

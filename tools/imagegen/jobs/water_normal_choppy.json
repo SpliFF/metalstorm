@@ -1,0 +1,11 @@
+{
+  "id": "water_normal_choppy",
+  "class": "water_normal",
+  "prompt": "Choppy water surface, higher-frequency ripples, sharper wave crests.",
+  "seed": 100702,
+  "width": 512,
+  "height": 512,
+  "amplitude": 0.75,
+  "output": "art/gen/water/water_normal_choppy.png",
+  "post": ["seamless", "pow2", "pbr_normal_only"]
+}

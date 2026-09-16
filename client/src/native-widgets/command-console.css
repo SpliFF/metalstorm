@@ -31,7 +31,7 @@
     border: 1px solid var(--nui-border);
     border-top-color: var(--nui-border-hi);
     border-radius: var(--nui-radius);
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--nui-edge);
     color: var(--nui-text);
     font: var(--nui-font);
     pointer-events: auto;
@@ -113,7 +113,7 @@
 .cc-chip {
     padding: 2px 9px;
     border: 1px solid var(--nui-accent);
-    border-radius: 10px;
+    border-radius: var(--nui-radius);
     background: transparent;
     color: var(--nui-accent);
     font: var(--nui-font);

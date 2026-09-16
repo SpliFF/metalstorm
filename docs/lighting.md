@@ -5,8 +5,10 @@ and the gotchas you need to know before changing anything.
 
 The implementation is split across three modules:
 
-- [client/src/core/scene-lighting.ts](../client/src/core/scene-lighting.ts) — builds the sun + ambient + HDR pipeline + CSM; owns the lighting-style / ambient-level knobs
-- [client/src/core/map-lighting.ts](../client/src/core/map-lighting.ts) — fetches and parses `mapinfo.lua → lighting`
+- [client/src/core/scene-lighting.ts](../client/src/core/scene-lighting.ts) — builds the sun + ambient + HDR pipeline + CSM; owns the lighting-style / ambient-level knobs and the grading/SSAO2 pass
+- [client/src/core/map-lighting.ts](../client/src/core/map-lighting.ts) — fetches and parses `mapinfo.lua → lighting` and `→ atmosphere`
+- [client/src/core/atmosphere.ts](../client/src/core/atmosphere.ts) — sky dome + fog + clearColor, driven by `MapAtmosphere` + the sun direction
+- [client/src/core/water-surface.ts](../client/src/core/water-surface.ts) — the Y=0 water plane material (scroll-bump + Fresnel + shore foam)
 - [client/src/core/entity-renderer.ts](../client/src/core/entity-renderer.ts) + [team-color-plugin.ts](../client/src/core/team-color-plugin.ts) — unit `PBRMaterial` + team-colour material plugin
 
 See [PLAN-lighting.md](../PLAN-lighting.md) for the rollout phases. This
@@ -260,6 +262,88 @@ shadow floors. The override resets at the next game session. While a
 `SunRig` day-night cycle runs it owns `ambient.intensity` and will
 overwrite live retunes until disabled.
 
+## Atmosphere (L-ATMOS)
+
+Sky dome + exponential fog + `clearColor`, driven by `mapinfo.lua →
+atmosphere` (`MapAtmosphere` — fogStart/fogEnd/fogColor/skyColor/sunColor,
+parsed since L2 but previously unapplied) and the sun direction the
+lighting pass already resolved.
+
+```
+mapinfo.lua atmosphere table
+    |
+    v
+loadMapAtmosphere(mapSourceUrl)     map-lighting.ts (HTTP-cached re-read
+    |                               of the same mapinfo.lua loadMapLighting
+    +-> MapAtmosphere { fogStart, fogEnd, fogColor, skyColor, ... }
+    |
+    v
+applyMapAtmosphere(atmosphere, scene, atmo, sunDirToSun)   atmosphere.ts
+    |   — sky luminance/turbidity from sun elevation
+    |   — scene.fogDensity (EXP2) or fogStart/fogEnd (LINEAR, gfx.sky=false)
+    |   — scene.clearColor = fog colour
+    v
+SkyMaterial (@babylonjs/materials) on a 40000-elmo dome, renderingGroupId 0,
+infiniteDistance, no shadows
+```
+
+`createAtmosphere(scene)` builds the dome once per session
+(game-processor.ts, right after `scene.clearColor` is seeded with a
+placeholder — before the real camera/FX setup); `applyMapAtmosphere` retunes
+it once per map load, sequenced *after* `applyMapLighting` so the sun
+direction it reads is the map's authored one, not the createSceneLighting
+placeholder.
+
+**Sky params from sun elevation.** `deriveSkyParams(sunElevationSin)`
+(pure, atmosphere.ts) maps a high sun to low turbidity / high luminance
+(clear, bright) and a low/below-horizon sun to high turbidity / low
+luminance (hazy, dim) — the "low warm sun" art-direction cue.
+
+**Fog density from `fogStart`/`fogEnd`.** Recoil's `fogStart`/`fogEnd` are
+*fractions* of the view distance, not absolute elmos (`CMapInfo::
+ReadAtmosphere`). `FOG_VIEW_RANGE_ELMOS` (8000) turns the fraction into a
+distance; `deriveFogDensity` solves the EXP2 density so that distance reads
+as ~1% transmittance (`exp(-(density·d)²) = 0.01`). `fogStart` has no EXP2
+analogue (no linear onset) — it only feeds `deriveLinearFog`, used by the
+`gfx.sky=false` low-preset fallback (`Scene.FOGMODE_LINEAR`, cheaper: no
+per-fragment density curve).
+
+**Fog/clear colour — FIDELITY-STANDIN.** `deriveFogColor` desaturates the
+authored `skyColor` 30% (same formula `scene-lighting.ts`'s ambient
+desaturation uses) and stands in for a true rendered horizon sample —
+reading the SkyMaterial's actual horizon pixel needs a render-to-texture
+readback, a full extra pass just to seed one colour. `skyColor` is the
+closest authored analogue mapinfo.lua ships, and horizon haze genuinely
+reads closer to neutral than the zenith colour, so the same desaturation
+already used for ambient applies here too.
+
+**Water surface.** `water-surface.ts` replaces the flat StandardMaterial
+plane with a `ShaderMaterial` (`shaders/water-surface.ts`): two
+independently-scrolling analytic bump fields (no normal-map texture asset
+yet — L-IMAGEGEN deferred) summed into a perturbed normal, Fresnel-mixed
+base colour ("Fresnel darkening" — near-vertical views read the tinted
+deep colour, grazing views lighten toward a pale sky-reflection stand-in;
+no reflection RTT), and shore foam. The foam reuses the *exact* depth-blend
+curve `water-absorption-plugin.ts` applies to the underwater terrain shade
+(`SMF_SHALLOW_WATER_DEPTH = 10` elmos): a heightmap-derived "depth below
+Y=0" texture (`buildShoreDepthData`, pure/tested) feeds the same
+`clamp(depth * 0.1, 0, 1)` blend, inverted so foam is strongest at the
+waterline. Still not Recoil's BumpWater or Babylon's `WaterMaterial` —
+both need a reflection RTT, a second full scene render, too costly at
+XL900 scale.
+
+**Grading (scene-lighting.ts, same `DefaultRenderingPipeline`).** Exposure
+0.9 / contrast 1.15, `ColorCurves` (cool shadows, warm highlights,
+saturation −10), vignette 0.35 (always on), animated grain (intensity 6,
+`gfx.grain`), sharpen 0.25 (High preset only, `gfx.quality === 'high'`),
+bloom threshold 1.2 / weight 0.25. SSAO2 (`gfx.ssao`, `requiresRestart`:
+built once at `createSceneLighting` time) — `ssaoRatio 0.5`, radius 8
+elmos, High preset only.
+
+**`gfx.*` gating.** New keys `gfx.sky` / `gfx.ssao` / `gfx.grain`
+(client-settings.ts); the Low preset sets all three false and the sky
+fallback also switches fog to `FOGMODE_LINEAR` (cheaper than EXP2).
+
 ## ⚠️ Gotcha: thin-instance matrix packing breaks shadow casting
 
 **Do not pack per-instance auxiliary data into a thin-instance world
@@ -319,6 +403,8 @@ Available in DevTools:
 | `window.__renderPipeline` | `DefaultRenderingPipeline` — exposure, contrast, tonemap, FXAA |
 | `window.__csm` | `CascadedShadowGenerator` — bias, normalBias, lambda, darkness |
 | `window.__mapLighting` | Last `MapLighting` applied (parsed `mapinfo.lua`) |
+| `window.__atmosphere` | `Atmosphere` — sky dome mesh + `SkyMaterial` (luminance, turbidity, sunPosition) |
+| `window.__ssao` | `SSAO2RenderingPipeline`, when `gfx.ssao` was on at session start — radius, totalStrength, base |
 | `__setAmbientLevel(v)` | Override the hemispheric ambient intensity (see "Per-game lighting style") |
 | `__setLightingStyle(s)` | Switch `'gameplay'`/`'realistic'` live |
 | `__fowDarkening.get()` / `.set({radar,explored,unscouted})` | Fog-of-war terrain **darkening** per visibility tier (0 = fully lit, 1 = opaque black). Out-of-vision ground is *dimmed*, never blacked out, so the (static, client-side) terrain stays recognisable while units/features remain hidden (their visibility is filtered server-side). Defaults: `radar 0.30`, `explored 0.50`, `unscouted 0.72`. Levels < 1 are the fix for the "black terrain" that was really unrendered FOW — see `TerrainFog` in `client/src/core/terrain.ts`. |

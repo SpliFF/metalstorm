@@ -326,10 +326,18 @@ def main():
             if v is not None and v not in effects:
                 fail(f'weapon-fx.json defaults.{key}.{slot}: effect {v!r} not in library.json')
 
-    # ── unit-fx
+    # ── unit-fx. `sound` is a gamedata/sounds.lua SoundItem key (played by
+    # unit-fx-dispatch.ts at the death position), a different namespace from
+    # every other slot (a library.json effect name) — checked against
+    # `sounds`, same as weapon-fx.json's fireSound/impactSound above.
     for cls, row in unit_fx['byClass'].items():
         for slot, v in row.items():
-            if v is not None and v not in effects:
+            if v is None:
+                continue
+            if slot == 'sound':
+                if v.lower() not in sounds:
+                    fail(f'unit-fx.json byClass.{cls}.sound: {v!r} is not a SoundItem')
+            elif v not in effects:
                 fail(f'unit-fx.json byClass.{cls}.{slot}: effect {v!r} not in library.json')
     for cls, scales in unit_fx['scaleOverrides'].items():
         if cls == '_doc':
@@ -338,7 +346,12 @@ def main():
             fail(f'unit-fx.json scaleOverrides.{cls}: no byClass row')
         for s, row in scales.items():
             for slot, v in row.items():
-                if v is not None and v not in effects:
+                if v is None:
+                    continue
+                if slot == 'sound':
+                    if v.lower() not in sounds:
+                        fail(f'unit-fx.json scaleOverrides.{cls}.{s}.sound: {v!r} is not a SoundItem')
+                elif v not in effects:
                     fail(f'unit-fx.json scaleOverrides.{cls}.{s}.{slot}: {v!r} not in library.json')
     for dname, row in unit_fx['units'].items():
         if dname == '_doc':

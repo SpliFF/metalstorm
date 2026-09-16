@@ -51,6 +51,11 @@
             { "check": "hasDirectiveTypeAfter", "type": "Withdraw", "frame": 600 },
             { "check": "withdrawsThrough", "x": 120, "z": 1900, "why": "the published departure zone (P7), not a guessed map edge" }
         ],
+        "strategos": [
+            { "check": "reactionWithin", "frames": 160 },
+            { "check": "hasDirectiveTypeAfter", "type": "Withdraw", "frame": 600, "region": "south_marsh",
+              "why": "the departure zone (120,1900) resolves into south_marsh — strategos anchors WITHDRAW on the region, not a point, so this (not withdrawsThrough) is the shape it can honestly satisfy" }
+        ],
         "null": [
             { "check": "maxDirectives", "value": 0 }
         ]

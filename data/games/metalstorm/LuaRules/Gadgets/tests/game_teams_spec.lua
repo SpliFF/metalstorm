@@ -492,3 +492,59 @@ describe("GameStart roster seed (wars §8.1)", function()
         assert.are.equal(1, world.trp(1, 'team_leader'))
     end)
 end)
+
+-- ============================================================
+-- Standing transport (PLAN-beta-journey.md §(c))
+-- ============================================================
+-- The lobby's per-player custom options are the only channel tier/mentor/
+-- callsign have into the sim, and game_assignment.lua's precedence check reads
+-- nothing else. What matters is the republished KEY, so these assert on the
+-- published param and not on the option table.
+describe("standing transport (§(c))", function()
+    it("republishes tier/mentor/callsign as public game rules params", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.setPlayer(2, 1, true, false, false, { tier = '2', callsign = 'Vex' })
+        world.setPlayer(1, 1, true, false, false,
+                        { tier = '0', mentor = 'player2', callsign = 'Raven' })
+
+        gadgetObj:PlayerAdded(1)
+        gadgetObj:PlayerAdded(2)
+
+        assert.are.equal(0, world.rp('rank_1'))
+        assert.are.equal(2, world.rp('rank_2'))
+        assert.are.equal('Raven', world.rp('callsign_1'))
+        assert.are.equal(2, world.rp('mentor_1'))   -- username resolved to playerID
+    end)
+
+    it("publishes -1 for the AI mentor", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.setPlayer(1, 1, true, false, false, { tier = '0', mentor = 'ai' })
+
+        gadgetObj:PlayerAdded(1)
+
+        assert.are.equal(-1, world.rp('mentor_1'))
+    end)
+
+    it("publishes nothing when the launch carries no custom options", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.setPlayer(1, 1, true)
+
+        gadgetObj:PlayerAdded(1)
+
+        assert.is_nil(world.rp('rank_1'))
+        assert.is_nil(world.rp('callsign_1'))
+    end)
+
+    it("leaves an unresolvable mentor name unpublished rather than guessing", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        world.setPlayer(1, 1, true, false, false, { tier = '0', mentor = 'nobody' })
+
+        gadgetObj:PlayerAdded(1)
+
+        assert.is_nil(world.rp('mentor_1'))
+    end)
+end)

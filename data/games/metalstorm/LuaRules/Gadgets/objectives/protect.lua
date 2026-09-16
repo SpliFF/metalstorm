@@ -8,10 +8,24 @@ local protect = {}
 
 local PARTICIPATION_RADIUS = 700
 
+--- F14: `quorum` is a count of things, so it must be a whole number in
+--- 1..roster. 0 or negative makes a "keep N alive" objective unfailable; more
+--- than the roster makes it unwinnable. Neither was rejected, and neither is
+--- visible at the board — the objective simply never resolves the way its
+--- author meant.
+local function validQuorum(q, n)
+    if q == nil then return true end
+    if type(q) ~= 'number' or q ~= math.floor(q) then return false end
+    return q >= 1 and q <= n
+end
+
 function protect.validateParams(params)
     if type(params) ~= 'table' then return false, 'params required' end
     if type(params.targetUnitIDs) ~= 'table' or #params.targetUnitIDs == 0 then
         return false, 'targetUnitIDs required'
+    end
+    if not validQuorum(params.quorum, #params.targetUnitIDs) then
+        return false, 'quorum must be a whole number in 1..' .. #params.targetUnitIDs
     end
     return true
 end

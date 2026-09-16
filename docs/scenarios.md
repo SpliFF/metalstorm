@@ -415,6 +415,113 @@ Two things offline validation cannot see, and one it can:
 
 ---
 
+## 9b. Wars that cross water, and wars on split maps
+
+Everything below was measured while authoring `scenarios/pelagic_landing.lua`
+and `scenarios/pelagic_counterlanding.lua` (Pelagic Expanse, 2026-09-17). It is
+here because none of it is visible from the schema, and every item on it cost a
+run.
+
+### The map has to say what it is
+
+`tools/mapgen/verify_scenario_maps.py` gates every offerable war on its map, and
+the verdict is the MAP's: `regions_from_map.py --verify` compares the
+connectivity it measures against the intent the map's own `mapinfo.lua`
+declares. Under PLAN-maps.md §2k an island map is legal content — the crossing
+is a transport problem — but it has to declare `metalstorm.reachability =
+"split"`. A map that declares `"connected"` and measures split fails the gate,
+and the failure is about the MAP, not about your war.
+
+`pelagic_expanse` was in exactly that state: eight start positions in six
+disconnected VEH components, declared connected. The generator table that
+decides the declaration is `SHIPPED_REACHABILITY` in
+`tools/mapgen/archipelago.py`; a map missing from it silently gets
+`reach.DEFAULT_INTENT`, which is `"connected"`. **The map directories
+themselves are gitignored**, so correcting a shipped `mapinfo.lua` fixes your
+checkout and the generator table fixes the next regeneration — do both.
+
+### Movement class is per region, not per map
+
+"Split" is not one fact. Measured on Pelagic Expanse with
+`regions_from_map.MOVE_CLASSES`:
+
+| class | maxslope / ford | the Hollow Dell theatre |
+|---|---|---|
+| INFANTRY | 45° / 12 elmos | one component |
+| VEH | 32° / 20 elmos | one component |
+| HEAVY | 24° / 30 elmos | **four fragments — the prize is unreachable** |
+
+So those two wars stage no HEAVY def at all: no `ms_tanks_s3`/`s4`, no
+`ms_artillery_s3`/`s4`, no `fable_heavy`. An army ordered at a prize its
+movement class cannot reach stands still for the whole match, and nothing in
+the log says so. Check the class before you pick the roster, not after.
+
+### Sea arrivals
+
+`game_transports.lua` validates the geometry at load (`terrainProblem`), and
+these are the rules that actually bite:
+
+- A `sea` entry AND drop zone must both be under at least the carrier's
+  `minWaterDepth` (SHIP = 12, `gamedata/moveinfo.tdf`). A landing ship created
+  on dry ground is refused by `Spring.CreateUnit` with nil and **no log line**.
+- The drop zone is therefore necessarily **offshore**, so it has to have dry
+  ground within `dropRadius` (sea default 450) or the cargo has nowhere to go.
+  Pick both ends by flood-filling the ship-navigable water from the entry and
+  then measuring to the nearest beach — a drop zone that is deep enough but on
+  the far side of a sand bar is a wave that never arrives.
+- An `air` drop zone must suit the **cargo**, not the carrier. Its entry point
+  has no constraint at all: an aircraft has no ground MoveDef, so asking
+  `Spring.TestMoveOrder` about its entry square answers "no" over open water,
+  which is where air waves enter from.
+- **The engine will not finish a ship's unload.** It accepts
+  `CMD_UNLOAD_UNITS`, decomposes it into a concrete `CMD_UNLOAD_UNIT` on a dry
+  square, and then waits for the hull to get near that square — which a SHIP
+  cannot do. Measured: three sea waves in one match holding their cargo at
+  0.2 elmo/frame, 12000 frames in. `game_transports.lua` now beaches the cargo
+  itself after `BEACH_AFTER_RETRIES`, so this is handled — but if you are
+  reading arrival code, that is why the fallback exists.
+
+### A departure zone is a place a ship has to be able to reach
+
+`departure` is §3.4's withdrawal zone and §7.10's `extractArea`. Put it in water
+at least `minWaterDepth` deep and in the same navigable body as the entry lane,
+and keep it ≥ ~900 elmos from your own parked carrier — a departure circle drawn
+over a staged transport deletes it on the first poll after frame 60, which reads
+as a crash.
+
+### `count` / `spacing` centres its grid
+
+`gridOffsets` lays a square-ish grid **centred** on the point, so a 3-wide trio
+at spacing 270 reaches 135 elmos to each side. On a 300-elmo beach that puts
+the outer file in the water, where `CreateUnit` refuses it silently. Size the
+spread to the ground.
+
+### The sweep that catches the rest
+
+`LuaRules/Gadgets/tests/scenario_references_spec.lua` walks EVERY shipped
+scenario and checks unit defs, feature defs, command names, `world.map` and
+region keys against their producers — `units/*.lua` executed with a stubbed
+`VFS.Include`, `rts/Sim/Units/CommandAI/Command.h`, the map's own
+`mapdata/regions.lua`. Run it from `data/games/metalstorm`; the map-dependent
+half goes `pending` without `data/maps`, so point it at a checkout that has
+them:
+
+```
+cd data/games/metalstorm
+SPRINGRTS_MAPS_DIR=/path/to/springrts-web/data/maps \
+  busted LuaRules/Gadgets/tests/scenario_references_spec.lua
+```
+
+It exists because the failures it catches are all silent: an unknown
+`units[].def` is dropped and the war stages one column short; an unknown
+`cargo[].def` drops the whole wave; a region key the map does not publish makes
+`SetControllingTeam` a no-op, so a `control` objective on it can never complete
+and the war cannot end. It found two on its first run — `roundtrip_static.lua`
+and `scenario_smoke_test.lua` were still addressing `green_flat_x34_v3` by grid
+key (`'2:2'`) after that map gained a named region graph.
+
+---
+
 ## 10. The authoring loop
 
 ```

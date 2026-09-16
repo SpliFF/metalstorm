@@ -1,6 +1,8 @@
 {
   "_doc": [
-    "Metalstorm weapon -> FX/SFX resolution map. The native-game analogue of the ",
+    "LIVE: read by client/src/core/weapon-fx-resolver.ts (exact -> defaults[weapontype] ",
+  "-> __fallback, case-insensitive) and drawn by native-fx/fx-game-loader.ts. ",
+  "Metalstorm weapon -> FX/SFX resolution map. The native-game analogue of the ",
     "BAR/ZK client dispatch (client/src/core/weapon-fx-dispatch.ts effectForFire / ",
     "effectForImpact), but data instead of code: no cegTag/explosionGenerator ",
     "strings on the defs — the client FX dispatch reads THIS table keyed by weapon ",

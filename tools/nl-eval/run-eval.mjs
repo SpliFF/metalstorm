@@ -57,6 +57,21 @@ const ONLY = flag('only', '');
 const BASELINE_PATH = flag('baseline', '');
 const TOLERANCE = Number(flag('tolerance', '0')) || 0;
 const SAVE_BASELINE = process.argv.includes('--save-baseline');
+/**
+ * Replay a recorded arm instead of calling the API.
+ *
+ * `offline-parser` reads `offline-recording.json` — the envelopes the client's
+ * OWN producers built for the same fixtures, emitted by
+ * `nl-offline-eval.test.ts` under `NL_OFFLINE_BASELINE=write`. It spends
+ * nothing, needs no key and is deterministic, which is what lets the offline
+ * arm be a gate while this harness's model arm can only ever be a report.
+ *
+ * It is a REPLAY, not a second implementation: recomputing the offline
+ * envelopes here would mean a JS paraphrase of `nl-fast-path.ts` and
+ * `nl-client.ts`, and this directory has already learned once (see the README's
+ * "The prompt is the same document on both sides") what a paraphrase costs.
+ */
+const FAKE = flag('fake', '');
 const dryRun = process.argv.includes('--dry-run');
 const verbose = process.argv.includes('--verbose');
 
@@ -74,7 +89,7 @@ const apiKey = (process.env.SPRING_NL_API_KEY || process.env.ANTHROPIC_API_KEY |
 const PRICES = {
     'claude-opus-5': { in: 5, out: 25 },
     'claude-opus-4-8': { in: 5, out: 25 },
-    'claude-sonnet-5': { in: 3, out: 15 },
+    'claude-sonnet-5': { in: 2, out: 10 },
     'claude-haiku-4-5': { in: 1, out: 5 },
 };
 
@@ -394,6 +409,10 @@ if (DUMP_PROMPT) {
     writeFileSync(DUMP_PROMPT, SYSTEM_PROMPT);
     console.log(`nl-eval: prompt written to ${DUMP_PROMPT}`);
 }
+if (FAKE) {
+    console.log(`nl-eval: --fake ${FAKE} — replaying a recorded arm, no API call, no spend. `
+        + 'The prompt below is assembled but not sent.');
+}
 console.log(`nl-eval: model ${MODEL}, effort ${EFFORT}, concurrency ${CONCURRENCY}, `
     + `system prompt ${promptBytes} bytes, fnv1a=${promptHash}`);
 
@@ -413,14 +432,52 @@ if (dryRun) {
     process.exit(0);
 }
 
-if (!apiKey) {
+/**
+ * The recorded offline arm, scored by the same scorer as a live run.
+ *
+ * Latency is reported as 0 and spend as $0, and both are the truth: nothing was
+ * called. The p50 line below therefore says `n/a` for a fake run, which is the
+ * honest answer rather than a zero that reads like a very fast model.
+ */
+function replayFake(kind) {
+    if (kind !== 'offline-parser') {
+        console.error(`nl-eval: --fake ${kind} is not a recorded arm (have: offline-parser).`);
+        process.exit(1);
+    }
+    const path = join(HERE, 'offline-recording.json');
+    if (!existsSync(path)) {
+        console.error(`nl-eval: ${path} is missing. Emit it with:`);
+        console.error('  cd client && NL_OFFLINE_BASELINE=write npx vitest run src/ui/native-ui/nl-offline-eval.test.ts');
+        process.exit(1);
+    }
+    const recording = JSON.parse(readFileSync(path, 'utf8'));
+    const wanted = ONLY ? recording.rows.filter((r) => r.category.includes(ONLY)) : recording.rows;
+    return wanted.map((row) => {
+        const scored = scoreEnvelope(row.expected, row.actual);
+        return {
+            category: row.category,
+            name: row.name ?? row.utterance,
+            utterance: row.utterance,
+            ms: 0,
+            error: null,
+            usage: { ...EMPTY_USAGE },
+            source: row.source,
+            pass: scored.pass,
+            agreement: scored.agreement,
+            mismatches: scored.mismatches.map((m) => ({ path: m.path, expected: m.expected, actual: m.actual })),
+            envelope: row.actual,
+        };
+    });
+}
+
+if (!apiKey && !FAKE) {
     console.log('nl-eval: no SPRING_NL_API_KEY / ANTHROPIC_API_KEY set — nothing to do.');
     console.log('nl-eval: this harness makes real API calls; see tools/nl-eval/README.md.');
     process.exit(0);
 }
 
 const startedAt = new Date().toISOString();
-const results = await pooled(jobs, CONCURRENCY, async (fixture) => {
+const results = FAKE ? replayFake(FAKE) : await pooled(jobs, CONCURRENCY, async (fixture) => {
     const answer = await ask(fixture);
     const scored = answer.envelope
         ? scoreEnvelope(fixture.expected, answer.envelope)
@@ -481,20 +538,33 @@ for (const c of summary.categories) {
     console.log(`  ${c.category.padEnd(24)} ${bar} ${(c.passRate * 100).toFixed(0).padStart(3)}%  `
         + `agreement ${(c.agreement * 100).toFixed(0)}%${c.errored ? `  (${c.errored} errored)` : ''}`);
 }
+if (FAKE) {
+    const claimed = results.filter((r) => r.source === 'fast-path').length;
+    console.log(`nl-eval: fast path  ${claimed}/${results.length} sentences claimed before the model `
+        + `(${((claimed / Math.max(1, results.length)) * 100).toFixed(1)}%) — a LATENCY number, not a quality one`);
+}
+
 console.log('');
 // `n/a` rather than `nullms` when every call errored — the first bogus-key run
 // printed "p50 nullms", which reads like a bug in the timing rather than the
 // honest "no successful call was timed".
 const ms = (v) => (v === null ? 'n/a' : `${v}ms`);
-console.log(`nl-eval: latency  p50 ${ms(latency.p50)}  p95 ${ms(latency.p95)}  `
-    + `(min ${ms(latency.min)}, max ${ms(latency.max)}, n=${latency.n}, concurrency ${CONCURRENCY})`);
-console.log(`nl-eval: tokens   in ${usage.inputTokens}  out ${usage.outputTokens}  `
-    + `cache read ${usage.cacheReadTokens}  cache write ${usage.cacheWriteTokens}`);
-console.log(`nl-eval: spend    ${spendUsd === null ? `unknown (no price for ${MODEL})` : `$${spendUsd.toFixed(4)} this run, $${(spendUsd / Math.max(1, results.length)).toFixed(5)} per utterance`}`);
+// A replayed arm has no latency and no spend, and printing "p50 0ms" would read
+// like a very fast model rather than like no call at all. The lines are
+// suppressed rather than zeroed for the same reason `ms()` prints `n/a`.
+if (!FAKE) {
+    console.log(`nl-eval: latency  p50 ${ms(latency.p50)}  p95 ${ms(latency.p95)}  `
+        + `(min ${ms(latency.min)}, max ${ms(latency.max)}, n=${latency.n}, concurrency ${CONCURRENCY})`);
+    console.log(`nl-eval: tokens   in ${usage.inputTokens}  out ${usage.outputTokens}  `
+        + `cache read ${usage.cacheReadTokens}  cache write ${usage.cacheWriteTokens}`);
+    console.log(`nl-eval: spend    ${spendUsd === null ? `unknown (no price for ${MODEL})` : `$${spendUsd.toFixed(4)} this run, $${(spendUsd / Math.max(1, results.length)).toFixed(5)} per utterance`}`);
+} else {
+    console.log('nl-eval: latency  n/a — nothing was called (replayed arm)');
+}
 
 // The plan's own tuning rule (§7 M7), stated by the harness rather than left
 // to whoever reads the number: drop to haiku if p50 > ~1.5 s.
-if (latency.p50 !== null) {
+if (latency.p50 !== null && !FAKE) {
     if (latency.p50 > 1500 && MODEL !== 'claude-haiku-4-5') {
         console.log(`nl-eval: p50 ${latency.p50}ms is over the plan's ~1500ms bar — `
             + 're-run with --model claude-haiku-4-5 and compare the pass rate before switching.');
@@ -544,8 +614,14 @@ if (BASELINE_PATH) {
     const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
     const verdict = compareToBaseline(summary, baseline, TOLERANCE);
     console.log('');
+    // The offline baseline has no model and no effort — it is a recording of
+    // this client's own producers, not of a model — so the provenance line says
+    // which ARM it came from rather than printing "undefined @ undefined".
+    const provenance = baseline.model
+        ? `${baseline.model} @ ${baseline.effort}`
+        : `${baseline.arm ?? 'unknown'} arm`;
     console.log(`nl-eval: gate vs ${BASELINE_PATH} `
-        + `(${baseline.model} @ ${baseline.effort}, ${verdict.overall.was} passing) `
+        + `(${provenance}, ${verdict.overall.was} passing) `
         + `→ ${verdict.overall.now} passing, tolerance ${TOLERANCE}`);
     if (!verdict.ok) {
         for (const r of verdict.regressions) {

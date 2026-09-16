@@ -19,6 +19,17 @@ local function validArea(a)
        and type(a.r) == 'number' and a.r > 0
 end
 
+--- F14: `quorum` is a count of things, so it must be a whole number in
+--- 1..roster. 0 or negative makes a "keep N alive" objective unfailable; more
+--- than the roster makes it unwinnable. Neither was rejected, and neither is
+--- visible at the board — the objective simply never resolves the way its
+--- author meant.
+local function validQuorum(q, n)
+    if q == nil then return true end
+    if type(q) ~= 'number' or q ~= math.floor(q) then return false end
+    return q >= 1 and q <= n
+end
+
 function extract.validateParams(params)
     if type(params) ~= 'table' then return false, 'params required' end
     if type(params.payloadUnitIDs) ~= 'table' or #params.payloadUnitIDs == 0 then
@@ -31,6 +42,9 @@ function extract.validateParams(params)
     end
     if type(params.threshold) ~= 'number' or params.threshold < 0 then
         return false, 'threshold must be a non-negative number'
+    end
+    if not validQuorum(params.quorum, #params.payloadUnitIDs) then
+        return false, 'quorum must be a whole number in 1..' .. #params.payloadUnitIDs
     end
     return true
 end

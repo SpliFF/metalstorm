@@ -92,6 +92,18 @@ local function load(sides, victoryCount, teams, unoccupied, startRegions)
         Echo = function(msg) world.echoes[#world.echoes + 1] = msg end,
     }
 
+    -- The gadget now pulls tick.lua through VFS.Include (the D15 foothold
+    -- gate), and this spec had no VFS at all. Same shim as
+    -- game_snapshot_spec.lua:161 — rewrite the engine-absolute path back to
+    -- one relative to the Gadgets/ cwd these specs run from.
+    _G.VFS = {
+        Include = function(path)
+            local rel = path:gsub('^LuaRules/', '')
+            rel = rel:gsub('^Gadgets/', './')
+            if not rel:match('^%./') then rel = '../' .. rel end
+            return dofile(rel)
+        end,
+    }
     _G.gadgetHandler = { IsSyncedCode = function() return true end }
     _G.gadget = {}
     _G.GG = {

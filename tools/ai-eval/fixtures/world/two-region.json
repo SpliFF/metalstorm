@@ -1,0 +1,13 @@
+{
+    "provider": "graph",
+    "mapWidth": 2048,
+    "mapHeight": 2048,
+    "regions": [
+        { "key": "homeland", "name": "Homeland", "value": 0.5, "tags": [],
+          "neighbors": ["frontier"],
+          "polygon": [{"x":0,"z":0},{"x":1024,"z":0},{"x":1024,"z":2048},{"x":0,"z":2048}] },
+        { "key": "frontier", "name": "Frontier", "value": 0, "tags": [],
+          "neighbors": ["homeland"],
+          "polygon": [{"x":1024,"z":0},{"x":2048,"z":0},{"x":2048,"z":2048},{"x":1024,"z":2048}] }
+    ]
+}

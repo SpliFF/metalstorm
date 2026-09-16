@@ -1,0 +1,11 @@
+{
+  "id": "biome_wetland",
+  "class": "biome",
+  "prompt": "Stagnant bog mudflat, dark olive-drab mud with dried-blood-red algae streaks and cracked dry-edge polygons, rust-stained standing puddles.",
+  "seed": 100405,
+  "width": 1024,
+  "height": 1024,
+  "colors": ["#3d3a2e", "#2b2e31", "#9a2f2f"],
+  "output": "art/gen/biomes/wetland_diffuse.png",
+  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+}

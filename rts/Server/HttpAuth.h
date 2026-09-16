@@ -10,7 +10,9 @@
 #include "Database.h"
 #include "FactionData.h"
 #include "GuestAccounts.h"
+#include "Mentorship.h"
 #include "NetworkServer.h"
+#include "Standing.h"
 #include "Crypto.h"
 #include "Totp.h"
 #include "WarPlayerBindings.h"
@@ -931,15 +933,46 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         // refuses unconditionally (`!stored.empty()`), which is why a guest is
         // unreachable by /api/auth/login and by Basic auth without either of
         // them needing to know guests exist.
+        // The chosen nickname (PLAN-beta-journey.md §(a)). Optional: a guest
+        // who supplies nothing still gets the generated hex name, which is
+        // what keeps "look at a war without a form" working.
+        //
+        // Guest nicknames share the `users.username` namespace rather than
+        // living in a second one. That is the point of the 409 below — a
+        // second uniqueness domain would let a guest spectate a war under the
+        // exact name a registered player fights it under, which is the
+        // impersonation this whole route would otherwise open.
+        const std::string wanted = JsonField(body, "username");
+        if (!wanted.empty() && !GuestAccounts::ValidNickname(wanted)) {
+            return JsonResponse(400, R"({"error":"a callsign is 2-32 characters of letters, numbers, _ or -"})");
+        }
+        if (!wanted.empty() && db.FindUser(wanted)) {
+            return JsonResponse(409, R"({"error":"that name belongs to a registered player","name_taken":true})");
+        }
+
         int64_t userId = 0;
         std::string username;
-        for (int attempt = 0; attempt < 5 && userId == 0; ++attempt) {
-            username = GuestAccounts::GenerateUsername();
+        const auto factionOpt = faction.empty()
+            ? std::nullopt : std::optional<std::string>(faction);
+        if (!wanted.empty()) {
+            // One attempt, and a lost race answers 409 rather than retrying
+            // under a different name: the caller asked for THIS name, and a
+            // silent fallback to `guest-<hex>` is the one outcome they cannot
+            // tell apart from success.
+            username = wanted;
             userId = db.CreateUser(username, /*passwordHash=*/"", "player",
-                                   /*isDev=*/false,
-                                   faction.empty() ? std::nullopt
-                                                   : std::optional<std::string>(faction),
+                                   /*isDev=*/false, factionOpt,
                                    /*isProvisional=*/true);
+            if (userId == 0) {
+                return JsonResponse(409, R"({"error":"that name belongs to a registered player","name_taken":true})");
+            }
+        } else {
+            for (int attempt = 0; attempt < 5 && userId == 0; ++attempt) {
+                username = GuestAccounts::GenerateUsername();
+                userId = db.CreateUser(username, /*passwordHash=*/"", "player",
+                                       /*isDev=*/false, factionOpt,
+                                       /*isProvisional=*/true);
+            }
         }
         if (userId == 0) {
             return JsonResponse(500, R"({"error":"guest sign-in failed"})");
@@ -968,7 +1001,11 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             // they minted, so a guest was the one account kind whose client
             // could not arm a renewal timer.
             + ",\"expires_in\":" + std::to_string(kAccessTtlSeconds)
-            + ",\"device_token\":\"" + JsonEscape(*device) + "\"";
+            + ",\"device_token\":\"" + JsonEscape(*device) + "\""
+            // So the lobby knows whether to nudge "your name is hex" — it
+            // cannot infer it from the username, because a chosen name and a
+            // generated one are both just names by the time they arrive.
+            + ",\"nickname_chosen\":" + (wanted.empty() ? "false" : "true");
         if (!faction.empty())
             json += ",\"faction\":\"" + JsonEscape(faction) + "\"";
         json += "}";
@@ -1141,6 +1178,141 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
                     ",\"expires_in\":" + std::to_string(kAccessTtlSeconds);
         json += "}";
         return JsonResponse(200, json);
+    });
+}
+
+// ── The account surface (PLAN-beta-journey.md §(b)) ────────────────────────
+//
+// Two routes, neither of which gates anything. That is a rule, not an
+// omission: everything the journey gates on (tier) is DERIVED from standing,
+// so the account surface is a read of the player's own row plus a writer for
+// three cosmetic fields. Nothing a player can POST here changes what they are
+// allowed to do — which is what makes it safe for the intro to call it before
+// the player has decided anything.
+
+/// Is `key` present in this JSON body at all?
+///
+/// JsonField cannot answer it: an absent field and a field set to `""` both
+/// come back as the empty string, and on the profile route those two mean
+/// opposite things ("leave the callsign alone" vs "clear it").
+inline bool HasJsonKey(const std::string& body, const std::string& key) {
+    return body.find("\"" + key + "\"") != std::string::npos;
+}
+
+/// The four cosmetic commander archetypes (§(e)'s customisation strip).
+/// Validated so the column holds a key the client has art for, never so the
+/// player is refused something — an unknown kind is a client bug.
+inline bool ValidCommanderKind(const std::string& kind) {
+    return kind == "surveyor" || kind == "foundry" || kind == "line" ||
+           kind == "signals";
+}
+
+/// The mentorship sub-object of `/api/account/me`, or "null".
+inline std::string MentorshipJson(Database& db, int64_t userId) {
+    auto row = Mentorship::ActiveFor(db.Handle(), userId);
+    if (!row) return "null";
+    std::string mentorName = "ai";
+    if (row->mentorId != Mentorship::kAiMentorId) {
+        auto mentor = db.FindUserById(row->mentorId);
+        mentorName = mentor ? (mentor->callsign.empty() ? mentor->username
+                                                        : mentor->callsign)
+                            : "";
+    }
+    return "{\"id\":" + std::to_string(row->id)
+         + ",\"mentor_id\":" + std::to_string(row->mentorId)
+         + ",\"mentor\":\"" + JsonEscape(mentorName) + "\""
+         + ",\"kind\":\"" + JsonEscape(row->kind) + "\""
+         + ",\"state\":\"" + JsonEscape(row->state) + "\"}";
+}
+
+/// Register the account routes on `net`.
+///
+/// Separate from RegisterEndpoints because that one is also called by the GAME
+/// server (GameHttpRoutes.cpp) and these belong to the lobby only — the sim
+/// reads tier as a per-player custom option handed to it at AuthRequest, never
+/// over HTTP.
+///
+/// **Both routes are POST, including the read.** PLAN-beta-journey.md names
+/// the read `GET /api/account/me`, but a GET handler in this server is not
+/// handed the request headers (NetworkServer::CheckGetAuthAndCall — a non-
+/// Public GET can only be enforced as loopback-only), so a GET route cannot
+/// learn WHICH account the dispatcher just admitted. `/api/account/me` is
+/// per-caller by construction, so it takes the same POST-that-reads shape
+/// `/api/friends/list` and the chat reads already use, and for the same
+/// stated reason.
+inline void RegisterAccountRoutes(NetworkServer& net, Database& db) {
+    Mentorship::EnsureTables(db.Handle());
+
+    // POST /api/account/me — the caller's own row, with tier derived.
+    net.AddHttpPost("/api/account/me", RouteAuth::TokenRequired,
+                    [&db](const std::string&, const std::string&,
+                          const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+        auto user = db.FindUserById(userId);
+        if (!user) return JsonResponse(401, R"({"error":"unauthorized"})");
+
+        const int tier = Standing::TierFor(user->standing);
+        std::string json = "{\"user_id\":" + std::to_string(user->id)
+            + ",\"username\":\"" + JsonEscape(user->username) + "\""
+            // Never null: an account that never chose one IS its username, so
+            // every renderer can print `callsign` without a fallback of its
+            // own (and they would not all agree on one).
+            + ",\"callsign\":\"" + JsonEscape(user->callsign.empty()
+                                              ? user->username : user->callsign) + "\""
+            + ",\"faction\":" + (user->factionId && !user->factionId->empty()
+                                 ? "\"" + JsonEscape(*user->factionId) + "\"" : "null")
+            + ",\"is_provisional\":" + (user->isProvisional ? "true" : "false")
+            + ",\"standing\":" + std::to_string(user->standing)
+            + ",\"sessions_played\":" + std::to_string(user->sessionsPlayed)
+            + ",\"tier\":" + std::to_string(tier)
+            + ",\"tier_name\":\"" + Standing::TierName(tier) + "\""
+            + ",\"commander_kind\":" + (user->commanderKind.empty()
+                                        ? "null" : "\"" + JsonEscape(user->commanderKind) + "\"")
+            + ",\"intro_done\":" + (user->introDone ? "true" : "false")
+            + ",\"mentorship\":" + MentorshipJson(db, userId)
+            + "}";
+        return JsonResponse(200, json);
+    });
+
+    // POST /api/account/profile {callsign?, commander_kind?, intro_done?}
+    net.AddHttpPost("/api/account/profile", RouteAuth::TokenRequired,
+                    [&db](const std::string&, const std::string& body,
+                          const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+
+        std::optional<std::string> callsign;
+        if (HasJsonKey(body, "callsign")) {
+            const std::string v = JsonField(body, "callsign");
+            // A callsign is a display name, not an identity — it is NOT
+            // unique and claims nothing. It shares the nickname charset
+            // anyway, `guest-` reservation included, so a player cannot wear a
+            // name the roster would read as a generated guest.
+            if (!v.empty() && !GuestAccounts::ValidNickname(v))
+                return JsonResponse(400, R"({"error":"a callsign is 2-32 characters of letters, numbers, _ or -"})");
+            callsign = v;
+        }
+
+        std::optional<std::string> commanderKind;
+        if (HasJsonKey(body, "commander_kind")) {
+            const std::string v = JsonField(body, "commander_kind");
+            if (!v.empty() && !ValidCommanderKind(v))
+                return JsonResponse(400, R"({"error":"unknown commander kind"})");
+            commanderKind = v;
+        }
+
+        std::optional<bool> introDone;
+        if (HasJsonKey(body, "intro_done")) {
+            const std::string v = JsonField(body, "intro_done");
+            introDone = (v == "true" || v == "1");
+        }
+
+        if (!callsign && !commanderKind && !introDone)
+            return JsonResponse(400, R"({"error":"nothing to update"})");
+        if (!db.UpdateProfile(userId, callsign, commanderKind, introDone))
+            return JsonResponse(500, R"({"error":"profile update failed"})");
+        return JsonResponse(200, R"({"ok":true})");
     });
 }
 

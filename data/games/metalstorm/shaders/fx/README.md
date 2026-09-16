@@ -54,7 +54,11 @@ iRot      = (rotBase, rotSpeed, orient, animFps)   orient 0=BB 1=GROUND 2=STRETC
 iAnim     = (animFrameStart, animFrameCount, _, _)
 iColStart = colourStart RGBA      iColEnd = colourEnd RGBA
 ```
-Uniforms: `uViewProj`, `uNow`, `uCamPos`, `uAtlasCols`, `uAtlasRows`;
+Uniforms: `uViewProj`, `uNow`, `uCamPos`, `uAtlasCols`, `uAtlasRows`, `uWind`
+(global drift vec3, elmos/s — `NativeFxRenderer.setWind`, step 7: added to
+every particle's centre over its age, `center += uWind * age`; the game pass
+sets a constant gentle breeze at construction, DIRECTION.md "smoke that
+lingers and drifts with a global wind vector");
 frag: `uParticleTex`, `uAtlasDimsInv`, `uDepthTex`, `uCamNearFar`, `uScreenSize`, `uSoftRange`.
 
 **muzzleFlash** (locs 2–4): `iPosLife=(pos.xyz,lifetime)`, `iBirth=(birthTime,size,spin,seed)`, `iColor=RGB+peakA`.
@@ -65,30 +69,89 @@ frag: `uParticleTex`, `uAtlasDimsInv`, `uDepthTex`, `uCamNearFar`, `uScreenSize`
 
 **shockwave** (locs 1–2, `aCorner` at loc 0): `iPosLife=(centre.xyz,lifetime)`, `iParams=(birthTime,maxRadius,strength,_)`. Renders into an `RGBA16F` offset target with additive blend; `shockwave-composite` then samples `uScene` at `vUV + uOffset.rg * uStrength`.
 
-## Wiring (engine ask — Stage 7, currently gated)
+## Wiring (live — PLAN-beta-presentation.md L-FX steps 1–4)
 
-The region-overlay stub next door is likewise unwired pending Stage 7. To bring
-these online, the render worker needs one small native-game FX loader that mirrors
-what `registerCegParticleShader()` et al. do for the Babylon path:
+These shaders run in the game. The loader is
+`client/src/core/native-fx/fx-game-loader.ts`, built at game start by
+`game-processor.ts` and best-effort: a game that ships no `effects/` library
+gets `null` back and every dispatch site keeps its existing CEG path.
 
-1. **Load + register.** Read each `shaders/fx/*.glsl` from the game VFS and
-   compile a raw WebGL2 program per pair (no Babylon `ShaderStore` rewrite —
-   these are already `#version 300 es`). One VAO per program with the base quad +
-   instance divisors above.
-2. **Instance pools.** Ring-buffer instance VBOs per program (particle pool
-   sized to the PLAN-fx-offload budget: 50 k global, 8 emitters/unit,
-   distance-culled). `orphan → subData` each frame with the live rows.
-3. **Effect system.** Compile `effects/library.json` name → emitter configs
-   (see `effects/README.md`); resolve weapon slots through `effects/weapon-fx.json`;
-   drive spawns from `combat-fx.ts` (impacts/kills) and the fx-offload §2 binding
-   interpreter (`weapon_fired` → muzzle, etc.). `combat-fx.ts` already routes
-   ZK/BAR impacts through a name → runtime dispatch; Metalstorm adds a parallel
-   resolver reading `weapon-fx.json` instead of `def.explosionGenerator`.
-4. **Offset target + composite.** Allocate the `RGBA16F` distortion target, draw
-   `shockwave` instances additively into it, then run `fullscreen-tri` +
-   `shockwave-composite` as a post pass over the scene colour.
+1. **Load.** `loadFxGameAssets` fetches all twelve `shaders/fx/*.glsl`, then
+   `effects/library.json`, `weapon-fx.json` and `unit-fx.json` over the game
+   VFS at `/api/games/data/<game>/…` — the same tree and the same order as the
+   `fx-viewer` scenario's `loadFxAssets`. The atlas is the procedural
+   placeholder (`native-fx/fx-atlas-placeholder.ts`, shared with the stage,
+   baked on an `OffscreenCanvas` in the worker) unless
+   `unittextures/fx_atlas.png` exists, which is probed first and decoded with
+   `createImageBitmap`. No ktx2: the worker has no transcoder.
+2. **Programs + pools.** `NativeFxRenderer` compiles the programs and owns the
+   ring-buffered instance VBOs against Babylon's own WebGL2 context
+   (`getEngineGl`). Unchanged from the fx-viewer stage — it is the same class.
+3. **Draw.** `NativeFxGamePass` hooks `scene.onAfterRenderingGroupObservable`
+   for the last rendering group and calls
+   `NativeFxRenderer.renderInto(gl, viewProj, now, depthTex, params)`, which
+   draws ONLY the additive FX passes into the framebuffer Babylon already has
+   bound — no clears, no render targets, no composite. GL-state discipline is
+   the LuaUI raw-GL pass's, verbatim (`game-processor.ts` `gpRunUiPass`): draw,
+   `bindVertexArray(null)`, `engine.wipeCaches(true)`. Because the pass lands
+   inside the scene, the FX are depth-tested against the world and go through
+   the HDR pipeline's bloom/tonemap with it.
+4. **Effects.** `effect-compiler.ts` expands a library name into rows;
+   `client/src/core/weapon-fx-resolver.ts` resolves a weapon def to slots
+   (exact → `defaults[weapontype]` → `__fallback`, case-insensitively — the
+   engine lowercases def names). Dispatch is one branch at each existing site
+   in `combat-fx.ts` (`onCombatEvents`, `onVolleyOutcome`,
+   `onProjectileImpacts`) and `projectile-renderer.ts` (`onFired`,
+   `onImpact`): **a def that authors no CEG and resolves here draws natively
+   and returns; anything else keeps the ceg-runtime path** — so maps, features
+   and the ZK/BAR games are untouched. Statistical volleys have no projectile,
+   so the pass invents `rounds` tracer copies in a ±3° cone spread over 0.4 s,
+   plus a dim 80 ms muzzle light through `FxLightPool` (gated by
+   `gfx.fxLights`). An impact with an authored `impact` effect also raises a
+   ground scar through the decal overlay's existing `onSnapshot(scars, …)`.
 
-Until that loader lands these files are inert authored assets — exactly like the
-`region-overlay` and `sounds.lua`/`resources.lua` stubs — and safe to sit in the
-tree. Tuning happens against the render harness (PLAN-model-harness.md), which
-already has capability-derived `fire`/`explode` showcase buttons.
+**Not wired (deliberate, beta scope).** Soft particles — `uSoftRange = 0`, no
+depth copy; a `DepthRenderer` copy is a High-preset item later. The native
+`shockwave*` + `shockwave-composite` pair stays **stage-only**: the game
+composites shockwaves through `distortion-renderer.ts`, and the offset pass
+needs render targets the in-scene pass deliberately does not allocate.
+Projectile-attached `trail` ribbons are still a later step; the trail pool
+exists and draws, nothing streams it yet. No X4 binding interpreter — see
+step 6 below for what unit-fx-dispatch.ts does instead.
+
+## Quality gating + unit FX (steps 5–6)
+
+- **`gfx.nativeFx`** (bool, Low preset off) is the kill switch:
+  `game-processor.ts` skips building the pass at all when false, restart-only
+  (same semantics as `gfx.particleQuality`).
+- **`gfx.particleQuality`** (0/1/2, shared with the CEG particle system) now
+  also drives the native pool: `NativeFxGamePass`/`NativeFxRenderer` size the
+  particle pool to 8k/24k/50k rows at construction (`NativeFxPoolCapacities`,
+  restart-only — a WebGL buffer can't resize live) and scale every emitter's
+  spawn count 0.5/0.75/1.0 (`SpawnContext.countScale`, live via
+  `NativeFxGamePass.setQuality`, `native-fx/fx-game-loader.ts
+  NATIVE_FX_QUALITY_TIERS`).
+- **`client/src/core/unit-fx-dispatch.ts`** resolves `effects/unit-fx.json`
+  by the `ms_<class>_s<n>` def-name convention (exact `units[]` entry layered
+  over `scaleOverrides[class][scale]` layered over `byClass[class]`).
+  Dispatched from `game-processor.ts`: `death` fires on EntityDestroy at the
+  last known position (+ the new `sound` field, a gamedata/sounds.lua
+  SoundItem key played through the same synthesised-named-sound path
+  `onUiSound` uses — a key sounds.lua doesn't define yet just resolves to
+  nothing); `damageSmoke`/`damageSmokeHeavy` re-trigger as a loop, band
+  re-evaluated on a 1.5s cadence (the hysteresis); `moveDust` fires for
+  moving tanks/artillery, rate ∝ speed, capped at 40 concurrent emitters by
+  camera distance through the shared `EntityFxFence` (LOD skip/half-rate +
+  frame budget).
+- **Cross-lane hooks, duck-typed.** Hit-flinch
+  (`MotionLeanRegistry.impulse`) and the move-dust rate source
+  (`WheelSpinDriver.spinning`) are pres-anim additions. This lane's clone of
+  `main` predates that lane's land, so `game-processor.ts` reads them through
+  a runtime `typeof x.method === 'function'` check
+  (`gpMotionLeanImpulseSink`/`gpWheelSpinRate`) rather than a static import —
+  both activate automatically once pres-anim lands, no further change here.
+  Until then, hit-flinch is a no-op and move-dust never fires (speed always
+  reads 0).
+
+Tuning still happens in the `fx-viewer` scenario — it is the authoring loop,
+and it drives this exact renderer against the same authored files.
