@@ -1,0 +1,631 @@
+{
+  "_comment": "Contract v2's focus half: TARGET ELISION (a verb with no target at all takes the drilled panel's place), the two verbs that must NOT elide, a proposal's `target` binding, and the camera deixis that has no antecedent to bind to. Every `expected` names the RESOLVED thing — rule 10 — because with a focus in context the model's job is to write what it read, not to echo the pronoun. The offline path reaches the same envelopes through `bindFocusReferences`, which is the property that makes the two producers interchangeable.",
+  "fixtures": [
+    {
+      "name": "\"attack\" with a town drilled — the town is the target",
+      "utterance": "attack",
+      "context": "basin-town-drilled",
+      "note": "Nothing is selected, so the subject stays team-wide. Elision supplies only the TARGET: a drilled panel is where, never who.",
+      "expected": {
+        "say": "Attacking Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 0
+          }
+        ],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"defend\" elides the same way",
+      "utterance": "defend",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Defending Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "\"hold\" elides",
+      "utterance": "hold",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Holding Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "\"secure\" elides",
+      "utterance": "secure it",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Securing Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"patrol\" elides into a ring around the drilled town",
+      "utterance": "patrol",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Patrolling Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "\"scout\" elides",
+      "utterance": "scout there",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Scouting Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "scout",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"reinforce\" elides",
+      "utterance": "reinforce",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Reinforcing Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "reinforce",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Randtown"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "\"withdraw\" must NOT elide into the open panel",
+      "utterance": "withdraw",
+      "context": "basin-town-drilled",
+      "note": "A town's panel being open must never turn \"pull back\" into \"pull back INTO the town\". Withdraw's elided target is the departure zone, and this board marks none — so the honest answer is the refusal that names the fix, not an order nobody asked for.",
+      "expected": {
+        "say": "Pulling back.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "any"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "departure zone"
+        ]
+      }
+    },
+    {
+      "name": "\"escort\" must NOT elide either — the drilled thing is WHAT, not WHERE",
+      "utterance": "escort",
+      "context": "basin-town-drilled",
+      "expected": {
+        "say": "Escorting.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "escort",
+              "subject": {
+                "type": "any"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1
+      }
+    },
+    {
+      "name": "a named target still wins over the drilled panel",
+      "utterance": "attack Northgate",
+      "context": "basin-town-drilled",
+      "note": "Elision fires only when the sentence had NO target word at all. A sentence that named one is not about what the player has open.",
+      "expected": {
+        "say": "Attacking Northgate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Northgate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"attack them\" with a proposal open — the counterparty's force",
+      "utterance": "attack them",
+      "context": "basin-proposal",
+      "note": "A proposal brief carries `target` (the counterparty as a spotted enemy force) as well as `place`. \"them\" is the force; \"it\" is the region. Binding both to the same name would make a ceasefire panel a machine for attacking the wrong thing.",
+      "expected": {
+        "say": "Chimera Squad is attacking the raider column near Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Raider column near Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"defend it\" with a proposal open — the region it is about",
+      "utterance": "defend it",
+      "context": "basin-proposal",
+      "expected": {
+        "say": "Chimera Squad is defending Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "a bare \"hold\" with a proposal open elides to its place",
+      "utterance": "hold",
+      "context": "basin-proposal",
+      "expected": {
+        "say": "Chimera Squad is holding Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"show me that\" with a proposal open frames its place",
+      "utterance": "show me that",
+      "context": "basin-proposal",
+      "ports": true,
+      "note": "A camera pronoun goes to a PLACE, never to a force — the counterparty is what the proposal is about, not somewhere to point a camera.",
+      "expected": {
+        "say": "Framing Osprey Fen.",
+        "actions": [
+          {
+            "kind": "camera",
+            "camera": {
+              "op": "focus",
+              "targetRef": "Osprey Fen"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"go there\" — the same camera move, a different word for it",
+      "utterance": "go there",
+      "context": "basin-focus",
+      "ports": true,
+      "expected": {
+        "say": "Framing Fallow Gate.",
+        "actions": [
+          {
+            "kind": "camera",
+            "camera": {
+              "op": "focus",
+              "targetRef": "Fallow Gate"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"look at it\"",
+      "utterance": "look at it",
+      "context": "basin-focus",
+      "ports": true,
+      "expected": {
+        "say": "Framing Fallow Gate.",
+        "actions": [
+          {
+            "kind": "camera",
+            "camera": {
+              "op": "focus",
+              "targetRef": "Fallow Gate"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "a camera pronoun with no PLACE in the focus refuses by name",
+      "utterance": "go there",
+      "context": "basin-departure",
+      "note": "The focus here is a squad brief with no `place`. A squad is a thing to follow, not a place to frame, and guessing its centroid would put the camera somewhere the player never pointed at.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "refuse",
+            "reason": "I don't know where \"there\" is — name a place, or open one first."
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1
+      }
+    },
+    {
+      "name": "\"attack it\" with an objective drilled",
+      "utterance": "attack it",
+      "context": "basin-focus",
+      "expected": {
+        "say": "Chimera Squad is attacking Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Fallow Gate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"patrol there\" with an objective drilled",
+      "utterance": "patrol there",
+      "context": "basin-focus",
+      "expected": {
+        "say": "Chimera Squad is patrolling Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Fallow Gate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "a bare verb with NOTHING open refuses — elision needs an antecedent",
+      "utterance": "attack",
+      "context": "basin",
+      "note": "No drilled panel, no pronoun, no name. The sentence is not an order and must not become one.",
+      "expected": {
+        "say": "Attacking.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": {
+                "type": "any"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "needs a place"
+        ]
+      }
+    },
+    {
+      "name": "the drilled panel supplies the target; the SELECTION supplies the subject",
+      "utterance": "defend",
+      "context": "basin-proposal",
+      "note": "Both halves of the focus are read, and they are read from different slots. A producer that took the subject from the drilled panel would order a proposal to defend itself.",
+      "expected": {
+        "say": "Chimera Squad is defending Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": {
+                "type": "selection"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"what's happening there\" with a town drilled and no battle log",
+      "utterance": "what's happening there",
+      "context": "basin-town-drilled",
+      "ports": true,
+      "note": "The pronoun binds fine — Randtown is open — and the query still refuses, because there is no log to read. Two different failures, and only the real one is reported.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Randtown"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "battle log"
+        ]
+      }
+    }
+  ]
+}
