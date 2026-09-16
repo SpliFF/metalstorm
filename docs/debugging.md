@@ -9,6 +9,7 @@ This is the hub page for debugging, logging, and performance tooling. It's writt
 | [debugging-logging.md](debugging-logging.md) | `libspringlog` (levels, C API, C++ macros, sinks), `spring-logserver` (HTTP query API, WebSocket protocol, SQLite persistence), game session tracking, adding a custom sink |
 | [debugging-console.md](debugging-console.md) | Browser debug console (tabs, filters, programmatic API), the `Spring.*` Lua debug API, the interactive Lua debugger (breakpoints/stepping), the Babylon.js inspector, adding a server command |
 | [debugging-tools.md](debugging-tools.md) | The read-only SQL proxy, process management, Claude/MCP integration (`tools/debug-mcp`), the standalone `springcli` CLI, the `mprocs` dev environment |
+| [mcp-tools.md](mcp-tools.md) | **Generated reference** for every `spring-debug` MCP tool — arguments, types, defaults, required fields — rendered straight from the schemas (`cd tools/debug-mcp && npm run docs`). The narrative, setup and traps stay in debugging-tools.md |
 | [debugging-performance.md](debugging-performance.md) | The permanent per-phase **FrameProfiler** (`perfDump`), the per-widget **LuaUI cost profiler** (`uiProfileStart/Dump/Stop`), and the **network simulator** (`netSim*`/`netStats`) — everything for measuring and characterising client performance |
 
 ---

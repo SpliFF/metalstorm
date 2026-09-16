@@ -16,7 +16,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { evalBareLua } from './scenario-lua.js';
@@ -30,6 +30,41 @@ const SCENARIO_DIR = join(ROOT, 'data', 'games', GAME, 'scenarios');
 /** Rules against an in-memory source, with the real repo's def universe. */
 const UNITS = loadDefNames(ROOT, GAME, 'unitdefs');
 const FEATURES = loadDefNames(ROOT, GAME, 'featuredefs');
+
+// --- build artefacts the def/region rules need ------------------------------
+//
+// Neither is committed: `data/games/metalstorm/cache/defs/` is a build output
+// the server bakes on first boot, and `data/maps/*` is processed map output.
+// A fresh worktree has neither, so the tests that read them SKIP with a
+// message naming the artefact — the suite must be green in a fresh tree, and
+// a skip says "not checked", never "fine". The check is on the FILE, not on
+// what the loader returned: a cache that is present but unreadable (a stale
+// or half-written bake, a shape the reader no longer understands) must FAIL
+// loudly, not vanish into a skip.
+const DEFS_DIR = join(ROOT, 'data', 'games', GAME, 'cache', 'defs');
+const REGIONS_MAP = 'green_flat_x34_v3';
+const REGIONS_FILE = join(ROOT, 'data', 'maps', REGIONS_MAP, 'mapdata', 'regions.lua');
+
+function bakedDefsExist(kind) {
+    if (!existsSync(DEFS_DIR)) return false;
+    return readdirSync(DEFS_DIR).some((k) => existsSync(join(DEFS_DIR, k, `${kind}.lua.br`)));
+}
+
+/** Skips `t` when no def cache has ever been baked; returns true when it did. */
+function skipWithoutDefs(t) {
+    if (bakedDefsExist('unitdefs') && bakedDefsExist('featuredefs')) return false;
+    t.skip(`no baked def cache at data/games/${GAME}/cache/defs/*/{unitdefs,featuredefs}.lua.br `
+        + '— run a game once (make dev-client + launch_scenario, or smoke.sh --start) to bake defs');
+    return true;
+}
+
+/** Skips `t` when the map's region graph was never processed; returns true when it did. */
+function skipWithoutRegions(t) {
+    if (existsSync(REGIONS_FILE)) return false;
+    t.skip(`no region graph at data/maps/${REGIONS_MAP}/mapdata/regions.lua `
+        + `— data/maps is processed map output: boot the lobby once with ${REGIONS_MAP} installed`);
+    return true;
+}
 
 function findings(luaBody, opts = {}) {
     const r = evalBareLua(luaBody, 'fixture.lua');
@@ -71,7 +106,8 @@ test('every shipped scenario validates with zero errors', async () => {
     }
 });
 
-test('the baked def caches are readable and name-keyed', () => {
+test('the baked def caches are readable and name-keyed', (t) => {
+    if (skipWithoutDefs(t)) return;
     assert.ok(UNITS, 'no unitdefs.lua.br — bake defs by running a game once');
     assert.ok(FEATURES, 'no featuredefs.lua.br');
     assert.ok(UNITS.defs.size > 50, `only ${UNITS.defs.size} unit defs`);
@@ -152,7 +188,8 @@ test('side-capacity: a negative capacity is a typo, not "unlimited"', () => {
     assert.ok(has(f, 'warning', 'side-capacity'));
 });
 
-test('unknown-unitdef', () => {
+test('unknown-unitdef', (t) => {
+    if (skipWithoutDefs(t)) return;
     const f = findings(BASE.replace("def = 'ms_soldiers_s1', team = 1", "def = 'ms_soldeirs_s1', team = 1"));
     assert.ok(has(f, 'error', 'unknown-unitdef'));
     assert.equal(f.find((x) => x.rule === 'unknown-unitdef').path, 'units[2]');
@@ -208,7 +245,8 @@ test('region-entry: neither a key nor x/z', () => {
     assert.ok(has(f, 'error', 'region-entry'));
 });
 
-test('unknown-featuredef, feature-coords and feature-facing', () => {
+test('unknown-featuredef, feature-coords and feature-facing', (t) => {
+    if (skipWithoutDefs(t)) return;
     const f = findings(BASE.replace("world = { map = 'green_flat_x34_v3' }",
         "world = { map = 'green_flat_x34_v3', features = { { def = 'ms_no_such_wreck', facing = 'northeast' } } }"));
     assert.ok(has(f, 'error', 'unknown-featuredef'));
@@ -216,7 +254,8 @@ test('unknown-featuredef, feature-coords and feature-facing', () => {
     assert.ok(has(f, 'error', 'feature-facing'));
 });
 
-test('feature-chain: chain > 1 on a def with no chain_pitch stacks every segment', () => {
+test('feature-chain: chain > 1 on a def with no chain_pitch stacks every segment', (t) => {
+    if (skipWithoutDefs(t)) return;
     const f = findings(BASE.replace("world = { map = 'green_flat_x34_v3' }",
         "world = { map = 'green_flat_x34_v3', features = { { def = 'ms_colossus_wreck', x = 5, z = 5, chain = 3 } } }"));
     assert.ok(has(f, 'error', 'feature-chain'));
@@ -241,9 +280,10 @@ test('ai-team and ai-stipend', () => {
     assert.ok(has(f, 'error', 'ai-stipend'));
 });
 
-test('ai-region: a slate key this map\'s graph does not declare (warning, not error)', () => {
-    const regions = loadRegionKeys(ROOT, 'green_flat_x34_v3');
-    assert.ok(regions, 'green_flat_x34_v3 should ship a region graph');
+test('ai-region: a slate key this map\'s graph does not declare (warning, not error)', (t) => {
+    if (skipWithoutRegions(t)) return;
+    const regions = loadRegionKeys(ROOT, REGIONS_MAP);
+    assert.ok(regions, `${REGIONS_FILE} exists but did not read as a region graph`);
     const f = findings(
         BASE.replace('objectives =', "ai = { { team = 1, slate = { kinds = { 'raid' }, home = 'atlantis' } } },\n  objectives ="),
         { regionKeys: regions.keys });
@@ -279,7 +319,8 @@ test('objective-chain-id: parentId is a runtime id, not a name', () => {
     assert.equal(f.filter((x) => x.rule === 'objective-chain-id' && x.severity === 'error').length, 2);
 });
 
-test('objective-populate: a malformed marker is a finding, not a silent no-op', () => {
+test('objective-populate: a malformed marker is a finding, not a silent no-op', (t) => {
+    if (skipWithoutDefs(t)) return;
     // Before this rule, every shape here booted clean and then either errored
     // inside the frame-30 sweep (a nil coordinate) or minted an objective its
     // type module refuses at init (a bad `into`) — both invisible at load.
@@ -371,7 +412,8 @@ test('defs-cache-missing: an empty universe SKIPS the def rules, never fails the
     assert.equal(f.filter((x) => x.severity === 'error').length, 0);
 });
 
-test('the acceptance case: two victories AND a bogus def in ONE call', () => {
+test('the acceptance case: two victories AND a bogus def in ONE call', (t) => {
+    if (skipWithoutDefs(t)) return;
     const f = findings(BASE
         .replace("def = 'ms_soldiers_s1', team = 1", "def = 'ms_soldeirs_s1', team = 1")
         .replace("{ type = 'destroy_all', victory = true }",
