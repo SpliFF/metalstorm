@@ -8,6 +8,9 @@
  * No simulation code — just HTTP serving, SQLite, and process management.
  */
 
+#include "Server/BroadcastCatalog.h"
+#include "Server/BroadcastLog.h"
+#include "Server/BroadcastRelay.h"
 #include "Server/Database.h"
 #include "Server/GrowthCounters.h"
 #include "Server/GameEventsDb.h"
@@ -94,6 +97,7 @@
 #include <netinet/in.h>
 #include <nlohmann/json.hpp>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -463,6 +467,15 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// property of the room being started.
 static std::string gReplayDir;
 
+/// PLAN-beta-broadcast.md lane L: `--broadcast-dir`. When set, every LIVE
+/// mission the lobby spawns (never a replay watch, never a broadcast relay
+/// watch — see the `isBroadcastRelay` branch below) is given a
+/// `--broadcast-out <dir>/<roomId>-<ts>.msb` so its outbound global-spectator
+/// stream is tapped for delayed viewing. File-scope for the same reason
+/// `gReplayDir` is: `spawnGameServer` is a static function reached from every
+/// room-creating call site, not a `main()` local.
+static std::string gBroadcastDir;
+
 /// PLAN-metalstorm-lobby.md §8, task 9a: "when did this account last make an
 /// authenticated request", the only source of the `online` presence state.
 ///
@@ -498,6 +511,17 @@ static std::string gGamesDir = "data/games";
 /// (`unordered_map` rather than `map`: `rts/Map/` shadows the `<map>` header on
 /// a case-insensitive filesystem, so it cannot be included here at all.)
 static std::unordered_map<uint32_t, std::string> gReplayRooms;
+
+/// Rooms WATCHING a broadcast relay (PLAN-beta-broadcast.md lane L), roomId →
+/// the `.msb` basename being relayed. Mirrors `gReplayRooms` at every one of
+/// its sites for the identical reason: a broadcast-watch room is a real room
+/// (§5's "casting" model, reused verbatim — join → play → leave is the path
+/// clients already use), and this map is what tells the rest of the lobby a
+/// game-server-shaped room apart from one that is only relaying a log nobody
+/// can join as a player. Distinct from `gBroadcastDir`/the tap wiring above:
+/// that side records a LIVE mission's own stream; this side tracks who is
+/// watching one played back through a relay.
+static std::unordered_map<uint32_t, std::string> gBroadcastRooms;
 
 /// The game-server binary this lobby forks. Release wins when it exists —
 /// which is also task 3b's field note ("a debug-only rebuild is invisible in a
@@ -659,8 +683,19 @@ static GameServerInstance spawnGameServer(
     // room cannot reach it by construction. Without it, an exec-driven test
     // that never opens a client is killed by the 120s startup-idle timer at
     // frame -1, because a skirmish holds GameStart for its rostered humans.
-    int idleStartupGraceSeconds = 0, int idleExitSeconds = 0) {
+    int idleStartupGraceSeconds = 0, int idleExitSeconds = 0,
+    // PLAN-beta-broadcast.md lane L: when set, this server RELAYS the named
+    // `.msb` to delayed watchers instead of hosting a live game or
+    // re-executing a `.msr`. Like `replayFile`, every argument describing the
+    // world is withheld — the relay pulls map/game/modoptions out of the
+    // log's own header (BroadcastLog.h reuses `replay::Header` verbatim for
+    // exactly this) — and no delay flag is passed: the relay's own compiled
+    // floor (`broadcast::kMinBroadcastDelaySec`) is what a fresh watch gets,
+    // and only `--dev-broadcast-floor` (never sent by this lobby) can lower
+    // it.
+    const std::string &broadcastFile = "") {
   const bool isReplay = !replayFile.empty();
+  const bool isBroadcastRelay = !broadcastFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
   inst.port = findFreePort(9100, 0, excludedPorts);
@@ -726,9 +761,11 @@ static GameServerInstance spawnGameServer(
   // whether THIS game ships that profile. A game without one simply never
   // gets the branch.
   //
-  // Never on a replay: the recording's roster is the authority, and adding an
-  // AI the recording did not have would diverge on the first frame.
-  if (!isReplay) {
+  // Never on a replay, and never on a broadcast relay: the recording's roster
+  // is the authority, and adding an AI it did not have would diverge on the
+  // first frame — and a relay has no roster at all (playerRoster is always
+  // empty on that path), so the census below would run for nothing.
+  if (!isReplay && !isBroadcastRelay) {
     const std::filesystem::path mentorProfile =
         std::filesystem::path(gGamesDir) / gameId / "AI" / "strategos" /
         "profiles" / "mentor.lua";
@@ -814,6 +851,34 @@ static GameServerInstance spawnGameServer(
     }
   }
 
+  // Broadcast tap (PLAN-beta-broadcast.md lane L). Only on a LIVE mission —
+  // never on a replay re-execution and never on a broadcast relay itself,
+  // which would tap its own delayed re-send rather than a fresh mission.
+  // Named `<roomId>-<ts>.msb` (epoch ms, matching `BroadcastTap.h`'s own wall
+  // clock) rather than reusing the replay side's `-p<port>` disambiguator: a
+  // room id is reused across a lobby restart, but two taps for the same room
+  // in the same millisecond cannot happen (one game server per room), so the
+  // timestamp alone is already unique and doubles as the catalog's ordering
+  // key (`BroadcastCatalog::ParseSegmentName`).
+  std::string broadcastOutPathStorage;
+  if (!gBroadcastDir.empty() && !isReplay && !isBroadcastRelay) {
+    std::error_code ec;
+    std::filesystem::create_directories(gBroadcastDir, ec);
+    if (ec) {
+      SLOG(SPRING_LOG_WARNING,
+           "--broadcast-dir '%s' is not usable (%s) — room %u will not be "
+           "broadcast",
+           gBroadcastDir.c_str(), ec.message().c_str(), roomId);
+    } else {
+      const uint64_t nowMs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      broadcastOutPathStorage = gBroadcastDir + "/" + std::to_string(roomId) +
+                               "-" + std::to_string(nowMs) + ".msb";
+    }
+  }
+
   pid_t pid = fork();
   if (pid == 0) {
     // Child process — redirect stdout/stderr to log file
@@ -857,7 +922,7 @@ static GameServerInstance spawnGameServer(
     argv.push_back(portStr.c_str());
     argv.push_back("--room");
     argv.push_back(roomStr.c_str());
-    if (!isReplay) {
+    if (!isReplay && !isBroadcastRelay) {
       argv.push_back("--game");
       argv.push_back(gameId.c_str());
       if (!gameVersion.empty()) {
@@ -882,6 +947,12 @@ static GameServerInstance spawnGameServer(
     if (isReplay) {
       argv.push_back("--replay");
       argv.push_back(replayFile.c_str());
+    } else if (isBroadcastRelay) {
+      // Deliberately no `--broadcast-delay-seconds`: the relay's own
+      // compiled floor applies, and only a `--dev-broadcast-floor` this
+      // lobby never sends can lower it (see the parameter comment).
+      argv.push_back("--broadcast");
+      argv.push_back(broadcastFile.c_str());
     } else {
       // Not on the replay path: a recording re-executes with the gating its
       // own stream was produced under, and every argument that describes the
@@ -903,6 +974,13 @@ static GameServerInstance spawnGameServer(
       if (!replayPathStorage.empty()) {
         argv.push_back("--journal-file");
         argv.push_back(replayPathStorage.c_str());
+      }
+      // Broadcast tap (PLAN-beta-broadcast.md lane L): orthogonal to
+      // --journal-file — that records causes, this records effects — so a
+      // mission may carry both.
+      if (!broadcastOutPathStorage.empty()) {
+        argv.push_back("--broadcast-out");
+        argv.push_back(broadcastOutPathStorage.c_str());
       }
       // Hibernation (PLAN-persistence task 3b). Both flags are war-only: a
       // skirmish has its own idle exit and no world worth freezing, and
@@ -955,6 +1033,10 @@ static GameServerInstance spawnGameServer(
       SLOG(SPRING_LOG_NOTICE,
            "spawned REPLAY server pid=%d port=%d for room %u (%s)", pid,
            inst.port, roomId, replayFile.c_str());
+    else if (isBroadcastRelay)
+      SLOG(SPRING_LOG_NOTICE,
+           "spawned BROADCAST RELAY server pid=%d port=%d for room %u (%s)",
+           pid, inst.port, roomId, broadcastFile.c_str());
     else {
       // A tuned idle grace is worth naming in the log: the failure it prevents
       // (a server vanishing at frame -1) otherwise looks like a crash.
@@ -963,6 +1045,8 @@ static GameServerInstance spawnGameServer(
         idleNote += " (idle-grace " + std::to_string(idleStartupGraceSeconds) + "s)";
       if (idleExitSeconds > 0)
         idleNote += " (idle-exit " + std::to_string(idleExitSeconds) + "s)";
+      if (!broadcastOutPathStorage.empty())
+        idleNote += " (broadcasting to " + broadcastOutPathStorage + ")";
       SLOG(SPRING_LOG_NOTICE,
            "spawned game server pid=%d port=%d for room %u "
            "(%zu players, %zu AI, %u pre-allocated player slot(s))%s%s%s",
@@ -1092,6 +1176,14 @@ int main(int argc, char *argv[]) {
   // pruning entirely (an operator who wants the whole history), which is why
   // the default is a real number and not a sentinel.
   int clientErrorRetentionDays = 30;
+  // PLAN-beta-broadcast.md lane L: `--broadcast-retention-days`. A `.msb`
+  // whose own file has not been touched (written to, by an active tap) in
+  // this many days is swept on the existing hourly maintenance pass — see
+  // `BroadcastCatalog::ShouldSweep`. 14 days by default: long enough to
+  // outlast a slow week's replay traffic, short enough that a beta server's
+  // disk does not grow forever. <= 0 disables the sweep, same convention as
+  // `clientErrorRetentionDays` above.
+  int broadcastRetentionDays = 14;
   // PLAN-metalstorm-lobby.md §5.3, task 3: a persistent war's game server is
   // deliberately NOT killed when this lobby shuts down — the next lobby's
   // startup adoption pass re-attaches to the live pid, which is the only
@@ -1155,6 +1247,10 @@ int main(int argc, char *argv[]) {
       wtKeyPath = argv[++i];
     } else if (arg == "--replay-dir" && i + 1 < argc) {
       gReplayDir = argv[++i];
+    } else if (arg == "--broadcast-dir" && i + 1 < argc) {
+      gBroadcastDir = argv[++i];
+    } else if (arg == "--broadcast-retention-days" && i + 1 < argc) {
+      broadcastRetentionDays = std::atoi(argv[++i]);
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
@@ -2778,7 +2874,10 @@ int main(int argc, char *argv[]) {
           p.target.roomId = roomId;
           p.target.pid = inst.pid;
           p.target.alive = inst.pid > 0 && isProcessAlive(inst.pid);
-          p.target.isReplay = gReplayRooms.count(roomId) > 0;
+          // A broadcast-watch room has no snapshot either — it is a relay
+          // process, not a world — so drain treats it exactly like a replay.
+          p.target.isReplay = gReplayRooms.count(roomId) > 0 ||
+                              gBroadcastRooms.count(roomId) > 0;
           if (const auto *room = rooms.GetRoom(roomId)) {
             p.target.kind = room->sessionKind;
             if (p.target.kind == SessionKind::PersistentWar)
@@ -2971,7 +3070,8 @@ int main(int argc, char *argv[]) {
             target.roomId = roomId;
             target.pid = gsIt->second.pid;
             target.alive = target.pid > 0 && isProcessAlive(target.pid);
-            target.isReplay = gReplayRooms.count(roomId) > 0;
+            target.isReplay = gReplayRooms.count(roomId) > 0 ||
+                              gBroadcastRooms.count(roomId) > 0;
           }
           if (const auto *room = rooms.GetRoom(roomId)) {
             known = true;
@@ -3962,6 +4062,16 @@ int main(int argc, char *argv[]) {
     // recording it is serving.
     if (auto rit = gReplayRooms.find(room->id); rit != gReplayRooms.end())
       j["replay_file"] = rit->second;
+    // PLAN-beta-broadcast.md lane L: same idea, for a room watching a
+    // broadcast relay instead of a `.msr` re-execution. `POST
+    // /api/broadcasts/watch` promises callers `is_broadcast: true` on the
+    // room it returns; this is the one place that promise is kept, so every
+    // OTHER way a client learns about this room (the room browser, the SSE
+    // broadcast) says the same thing.
+    if (auto bit = gBroadcastRooms.find(room->id); bit != gBroadcastRooms.end()) {
+      j["is_broadcast"] = true;
+      j["broadcast_file"] = bit->second;
+    }
     return j.dump();
   };
 
@@ -8292,8 +8402,11 @@ int main(int argc, char *argv[]) {
                  gsIt->second.pid);
           }
           // A replay room's last watcher leaving ends the cast — the same
-          // abandon rule a game room already has (PLAN-replay task 4c).
+          // abandon rule a game room already has (PLAN-replay task 4c). A
+          // broadcast-watch room follows identically (PLAN-beta-broadcast.md
+          // lane L).
           gReplayRooms.erase(rid);
+          gBroadcastRooms.erase(rid);
           rooms.DeleteRoom(rid);
         }
 
@@ -9150,6 +9263,248 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
       });
 
+  // ────────── Broadcast browser (PLAN-beta-broadcast.md lane L) ──────────
+  //
+  // Mirrors the replay browser immediately above, for a `.msb` tap log
+  // instead of a `.msr` recording: enumerate what `--broadcast-dir` holds and
+  // spawn/join a relay room to watch one. Both 404 when the directory is
+  // unset, same reasoning as the replay pair.
+
+  /// Resolve a client-supplied broadcast log name to a path inside
+  /// gBroadcastDir. Matched against the directory listing, never
+  /// concatenated — same reasoning as `resolveReplayFile` above.
+  auto resolveBroadcastFile = [](const std::string &name,
+                                 std::string &pathOut) -> bool {
+    if (gBroadcastDir.empty() || name.empty())
+      return false;
+    std::error_code ec;
+    for (const auto &entry :
+         std::filesystem::directory_iterator(gBroadcastDir, ec)) {
+      if (ec)
+        return false;
+      if (!entry.is_regular_file(ec))
+        continue;
+      if (entry.path().extension() != ".msb")
+        continue;
+      if (entry.path().filename().string() == name) {
+        pathOut = entry.path().string();
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /// `mission_title` for a listing row: the scenario's display name when the
+  /// tap's header carries a `scenario` modoption and this lobby still knows
+  /// that scenario; the raw scenario id when it does not (a game this lobby
+  /// no longer serves); the map id for a tap with no scenario at all (a
+  /// skirmish).
+  auto broadcastMissionTitle = [&](const replay::Header &h) -> std::string {
+    for (const auto &[key, value] : h.modOptions) {
+      if (key != "scenario")
+        continue;
+      if (const auto *info =
+              ScenarioDiscovery::FindById(scenariosFor(h.gameId), value))
+        return info->displayName;
+      return value;
+    }
+    return h.mapId;
+  };
+
+  // POST /api/broadcasts/list — every `.msb` whose enforced delay has
+  // elapsed. A POST for a read, same reason /api/replays/list is one: a GET
+  // never carries an Authorization header (NetworkServer.h's RouteAuth
+  // note), and a mission title is worth real token auth. TokenRequired
+  // passes a guest token, same as every other spectate route.
+  net.AddHttpPost(
+      "/api/broadcasts/list", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        if (requireAuth(headers) <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+        if (gBroadcastDir.empty())
+          return HttpAuth::JsonResponse(
+              404,
+              R"({"error":"this lobby is not broadcasting missions - no --broadcast-dir is set"})");
+
+        const uint64_t nowMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+
+        // One skip-scan per file (LoadSummary decodes no payload), an
+        // Availability verdict over it, then — unlike the replay admin list —
+        // an unreadable or not-yet-available log is DROPPED rather than shown
+        // with an error: this is a player-facing browser, and a segment the
+        // delay has not opened yet is not a listing bug to surface.
+        std::unordered_map<std::string, nlohmann::json> rowByFile;
+        std::vector<broadcastcatalog::SegmentEntry> order;
+
+        std::error_code ec;
+        for (const auto &entry :
+             std::filesystem::directory_iterator(gBroadcastDir, ec)) {
+          if (ec)
+            break;
+          if (!entry.is_regular_file(ec) || entry.path().extension() != ".msb")
+            continue;
+          const std::string file = entry.path().filename().string();
+          const broadcast::Summary sum =
+              broadcast::LoadSummary(entry.path().string());
+          if (!sum.ok)
+            continue;
+          const auto avail = broadcastcatalog::Availability(
+              sum, broadcast::kMinBroadcastDelaySec, nowMs);
+          if (!avail.available)
+            continue;
+
+          broadcastcatalog::SegmentName segName;
+          const uint64_t orderKey =
+              broadcastcatalog::ParseSegmentName(file, segName)
+                  ? segName.timestampMs
+                  : sum.firstWallMs;
+
+          nlohmann::json j;
+          j["file"] = file;
+          j["mission_title"] = broadcastMissionTitle(sum.header);
+          j["map"] = sum.header.mapId;
+          j["game"] = sum.header.gameId;
+          j["state"] = broadcastcatalog::StateName(avail.state);
+          j["behind_seconds"] = avail.behindSeconds;
+          j["available_since"] = avail.availableSinceMs / 1000;
+          j["duration"] = avail.durationMs / 1000;
+          j["watching_room"] = nullptr;
+          for (const auto &[rid, f] : gBroadcastRooms) {
+            if (f == file) {
+              j["watching_room"] = rid;
+              break;
+            }
+          }
+          order.push_back({file, orderKey});
+          rowByFile[file] = std::move(j);
+        }
+
+        nlohmann::json resp;
+        resp["dir"] = gBroadcastDir;
+        resp["broadcasts"] = nlohmann::json::array();
+        for (const auto &seg :
+             broadcastcatalog::OrderSegmentsNewestFirst(std::move(order)))
+          resp["broadcasts"].push_back(std::move(rowByFile[seg.file]));
+        return HttpAuth::JsonResponse(200, resp.dump());
+      });
+
+  // POST /api/broadcasts/watch {"file": "..."} — join or spawn the relay
+  // room for one segment. Same shape as /api/replays/watch: a second caller
+  // for a file already being relayed JOINS that room rather than spawning a
+  // rival relay over the same log (one relay process serves every watcher of
+  // a segment, each on their own cursor — BroadcastRelay.h).
+  net.AddHttpPost(
+      "/api/broadcasts/watch", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        if (gBroadcastDir.empty())
+          return HttpAuth::JsonResponse(
+              404,
+              R"({"error":"this lobby is not broadcasting missions - no --broadcast-dir is set"})");
+
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        const std::string file = j.value("file", "");
+
+        std::string path;
+        if (!resolveBroadcastFile(file, path))
+          return HttpAuth::JsonResponse(
+              404,
+              R"({"error":"no such broadcast in this lobby's broadcast dir"})");
+
+        // Refuse a file we cannot read before forking, same reasoning as the
+        // replay route: a relay given an unreadable log exits immediately,
+        // and the room it left behind would read as "the game crashed".
+        const broadcast::Summary sum = broadcast::LoadSummary(path);
+        if (!sum.ok)
+          return HttpAuth::JsonResponse(
+              422, "{\"error\":\"" + HttpAuth::JsonEscape(sum.error) + "\"}");
+
+        // Already being relayed? Join that room.
+        for (const auto &[rid, f] : gBroadcastRooms) {
+          if (f != file)
+            continue;
+          auto gsIt = gameServers.find(rid);
+          if (gsIt == gameServers.end() || !isProcessAlive(gsIt->second.pid))
+            break; // stale entry; the health loop will clear it, spawn anew
+          if (!rooms.JoinRoom(rid, static_cast<uint32_t>(userId), 0,
+                              user->username, "", /*asSpectator=*/true))
+            return HttpAuth::JsonResponse(
+                403, R"({"error":"cannot join this broadcast"})");
+          SLOG(SPRING_LOG_NOTICE, "'%s' joined the broadcast of '%s' (room %u)",
+               user->username.c_str(), file.c_str(), rid);
+          broadcastRooms();
+          return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(rid)));
+        }
+
+        // One watcher may only be in one room; leaving is implicit, same as
+        // the replay and direct-start paths.
+        if (auto *prior = findPlayerRoom(static_cast<uint32_t>(userId))) {
+          const uint32_t priorId = prior->id;
+          if (rooms.LeaveRoom(priorId, static_cast<uint32_t>(userId)) ==
+              LeaveResult::Abandoned) {
+            auto gsIt = gameServers.find(priorId);
+            if (gsIt != gameServers.end()) {
+              kill(gsIt->second.pid, SIGTERM);
+              removeGameServer(priorId);
+              gameServers.erase(gsIt);
+            }
+            gReplayRooms.erase(priorId);
+            gBroadcastRooms.erase(priorId);
+            rooms.DeleteRoom(priorId);
+          }
+        }
+
+        // Map/game come out of the LOG's header, not a caller-supplied field
+        // — same reasoning as the replay route.
+        const uint32_t roomId = rooms.CreateRoom(
+            "⏱ " + broadcastMissionTitle(sum.header), sum.header.mapId,
+            sum.header.gameId, /*maxPlayers=*/8, /*password=*/"",
+            static_cast<uint32_t>(userId), 0, user->username,
+            /*persistent=*/false);
+        gBroadcastRooms[roomId] = file;
+
+        std::unordered_set<int> busyPorts;
+        for (const auto &[rid, gi] : gameServers)
+          if (gi.pid > 0 && isProcessAlive(gi.pid))
+            busyPorts.insert(gi.port);
+        auto inst = spawnGameServer(
+            roomId, sum.header.gameId, sum.header.gameVersion,
+            sum.header.mapId, dbPath, /*playerRoster=*/{}, /*aiSlots=*/{},
+            /*modOptions=*/{}, busyPorts, devBuildAcknowledged, wtCertPath,
+            wtKeyPath, /*replayFile=*/"", /*sessionKind=*/SessionKind::Skirmish,
+            /*resumeFromSnapshot=*/false, /*hibernateIdleSeconds=*/0,
+            /*playerSlotCap=*/0, /*idleStartupGraceSeconds=*/0,
+            /*idleExitSeconds=*/0, /*broadcastFile=*/path);
+        if (inst.state == GameServerInstance::Crashed) {
+          gBroadcastRooms.erase(roomId);
+          rooms.DeleteRoom(roomId);
+          return HttpAuth::JsonResponse(
+              500, R"({"error":"could not start a broadcast relay"})");
+        }
+        gameServers[roomId] = inst;
+        persistGameServer(inst);
+
+        GameRoom *room = rooms.GetRoom(roomId);
+        room->gameServerPort = inst.port;
+        rooms.SetRoomState(roomId, ERoomState::Loading);
+
+        db.LogAudit(userId, user->username, "broadcast_watch", file,
+                    "room=" + std::to_string(roomId));
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
+      });
+
 #undef HTTP_ROOM_AUTH
 
   // --direct <manifest.json>: create one standing room at boot, driven
@@ -9212,6 +9567,11 @@ int main(int argc, char *argv[]) {
   int reapTick = 0;
   int errorPruneTick = 0;
   int sessionSweepTick = 0;
+  // PLAN-beta-broadcast.md lane L: same ~hourly cadence as the session sweep
+  // below, but its OWN tick — the session sweep's guard short-circuits on
+  // `haveMaintenanceDb` and this sweep needs no database connection at all
+  // (it is a plain directory walk), so it must not depend on one being up.
+  int broadcastSweepTick = 0;
   /// War-browser refresh cadence (task 6) — see the tick below for why a war
   /// needs one and a room does not.
   int warBroadcastTick = 0;
@@ -9811,6 +10171,53 @@ int main(int argc, char *argv[]) {
              chat);
     }
 
+    // Sweep `.msb` broadcast logs older than --broadcast-retention-days
+    // (~hourly, PLAN-beta-broadcast.md lane L). A file's OWN mtime is the
+    // age (`BroadcastCatalog::ShouldSweep`'s reasoning): an actively-tapped
+    // log is touched by `Writer::Flush()` every tick, so a mission still
+    // being tapped or watched can never age out from under it, and this
+    // needs no room/game-server cross-reference to stay safe.
+    if (!gBroadcastDir.empty() && ++broadcastSweepTick >= 36000) {
+      broadcastSweepTick = 0;
+      const uint64_t nowMs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      int swept = 0;
+      std::error_code ec;
+      for (const auto &entry :
+           std::filesystem::directory_iterator(gBroadcastDir, ec)) {
+        if (ec)
+          break;
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".msb")
+          continue;
+        // `stat()` rather than `std::filesystem::last_write_time`: this
+        // libc++ has no `clock_cast`, and `file_clock`'s epoch is unspecified
+        // — the exact reason `replay::ListDirectory` (ReplayFile.cpp) also
+        // asks the OS directly instead of converting the filesystem clock.
+        struct stat st{};
+        if (::stat(entry.path().c_str(), &st) != 0)
+          continue;
+        const uint64_t mtimeMs = static_cast<uint64_t>(st.st_mtime) * 1000ull;
+        if (!broadcastcatalog::ShouldSweep(mtimeMs, nowMs, broadcastRetentionDays))
+          continue;
+        const std::string file = entry.path().filename().string();
+        std::filesystem::remove(entry.path(), ec);
+        if (ec)
+          continue;
+        ++swept;
+        broadcastcatalog::SegmentName segName;
+        if (broadcastcatalog::ParseSegmentName(file, segName))
+          SLOG(SPRING_LOG_INFO, "swept broadcast log '%s' (room %u, past %d day(s))",
+              file.c_str(), segName.roomId, broadcastRetentionDays);
+        else
+          SLOG(SPRING_LOG_INFO, "swept broadcast log '%s' (past %d day(s))",
+              file.c_str(), broadcastRetentionDays);
+      }
+      if (swept > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d broadcast log(s) past retention", swept);
+    }
+
     // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).
     //
     // PLAN-metalstorm-lobby.md §4, task 6. Every other broadcast in this file
@@ -9845,6 +10252,7 @@ int main(int argc, char *argv[]) {
         for (uint32_t rid : reaped) {
           removeGameServer(rid); // safety
           gReplayRooms.erase(rid);
+          gBroadcastRooms.erase(rid);
         }
         SLOG(SPRING_LOG_NOTICE, "reaped %zu abandoned room(s)", reaped.size());
         broadcastRooms();
@@ -9919,6 +10327,21 @@ int main(int argc, char *argv[]) {
                  "replay room %u closed — '%s' played out", roomId,
                  rit->second.c_str());
             gReplayRooms.erase(rit);
+            rooms.DeleteRoom(roomId);
+            broadcastRooms();
+            continue;
+          }
+
+          // PLAN-beta-broadcast.md lane L: same rule for a room watching a
+          // broadcast relay. The relay process only exits when the lobby (or
+          // an operator) kills it — normally that happens through the
+          // abandon path above — but a relay can also crash, and a crashed
+          // one has no next game either.
+          if (auto bit = gBroadcastRooms.find(roomId);
+              bit != gBroadcastRooms.end()) {
+            SLOG(SPRING_LOG_NOTICE, "broadcast-watch room %u closed — '%s'",
+                roomId, bit->second.c_str());
+            gBroadcastRooms.erase(bit);
             rooms.DeleteRoom(roomId);
             broadcastRooms();
             continue;
