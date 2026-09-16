@@ -81,6 +81,7 @@ import { uiActionRegistry, createNLUiActionPort } from '../ui/native-ui/ui-actio
 import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js';
 import { answerLocally, isCancel, resubmissionText } from '../ui/native-ui/nl-clarify.js';
 import { focusModel } from '../ui/native-ui/focus-model.js';
+import { uiStore } from '../ui/native-ui/ui-store.js';
 import { focusContextFor } from '../ui/native-ui/nl-focus.js';
 import {
     isVoiceCaptureAvailable, createWebSpeechVoicePort, createPushToTalk,
@@ -545,6 +546,24 @@ function dispose() {
 }
 
 /**
+ * Drop a transcript line that is outside a mentored player's scope
+ * (PLAN-beta.md "Mentorship": the console hides all-chat and enemy lines so
+ * the player can hear their mentor).
+ *
+ * Scope rides on the CALLER's `extra.scope` — `'all'` for all-chat, `'enemy'`
+ * for anything said by the other side — so the console never has to guess from
+ * the text. Every line the console itself produces (your orders, the game's
+ * answers, a mentor's direct line) carries no scope and is never hidden. The
+ * chat producer that would set it does not exist on the wire yet; this is the
+ * gate it lands into, and `uiStore.setShowEverything(true)` (the mentor card's
+ * toggle) opens it.
+ */
+function chatterHidden(scope) {
+    if (scope !== 'all' && scope !== 'enemy') return false;
+    return uiStore.isChatterFiltered();
+}
+
+/**
  * Append one transcript line (+ optional dim transparency notes) and scroll.
  *
  * Anything the game says SUMMONS the command line. A spoken order, a follow
@@ -554,6 +573,7 @@ function dispose() {
  * refusal-copy discipline in this stack exists to prevent.
  */
 function say(kind, text, notes = [], extra = {}) {
+    if (chatterHidden(extra.scope)) return null;
     if (!state.visible) summon({ focusInput: false });
     const who = kind === 'you' ? 'you' : kind === 'system' ? '' : 'game';
     state.log.push({ who, kind, text, notes, chosen: [], ...extra });
@@ -752,6 +772,12 @@ function buildLocalPorts(resolver) {
             teamRulesParam: (key) => state.ctx?.store.teamRulesParam(state.ctx.identity.teamId, key),
             playerId: state.ctx?.identity.playerId ?? 0,
             ...(camera ? { focusCamera: (x, z) => camera.focusOn(x, z) } : {}),
+            // "What's happening?" (contract v2). The moments are the HUD's own
+            // record of the battle, which makes the answer LOS-honest by
+            // construction — there is nothing in here the player was not shown.
+            // Without this port the query refuses by name, which is the honest
+            // answer but not a useful one.
+            battleMoments: () => state.ctx?.store.getBattleMoments() ?? [],
         });
     }
 

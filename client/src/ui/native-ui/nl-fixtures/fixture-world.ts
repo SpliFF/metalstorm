@@ -204,6 +204,22 @@ export interface NLFixture {
     ports?: boolean;
     /** Why this fixture exists, when that isn't obvious from the utterance. */
     note?: string;
+    /**
+     * Do not score this fixture in the OFFLINE arm, and say why.
+     *
+     * A handful of fixtures exist to pin what the EXECUTOR does with an
+     * envelope the model got wrong — "the model said `selection` and nothing is
+     * selected" is a real thing a model does, and the refusal it earns is worth
+     * a fixture. Their `expected` is therefore deliberately not the canonical
+     * reading of the sentence, and scoring a deterministic producer against it
+     * would mark the producer down for being right.
+     *
+     * The string is the reason, and it is required: an exemption with no
+     * argument attached is how a corpus quietly stops measuring anything. The
+     * count is pinned in `offline-baseline.json`, so growing this list is a
+     * reviewed diff.
+     */
+    offlineSkip?: string;
 }
 
 export interface FixtureFile {
@@ -241,7 +257,7 @@ export interface FixtureWorld {
 
 /** Panels every board has unless it says otherwise — the Metalstorm manifest set
  *  plus the minimap, which is the one entry with a full-screen mode. */
-const DEFAULT_PANELS: NonNullable<FixtureContext['panels']> = [
+export const DEFAULT_PANELS: NonNullable<FixtureContext['panels']> = [
     { id: 'minimap', label: 'Minimap', aliases: ['mini map', 'tactical map'], fullscreen: true },
     { id: 'parley-panel', label: 'Parley', aliases: ['diplomacy panel', 'diplomacy'] },
     { id: 'objectives-panel', label: 'Objectives', aliases: ['objectives', 'mission'] },

@@ -30,10 +30,13 @@
  * documented exceptions (projectile-attached state, faithful to
  * projectile-trails.ts) — both are explicit update calls here.
  *
- * This module is the reference implementation for the Stage-7 GP-worker FX
- * loader (shaders/fx/README.md "Wiring"): the worker adapter should
- * instantiate it against Babylon's context via getEngineGl(engine) and drive
- * beginFrame/render with the game camera instead of the harness stage.
+ * TWO ENTRY POINTS. `render(frame)` owns the whole sequence above and is the
+ * fx-viewer stage's path. `renderInto(gl, viewProj, now, depthTex, params)`
+ * runs step 3 ONLY, into the framebuffer the caller already has bound, with no
+ * clears and no composite — that is the game path (fx-game-loader.ts, hooked
+ * on scene.onAfterRenderingGroupObservable against Babylon's own context via
+ * getEngineGl). Shockwave/offset stays stage-only: the game composites its
+ * shockwaves through distortion-renderer.ts.
  */
 
 import {
@@ -81,6 +84,38 @@ export interface NativeFxFrame {
 
 export type ShaderSolo = 'particle' | 'muzzleFlash' | 'tracer' | 'trail' | 'shockwave';
 
+/** Extra state `renderInto` needs that a bare view-projection can't carry.
+ *  `camPos` is not optional in practice — every FX program billboards around
+ *  it — so the game adapter always passes the live camera. */
+export interface FxPassParams {
+    camPos: [number, number, number];
+    /** Camera (near, far) used to build the matrix — soft-particle linearise. */
+    nearFar?: [number, number];
+    /** Target size in px (uScreenSize). Defaults to the last setScreenSize. */
+    screen?: [number, number];
+    /** Soft-particle fade range in elmos. 0 (the game default) = no depth copy. */
+    softRange?: number;
+    trailSprite?: string;
+    trailTint?: [number, number, number];
+    solo?: ShaderSolo | null;
+}
+
+/** Everything the four additive FX programs read, independent of which
+ *  framebuffer they land in — the shared argument of the stage path
+ *  (`render`) and the in-scene path (`renderInto`). */
+interface FxDraw {
+    now: number;
+    camPos: [number, number, number];
+    nearFar: [number, number];
+    softRange: number;
+    /** Depth texture for the soft fade; null binds the atlas as a dummy
+     *  (legal sampler, never read — the shader guards on uSoftRange). */
+    depthTex: WebGLTexture | null;
+    solo: ShaderSolo | null;
+    trailSprite?: string;
+    trailTint?: [number, number, number];
+}
+
 export interface PoolCounts {
     particles: number;
     muzzles: number;
@@ -96,6 +131,14 @@ const POOL = {
     trail: 1024,
     shock: 32,
 } as const;
+
+/** Per-pool capacity override (PLAN-beta-presentation L-FX step 5:
+ *  `gfx.particleQuality` → pool caps 8k/24k/50k). Structural — a pool not
+ *  named here keeps its POOL default. Capacity is fixed at construction
+ *  (a WebGL buffer can't be resized live), matching the existing
+ *  `gfx.particleQuality` semantics for the CEG particle system
+ *  (`requiresRestart` in client-settings.ts). */
+export type NativeFxPoolCapacities = Partial<Record<keyof typeof POOL, number>>;
 
 /** Files the renderer needs from shaders/fx/. Exported so callers can drive
  *  their fetch loop off the same list (single source of truth). */
@@ -146,14 +189,22 @@ export class NativeFxRenderer {
 
     private width = 0;
     private height = 0;
-    private tracerGen = new Int32Array(POOL.tracer);
-    private trailGen = new Int32Array(POOL.trail);
+    private tracerGen: Int32Array;
+    private trailGen: Int32Array;
     /** Rows the CPU touched since the last draw (row-index ranges per pool),
      *  flushed with one bufferSubData per pool per frame. */
     private dirtyTracer = new Set<number>();
     private dirtyTrail = new Set<number>();
+    /** Global wind drift (elmos/s), added to every particle's position over
+     *  its age (uWind — PLAN-beta-presentation L-FX step 7). Applies to the
+     *  whole particle pass, not per-effect: smoke (long-lived) visibly
+     *  drifts: sparks/fireballs (short-lived) barely move under it. */
+    private wind: [number, number, number] = [0, 0, 0];
 
-    constructor(gl: WebGL2RenderingContext, sources: NativeFxSources, textures: NativeFxTextures) {
+    constructor(
+        gl: WebGL2RenderingContext, sources: NativeFxSources, textures: NativeFxTextures,
+        capacities?: NativeFxPoolCapacities,
+    ) {
         this.gl = gl;
         this.tex = textures;
         this.distortionAvailable = gl.getExtension('EXT_color_buffer_float') !== null;
@@ -161,6 +212,9 @@ export class NativeFxRenderer {
         for (const f of NATIVE_FX_SHADER_FILES) {
             if (!sources[f]) throw new Error(`[native-fx] missing shader source "${f}"`);
         }
+        const cap = { ...POOL, ...capacities };
+        this.tracerGen = new Int32Array(cap.tracer);
+        this.trailGen = new Int32Array(cap.trail);
 
         // ── programs ────────────────────────────────────────────────────────
         this.link('particle', sources['particle.vert.glsl'], sources['particle.frag.glsl']);
@@ -189,12 +243,12 @@ export class NativeFxRenderer {
         // ── instance pools + VAOs (attribute locations match the .glsl
         //    layout(location=N) declarations exactly) ─────────────────────────
         this.pools = {
-            particle: this.makePool(PARTICLE_FLOATS, POOL.particle, 2, 7, true),
-            muzzle:   this.makePool(MUZZLE_FLOATS, POOL.muzzle, 2, 3, true),
-            tracer:   this.makePool(TRACER_FLOATS, POOL.tracer, 2, 4, true),
-            trail:    this.makePool(TRAIL_FLOATS, POOL.trail, 2, 3, true),
+            particle: this.makePool(PARTICLE_FLOATS, cap.particle, 2, 7, true),
+            muzzle:   this.makePool(MUZZLE_FLOATS, cap.muzzle, 2, 3, true),
+            tracer:   this.makePool(TRACER_FLOATS, cap.tracer, 2, 4, true),
+            trail:    this.makePool(TRAIL_FLOATS, cap.trail, 2, 3, true),
             // shockwave.vert has NO aUV: instance attribs start at location 1.
-            shock:    this.makePool(SHOCK_FLOATS, POOL.shock, 1, 2, false),
+            shock:    this.makePool(SHOCK_FLOATS, cap.shock, 1, 2, false),
         };
 
         // ── render targets (sized on first beginFrame/resize) ───────────────
@@ -282,6 +336,12 @@ export class NativeFxRenderer {
         this.dirtyTrail.add(h.row);
     }
 
+    /** Set the global wind drift (elmos/s) `uWind` adds to every particle's
+     *  position over its age. Persistent — not per-effect/per-frame. */
+    setWind(x: number, y: number, z: number): void {
+        this.wind = [x, y, z];
+    }
+
     counts(): PoolCounts {
         return {
             particles: this.pools.particle.spawned,
@@ -344,14 +404,16 @@ export class NativeFxRenderer {
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneFbo);
 
         // 3. FX passes — additive premultiplied, depth test on / write off
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.ONE, gl.ONE);
-        gl.depthMask(false);
-
-        if (!solo || solo === 'particle') this.drawParticles(frame, viewProj);
-        if (!solo || solo === 'muzzleFlash') this.drawMuzzles(frame, viewProj);
-        if (!solo || solo === 'tracer') this.drawTracers(frame, viewProj);
-        if (!solo || solo === 'trail') this.drawTrails(frame, viewProj);
+        this.drawFxPasses(viewProj, {
+            now: frame.now,
+            camPos: frame.camPos,
+            nearFar: frame.nearFar,
+            softRange: frame.softRange ?? 10,
+            depthTex: this.depthCopy,
+            solo,
+            trailSprite: frame.trailSprite,
+            trailTint: frame.trailTint,
+        });
 
         // 4. shockwave offsets → RGBA16F target
         const distort = this.distortionAvailable && (!solo || solo === 'shockwave');
@@ -384,6 +446,64 @@ export class NativeFxRenderer {
         gl.bindVertexArray(null);
         gl.enable(gl.DEPTH_TEST);
         gl.depthMask(true);
+    }
+
+    /**
+     * Draw ONLY the additive FX passes (step 3) into the CURRENTLY BOUND
+     * framebuffer. No clears, no scene FBO, no depth copy, no composite —
+     * shockwave/offset stays stage-only (the game composites its own through
+     * distortion-renderer.ts). This is the entry point the game-processor
+     * worker's FX pass uses from `scene.onAfterRenderingGroupObservable`,
+     * where Babylon owns the target and the viewport.
+     *
+     * Leaves additive blend + depthMask(false) behind: the caller restores
+     * (Babylon does it with `wipeCaches(true)` — see game-processor's LuaUI
+     * pass for the same contract).
+     */
+    renderInto(
+        gl: WebGL2RenderingContext,
+        viewProj: Float32Array,
+        now: number,
+        depthTex: WebGLTexture | null,
+        params: FxPassParams,
+    ): void {
+        if (gl !== this.gl) throw new Error('[native-fx] renderInto on a foreign GL context');
+        if (params.screen) this.setScreenSize(params.screen[0], params.screen[1]);
+        this.flushDirty();
+        this.drawFxPasses(viewProj, {
+            now,
+            camPos: params.camPos,
+            nearFar: params.nearFar ?? [1, 10000],
+            softRange: depthTex ? (params.softRange ?? 0) : 0,
+            depthTex,
+            solo: params.solo ?? null,
+            trailSprite: params.trailSprite,
+            trailTint: params.trailTint,
+        });
+    }
+
+    /** Record the target size the FX programs reason about (uScreenSize)
+     *  without allocating the stage render targets — `renderInto` draws into
+     *  someone else's framebuffer and owns none of its own. */
+    setScreenSize(width: number, height: number): void {
+        this.width = width;
+        this.height = height;
+    }
+
+    /** The four additive programs, in draw order. Shared by both entry
+     *  points; sets the blend/depth contract every shaders/fx header
+     *  documents and leaves it set. */
+    private drawFxPasses(viewProj: Float32Array, d: FxDraw): void {
+        const gl = this.gl;
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthMask(false);
+        const solo = d.solo;
+        if (!solo || solo === 'particle') this.drawParticles(d, viewProj);
+        if (!solo || solo === 'muzzleFlash') this.drawMuzzles(d, viewProj);
+        if (!solo || solo === 'tracer') this.drawTracers(d, viewProj);
+        if (!solo || solo === 'trail') this.drawTrails(d, viewProj);
     }
 
     dispose(): void {
@@ -536,53 +656,54 @@ export class NativeFxRenderer {
         gl.bindVertexArray(null);
     }
 
-    private drawParticles(frame: NativeFxFrame, viewProj: Float32Array): void {
+    private drawParticles(d: FxDraw, viewProj: Float32Array): void {
         const gl = this.gl;
         const u = this.use('particle');
         gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
-        gl.uniform1f(u.uNow, frame.now);
-        gl.uniform3f(u.uCamPos, ...frame.camPos);
+        gl.uniform1f(u.uNow, d.now);
+        gl.uniform3f(u.uCamPos, ...d.camPos);
         gl.uniform1f(u.uAtlasCols, this.tex.atlasCols);
         gl.uniform1f(u.uAtlasRows, this.tex.atlasRows);
+        gl.uniform3f(u.uWind, this.wind[0], this.wind[1], this.wind[2]);
         this.bindTex(0, this.tex.atlas, u.uParticleTex);
         gl.uniform2f(u.uAtlasDimsInv, 1 / this.tex.atlasCols, 1 / this.tex.atlasRows);
-        this.bindTex(1, this.depthCopy, u.uDepthTex);
-        gl.uniform2f(u.uCamNearFar, frame.nearFar[0], frame.nearFar[1]);
+        this.bindTex(1, d.depthTex ?? this.tex.atlas, u.uDepthTex);
+        gl.uniform2f(u.uCamNearFar, d.nearFar[0], d.nearFar[1]);
         gl.uniform2f(u.uScreenSize, this.width, this.height);
-        gl.uniform1f(u.uSoftRange, frame.softRange ?? 10);
+        gl.uniform1f(u.uSoftRange, d.softRange);
         this.drawInstanced(this.pools.particle);
     }
 
-    private drawMuzzles(frame: NativeFxFrame, viewProj: Float32Array): void {
+    private drawMuzzles(d: FxDraw, viewProj: Float32Array): void {
         const gl = this.gl;
         const u = this.use('muzzle');
         gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
-        gl.uniform1f(u.uNow, frame.now);
-        gl.uniform3f(u.uCamPos, ...frame.camPos);
+        gl.uniform1f(u.uNow, d.now);
+        gl.uniform3f(u.uCamPos, ...d.camPos);
         gl.uniform1f(u.uHasTex, 0);
         this.drawInstanced(this.pools.muzzle);
     }
 
-    private drawTracers(frame: NativeFxFrame, viewProj: Float32Array): void {
+    private drawTracers(d: FxDraw, viewProj: Float32Array): void {
         const gl = this.gl;
         const u = this.use('tracer');
         gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
-        gl.uniform1f(u.uNow, frame.now);
-        gl.uniform3f(u.uCamPos, ...frame.camPos);
+        gl.uniform1f(u.uNow, d.now);
+        gl.uniform3f(u.uCamPos, ...d.camPos);
         gl.uniform3f(u.uColorScale, 1, 1, 1);
         gl.uniform1f(u.uHasTex, 0);
         this.drawInstanced(this.pools.tracer);
     }
 
-    private drawTrails(frame: NativeFxFrame, viewProj: Float32Array): void {
+    private drawTrails(d: FxDraw, viewProj: Float32Array): void {
         const gl = this.gl;
         const u = this.use('trail');
         gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
-        gl.uniform3f(u.uCamPos, ...frame.camPos);
-        const sprite = frame.trailSprite ?? 'smoketrail';
+        gl.uniform3f(u.uCamPos, ...d.camPos);
+        const sprite = d.trailSprite ?? 'smoketrail';
         const strip = this.tex.trailStrips[sprite] ?? this.tex.trailStrips.smoketrail;
         this.bindTex(0, strip, u.uTrailTex);
-        const tint = frame.trailTint ?? [0.6, 0.58, 0.55];
+        const tint = d.trailTint ?? [0.6, 0.58, 0.55];
         gl.uniform3f(u.uTint, tint[0], tint[1], tint[2]);
         this.drawInstanced(this.pools.trail);
     }

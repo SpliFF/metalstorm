@@ -1,0 +1,117 @@
+{
+  "note": "Coverage of the contract by nl-instructions.md, measured offline by tools/nl-eval/score-instructions.mjs. A DOCUMENTATION number, not a model-accuracy one — see that file’s header.",
+  "bytes": 12180,
+  "features": 85,
+  "earned": 291,
+  "available": 342,
+  "coverage": 0.8508771929824561,
+  "taught": 85,
+  "exemplified": 68,
+  "missing": [],
+  "proseOnly": [
+    "rule:names-are-data",
+    "rule:never-invent-a-name",
+    "rule:ambiguous-means-ask",
+    "rule:clarify-excludes-actions",
+    "rule:actions-run-in-order",
+    "rule:refuse-by-name",
+    "rule:focus-is-part-of-the-sentence",
+    "rule:write-the-resolved-name",
+    "rule:target-elision",
+    "rule:withdraw-departure",
+    "rule:patrol-takes-a-place",
+    "rule:place-vs-force",
+    "rule:events-query",
+    "rule:asked",
+    "rule:no-invented-coordinates",
+    "rule:say-is-spoken",
+    "rule:one-subject-per-action"
+  ],
+  "stale": [],
+  "byGroup": [
+    {
+      "group": "camera",
+      "total": 6,
+      "earned": 12,
+      "available": 12,
+      "missing": []
+    },
+    {
+      "group": "focus",
+      "total": 10,
+      "earned": 40,
+      "available": 40,
+      "missing": []
+    },
+    {
+      "group": "group",
+      "total": 2,
+      "earned": 4,
+      "available": 4,
+      "missing": []
+    },
+    {
+      "group": "guidance",
+      "total": 7,
+      "earned": 14,
+      "available": 14,
+      "missing": []
+    },
+    {
+      "group": "kind",
+      "total": 7,
+      "earned": 42,
+      "available": 42,
+      "missing": []
+    },
+    {
+      "group": "query",
+      "total": 6,
+      "earned": 24,
+      "available": 24,
+      "missing": []
+    },
+    {
+      "group": "rule",
+      "total": 18,
+      "earned": 57,
+      "available": 108,
+      "missing": []
+    },
+    {
+      "group": "subject",
+      "total": 6,
+      "earned": 24,
+      "available": 24,
+      "missing": []
+    },
+    {
+      "group": "target",
+      "total": 3,
+      "earned": 12,
+      "available": 12,
+      "missing": []
+    },
+    {
+      "group": "ui",
+      "total": 4,
+      "earned": 8,
+      "available": 8,
+      "missing": []
+    },
+    {
+      "group": "verb",
+      "total": 11,
+      "earned": 44,
+      "available": 44,
+      "missing": []
+    },
+    {
+      "group": "when",
+      "total": 5,
+      "earned": 10,
+      "available": 10,
+      "missing": []
+    }
+  ]
+}

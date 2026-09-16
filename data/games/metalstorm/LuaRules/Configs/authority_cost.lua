@@ -36,6 +36,22 @@ return {
         proposal   = 0.5,    -- parley proposal fee (interaction)
     },
 
+    -- The MEDIAN DIRECTIVE BASIS — Σ authority_cost_base over the roster a
+    -- typical group-scoped directive is charged against (game_authority.lua
+    -- `sumGroupBaseCost`). Measured over the shipped unit corpus, not chosen:
+    -- 53 defs carry `authority_cost_base`, and `authority_cost_base ×
+    -- squad_size` (one squad's whole roster, which is the sim atom) has median
+    -- 4 across them — the distribution is 1×6 2×5 3×3 4×17 6×7 8×12 12×1 16×2.
+    -- Re-measure it by summing that product over units/*.lua whenever the
+    -- corpus's scale curves move.
+    --
+    -- It is NOT an input to `cost()` — the live charge always reads the real
+    -- roster — so it is not a formula-affecting change and does not bump
+    -- `version`. Its one consumer is objectives/generator.lua, which sizes
+    -- every systemic reward as a COUNT OF MEDIAN DIRECTIVES (§10.6) so that
+    -- what an objective pays and what an order costs cannot drift apart.
+    median_directive_basis = 4,
+
     -- Region modifier bounds (actual per-cell value from GG.Regions —
     -- regions/cost.lua MOD_FRIENDLY/MOD_NEUTRAL/MOD_ENEMY; kept here purely
     -- as documentation for the client formula mirror, not a runtime input):

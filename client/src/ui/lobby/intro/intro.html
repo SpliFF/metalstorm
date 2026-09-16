@@ -1,0 +1,73 @@
+<!-- Intro (PLAN-beta-journey.md §(e)): three slides after the first sign-up.
+     `image_base` is the game's `/api/games/data/<id>/ui/lobby/intro` folder
+     (empty for the engine default — the CSS gradient shows instead). Slide 2
+     is filled by LobbyUI from /api/factions/<game>; slide 3's commander cards
+     are rendered from entry-flow.ts. Skip is always visible. -->
+<div class="entry entry-intro" data-slide="0">
+    <div class="entry-backdrop"></div>
+    <header class="entry-top">
+        <span class="entry-stamp">{{game_title}} <i>//</i> briefing</span>
+        <div class="intro-progress" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="entry-top-tools">
+            <button type="button" class="entry-link" id="intro-skip-btn">Skip</button>
+        </div>
+    </header>
+    <main class="intro-stage">
+        <section class="intro-slide" data-slide="0">
+            <div class="intro-art intro-art-world" style="background-image:url('{{image_base}}/world.jpg')">
+                <span class="intro-art-label">The World</span>
+            </div>
+            <div class="intro-text">
+                <p class="entry-kicker">01 / 03 · The World</p>
+                <h2>One World. Held by whoever shows up.</h2>
+                <p>A single persistent map, shared by everyone who plays. Factions hold ground,
+                   accrue what it yields, and stage attacks that take days to arrive — the
+                   attacker's days in transit are the defender's hours of warning.</p>
+                <p>Nothing here resets. Every Mission you fight is a piece of it: a region
+                   taken, a convoy delivered, a truce brokered. The World remembers.</p>
+            </div>
+        </section>
+        <section class="intro-slide" data-slide="1">
+            <div class="intro-art intro-art-faction" id="intro-faction-art">
+                <span class="intro-art-label">Your Faction</span>
+            </div>
+            <div class="intro-text">
+                <p class="entry-kicker">02 / 03 · Your Faction</p>
+                <h2 id="intro-faction-name">Your Faction</h2>
+                <p id="intro-faction-desc">The people you fight for. Every Mission's sides are which
+                   Faction each team fights for; yours is chosen once and is the same in every one.</p>
+                <p class="intro-faction-note">The Faction owns the army. Squads are lent to you, and
+                   what you are shown grows with your Standing.</p>
+            </div>
+        </section>
+        <section class="intro-slide" data-slide="2">
+            <div class="intro-art intro-art-role" style="background-image:url('{{image_base}}/role.jpg')">
+                <span class="intro-art-label">Your Role</span>
+            </div>
+            <div class="intro-text">
+                <p class="entry-kicker">03 / 03 · Your Role</p>
+                <h2>Recruit.</h2>
+                <p>You will be given a few squads and a task. Do it well and the Faction gives you
+                   more. Watch, ask, and listen to a mentor if one offers — nobody expects a
+                   Recruit to win the Mission alone.</p>
+                <div class="intro-custom">
+                    <div class="intro-custom-head">
+                        <span>How others see you</span>
+                        <span class="entry-mono">optional · never locked</span>
+                    </div>
+                    <label class="entry-field">
+                        <span>Callsign</span>
+                        <input type="text" id="intro-callsign" maxlength="32" autocomplete="off"
+                               spellcheck="false" placeholder="{{callsign}}">
+                    </label>
+                    <div class="intro-kinds" id="intro-kinds"></div>
+                </div>
+            </div>
+        </section>
+    </main>
+    <footer class="intro-nav">
+        <button type="button" class="entry-btn entry-btn-ghost" id="intro-back-btn">Back</button>
+        <span class="intro-nav-status entry-mono" id="intro-status"></span>
+        <button type="button" class="entry-btn entry-btn-primary" id="intro-next-btn">Next</button>
+    </footer>
+</div>

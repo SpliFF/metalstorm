@@ -7,9 +7,9 @@
  */
 
 import {
-    Camera, CascadedShadowGenerator, Color3, DefaultRenderingPipeline,
+    Camera, CascadedShadowGenerator, Color3, ColorCurves, DefaultRenderingPipeline,
     DirectionalLight, HemisphericLight, ImageProcessingConfiguration,
-    Scene, ShadowGenerator, Vector3,
+    Scene, ShadowGenerator, SSAO2RenderingPipeline, Vector3,
 } from '@babylonjs/core';
 import { normaliseSunDir, type MapLighting } from './map-lighting.js';
 import { clientSettings } from './client-settings.js';
@@ -137,6 +137,9 @@ export interface SceneLighting {
     csm: CascadedShadowGenerator;
     /** PLAN-perf M8 — analytic replacement for `csm.autoCalcDepthBounds`. */
     shadowDepthBounds: ShadowDepthBounds;
+    /** L-ATMOS grading pass — SSAO2, built only when `gfx.ssao` is true at
+     *  session start (requiresRestart, see client-settings.ts). Null when off. */
+    ssao: SSAO2RenderingPipeline | null;
 }
 
 /**
@@ -163,22 +166,55 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     renderPipeline.imageProcessing.toneMappingEnabled = true;
     renderPipeline.imageProcessing.toneMappingType =
         ImageProcessingConfiguration.TONEMAPPING_ACES;
-    renderPipeline.imageProcessing.exposure = 1.0;
-    renderPipeline.imageProcessing.contrast = 1.0;
+    // L-ATMOS grading (PLAN-beta-presentation.md, art direction: "contrast
+    // 1.15, exposure 0.9, bloom only above 1.2" — a slight underexposure +
+    // punch so the desaturated palette doesn't read as flat/washed).
+    renderPipeline.imageProcessing.exposure = 0.9;
+    renderPipeline.imageProcessing.contrast = 1.15;
     renderPipeline.fxaaEnabled = clientSettings.getBool('gfx.fxaa', true);
     clientSettings.subscribe('gfx.msaaSamples', v => { renderPipeline.samples = Number(v); });
     clientSettings.subscribe('gfx.fxaa', v => { renderPipeline.fxaaEnabled = Boolean(v); });
 
+    // Colour curves: cool shadows / warm highlights, -10 global saturation —
+    // the "gritty realism" grade (art direction: nothing reads saturated
+    // unless hot or powered). Hue 210 = blue, 30 = orange; density is the
+    // filter strength in [0,100].
+    const colorCurves = new ColorCurves();
+    colorCurves.globalSaturation = -10;
+    colorCurves.shadowsHue = 210;
+    colorCurves.shadowsDensity = 30;
+    colorCurves.highlightsHue = 30;
+    colorCurves.highlightsDensity = 30;
+    renderPipeline.imageProcessing.colorCurves = colorCurves;
+    renderPipeline.imageProcessing.colorCurvesEnabled = true;
+
+    // Vignette — fixed weight, not gfx-gated (cheap, always-on per the brief).
+    renderPipeline.imageProcessing.vignetteEnabled = true;
+    renderPipeline.imageProcessing.vignetteWeight = 0.35;
+
+    // Film grain (gfx.grain; low preset disables it). Animated so it doesn't
+    // read as a static dither pattern.
+    renderPipeline.grainEnabled = clientSettings.getBool('gfx.grain', true);
+    renderPipeline.grain.intensity = 6;
+    renderPipeline.grain.animated = true;
+    clientSettings.subscribe('gfx.grain', v => { renderPipeline.grainEnabled = Boolean(v); });
+
+    // Sharpen — High quality only (art direction calls for a crisp gritty
+    // read at High; at Medium/Low the extra pass isn't worth the cost).
+    renderPipeline.sharpen.edgeAmount = 0.25;
+    renderPipeline.sharpenEnabled = clientSettings.getString('gfx.quality', 'medium') === 'high';
+    clientSettings.subscribe('gfx.quality', v => { renderPipeline.sharpenEnabled = v === 'high'; });
+
     // HDR bloom (PLAN-weapon-fx-gaps L1). The pipeline is HDR (RGBA16F)
     // and ACES-tonemapped, so emissive FX — weapon bolts, explosion CEGs,
     // and the dynamic FxLightPool lights — push values above 1.0. Bloom
-    // is what makes those read as glowing rather than merely bright. The
-    // threshold is high so only genuinely HDR pixels bloom (the lit
-    // terrain stays crisp); weight/kernel are conservative. All four are
-    // live-tunable via window.__renderPipeline.
+    // is what makes those read as glowing rather than merely bright.
+    // Threshold/weight per the L-ATMOS art-direction grade (bloom only
+    // above 1.2, kept lean at 0.25 so it stays a highlight not a glow).
+    // All four are live-tunable via window.__renderPipeline.
     renderPipeline.bloomEnabled = clientSettings.getBool('gfx.bloom', true);
-    renderPipeline.bloomThreshold = 0.85;
-    renderPipeline.bloomWeight = 0.35;
+    renderPipeline.bloomThreshold = 1.2;
+    renderPipeline.bloomWeight = 0.25;
     renderPipeline.bloomKernel = 64;
     renderPipeline.bloomScale = 0.5;
     clientSettings.subscribe('gfx.bloom', v => { renderPipeline.bloomEnabled = Boolean(v); });
@@ -188,7 +224,23 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     const shadowDepthBounds = new ShadowDepthBounds(csm);
     (globalThis as Record<string, unknown>).__shadowDepthBounds = shadowDepthBounds;
 
-    const lighting: SceneLighting = { ambient, sun, renderPipeline, csm, shadowDepthBounds };
+    // SSAO2 — High preset only (`gfx.ssao`, requiresRestart: the geometry
+    // buffer + blur render targets are only worth allocating when the
+    // preset asks for them). ssaoRatio 0.5 / radius 8 elmos per the art
+    // direction; base 0 keeps unoccluded surfaces untouched.
+    let ssao: SSAO2RenderingPipeline | null = null;
+    if (clientSettings.getBool('gfx.ssao', false)) {
+        ssao = new SSAO2RenderingPipeline(
+            'ssao', scene, { ssaoRatio: 0.5, blurRatio: 0.5 }, [camera]);
+        ssao.radius = 8;
+        ssao.totalStrength = 1.0;
+        ssao.base = 0;
+        (globalThis as Record<string, unknown>).__ssao = ssao;
+    }
+
+    const lighting: SceneLighting = {
+        ambient, sun, renderPipeline, csm, shadowDepthBounds, ssao,
+    };
     // Register as the rig setLightingStyle/setAmbientLevel retune, and
     // reset the per-session tuning state (a DevTools ambient override or a
     // previous game's style must not leak into a new session — gp:init

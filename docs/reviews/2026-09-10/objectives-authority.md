@@ -2,13 +2,36 @@
 
 ## STATUS
 
-complete (wrapped early) — coordinator wrap-up directive. Commit `2155f33cd8` is the landed
-work (authority side + field-engineering gate, all gates green). The objectives-side fixes
-below were designed and reviewed but NOT applied (the edit batch was refused by the sandbox
-before it ran); they are listed under "Not done" with exact intent so the next session can
-land them in under an hour.
+**CLOSED 2026-09-17.** Commit `2155f33cd8` was the authority-side work (field-engineering
+gate, velocity metric, decay rate, metrics publish). Everything under "Not done" below has
+since landed on `taskherd/objectives-econ`:
 
-## Not done (in priority order, all with the fix designed — see the finding text)
+| Commit | What |
+|---|---|
+| `6332d1cd95` | items 1-4 — the seven objectives fixes (F6-F14) + the gameover Tick gate |
+| `95f134b032` | item 5 — the economy harness (`authority/economy_sim.lua`) |
+| `2fee2c78d8` | item 6 — the chain rule and the comeback valve |
+| `e4e595e929` | item 7 — the manual's §11/§12 corrections |
+
+Every site was re-verified against the tree before editing; all seven were still exactly as
+described here. Gates after: `authority/` 91 (was 71), `objectives/` 198 (was 139), plus the
+eleven gadget suites, the three AI suites and the ui/ vitest root — all green.
+
+**What the harness found on its first run** (the one thing here that is new information
+rather than a closed item): with all six generator rules running together, the generator
+mints far more than a team can spend — pool ratio 18-215x against the design's max of 8, and
+velocity through the 0.6 floor at dense density. Adding the two new gameplay rules amplifies
+it (dense: mint 379 -> 610/min, pool ratio 215 -> 412, velocity 0.50 -> 0.32). This is also
+the concrete case for leaving reward normalisation OFF, which is where the cost spec has it:
+at velocity 0.32 the 1/velocity scale clamps at x2.0 and would DOUBLE every systemic reward,
+making the oversupply worse. Tuning the generator's reward literals is §10.6's open task
+(derive them from the cost spec's median directive cost) and is a balance decision, not a
+defect — it was not taken here.
+
+## What was not done (in priority order, all with the fix designed — see the finding text)
+
+*Historical: this is the list as it stood on 2026-09-10. Every item is now landed; kept for
+the design rationale each entry carries.*
 
 1. `game_objectives.lua` — six fixes, none applied:
    - **completion beats expiry on the same tick** (F6): on the expiry tick call `module.check`

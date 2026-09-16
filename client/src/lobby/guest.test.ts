@@ -149,3 +149,23 @@ describe('guest names', () => {
         expect(displayGuestName('Ravager')).toBe('Ravager');
     });
 });
+
+import { classifyGuestResponse, validNickname } from './guest';
+
+describe('chosen nicknames (PLAN-beta-journey §a)', () => {
+    it('mirrors the server charset rule', () => {
+        expect(validNickname('raven')).toBe(true);
+        expect(validNickname('r')).toBe(false);
+        expect(validNickname('guest-cafe')).toBe(false);
+        expect(validNickname('bad name')).toBe(false);
+    });
+    it('tells a taken name apart from every other failure', () => {
+        expect(classifyGuestResponse({ ok: false, status: 409 }, { error: 'taken', name_taken: true }))
+            .toEqual({ kind: 'name-taken', message: 'taken' });
+        expect(classifyGuestResponse({ ok: false, status: 500 }, null).kind).toBe('failed');
+        const ok = classifyGuestResponse({ ok: true, status: 201 }, { token: 't', nickname_chosen: true });
+        expect(ok.kind === 'ok' && ok.nicknameChosen).toBe(true);
+        const legacy = classifyGuestResponse({ ok: true, status: 201 }, { token: 't' });
+        expect(legacy.kind === 'ok' && legacy.nicknameChosen).toBe(false);
+    });
+});

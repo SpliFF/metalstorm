@@ -154,6 +154,25 @@ export default defineConfig({
                     environment: 'node',
                 },
             },
+            {
+                // `tools/nl-eval` scores the NL prompt and the NL producers. Its
+                // scorers are pure (no fs, no network, no clock) and have had
+                // tests since M7 — but they were in NO gate: the README claimed
+                // they rode along with the ordinary suite, and the client
+                // project's `src/**` include never reached them. A suite in no
+                // gate is not a gate, which is the same lesson the
+                // metalstorm-game project above was added for.
+                //
+                // The money-spending half of that directory is untouched by
+                // this: `run-eval.mjs` is a program, not a test file, and is
+                // still opt-in.
+                test: {
+                    name: 'nl-eval',
+                    root: resolve(__dirname, '../tools/nl-eval'),
+                    include: ['**/*.test.mjs'],
+                    environment: 'node',
+                },
+            },
         ],
     },
 });
