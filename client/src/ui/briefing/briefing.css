@@ -19,9 +19,9 @@
     align-items: center;
     justify-content: center;
     padding: 2rem 1rem;
-    background: rgba(8, 10, 14, 0.9);
-    font-family: system-ui, sans-serif;
-    color: #e6e8ec;
+    background: var(--nui-scrim);
+    font-family: var(--nui-family-text);
+    color: var(--nui-text-bright);
 }
 
 #briefing-overlay .briefing-panel {
@@ -31,10 +31,12 @@
     /* A long story scrolls INSIDE the panel; the page never does. */
     max-height: 100%;
     overflow: hidden;
-    background: #161a22;
-    border: 1px solid #2a3140;
-    border-radius: 12px;
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
+    border: 1px solid var(--nui-border);
+    border-top-color: var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
 }
 
 /* 3:1 banner, BAR's authoring guidance for campaign art. The map thumbnail
@@ -42,7 +44,7 @@
 #briefing-overlay .briefing-banner {
     aspect-ratio: 3 / 1;
     overflow: hidden;
-    background: #0d1017;
+    background: var(--nui-bg-sunken);
     flex: none;
 }
 
@@ -66,9 +68,11 @@
 
 #briefing-overlay h1 {
     margin: 0;
+    font: var(--nui-font-display-hi);
     font-size: 1.6rem;
-    letter-spacing: 0.01em;
-    color: #f5f7fa;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    color: var(--nui-text-bright);
 }
 
 #briefing-overlay h2 {
@@ -77,7 +81,7 @@
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    color: #7d8ba0;
+    color: var(--nui-text-faint);
 }
 
 #briefing-overlay h2:empty {
@@ -87,7 +91,7 @@
 #briefing-overlay #briefing-story p {
     margin: 0 0 0.85rem;
     line-height: 1.6;
-    color: #c6ccd6;
+    color: var(--nui-text);
 }
 
 #briefing-overlay #briefing-tips-wrap h3 {
@@ -95,7 +99,7 @@
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    color: #7d8ba0;
+    color: var(--nui-text-faint);
 }
 
 #briefing-overlay #briefing-tips {
@@ -106,13 +110,13 @@
 #briefing-overlay #briefing-tips li {
     margin: 0 0 0.5rem;
     line-height: 1.5;
-    color: #aab2c0;
+    color: var(--nui-text-dim);
 }
 
 #briefing-overlay #briefing-partime {
     margin: 1rem 0 0.5rem;
     font-size: 0.85rem;
-    color: #6f7a8c;
+    color: var(--nui-border-hi);
 }
 
 /* Empty sections collapse instead of leaving a labelled void — every briefing
@@ -129,32 +133,35 @@
     align-items: center;
     justify-content: center;
     gap: 0.6rem;
-    font: inherit;
+    font: var(--nui-font-display);
     font-size: 1rem;
-    font-weight: 600;
-    color: #6f7a8c;
-    background: #1d2430;
-    border: 1px solid #2a3140;
-    border-radius: 8px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    color: var(--nui-text-faint);
+    background: var(--nui-bg-head);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
     cursor: default;
 }
 
 #briefing-overlay.briefing-ready #briefing-begin-btn {
-    color: #0b0e13;
-    background: #7fd1a8;
-    border-color: #7fd1a8;
+    color: var(--nui-accent);
+    background: var(--nui-bg-raised);
+    border-color: var(--nui-accent-dim);
+    box-shadow: var(--nui-edge), inset 0 0 0 1px var(--nui-accent-dim);
     cursor: pointer;
 }
 
 #briefing-overlay.briefing-ready #briefing-begin-btn:hover {
-    background: #96dcb8;
+    background: var(--nui-bg-hover);
+    border-color: var(--nui-accent);
 }
 
 #briefing-overlay .briefing-spinner {
     width: 0.9rem;
     height: 0.9rem;
-    border: 2px solid #3a4356;
-    border-top-color: #7d8ba0;
+    border: 2px solid var(--nui-bg-hover);
+    border-top-color: var(--nui-text-faint);
     border-radius: 50%;
     animation: briefing-spin 0.9s linear infinite;
 }
