@@ -3,6 +3,29 @@
 ## STATUS
 complete (wrapped early) — ai/lib (63 specs) + ai/garrison (smoke spec) landed; tools/ai-eval and docs/ai-players.md NOT built (see "Not done").
 
+**CLOSED 2026-09-17.** The whole "Not done" queue below was finished in a
+later session: `tools/ai-eval` (driver + pure scorer + 5 fixtures + committed
+baseline, `make test-ai-eval`), `docs/ai-players.md` (from the census table
+below, re-verified against `rts/Server/AI/` and carrying the 2026-09-16 engine
+changes), and `garrison/tests/brain_spec.lua` (30 doctrine cases). The
+ai-actuation planner asks were carried too (relative-strength
+ceasefire/tribute with a real counter, `Planner.originateProposals`). Suites:
+ai/lib 63 → 69, garrison 1 → 31, strategos 154 → 175, parley gadget 52 → 54.
+
+What the harness found on its first run, and what remains:
+* A dormant garrison took 310 frames to react to being overrun — LOD backoff
+  plus no contact callin (F4). Fixed with `lib/scheduler`'s alert path and a
+  cheap per-callin poll; both spec'd and now gated by the fixture.
+* **Strategos never withdraws and ignores the objective board.** In
+  `outmatched-withdrawal` it keeps assaulting enemy-held ground while six
+  heavies stand on its own; in `objective-next-door` it pursues its own
+  expansion goal and never reads the published objective. Both are lane-4
+  (ai-core) work, deliberately NOT encoded as eval expectations — the
+  baseline records the behaviour as it is, so that lane can improve it
+  without fighting a gate that pins mediocrity in place.
+* Every ai-eval fixture is synthetic. A recorded snapshot from a real
+  `--headless-run` is the obvious next fixture and is not built.
+
 ## Not done
 * `tools/ai-eval/**` (task 4) — not started. Design settled: node `run-eval.mjs` spawns `lua driver.lua --ai <dir> --fixture <json>` one process per (AI, fixture) so two `onUpdate` globals never share a state; driver installs `ai/lib/testing/fake_engine.lua`, applies a fixture timeline (units/enemies/rulesParam patches at frames, synthetic `contact` events), calls `onUpdate` every 10 frames, drains, and prints JSON (directives, authority spent via the drain's real charge, reaction latency = frames from event to first directive anchored in/next to the event region); node compares against `baseline.json` with tolerance, exit 2 on regression, `node --test` for the pure compare. Strategos runs unmodified through the same driver (its `main.lua` + `dofile` works against the fake engine exactly as `tests/tick_wiring_spec.lua` does), so the strategos-vs-garrison comparison needs no strategos edit.
 * `docs/ai-players.md` (task 1) — not written. The census is complete and lives in this report (surface table below) — turn it into the doc: manifest (`ai.config.lua`: name/entry/description/version/author; folder name = id; `content/engine/ai/` then `<game>/ai/`, game shadows engine; `luaai.lua` registry entries have no runtime), seating (`--ai id:team[:pos[:profile]]` repeatable; headless manifest `aiSlots[]`; lobby `RoomAddAI` → `room_ai_slots` → `--ai`; `Spring.SpawnAIPlayer(team, id)` mid-game via `game_ai_caretaker.lua`; each AI = real `CPlayer` with `isAI`, its own `authority_player_<n>` pool minted by `PlayerAdded`), profile transport (`--ai` 4th field → modoption `ai_profile_player<n>` → `game_teams.lua` republishes team rulesParam `ai_profile_<n>`; scenario `ai` section publishes `ai_profile` + `ai_slate_*`), callins (ONLY `onUpdate(frame)` every 10 frames, synchronous on the sim thread; no onInit — boot on first update), reads/writes table, costs (F1), fog (LOS full detail / radar blip position-only / own team params only), forbidden (`AI.issueCommand`, any cross-team read), LOD etiquette (≤ 2 ms/tick, self-throttle), headless testing (`busted` + fake engine; `spring-server --headless-run` with `aiSlots`).
