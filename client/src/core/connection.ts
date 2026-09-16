@@ -126,6 +126,10 @@ import { parseMapData, type ParsedMapData } from './map-data.js';
 import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
+import {
+    parseTerrainKnowledge, ENVELOPE_TERRAIN_KNOWLEDGE,
+    type TerrainKnowledgeMask,
+} from './terrain-knowledge.js';
 import { recordInbound, recordOutbound } from './net-inspector.js';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
 import { SCHEMA_HASH } from '../protocol/schema-hash.js';
@@ -138,6 +142,9 @@ const ENVELOPE_BUILD_ACTIVITY = 0x06;
 const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
 const ENVELOPE_HEIGHTMAP = 0x09;
+// 0x0A = terrain knowledge mask. Its constant lives in terrain-knowledge.ts
+// (imported above) rather than being re-declared here, so the parser and the
+// dispatcher arm cannot drift apart.
 
 // PROTOCOL_VERSION + ENVELOPE_FLATBUFFERS live in protocol-version.ts so the
 // scripted wire client shares them rather than copying them (see that file).
@@ -1251,6 +1258,10 @@ export interface ConnectionEvents {
      *  consumed by `DecalRenderer`. */
     onDecals?: (snapshot: DecalSnapshot) => void;
     onHeightmapPatch?: (patch: HeightmapPatch) => void;
+    /// terrain-knowledge-is-LOS (envelope 0x0A): the set of terrain chunks
+    /// the viewer's ally team has ever seen. Never fires in a stock game —
+    /// the server only emits it under the `terrainknowledge` modoption.
+    onTerrainKnowledge?: (mask: TerrainKnowledgeMask) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
@@ -2283,6 +2294,13 @@ export class Connection {
             const patch = parseHeightmapPatch(data.subarray(1));
             if (patch) {
                 this.events.onHeightmapPatch?.(patch);
+            }
+            return;
+        }
+        if (envelope === ENVELOPE_TERRAIN_KNOWLEDGE) {
+            const mask = parseTerrainKnowledge(data.subarray(1));
+            if (mask) {
+                this.events.onTerrainKnowledge?.(mask);
             }
             return;
         }
