@@ -11,6 +11,7 @@
 
 #include "Server/RulesParamKeyDict.h"
 #include "Server/IdRecycleAnnouncer.h"
+#include "Server/TerrainKnowledge.h"
 
 struct GameServerContext;
 struct ClientSession;
@@ -81,6 +82,11 @@ private:
     void BroadcastFeatureLifecycle(int frameNum);
     void BroadcastUnitCommands(int frameNum);
     void StreamLosBitmaps(int frameNum);
+    /// terrain-knowledge-is-LOS K0: per-ally ever-seen terrain-chunk mask
+    /// (envelope 0x0A). Sits beside StreamLosBitmaps and shares its 1 Hz
+    /// cadence + Vision stream class. No-op unless the `terrainknowledge`
+    /// modoption is on. See client/src/core/DESIGN-TERRAIN-KNOWLEDGE.md.
+    void StreamTerrainKnowledge(int frameNum);
     void BroadcastRulesParams(int frameNum);
 
     // W3 helpers
@@ -118,6 +124,24 @@ private:
     static constexpr size_t   kKeyDictCompactMinDeadPct = 25;     // and ≥25% dead
     uint32_t gameParamsRev = 0;                         // generation counter for game params
     std::vector<uint32_t> teamParamsRev;                // per-team generation counters
+
+    // ── terrain-knowledge-is-LOS (K0) ───────────────────────────────────
+    // The per-ally ever-seen terrain-chunk mask. Owned here rather than in
+    // IntelEventCollector on purpose: the intel collector's explored plane is
+    // a *display* product (64x64 cap, OR-downsampled, cleared on resize,
+    // never serialised); this is the authority the wire and the null-query
+    // rule answer to. Design doc §1.2.
+    TerrainKnowledge::Mask terrainKnown;
+    // Off unless the `terrainknowledge` modoption is set. Read once, lazily,
+    // on the first streaming tick — modoptions are final by then.
+    bool terrainKnowledgeEnabled = false;
+    bool terrainKnowledgeInit = false;
+    // Last revision actually sent per session-ally, so a settled mask does not
+    // re-ship every second. Correctness never depends on this (the message is
+    // idempotent) — it is purely a bandwidth skip.
+    // Value packs (ally << 32 | revision) so a spectator switching the team
+    // it watches forces a resend rather than colliding on the revision.
+    std::unordered_map<int, uint64_t> terrainKnownSentRev;
 
     // Last-team-standing fallback latch (was a function-static int in the loop):
     // the team the alive-unit count declared the winner, or -1 while undecided.

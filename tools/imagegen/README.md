@@ -31,7 +31,9 @@ imports it.
   (`POST /prompt`, poll `/history/<id>`, `GET /view`); `hosted` calls fal.ai
   or Replicate from `FAL_KEY`/`REPLICATE_API_TOKEN` — **never commit either
   key**, both come from the environment only.
-- `post/` — `seamless.py` (offset-blend tiling), `resize.py` (power-of-two),
+- `post/` — `seamless.py` (four-way cross-fade tiling — not the classic
+  offset-blend, whose blurred cross is visible on real SDXL output),
+  `resize.py` (power-of-two),
   `pbr.py` (height→normal reusing `tools/fable-model-forge/normals.py`'s
   Sobel bake; luminance→roughness), `ktx2.py` (shells out to the built
   `tools/textureconverter` binary for terrain; PNG-only + a report line if
@@ -40,7 +42,17 @@ imports it.
   falls back to an SVG that embeds the raster).
 - `run.py` — orchestrator + `manifest.json` writer + backend auto-probe
   (ComfyUI :8188 then :8000 → `comfy_local`; else an API key env var →
-  `hosted`; else `none`).
+  `hosted`; else `none`). Raster samples are cached in `.cache/raw/`
+  (gitignored) keyed to prompt/negative/seed/size, so `--force` re-runs the
+  post steps for free and only `--no-raw-cache` re-samples. A job file may
+  pin `"backend": "none"` + `"backend_reason"` to stay on the placeholder
+  whatever `--backend` says (the reason is copied into its manifest entry).
+  Emblem jobs may also tune the backdrop key: `key_circle` (centred-badge
+  radius as a fraction of the short side, default 0.5) and
+  `key_bright_unsat` (treat unsaturated pixels brighter than the corner band
+  as backdrop — only for a badge with no pale unsaturated parts).
+- `contact.py` — rebuilds `docs/reviews/beta/imagegen-contact.png` from the
+  manifest (one tile per PNG + a 2×2 tiled seam check per tileable).
 - `tests/` — `python3 -m unittest discover -s tools/imagegen/tests`.
 
 ## Backend selection (`--backend auto`, the default)
@@ -51,7 +63,11 @@ imports it.
    exactly what's missing if none is installed. **Never downloads a model**
    — Flux fp8 doesn't run on Metal and bf16 Flux doesn't fit in 32 GB
    unified memory on an M2 Pro, so SDXL base is the target; install it
-   through ComfyUI Desktop's own model manager.
+   through ComfyUI Desktop's own model manager. Every job is sampled at
+   ~1 MP on the 64-px latent grid at the job's aspect (`native_size`) and
+   Lanczos-resized to the job's size — SDXL at 512² is mush and at 2 MP it
+   repeats the scene and takes 4× as long. Steps 28 / cfg 6.5 / `dpmpp_2m`
+   + `karras`, ~2 min per sample on an M2 Pro.
 2. `hosted` if `FAL_KEY` or `REPLICATE_API_TOKEN` is set.
 3. `none` otherwise — procedural placeholders (palette-gradient noise;
    emblems are flat geometric badges), fully deterministic per seed.
