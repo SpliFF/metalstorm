@@ -13,8 +13,10 @@ while true; do
   line=$(taskherd status -C "$REPO" 2>/dev/null | head -1)
   max=$(echo "$line" | sed -n 's/.*max \([0-9]*\).*/\1/p'); running=$(echo "$line" | sed -n 's/.*running \([0-9]*\).*/\1/p')
   if [ -n "$max" ] && [ -n "$running" ] && [ "$running" -lt "$max" ]; then
-    out=$(taskherd run -C "$REPO" 2>&1 | tail -3 | tr '\n' ' ')
-    echo "$(date '+%F %T') running=$running/$max run: $out" >> "$LOG"
+    # fire in the background: `taskherd run` stays attached for the whole step
+    ( nohup taskherd run -C "$REPO" >> "$REPO/.tasks/logs/driver-runs.log" 2>&1 & )
+    echo "$(date '+%F %T') running=$running/$max fired one step" >> "$LOG"
+    sleep 30
   fi
   sleep "$INTERVAL"
 done
