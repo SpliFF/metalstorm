@@ -65,30 +65,54 @@ frag: `uParticleTex`, `uAtlasDimsInv`, `uDepthTex`, `uCamNearFar`, `uScreenSize`
 
 **shockwave** (locs 1–2, `aCorner` at loc 0): `iPosLife=(centre.xyz,lifetime)`, `iParams=(birthTime,maxRadius,strength,_)`. Renders into an `RGBA16F` offset target with additive blend; `shockwave-composite` then samples `uScene` at `vUV + uOffset.rg * uStrength`.
 
-## Wiring (engine ask — Stage 7, currently gated)
+## Wiring (live — PLAN-beta-presentation.md L-FX steps 1–4)
 
-The region-overlay stub next door is likewise unwired pending Stage 7. To bring
-these online, the render worker needs one small native-game FX loader that mirrors
-what `registerCegParticleShader()` et al. do for the Babylon path:
+These shaders run in the game. The loader is
+`client/src/core/native-fx/fx-game-loader.ts`, built at game start by
+`game-processor.ts` and best-effort: a game that ships no `effects/` library
+gets `null` back and every dispatch site keeps its existing CEG path.
 
-1. **Load + register.** Read each `shaders/fx/*.glsl` from the game VFS and
-   compile a raw WebGL2 program per pair (no Babylon `ShaderStore` rewrite —
-   these are already `#version 300 es`). One VAO per program with the base quad +
-   instance divisors above.
-2. **Instance pools.** Ring-buffer instance VBOs per program (particle pool
-   sized to the PLAN-fx-offload budget: 50 k global, 8 emitters/unit,
-   distance-culled). `orphan → subData` each frame with the live rows.
-3. **Effect system.** Compile `effects/library.json` name → emitter configs
-   (see `effects/README.md`); resolve weapon slots through `effects/weapon-fx.json`;
-   drive spawns from `combat-fx.ts` (impacts/kills) and the fx-offload §2 binding
-   interpreter (`weapon_fired` → muzzle, etc.). `combat-fx.ts` already routes
-   ZK/BAR impacts through a name → runtime dispatch; Metalstorm adds a parallel
-   resolver reading `weapon-fx.json` instead of `def.explosionGenerator`.
-4. **Offset target + composite.** Allocate the `RGBA16F` distortion target, draw
-   `shockwave` instances additively into it, then run `fullscreen-tri` +
-   `shockwave-composite` as a post pass over the scene colour.
+1. **Load.** `loadFxGameAssets` fetches all twelve `shaders/fx/*.glsl`, then
+   `effects/library.json`, `weapon-fx.json` and `unit-fx.json` over the game
+   VFS at `/api/games/data/<game>/…` — the same tree and the same order as the
+   `fx-viewer` scenario's `loadFxAssets`. The atlas is the procedural
+   placeholder (`native-fx/fx-atlas-placeholder.ts`, shared with the stage,
+   baked on an `OffscreenCanvas` in the worker) unless
+   `unittextures/fx_atlas.png` exists, which is probed first and decoded with
+   `createImageBitmap`. No ktx2: the worker has no transcoder.
+2. **Programs + pools.** `NativeFxRenderer` compiles the programs and owns the
+   ring-buffered instance VBOs against Babylon's own WebGL2 context
+   (`getEngineGl`). Unchanged from the fx-viewer stage — it is the same class.
+3. **Draw.** `NativeFxGamePass` hooks `scene.onAfterRenderingGroupObservable`
+   for the last rendering group and calls
+   `NativeFxRenderer.renderInto(gl, viewProj, now, depthTex, params)`, which
+   draws ONLY the additive FX passes into the framebuffer Babylon already has
+   bound — no clears, no render targets, no composite. GL-state discipline is
+   the LuaUI raw-GL pass's, verbatim (`game-processor.ts` `gpRunUiPass`): draw,
+   `bindVertexArray(null)`, `engine.wipeCaches(true)`. Because the pass lands
+   inside the scene, the FX are depth-tested against the world and go through
+   the HDR pipeline's bloom/tonemap with it.
+4. **Effects.** `effect-compiler.ts` expands a library name into rows;
+   `client/src/core/weapon-fx-resolver.ts` resolves a weapon def to slots
+   (exact → `defaults[weapontype]` → `__fallback`, case-insensitively — the
+   engine lowercases def names). Dispatch is one branch at each existing site
+   in `combat-fx.ts` (`onCombatEvents`, `onVolleyOutcome`,
+   `onProjectileImpacts`) and `projectile-renderer.ts` (`onFired`,
+   `onImpact`): **a def that authors no CEG and resolves here draws natively
+   and returns; anything else keeps the ceg-runtime path** — so maps, features
+   and the ZK/BAR games are untouched. Statistical volleys have no projectile,
+   so the pass invents `rounds` tracer copies in a ±3° cone spread over 0.4 s,
+   plus a dim 80 ms muzzle light through `FxLightPool` (gated by
+   `gfx.fxLights`). An impact with an authored `impact` effect also raises a
+   ground scar through the decal overlay's existing `onSnapshot(scars, …)`.
 
-Until that loader lands these files are inert authored assets — exactly like the
-`region-overlay` and `sounds.lua`/`resources.lua` stubs — and safe to sit in the
-tree. Tuning happens against the render harness (PLAN-model-harness.md), which
-already has capability-derived `fire`/`explode` showcase buttons.
+**Not wired (deliberate, beta scope).** Soft particles — `uSoftRange = 0`, no
+depth copy; a `DepthRenderer` copy is a High-preset item later. The native
+`shockwave*` + `shockwave-composite` pair stays **stage-only**: the game
+composites shockwaves through `distortion-renderer.ts`, and the offset pass
+needs render targets the in-scene pass deliberately does not allocate.
+Projectile-attached `trail` ribbons and `unit-fx.json` (`unit-fx-dispatch.ts`)
+are later L-FX steps; the trail pool exists and draws, nothing streams it yet.
+
+Tuning still happens in the `fx-viewer` scenario — it is the authoring loop,
+and it drives this exact renderer against the same authored files.
