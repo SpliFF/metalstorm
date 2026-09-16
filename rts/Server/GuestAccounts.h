@@ -75,6 +75,20 @@ constexpr int kDeviceTtlSeconds = 90 * 24 * 60 * 60;  // 90 days
 /// row source.
 constexpr int kAbandonedGuestAgeSeconds = 30 * 24 * 60 * 60;  // 30 days
 
+/// The one nickname rule in the app: 2–32 characters of `[A-Za-z0-9_-]`, and
+/// never the `guest-` shape the mint reserves for itself.
+///
+/// Shared by `POST /api/auth/guest` (a spectator choosing a callsign) and
+/// DecideUpgrade (a guest claiming it permanently) because those two are the
+/// same name in the same `users.username` namespace — a name accepted at the
+/// door and refused at the upgrade would strand somebody under a name they
+/// had already been playing under. One predicate, so they cannot drift.
+///
+/// `guest-` is reserved rather than merely discouraged: a chosen name of that
+/// shape impersonates a generated guest and can collide with one this lobby is
+/// about to mint.
+bool ValidNickname(const std::string& name);
+
 /// Create the device-token table if absent. Additive only — it holds the sole
 /// credential of every guest account, so a probe-and-drop migration would
 /// delete players, not rows (same reasoning as AuthTokens::EnsureTables).
