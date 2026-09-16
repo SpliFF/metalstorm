@@ -745,7 +745,17 @@ generator.rules = { controlRule, districtRule, escortRule, infraRule,
 --- `world.createLinkedPair`. `world.tick` is a monotonic eval-tick counter
 --- (not the frame number), so debounce windows ("contested >= 2 eval
 --- ticks") count ticks, not frames.
+---
+--- Never runs against a scripted scenario: a tutorial/solo Mission's whole
+--- point is its own authored beat list (scenarios/tutorial_01.lua), and this
+--- generator posting a `control`/`liveness`/... objective into it doubles the
+--- board the scripted beats were meant to own alone. Read the same field
+--- game_scenario/game_tutorial do (`GG.Scenario.data.tutorial`), through the
+--- world facade so this stays fake-testable.
 function generator.tick(world, state)
+    local scn = world.scenario and world.scenario()
+    if scn and (scn.tutorial or scn.solo) then return end
+
     local mo = world.modOptions and world.modOptions() or {}
     local density = densityFor(mo.objective_density)
 
