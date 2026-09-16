@@ -40,9 +40,15 @@ import {
     type TotpStatus,
 } from './totp';
 import {
-    classifyUpgradeResponse, clearDeviceToken, decideBoot, describeUpgradeCost,
-    displayGuestName, DEVICE_TOKEN_KEY, storeDeviceToken,
+    classifyGuestResponse, classifyUpgradeResponse, clearDeviceToken, decideBoot,
+    describeUpgradeCost, displayGuestName, DEVICE_TOKEN_KEY, storeDeviceToken,
+    validNickname,
 } from './guest';
+import {
+    COMMANDER_KINDS, INTRO_SEEN_KEY, decideEntry, nicknameNote, tierLabel,
+    type AccountMe,
+} from '../ui/lobby/hub/entry-flow.js';
+import { openHelp, tutorialUrl } from '../ui/help/help.js';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -95,7 +101,7 @@ import { WorldScreen } from './world-screen.js';
 
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
-export type LobbyScreen = 'login' | 'browser' | 'room' | 'game';
+export type LobbyScreen = 'welcome' | 'login' | 'intro' | 'hub' | 'browser' | 'room' | 'game';
 
 interface RoomInfo {
     id: number; name: string; mapId: string;
@@ -449,7 +455,7 @@ export class LobbyUI {
                 browserTokenStore.get(DEVICE_TOKEN_KEY));
             if (boot.kind === 'session') this.tryAutoLogin(savedUser!, savedToken!);
             else if (boot.kind === 'resume-guest') void this.resumeGuest(boot.deviceToken);
-            else this.showLogin();
+            else this.showWelcome();
         }
     }
 
@@ -465,7 +471,10 @@ export class LobbyUI {
         // for a possible later un-suppress, but never re-render — a
         // re-render here would un-hide the login form the runner hid.
         if (this.suppressed) return;
-        if (this.currentScreen === 'login') this.showLogin();
+        if (this.currentScreen === 'welcome') this.showWelcome();
+        else if (this.currentScreen === 'login') this.showLogin(this.loginMode);
+        else if (this.currentScreen === 'intro') this.showIntro();
+        else if (this.currentScreen === 'hub') this.showHub();
         else if (this.currentScreen === 'browser') this.showBrowser();
         else if (this.currentScreen === 'room') this.showRoom();
     }
@@ -474,6 +483,7 @@ export class LobbyUI {
 
     private async tryAutoLogin(username: string, token: string): Promise<void> {
         if (this.suppressed) return;
+        this.setEntryChrome(false);
         this.container.style.display = 'flex';
         this.container.innerHTML = renderTemplate(this.templates.reconnecting, {
             attempt_suffix: this.autoLoginAttempts > 0
@@ -567,7 +577,8 @@ export class LobbyUI {
             this.joinRoom(this.pendingRejoinRoomId);
         }
         this.startPolling();
-        this.showBrowser();
+        if (savedRoomId) this.showBrowser();
+        else void this.enterAfterSignIn({});
     }
 
     getConnection(): Connection | null { return this.connection; }
@@ -872,38 +883,329 @@ export class LobbyUI {
 
     // ===================== LOGIN =====================
 
-    showLogin(): void {
+    /// Which face the login card shows. Sign-up reveals the confirm-password
+    /// field, and a filled one is what doLogin() reads as "register".
+    private loginMode: 'login' | 'signup' = 'login';
+
+    showLogin(mode: 'login' | 'signup' = 'login'): void {
         this.currentScreen = 'login';
+        this.loginMode = mode;
         if (this.suppressed) return;
-        this.container.style.display = 'flex';
-        this.container.innerHTML = this.templates.login;
+        this.setEntryChrome(true);
+        this.container.style.display = 'block';
+        this.container.innerHTML = renderTemplate(this.templates.login, {
+            ...this.entryVars(), mode,
+        });
         document.getElementById('login-form')!.onsubmit = (e) => {
             e.preventDefault();
             this.doLogin();
         };
 
         // PLAN-metalstorm-lobby.md task 0: faction is a required, one-time
-        // sign-up choice — only shown once the user signals "new account"
-        // by filling the confirm-password field (the same signal doLogin()
-        // itself uses to decide login vs. register).
-        const pass2El = document.getElementById('login-pass2') as HTMLInputElement | null;
-        const groupEl = document.getElementById('login-faction-group');
+        // sign-up choice, shown on the sign-up face of the card.
         const selectEl = document.getElementById('login-faction') as HTMLSelectElement | null;
         const descEl = document.getElementById('login-faction-desc');
-        if (pass2El && groupEl) {
-            pass2El.oninput = () => groupEl.classList.toggle('hidden', pass2El.value === '');
-        }
         if (selectEl && descEl) {
             selectEl.onchange = () => {
                 const f = this.availableFactions.find(x => x.key === selectEl.value);
                 descEl.textContent = f ? f.description : '';
             };
         }
-        // Task 8c. Optional in the same way every other control here is: a
-        // game's template override may ship a login screen without it.
+        // Every control below is optional: a game's template override may
+        // ship a login screen without it.
         const guestBtn = document.getElementById('login-guest-btn') as HTMLButtonElement | null;
-        if (guestBtn) guestBtn.onclick = () => { void this.signInAsGuest(); };
+        if (guestBtn) guestBtn.onclick = () => this.showWelcome();
+        const backBtn = document.getElementById('login-back-btn') as HTMLButtonElement | null;
+        if (backBtn) backBtn.onclick = () => this.showWelcome();
+        const switchBtn = document.getElementById('login-switch-btn') as HTMLButtonElement | null;
+        if (switchBtn) switchBtn.onclick = () => this.showLogin('signup');
         this.fetchFactionsForSignup();
+    }
+
+    // ===================== ENTRY: WELCOME / INTRO / HUB =====================
+    // PLAN-beta-journey.md §(a)/(e). The screens are templates under
+    // ui/lobby/{welcome,intro,hub}; the decisions are entry-flow.ts.
+
+    /// `POST /api/account/me` as last fetched; null before sign-in and on a
+    /// lobby without the route (journey-accounts not landed).
+    private me: AccountMe | null = null;
+    /// "Watch as <callsign>": the browser lists Missions with Watch first.
+    private watchMode = false;
+    /// Set by the hub's Explore; consumed once the World button is wired.
+    private pendingOpenWorld = false;
+
+    /// The full-bleed stage the entry screens draw on. lobby.css centres a
+    /// card in a flex backdrop; the entry sheets take the whole viewport.
+    private setEntryChrome(entry: boolean): void {
+        this.container.classList.toggle('lobby-entry', entry);
+        if (entry) this.container.classList.remove('lobby-watch');
+        // Entry screens stack (`block`); the browser and room screens are
+        // lobby.css's flex-centred cards. `none` (in game) is left alone.
+        else if (this.container.style.display === 'block') this.container.style.display = 'flex';
+    }
+
+    /// The game the lobby is styling itself for — `?game=` or the sticky
+    /// key main.ts writes — or none (engine default).
+    private entryGameId(): string {
+        const fromUrl = new URLSearchParams(window.location.search).get('game');
+        return fromUrl || localStorage.getItem('springrts-game-id') || '';
+    }
+
+    private gameTitle(): string {
+        const id = this.entryGameId();
+        if (!id) return 'Spring RTS Web';
+        const known = this.availableGames.find(g => g.id === id)?.displayName;
+        return known || id.charAt(0).toUpperCase() + id.slice(1);
+    }
+
+    /// Template vars every entry screen takes. `image_base` is the game's
+    /// intro art folder (see intro.html); empty when no game is known.
+    private entryVars(): Record<string, string> {
+        const id = this.entryGameId();
+        return {
+            game_title: this.esc(this.gameTitle()),
+            image_base: id ? `/api/games/data/${encodeURIComponent(id)}/ui/lobby/intro` : '',
+        };
+    }
+
+    showWelcome(): void {
+        this.currentScreen = 'welcome';
+        if (this.suppressed) return;
+        this.setEntryChrome(true);
+        this.container.style.display = 'block';
+        this.container.innerHTML = renderTemplate(this.templates.welcome, this.entryVars());
+        if (this.availableGames.length === 0) void this.refreshGameList();
+
+        const input = document.getElementById('welcome-callsign') as HTMLInputElement | null;
+        const nameEl = document.getElementById('welcome-watch-name');
+        const watchBtn = document.getElementById('welcome-watch-btn') as HTMLButtonElement | null;
+        const sync = () => {
+            const v = input?.value.trim() ?? '';
+            if (nameEl) nameEl.textContent = v || '…';
+            if (watchBtn) watchBtn.disabled = v === '';
+        };
+        if (input) {
+            input.oninput = sync;
+            input.onkeydown = (e) => { if (e.key === 'Enter') void this.watchAs(); };
+            input.focus();
+        }
+        sync();
+        if (watchBtn) watchBtn.onclick = () => { void this.watchAs(); };
+        (document.getElementById('welcome-signup-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => this.showLogin('signup'));
+        (document.getElementById('welcome-login-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => this.showLogin('login'));
+        (document.getElementById('welcome-help-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => openHelp('getting-started'));
+    }
+
+    /// Watch as <callsign>: a guest account under the chosen name. 409 means
+    /// a registered player owns it — the one refusal the screen must explain.
+    private async watchAs(): Promise<void> {
+        const input = document.getElementById('welcome-callsign') as HTMLInputElement | null;
+        const msgEl = document.getElementById('welcome-msg');
+        const say = (text: string, cls = '') => {
+            if (msgEl) { msgEl.textContent = text; msgEl.className = `entry-msg ${cls}`; }
+        };
+        const name = input?.value.trim() ?? '';
+        if (!validNickname(name)) {
+            say('2–32 letters, digits, _ or -; not starting with guest-', 'error');
+            return;
+        }
+        say('Signing in…');
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/guest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: name }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            const outcome = classifyGuestResponse(resp, data);
+            if (outcome.kind === 'name-taken') {
+                say(`${outcome.message} — choose another, or log in as them.`, 'error');
+                return;
+            }
+            if (outcome.kind !== 'ok') { say(outcome.message, 'error'); return; }
+            storeDeviceToken(outcome.data, browserTokenStore);
+            const note = nicknameNote(name, outcome.data.username);
+            if (note) {
+                say(note);
+                await new Promise(r => setTimeout(r, 1400));
+            }
+            this.adoptGuestSession(outcome.data, { watch: true });
+        } catch (err) {
+            say(`Connection failed: ${err}`, 'error');
+        }
+    }
+
+    private async fetchMe(): Promise<AccountMe | null> {
+        if (!this.authToken) return null;
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/account/me`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.authToken}`,
+                },
+                body: '{}',
+            });
+            if (!resp.ok) return null;
+            const j = await resp.json();
+            if (!j || typeof j.username !== 'string') return null;
+            this.me = j as AccountMe;
+            return this.me;
+        } catch {
+            return null;
+        }
+    }
+
+    /// Where a sign-in lands: intro, hub or the Mission list — entry-flow.ts
+    /// decides, this fetches. A room joined meanwhile (saved-room rejoin) wins.
+    private async enterAfterSignIn(opts: { justRegistered?: boolean; watch?: boolean }): Promise<void> {
+        this.watchMode = opts.watch ?? false;
+        const me = await this.fetchMe();
+        if (this.suppressed || this.currentScreen === 'room') return;
+        const username = localStorage.getItem('springrts-username') ?? '';
+        const screen = decideEntry({
+            me,
+            justRegistered: opts.justRegistered ?? false,
+            introSeenLocally: localStorage.getItem(INTRO_SEEN_KEY) === username,
+            watch: this.watchMode,
+        });
+        if (screen === 'intro') this.showIntro();
+        else if (screen === 'hub') this.showHub();
+        else this.showBrowser();
+    }
+
+    /// True when this account's home is the hub — the browser then carries a
+    /// way back to it.
+    private hubIsHome(): boolean {
+        return decideEntry({ me: this.me, justRegistered: false, introSeenLocally: true, watch: false }) === 'hub';
+    }
+
+    showIntro(): void {
+        this.currentScreen = 'intro';
+        if (this.suppressed) return;
+        this.setEntryChrome(true);
+        this.container.style.display = 'block';
+        const callsign = this.me?.callsign || localStorage.getItem('springrts-username') || '';
+        this.container.innerHTML = renderTemplate(this.templates.intro, {
+            ...this.entryVars(), callsign: this.esc(callsign),
+        });
+        const root = this.container.querySelector('.entry-intro') as HTMLElement | null;
+        let slide = 0;
+        const status = document.getElementById('intro-status');
+        const nextBtn = document.getElementById('intro-next-btn') as HTMLButtonElement | null;
+        const show = (n: number) => {
+            slide = Math.max(0, Math.min(2, n));
+            root?.setAttribute('data-slide', String(slide));
+            if (status) status.textContent = `${slide + 1} / 3`;
+            if (nextBtn) nextBtn.textContent = slide === 2 ? 'Enter the World' : 'Next';
+        };
+        show(0);
+        (document.getElementById('intro-back-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => show(slide - 1));
+        if (nextBtn) nextBtn.onclick = () => { if (slide === 2) void this.finishIntro(false); else show(slide + 1); };
+        (document.getElementById('intro-skip-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => { void this.finishIntro(true); });
+
+        // Slide 3: the customisation strip. Cards toggle; nothing is required.
+        const kinds = document.getElementById('intro-kinds');
+        if (kinds) {
+            kinds.innerHTML = COMMANDER_KINDS.map(k =>
+                `<button type="button" class="intro-kind${this.me?.commander_kind === k.key ? ' selected' : ''}" data-kind="${k.key}">`
+                + `<span class="intro-kind-glyph">${k.glyph}</span>`
+                + `<span class="intro-kind-name">${this.esc(k.name)}</span>`
+                + `<span class="intro-kind-blurb">${this.esc(k.blurb)}</span></button>`).join('');
+            kinds.querySelectorAll('.intro-kind').forEach(btn => {
+                (btn as HTMLElement).onclick = () => {
+                    const was = btn.classList.contains('selected');
+                    kinds.querySelectorAll('.intro-kind').forEach(b => b.classList.remove('selected'));
+                    if (!was) btn.classList.add('selected');
+                };
+            });
+        }
+        void this.renderIntroFaction();
+    }
+
+    /// Slide 2 from `/api/factions/<game>`: the player's own faction when the
+    /// account has one, else the first declared (a guest-upgrade may not).
+    private async renderIntroFaction(): Promise<void> {
+        if (this.availableFactions.length === 0) await this.fetchFactionsForSignup();
+        if (this.currentScreen !== 'intro') return;
+        const f = this.availableFactions.find(x => x.key === this.myFaction) ?? this.availableFactions[0];
+        if (!f) return;
+        const nameEl = document.getElementById('intro-faction-name');
+        const descEl = document.getElementById('intro-faction-desc');
+        const art = document.getElementById('intro-faction-art');
+        if (nameEl) nameEl.textContent = f.fullName || f.name;
+        if (descEl) descEl.textContent = f.description;
+        const base = this.entryVars().image_base;
+        if (art && base) art.style.backgroundImage = `url('${base}/${encodeURIComponent(f.key)}.jpg')`;
+    }
+
+    /// Persist the strip (`POST /api/account/profile`) and mark the intro
+    /// done. The route is optional: a lobby without it still moves on, and
+    /// the local key stops the intro re-running on that browser.
+    private async finishIntro(skipped: boolean): Promise<void> {
+        const callsign = skipped ? '' : ((document.getElementById('intro-callsign') as HTMLInputElement | null)?.value.trim() ?? '');
+        const kind = skipped ? '' : (this.container.querySelector('.intro-kind.selected')?.getAttribute('data-kind') ?? '');
+        const body: Record<string, unknown> = { intro_done: 1 };
+        if (callsign && validNickname(callsign)) body.callsign = callsign;
+        if (kind) body.commander_kind = kind;
+        try { await this.lobbyPost('/api/account/profile', body); } catch { /* optional route */ }
+        if (this.me) {
+            this.me.intro_done = true;
+            if (typeof body.callsign === 'string') this.me.callsign = body.callsign;
+            if (typeof body.commander_kind === 'string') this.me.commander_kind = body.commander_kind;
+        }
+        localStorage.setItem(INTRO_SEEN_KEY, localStorage.getItem('springrts-username') ?? '');
+        this.showHub();
+    }
+
+    showHub(): void {
+        this.currentScreen = 'hub';
+        if (this.suppressed) return;
+        this.setEntryChrome(true);
+        this.container.style.display = 'block';
+        const username = localStorage.getItem('springrts-username') ?? '';
+        const faction = this.availableFactions.find(x => x.key === this.myFaction);
+        this.container.innerHTML = renderTemplate(this.templates.hub, {
+            ...this.entryVars(),
+            callsign: this.esc(this.me?.callsign || displayGuestName(username)),
+            tier: this.esc(tierLabel(this.me)),
+            faction: this.esc(faction?.fullName ?? this.myFaction),
+        });
+        if (!faction && this.myFaction) {
+            void this.fetchFactionsForSignup().then(() => {
+                if (this.currentScreen !== 'hub') return;
+                const f = this.availableFactions.find(x => x.key === this.myFaction);
+                const el = this.container.querySelector('.hub-faction');
+                if (f && el) el.textContent = f.fullName || f.name;
+            });
+        }
+        this.wireLogoutButton();
+        const on = (id: string, fn: () => void) => {
+            const el = document.getElementById(id) as HTMLButtonElement | null;
+            if (el) el.onclick = fn;
+        };
+        on('hub-browser-btn', () => { this.watchMode = false; this.showBrowser(); });
+        on('hub-help-btn', () => openHelp('getting-started'));
+        on('hub-explore-btn', () => { this.watchMode = false; this.pendingOpenWorld = true; this.showBrowser(); });
+        on('hub-spectate-btn', () => { this.watchMode = true; this.showBrowser(); });
+        on('hub-solo-btn', () => { window.location.href = tutorialUrl(window.location.search); });
+        const msg = document.getElementById('hub-msg');
+        on('hub-support-btn', () => {
+            const btn = document.getElementById('hub-support-btn') as HTMLButtonElement;
+            void this.runDeploy(btn, (text) => { if (msg) msg.textContent = text; });
+        });
+        const guestNote = document.getElementById('hub-guest-note');
+        if (guestNote && this.isProvisional) guestNote.style.display = '';
+        on('hub-claim-btn', () => {
+            this.watchMode = false;
+            this.showBrowser();
+            (document.getElementById('guest-upgrade-btn') as HTMLButtonElement | null)?.click();
+        });
     }
 
     /// Populate the sign-up faction picker. Hardcoded to Metalstorm, not
@@ -972,6 +1274,7 @@ export class LobbyUI {
             // A two-factor challenge is a failed login that must NOT fall
             // through to registration — see classifyLoginResponse.
             let outcome = classifyLoginResponse(resp, data, pass2 !== '');
+            let registered = false;
             if (outcome.kind === 'totp-required') {
                 totpGroup?.classList.remove('hidden');
                 totpEl?.focus();
@@ -986,6 +1289,7 @@ export class LobbyUI {
                 return;
             }
             if (outcome.kind === 'register') {
+                registered = true;
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1013,7 +1317,7 @@ export class LobbyUI {
             console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`
                 + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
             this.startPolling();
-            this.showBrowser();
+            void this.enterAfterSignIn({ justRegistered: registered });
         } catch (err) {
             msgEl.textContent = `Connection failed: ${err}`;
             msgEl.className = 'msg error';
@@ -1059,7 +1363,9 @@ export class LobbyUI {
             },
         });
         console.log('[lobby] logged out');
-        this.showLogin();
+        this.me = null;
+        this.watchMode = false;
+        this.showWelcome();
     }
 
     /**
@@ -1173,8 +1479,8 @@ export class LobbyUI {
                 return;
             }
             clearDeviceToken(browserTokenStore);
-        } catch { /* network error — the login screen is still the answer */ }
-        this.showLogin();
+        } catch { /* network error — the welcome screen is still the answer */ }
+        this.showWelcome();
     }
 
     /// Shared tail of both guest entry points. Deliberately does NOT go
@@ -1185,7 +1491,7 @@ export class LobbyUI {
     private adoptGuestSession(data: {
         token?: string; user_id?: number; username?: string; faction?: string;
         expires_in?: number;
-    }): void {
+    }, opts: { watch?: boolean } = {}): void {
         this.authToken = data.token ?? '';
         this.myPlayerId = data.user_id ?? 0;
         this.myFaction = data.faction ?? '';
@@ -1196,7 +1502,7 @@ export class LobbyUI {
         // never schedule a renewal.
         storeTokens(data, browserTokenStore);
         this.startPolling();
-        this.showBrowser();
+        void this.enterAfterSignIn({ watch: opts.watch ?? false });
     }
 
     /**
@@ -1320,7 +1626,7 @@ export class LobbyUI {
             const lost = outcome.data.cleared_bindings ?? 0;
             console.log(`[lobby] account claimed: user=${outcome.data.username}`
                 + ` faction=${this.myFaction} cleared_bindings=${lost}`);
-            this.showBrowser();
+            void this.enterAfterSignIn({ justRegistered: true });
         } catch (err) {
             say(`Connection failed: ${err}`, true);
         }
@@ -1706,10 +2012,23 @@ export class LobbyUI {
         // read back, and the header's job is telling the player WHICH account
         // this is. `displayGuestName` shortens it and leaves a claimed name
         // exactly as typed.
+        this.setEntryChrome(false);
+        this.container.classList.toggle('lobby-watch', this.watchMode);
+        this.container.style.display = 'flex';
         this.container.innerHTML = renderTemplate(this.templates.browser, {
             account_name: this.esc(
                 displayGuestName(localStorage.getItem('springrts-username') ?? '')),
         });
+        // A Recruit's home is the hub; the browser is one click from it.
+        const accountEl = document.getElementById('account-name');
+        if (accountEl && this.hubIsHome()) {
+            const hubBtn = document.createElement('button');
+            hubBtn.id = 'hub-btn';
+            hubBtn.className = 'secondary';
+            hubBtn.textContent = '⌂ Hub';
+            hubBtn.onclick = () => { this.watchMode = false; this.showHub(); };
+            accountEl.before(hubBtn);
+        }
         this.wireLogoutButton();
         document.getElementById('create-room-btn')!.onclick = () => {
             document.getElementById('create-form')!.style.display = 'block';
@@ -1747,37 +2066,38 @@ export class LobbyUI {
     private wireDeployButton(): void {
         const btn = document.getElementById('deploy-btn') as HTMLButtonElement | null;
         if (!btn) return;
-        btn.onclick = async () => {
-            btn.disabled = true;
-            const out = document.getElementById('deploy-result');
-            try {
-                const d = await this.lobbyPost('/api/wars/deploy') as DeployResult;
-                if (out) {
-                    out.textContent = formatDeploy(d);
-                    out.style.display = '';
-                }
-                // Since demand-driven seeding a `seed` answer can carry the
-                // `room_id` of the war the server just built; walk into it
-                // like a join (war-surfaces review 2026-09-10, finding 1).
-                if (deployIsEnterable(d) && d.room_id) {
-                    this.joinRoom(d.room_id, /*asSpectator=*/false);
-                } else if (d.outcome === 'seed') {
-                    // Opened, not created: a war needs a map and a scenario,
-                    // and picking those for somebody is a bigger decision than
-                    // picking which existing war they walk into.
-                    const form = document.getElementById('create-form');
-                    if (form) form.style.display = 'block';
-                }
-            } catch (e) {
-                console.warn('[lobby] deploy failed', e);
-                if (out) {
-                    out.textContent = 'Deploy failed — pick a war from the list.';
-                    out.style.display = '';
-                }
-            } finally {
-                btn.disabled = false;
+        const out = document.getElementById('deploy-result');
+        btn.onclick = () => void this.runDeploy(btn, (text) => {
+            if (out) { out.textContent = text; out.style.display = ''; }
+        });
+    }
+
+    /// The deploy round trip, shared by the browser's Deploy and the hub's
+    /// Support. `report` shows the sentence; the outcome decides the screen.
+    private async runDeploy(btn: HTMLButtonElement, report: (text: string) => void): Promise<void> {
+        btn.disabled = true;
+        try {
+            const d = await this.lobbyPost('/api/wars/deploy') as DeployResult;
+            report(formatDeploy(d));
+            // Since demand-driven seeding a `seed` answer can carry the
+            // `room_id` of the war the server just built; walk into it
+            // like a join (war-surfaces review 2026-09-10, finding 1).
+            if (deployIsEnterable(d) && d.room_id) {
+                this.joinRoom(d.room_id, /*asSpectator=*/false);
+            } else if (d.outcome === 'seed') {
+                // Opened, not created: a war needs a map and a scenario,
+                // and picking those for somebody is a bigger decision than
+                // picking which existing war they walk into.
+                if (this.currentScreen !== 'browser') { this.watchMode = false; this.showBrowser(); }
+                const form = document.getElementById('create-form');
+                if (form) form.style.display = 'block';
             }
-        };
+        } catch (e) {
+            console.warn('[lobby] deploy failed', e);
+            report('Deploy failed — pick a Mission from the list.');
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     // ============== FRIENDS (PLAN-metalstorm-lobby §8, task 9a) ==============
@@ -2563,7 +2883,11 @@ export class LobbyUI {
         // The button appears only once `/api/world` answers — a lobby built
         // before W1 404s it, and a World button that opens an empty map reads
         // as a broken feature rather than an absent one.
-        void world.probe().then(ok => { if (ok) btn.style.display = ''; });
+        void world.probe().then(ok => {
+            if (ok) btn.style.display = '';
+            if (ok && this.pendingOpenWorld && this.currentScreen === 'browser') world.open();
+            this.pendingOpenWorld = false;
+        });
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
@@ -3302,6 +3626,7 @@ export class LobbyUI {
     }
 
     private showRoom(): void {
+        this.setEntryChrome(false);
         if (this.suppressed) return;
         if (!this.currentRoom) return;
         this.currentScreen = 'room';
@@ -4073,5 +4398,12 @@ export class LobbyUI {
         s.id = 'lobby-styles';
         s.textContent = this.templates.styles;
         document.head.appendChild(s);
+        // The entry flow's sheets ride after lobby.css so their `.entry-*`
+        // rules win ties on the shared button/input elements.
+        document.getElementById('lobby-entry-styles')?.remove();
+        const e = document.createElement('style');
+        e.id = 'lobby-entry-styles';
+        e.textContent = `${this.templates.welcomeStyles}\n${this.templates.introStyles}\n${this.templates.hubStyles}`;
+        document.head.appendChild(e);
     }
 }
