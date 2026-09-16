@@ -253,6 +253,8 @@ button.world-chip[aria-pressed="true"] { border-color: #8ad2ff; background: #142
 /* ---- ledger tabs ---- */
 .world-tabs { display: flex; gap: 2px; margin: -4px -14px 10px; padding: 0 10px; border-bottom: 1px solid #22314a; }
 .world-tab {
+    appearance: none;
+    -webkit-appearance: none;
     padding: 6px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
@@ -263,6 +265,7 @@ button.world-chip[aria-pressed="true"] { border-color: #8ad2ff; background: #142
     cursor: pointer;
 }
 .world-tab:hover { color: #e9f2fa; }
+.world-tab:focus-visible { outline: 1px solid #8ad2ff; outline-offset: 1px; }
 .world-tab[aria-selected="true"] { color: #8ad2ff; border-bottom-color: #8ad2ff; }
 
 /* ---- alerts ---- */

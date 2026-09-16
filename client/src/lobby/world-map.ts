@@ -439,15 +439,26 @@ export function parseWorldGraph(json: unknown): WorldGraph | null {
     }
     const known = new Set(pois.map(p => p.id));
     const edges: WorldEdge[] = [];
+    // The world seeder emits a bidirectional edge as one row per direction
+    // (both rows carry bidirectional:true) — collapse each undirected pair
+    // to one edge so a POI's transit list and the map line aren't doubled.
+    const seenPairs = new Set<string>();
     for (const item of (Array.isArray(raw.edges) ? raw.edges : []) as Record<string, unknown>[]) {
         if (!item || typeof item.from !== 'string' || typeof item.to !== 'string') continue;
         if (!known.has(item.from) || !known.has(item.to)) continue;
+        const bidirectional = item.bidirectional !== false;
+        const kind = typeof item.kind === 'string' ? item.kind : '';
+        if (bidirectional) {
+            const pairKey = [item.from, item.to].sort().join('\0') + '\0' + kind;
+            if (seenPairs.has(pairKey)) continue;
+            seenPairs.add(pairKey);
+        }
         edges.push({
             from: item.from,
             to: item.to,
             transitWorldMs: Number.isFinite(Number(item.transitWorldMs)) ? Number(item.transitWorldMs) : 0,
-            kind: typeof item.kind === 'string' ? item.kind : '',
-            bidirectional: item.bidirectional !== false,
+            kind,
+            bidirectional,
             config: (item.config && typeof item.config === 'object')
                 ? item.config as Record<string, unknown> : {},
         });
