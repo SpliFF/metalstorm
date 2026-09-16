@@ -25,7 +25,15 @@ def height_from_luminance(img: Image.Image) -> np.ndarray:
     return np.asarray(img.convert('L'), dtype=np.float32) / 255.0
 
 
-def normal_from_height(height: np.ndarray, strength: float = 2.2) -> Image.Image:
+def normal_from_height(height: np.ndarray, strength: float = 2.2, soften: float = 1.2) -> Image.Image:
+    """`soften` is a Gaussian sigma (px) applied to the height field before
+    the Sobel bake: raster-backend luminance is grain-noisy at the pixel
+    level, and an unsmoothed bake turns that into normal-map sparkle (and a
+    PNG ~2× the size of the diffuse). STYLE.md asks for soft normal maps."""
+    if soften > 0:
+        from PIL import ImageFilter
+        h_img = Image.fromarray(np.clip(height * 255.0, 0, 255).astype(np.uint8), 'L')
+        height = np.asarray(h_img.filter(ImageFilter.GaussianBlur(soften)), dtype=np.float32) / 255.0
     hm = _height_map_cls()()
     hm.h = height.astype(np.float32)
     return hm.to_normal_image(strength=strength)

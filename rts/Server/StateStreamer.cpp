@@ -17,6 +17,7 @@
 #include "SoundEventCollector.h"
 #include "ProjectileEventCollector.h"
 #include "IntelEventCollector.h"
+#include "TerrainKnowledge.h"
 #include "PlayerTeamEventCollector.h"
 #include "UnitLifecycleCollector.h"
 #include "FeatureLifecycleCollector.h"
@@ -44,6 +45,7 @@
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Map/ReadMap.h"
+#include "Game/GameSetup.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/EventHandler.h"
 
@@ -180,6 +182,7 @@ void StateStreamer::Tick(int /*frameNum*/) {
     BroadcastFeatureLifecycle(0);
     BroadcastUnitCommands(0);
     StreamLosBitmaps(0);
+    StreamTerrainKnowledge(0);
 }
 
 void StateStreamer::EmitJoinBundle(ClientSession& session) {
@@ -1881,6 +1884,112 @@ void StateStreamer::StreamLosBitmaps(int) {
             }
         });
     }
+}
+
+
+
+// terrain-knowledge-is-LOS (K0) — stream the per-ally ever-seen terrain-chunk
+// mask (envelope 0x0A). Deliberately built as a sibling of StreamLosBitmaps
+// above, sharing its 1 Hz cadence, its per-session ally resolution and its
+// Vision stream class (a knowledge message must never head-of-line-block the
+// control bidi). See client/src/core/DESIGN-TERRAIN-KNOWLEDGE.md.
+//
+// The whole mask ships every time. It is at most 8 bytes of payload, and the
+// entity lane is newest-wins — there is no one-shot signal to be had, so a
+// reveal is a STATE (idempotent / reorder- / replay-tolerant), not an event.
+void StateStreamer::StreamTerrainKnowledge(int) {
+    // One-time init. Modoptions are final by the time the sim is streaming
+    // (the same reasoning Simulation.cpp's standing-order bounds rely on).
+    if (!terrainKnowledgeInit) {
+        terrainKnowledgeInit = true;
+        const auto& opts = CGameSetup::GetModOptions();
+        const auto it = opts.find("terrainknowledge");
+        terrainKnowledgeEnabled = (it != opts.end())
+            && !it->second.empty() && it->second != "0" && it->second != "false";
+        if (terrainKnowledgeEnabled) {
+            const auto plan = TerrainKnowledge::PlanChunks(
+                mapDims.mapx + 1, mapDims.mapy + 1);
+            terrainKnown.Reset(plan, teamHandler.ActiveAllyTeams());
+            LOG("[terrain-knowledge] ON - %dx%d chunks of %d quads, %d ally team(s)",
+                plan.chunksX, plan.chunksZ, plan.chunkQuads,
+                teamHandler.ActiveAllyTeams());
+        }
+    }
+    if (!terrainKnowledgeEnabled) return;
+    if (terrainKnown.Plan().Count() <= 0) return;
+
+    auto& rtcServer = ctx.rtcServer;
+    auto& sessions = ctx.sessions;
+    auto& sim = ctx.sim;
+    const int curFrame = sim.GetFrameNum();
+    if (curFrame <= 0 || (curFrame % GAME_SPEED) != 0) return;
+    if (losHandler == nullptr || rtcServer.GetClientCount() == 0) return;
+
+    const uint32_t frameNo = static_cast<uint32_t>(curFrame);
+    const int activeAllyTeams = teamHandler.ActiveAllyTeams();
+
+    // Advance the mask from live LOS, once per ally team per second. LOS only
+    // — radar/air tell you something is there, not what the ground looks like.
+    const auto& losType = losHandler->los;
+    const int losW = losType.size.x;
+    const int losH = losType.size.y;
+    const int squaresPerLos = 1 << losType.mipLevel;
+    for (int at = 0; at < activeAllyTeams; ++at) {
+        if (losHandler->GetGlobalLOS(at)) {
+            terrainKnown.RevealAll(at);
+            continue;
+        }
+        if (at >= static_cast<int>(losType.losMaps.size())) continue;
+        const auto& losMap = losType.losMaps[at].GetLosMap();
+        terrainKnown.UpdateFromLos(at, losW, losH, squaresPerLos,
+            [&](int lx, int lz) {
+                return losMap[static_cast<size_t>(lz) * losW + lx] != 0;
+            });
+    }
+
+    const auto& plan = terrainKnown.Plan();
+    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+        int viewerAllyTeam = -1;
+        if (session.role == "spectator") {
+            if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                && session.spectatorVisibilityTeam >= 0
+                && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+            }
+        } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
+            viewerAllyTeam = teamHandler.AllyTeam(session.team);
+        }
+        // A Global-mode spectator is not a player and knows everything; it is
+        // handed an all-ones mask rather than nothing, so its client still
+        // takes the knowledge path (and so a spectator never sees a void map).
+        const bool global = (viewerAllyTeam < 0);
+
+        std::vector<uint8_t> packed;
+        uint32_t rev = 0;
+        if (global) {
+            packed.assign(plan.PlaneBytes(), uint8_t{0xFF});
+            rev = 1;  // constant: an all-ones mask never changes
+        } else {
+            packed = terrainKnown.Pack(viewerAllyTeam);
+            rev = terrainKnown.Revision(viewerAllyTeam);
+        }
+
+        // Bandwidth skip only — the message is idempotent, so a missed
+        // comparison costs 16 bytes, never correctness.
+        const int key = static_cast<int>(clientId);
+        const uint64_t stamp =
+            (static_cast<uint64_t>(global ? 255 : viewerAllyTeam) << 32) | rev;
+        const auto sent = terrainKnownSentRev.find(key);
+        if (sent != terrainKnownSentRev.end() && sent->second == stamp) return;
+
+        auto msg = Protocol::BuildTerrainKnowledge(
+            frameNo, global ? 255 : viewerAllyTeam,
+            plan.chunksX, plan.chunksZ, packed);
+        if (msg.empty()) return;
+        rtcServer.SendStream(clientId, StreamClass::Vision,
+                             msg.data(), msg.size());
+        terrainKnownSentRev[key] = stamp;
+    });
 }
 
 

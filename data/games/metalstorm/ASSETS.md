@@ -273,7 +273,7 @@ of `models/` directly). Cell text must escape `|` as `\|`.
 | models/ms_airbase_{diffuse,orm,emissive,team,normals}.ktx2 | ms_airbase | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Painted by `tools/fable-model-forge/paint_ms_airbase.py` at 2048² (RNG seed 90210) via `prefabs/paintlib.py`. Worn concrete apron with off-white airfield markings (~+37% on small grid cells — a deliberate exception to tone-on-tone, noted as a baker-sprinkle artifact, not chased), corrugated patched-steel hangar, hazard bands at door jambs, rust/soot/grime weathering. Team via `team_panel(..., base=(120,124,128))` + apron `roundel_star` in mask R only. Emissive: amber cab windows + work glow, red-amber beacon, warm floodlight cores — zero blue-dominant pixels. Encoded UASTC+Zstd+mips by `encode.mjs`. |
 | models/ms_engineers_s4.gltf (+.bin) | ms_engineers_s4 | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Procedural glTF by `tools/fable-model-forge/gen_ms_engineers_s4.py` (dims/zones/clip in `ms_engineers_s4_layout.py`). Prompt: "unit art final slice — engineers s4 mobile fabrication platform, single vast tracked crawler" (2026-08-20). The s4 tier of the engineers family (s1–s3 are humanoid hi-vis figures) carries the family read — hi-vis + hazard + tools — onto a vehicle: measured **19.90 m long (z) × 10.50 m wide (x)**, hull deck 3.3 m, cab top 7.4 m, crane-boom pulley 9.93 m; ground contact Y = 0 (lowest chamfer vertex 0.12 m — underside faces skipped). Two vast full-length track pods (drive wheels texture-suggested), glazed forward crew cab, open-sided fabrication bay amidships with amber welding glow, slewing crane aft, gas-bottle racks, crates, floodlights, rotating beacon. 1644 tris (budget 3000), 2048² atlas. 3 pieces: `body` → `crane_base` (0, 3.3, 6.5) → `crane_boom` (0, 2.3, −1.2) — UNARMED, no turret/barrel/muzzle anywhere, `getAimPieces` → `null` by design. **One clip, and it renders** (squad_size 1): `idle` 10 s seamless crane yaw sweep 0→+25→0→−25→0° with a −2.5° boom bob; boom clears the bay roof by ≥0.4 m through the full sweep. Stem matches the `_builder.lua` default — no unitdef change, no override. |
 | models/ms_engineers_s4_{diffuse,orm,emissive,team,normals}.ktx2 | ms_engineers_s4 | n/a — generated in-session (no external source) | Claude Fable 5 (Anthropic) via tools/fable-model-forge | Generated (Claude Fable 5) | Painted by `tools/fable-model-forge/paint_ms_engineers_s4.py` at 2048² (RNG seed 90210) via `prefabs/paintlib.py`. Patched-plate scavenger hull with hi-vis orange/yellow trim and hazard chevrons, mud/rust on the track pods (lightened in the one fix pass so the pods don't bake near-black), tone-on-tone deck plating. "ENG-04"/"04" stencils use mirrored twin zones so both ±x faces read correctly. Team via `team_panel(..., base=(120,124,128))`: pod stripe, cab panel, deck ID square, crane square — mask R only. Emissive all warm/amber (cab glow, floodlights, weld pool, beacon, markers) — zero blue-dominant pixels. Encoded UASTC+Zstd+mips by `encode.mjs`. |
-| unittextures/fx_atlas.png | (shared — native FX atlas, `effects/library.json` `atlas`) | n/a — procedurally generated | Metalstorm project | Generated (tools/imagegen, backend=none) | 8×8 sprite grid by `tools/imagegen/run.py` (job `fx_atlas`, seed 100601): one soft blob/ring per named frame (dot/spark/fireball/smoke/dust/flash/ring/foam/smoketrail/bubbletrail/scorch), matching `effects/library.json`'s `atlas.frames` cell ids. PNG (not ktx2 — `fx-game-loader.ts`'s worker has no ktx2 transcoder, PLAN-beta-presentation.md L-FX step 2). Full provenance in `art/gen/manifest.json`; human-readable index in this file's "Generated art" section below. Placeholder until a real backend regenerates it in place. |
+| unittextures/fx_atlas.png | (shared — native FX atlas, `effects/library.json` `atlas`) | n/a — procedurally generated | Metalstorm project | Generated (tools/imagegen, backend=none) | 8×8 sprite grid by `tools/imagegen/run.py` (job `fx_atlas`, seed 100601): one soft blob/ring per named frame (dot/spark/fireball/smoke/dust/flash/ring/foam/smoketrail/bubbletrail/scorch), matching `effects/library.json`'s `atlas.frames` cell ids. PNG (not ktx2 — `fx-game-loader.ts`'s worker has no ktx2 transcoder, PLAN-beta-presentation.md L-FX step 2). Full provenance in `art/gen/manifest.json`; human-readable index in this file's "Generated art" section below. Deliberately pinned to `backend=none` (reason in the job file and the manifest entry): a single SDXL sample cannot honour the 8×8 cell grid — see "Generated art" below. |
 
 ## Fonts
 
@@ -313,42 +313,65 @@ post-step provenance per file lives in `data/games/metalstorm/art/gen/manifest.j
 (git-tracked, regenerate with `run.py --backend none --all`) — this table is
 a human-readable index into it, not the record of truth.
 
-**Current backend: `none`** (procedural placeholders — palette-gradient
-noise; emblems are flat geometric badges; deterministic per seed). ComfyUI
-Desktop was confirmed live on `127.0.0.1:8188` (0.36.0, device `mps`, 32 GB)
-2026-09-17 but has **zero checkpoints installed** (`GET
-/object_info/CheckpointLoaderSimple` returns an empty list) — `comfy_local`
-is wired up and will be picked automatically once an SDXL base checkpoint
-(`sd_xl_base_1.0*.safetensors`) is installed through ComfyUI Desktop's own
-model manager; this tool does not download models. No `FAL_KEY` /
-`REPLICATE_API_TOKEN` were set at generation time either. Every row below
-gets regenerated in place (same output paths, `run.py` overwrites) the day a
-real backend is selected — no job files change.
+**Current backend: `comfy_local`** as of 2026-09-17 — ComfyUI Desktop 0.36.0
+on `127.0.0.1:8188`, `sd_xl_base_1.0.safetensors`, every job sampled at
+~1 MP on the 64-px latent grid at the job's aspect and Lanczos-resized to
+the job's size (`backends/comfy_local.native_size`; SDXL at 512² is mush and
+at 2 MP repeats the scene), steps 28 / cfg 6.5 / `dpmpp_2m` + `karras`,
+~2 min per sample on the M2 Pro. The `BrokenPipeError` blocker recorded in
+the previous round was cleared by a human restart of ComfyUI Desktop (its
+backend's stdout/stderr now go to `logs/comfy-headless.log`); every
+submission since has sampled without incident.
 
-| Asset (path in tree) | Class | Backend | Seed | Prompt (summary) |
+**Every output below was viewed and judged against `art/DIRECTION.md`
+(palette, grit, readability) before being kept.** 13 of 16 jobs are real
+SDXL output; 3 stay on the `none` placeholder because the real output was
+*worse* than the placeholder — the reason is pinned in the job file
+(`"backend": "none"` + `"backend_reason"`) and copied into the manifest
+entry (`backend_pinned`, `backend_reason`) so the call is on record, not
+just in this prose. Contact sheet with a 2×2 seam check per tileable:
+`docs/reviews/beta/imagegen-contact.png` (`tools/imagegen/contact.py`).
+
+| Asset (path in tree) | Class | Backend | Seed | Verdict |
 |---|---|---|---|---|
-| art/gen/emblems/compact.png (+.svg) | emblem | none | 100201 | Meridian Compact — compass/fabricator-gear badge, phosphor-cyan accent |
-| art/gen/emblems/union.png (+.svg) | emblem | none | 100202 | Foundry Union — hammer/wrench + furnace-hatch badge, hazard-yellow accent |
-| art/gen/lobby-bg.png | lobby_background | none | 100301 | Dust-bowl frontline horizon at dusk, machine silhouettes on the ridgeline |
-| art/gen/biomes/grassland_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100401 | Dead scavenger-plains grassland, cracked olive-drab dirt |
-| art/gen/biomes/forest_floor_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100402 | Dead-forest floor litter, root scars over worn-steel soil |
-| art/gen/biomes/desert_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100403 | Dust-bowl desert floor, wind-ripple dust-khaki sand |
-| art/gen/biomes/rockfield_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100404 | Broken rockfield, rust-stained fracture seams |
-| art/gen/biomes/wetland_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100405 | Stagnant bog mudflat, algae streaks, cracked dry-edge polygons |
-| art/gen/biomes/frostwaste_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | none | 100406 | Ash-grey frost waste, no clean pristine snow |
-| art/gen/overlays/rust_streaks.png | overlay | none | 100501 | Gravity-fed rust streaks from bolts/seams, alpha |
-| art/gen/overlays/dust_coat.png | overlay | none | 100502 | Fine settled dust coat, patchy khaki film, alpha |
-| art/gen/overlays/oil_stains.png | overlay | none | 100503 | Dark oil stains/drips near joints, alpha |
-| art/gen/overlays/soot_scorch.png | overlay | none | 100504 | Soot scorch around muzzles/exhausts, alpha |
-| unittextures/fx_atlas.png | fx_atlas | none | 100601 | 8×8 smoke/fire/dust flipbook, frame ids from `effects/library.json` `atlas` |
-| art/gen/water/water_normal_calm.png | water_normal | none | 100701 | Calm water surface, low-amplitude ripples |
-| art/gen/water/water_normal_choppy.png | water_normal | none | 100702 | Choppy water surface, higher-frequency ripples |
+| art/gen/emblems/compact.png (+.svg) | emblem | comfy_local | 100211 | Bold compass rose, cream on worn steel with a phosphor-cyan crescent; reads at 64 px. Seed 100201 gave a fine-line blueprint that was unreadable at 64 px — re-prompted for thick flat shapes. The .svg is a FALLBACK (`potrace` not installed): a wrapper that references the PNG, not a vector trace. |
+| art/gen/emblems/union.png (+.svg) | emblem | comfy_local | 100202 | Hazard-yellow disc with a black crossed hammer/wrench crosshair; reads at 64 px. SDXL painted it on mottled concrete despite the flat-backdrop prompt; `post/alpha.py`'s corner-band key + hole fill + centred-badge circle, with the job's `key_bright_unsat`/`key_circle` knobs, isolates it. A re-seed (100212) with a stronger flat-backdrop prompt came back as a low-contrast grey wheel — rejected. .svg: same FALLBACK as above. |
+| art/gen/lobby-bg.png | lobby_background | comfy_local | 100311 | Matte-painting dust flat, tiny wreck silhouettes, thin smoke, hazed blue-grey sky — on brief. Seed 100301 gave photographic modern main battle tanks: rejected as off-setting. Sampled 1472×704, resized to 2048×1024. |
+| art/gen/biomes/desert_diffuse.png (+_normal, +_roughness, +.ktx2 ×3) | biome | comfy_local | 100403 | Cracked hardpan with dust drifts; mean colour graded onto the job's palette (dust khaki / bleached bone / olive). Tiles clean. |
+| art/gen/biomes/forest_floor_diffuse.png (+…) | biome | comfy_local | 100402 | Leaf litter, bark and twigs over grey soil; the palette grade pulls it cool (worn-steel soil). Tiles clean. |
+| art/gen/biomes/grassland_diffuse.png (+…) | biome | comfy_local | 100411 | Dead straw tufts and matted grass over olive dirt. Seed 100401 was cracked mud with no grass — re-seeded with a subject-first prompt. |
+| art/gen/biomes/rockfield_diffuse.png (+…) | biome | comfy_local | 100404 | Shattered slab field with rust-stained seams. Tiles clean; a faint cross-fade double-exposure in the border bands. |
+| art/gen/biomes/wetland_diffuse.png (+…) | biome | comfy_local | 100405 | Cracked mud, brown. First grade landed on wine-red because the job's colour list was weighted to dried-blood red — re-weighted to olive/khaki/rust. Standing water and algae did not read; it is "dry bog margin". |
+| art/gen/biomes/frostwaste_diffuse.png (+…) | biome | comfy_local | 100416 | Cracked frozen grey mud. Seed 100406 had a repeating horizontal band of light stones (visible on tiling) — re-seeded. Rime/ash did not read; it is "frozen cracked earth". |
+| art/gen/overlays/rust_streaks.png | overlay | comfy_local | 100501 | Rust splats and drips, flat `#7a3b1e` tint, alpha from the sample's stains. Tiles clean. |
+| art/gen/overlays/dust_coat.png | overlay | comfy_local | 100502 | Patchy khaki dust mottling. Tiles clean (the first version showed the old offset-blend's blurred cross — fixed in `post/seamless.py`). |
+| art/gen/overlays/oil_stains.png | overlay | comfy_local | 100503 | Dark oil splatter and drips. Tiles clean. |
+| art/gen/overlays/soot_scorch.png | overlay | comfy_local | 100504 | Black soot blotches. Tiles clean. |
+| unittextures/fx_atlas.png | fx_atlas | **none (pinned)** | 100601 | A single SDXL sample of a "sprite sheet" is not aligned to the 8×8 cell grid `effects/library.json`'s `atlas.frames` indexes into — every named frame would land on arbitrary pixels, worse than the placeholder's one-blob-per-cell. Real FX sprites need a per-frame job class (one isolated sprite per sample, composited into the grid). Pixel-identical to the previous round. |
+| art/gen/water/water_normal_calm.png | water_normal | **none (pinned)** | 100701 | SDXL rendered "greyscale height field, small ripples" as strongly anisotropic horizontal corrugation; as a scrolling normal map that reads as streaks, not ripples. The isotropic procedural ripple field is the better normal source. |
+| art/gen/water/water_normal_choppy.png | water_normal | **none (pinned)** | 100702 | Same as calm — the calm and choppy samples were near-identical. |
 
-All rows: License `Generated (tools/imagegen, backend=none)`; Modifications
-= seamless offset-blend (biome/overlay/water classes) + power-of-two resize
-+ (biome only) height→normal/luminance→roughness PBR derivation reusing
+**Honest caveat on the biome set:** four of the six (desert, rockfield,
+wetland, frostwaste) are cracked-earth variants — SDXL's prior for
+"post-collapse ground" is strong even with the job subject placed first
+in the prompt (`style.json` biome class now uses a short prefix and a
+`suffix`, so the subject leads). They are distinguishable by tint and
+crack scale and each is better than the noise placeholder it replaces,
+but a future round should pin a per-biome reference image (img2img /
+ControlNet) if the set needs more material variety.
+
+All rows: License `Generated (tools/imagegen, backend=comfy_local)` except
+the three pinned rows (`backend=none`); Modifications = (biome)
+`palette_grade` per-channel gain onto the job's palette mean + (biome/
+overlay classes, raster backends only — the placeholders are periodic
+already) four-way cross-fade seamless tiling + power-of-two resize +
+(overlay class) `overlay_alpha` alpha from median-relative luminance
+deviation, flat tint + (emblem class) `bg_key` backdrop key + (biome only)
+height→normal (σ 1.2 pre-soften, STYLE.md "soft normal maps") /
+luminance→roughness PBR derivation reusing
 `tools/fable-model-forge/normals.py`'s Sobel bake + ktx2 encode via
-`tools/textureconverter`. Full text lives in `art/gen/manifest.json`, not
+`tools/textureconverter` (UASTC for diffuse/normal, ETC1S for the
+greyscale roughness). Full text lives in `art/gen/manifest.json`, not
 duplicated here.
 
 ## Audio

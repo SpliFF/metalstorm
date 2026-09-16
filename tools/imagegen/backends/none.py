@@ -15,6 +15,7 @@ Per asset_class:
 """
 from __future__ import annotations
 import io
+import zlib
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -207,7 +208,11 @@ def _gen_fx_atlas(rng, w, h, cols: int, rows: int, frames: dict[str, int]) -> Im
     img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
     for name, idx in frames.items():
         col, row = idx % cols, idx // cols
-        cell_seed = (int(rng.integers(0, 2**31 - 1)) ^ hash(name)) & 0xFFFFFFFF
+        # zlib.crc32, not the builtin hash() — str hashing is salted per
+        # process (PYTHONHASHSEED), which broke the "deterministic per seed"
+        # guarantee this module advertises (fx_atlas.png differed rerun to
+        # rerun with an identical job spec).
+        cell_seed = (int(rng.integers(0, 2**31 - 1)) ^ zlib.crc32(name.encode())) & 0xFFFFFFFF
         cell_rng = np.random.default_rng(cell_seed)
         sprite = _fx_sprite(name, cell_w, cell_h, cell_rng)
         img.alpha_composite(sprite, (col * cell_w, row * cell_h))

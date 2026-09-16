@@ -3,10 +3,9 @@ vector primitives (backends/none.emblem_shapes) so it writes real SVG
 markup directly — no tracing needed. A raster backend (comfy_local/hosted)
 has no vector source, so this traces its PNG with `potrace` when present;
 without it (TOOLING GAP: potrace not installed) it falls back to an SVG
-that embeds the raster, which is a valid .svg file but not a vector trace.
+that references the sibling PNG, which is a valid .svg file but not a vector trace.
 """
 from __future__ import annotations
-import base64
 import os
 import shutil
 import subprocess
@@ -32,11 +31,14 @@ def write_geometric_svg(shapes: list[dict], out_path: Path, size: int = 100) -> 
 
 
 def _write_embedded_svg(png_path: Path, svg_path: Path) -> None:
-    data = base64.b64encode(Path(png_path).read_bytes()).decode('ascii')
+    """The no-potrace fallback: a valid SVG whose only element is the sibling
+    raster by relative href (same directory, so it resolves wherever the
+    pair is served from). Not base64 — that doubled every emblem's footprint
+    for zero information."""
     w, h = Image.open(png_path).size
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
-           f'viewBox="0 0 {w} {h}"><image width="{w}" height="{h}" '
-           f'href="data:image/png;base64,{data}"/></svg>\n')
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+           f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+           f'<image width="{w}" height="{h}" href="{Path(png_path).name}" xlink:href="{Path(png_path).name}"/></svg>\n')
     Path(svg_path).write_text(svg)
 
 
