@@ -4,8 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <queue>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "SqliteThreading.h"
 #include "WorldFactions.h"
@@ -118,6 +118,10 @@ WorldStagingRules WorldStagingRules::FromWorldConfig(const nlohmann::json& c) {
         CfgDouble(c, "stagingWindowMaxWorldMs", r.stagingWindowMaxWorldMs);
     r.materialiseMaxAttempts =
         CfgInt(c, "stagingMaterialiseMaxAttempts", r.materialiseMaxAttempts);
+    r.maxTransportsPerCommit =
+        CfgInt(c, "stagingMaxTransportsPerCommit", r.maxTransportsPerCommit);
+    r.maxSquadsPerCommit =
+        CfgInt(c, "stagingMaxSquadsPerCommit", r.maxSquadsPerCommit);
     return r;
 }
 
@@ -154,19 +158,35 @@ int64_t CheapestTransitTo(const std::vector<WorldPoiEdgeRecord>& edges,
                           const std::vector<std::string>& fromPois,
                           const std::string& poiId) {
     if (poiId.empty() || fromPois.empty()) return 0;
-    const std::unordered_set<std::string> from(fromPois.begin(), fromPois.end());
-    int64_t best = 0;
+    // Dijkstra from every source over the (direction-aware) edge list: the
+    // answer is the cheapest PATH, so a two-hop march is priced as two hops,
+    // never as "no direct edge → default" (F6). A one-way route is one way
+    // for a march too, so the reverse direction only exists on a
+    // bidirectional edge. A source equal to the target returns 0 → default.
+    std::unordered_map<std::string, std::vector<std::pair<std::string, int64_t>>> adj;
     for (const auto& e : edges) {
         if (e.transitWorldMs <= 0) continue;
-        const bool forward  = e.toPoi == poiId && from.count(e.fromPoi) > 0;
-        // A one-way route is one way for a march too, so the reverse
-        // direction only counts on a bidirectional edge.
-        const bool backward = e.bidirectional && e.fromPoi == poiId &&
-                              from.count(e.toPoi) > 0;
-        if (!forward && !backward) continue;
-        if (best == 0 || e.transitWorldMs < best) best = e.transitWorldMs;
+        adj[e.fromPoi].push_back({e.toPoi, e.transitWorldMs});
+        if (e.bidirectional) adj[e.toPoi].push_back({e.fromPoi, e.transitWorldMs});
     }
-    return best;
+    using Item = std::pair<int64_t, std::string>;  // (distance, poi)
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+    std::unordered_map<std::string, int64_t> best;
+    for (const auto& s : fromPois) { best[s] = 0; pq.push({0, s}); }
+    while (!pq.empty()) {
+        const auto [d, u] = pq.top();
+        pq.pop();
+        if (d > best[u]) continue;
+        if (u == poiId) return d;
+        const auto it = adj.find(u);
+        if (it == adj.end()) continue;
+        for (const auto& [v, w] : it->second) {
+            const int64_t nd = d + w;
+            const auto bi = best.find(v);
+            if (bi == best.end() || nd < bi->second) { best[v] = nd; pq.push({nd, v}); }
+        }
+    }
+    return 0;
 }
 
 // ─────────────────────────── the store ────────────────────────────────────
@@ -276,11 +296,11 @@ WorldStagingCommitResult WorldStaging::Commit(sqlite3* db,
     // the force somewhere else.
     if (!poi->HasBattleMap()) { res.error = "no_battle_map"; return res; }
 
-    if (!WorldFactions::Load(db, req.worldId, req.attackerFactionId)) {
+    const auto attacker = WorldFactions::Load(db, req.worldId, req.attackerFactionId);
+    if (!attacker) {
         res.error = "no_faction";
         return res;
     }
-
     if (const std::string why = StagingInstigationError(
             req.transports, req.squads, req.attackerFactionId, poi->ownerFactionId);
         !why.empty()) {
@@ -288,39 +308,69 @@ WorldStagingCommitResult WorldStaging::Commit(sqlite3* db,
         return res;
     }
 
+    // A faction with no side key can never appear in a war_outcome verdict,
+    // so its expedition could never be priced — refuse at commitment, while
+    // the player can still spend the force somewhere else (F9).
+    if (attacker->sideKey.empty()) { res.error = "no_side"; return res; }
+    // A war against a POI your own SIDE holds could never be won by anyone —
+    // materialisation would stage a same-side battle (F18). Runs AFTER the
+    // instigation rule so "you hold it yourself" reports as `already_held`,
+    // the more precise refusal.
+    if (!poi->ownerFactionId.empty()) {
+        if (const auto owner = WorldFactions::Load(db, req.worldId, poi->ownerFactionId);
+            owner && owner->sideKey == attacker->sideKey) {
+            res.error = "same_side";
+            return res;
+        }
+    }
+    // What materialisation could not seat, commitment must not take (F20).
+    if (req.transports > rules.maxTransportsPerCommit ||
+        req.squads > rules.maxSquadsPerCommit) {
+        res.error = "too_much_force";
+        return res;
+    }
+
     // §7.2's late commitment: force committed while this faction already has
     // an open window at this POI joins it. The window does not move — see the
     // header for why extending it would be a grief vector.
-    for (const auto& open : OpenFor(db, req.worldId)) {
-        if (open.poiId != req.poiId || open.attackerFactionId != req.attackerFactionId)
-            continue;
-        static const char* kAdd =
-            "UPDATE world_staging SET transports=transports+?, squads=squads+? "
-            "WHERE rowid=? AND state='staging'";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db, kAdd, -1, &stmt, nullptr) != SQLITE_OK) {
-            res.error = "db_error";
-            return res;
+    //
+    // One transaction for "find the open window, add to it, reload" (F5):
+    // inside BEGIN IMMEDIATE the sweep cannot materialise the row between the
+    // read and the UPDATE, and `changes()==0` is then a genuine "closed under
+    // us" rather than a silently-joined ghost.
+    std::optional<WorldStagingRecord> joinedRow;
+    std::string joinError;
+    SqliteWriteTransaction(db, "WorldStagingJoin", [&] {
+        for (const auto& open : OpenFor(db, req.worldId)) {
+            if (open.poiId != req.poiId || open.attackerFactionId != req.attackerFactionId)
+                continue;
+            static const char* kAdd =
+                "UPDATE world_staging SET transports=transports+?, squads=squads+? "
+                "WHERE rowid=? AND state='staging'";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, kAdd, -1, &stmt, nullptr) != SQLITE_OK) {
+                joinError = "db_error";
+                return SQLITE_ERROR;
+            }
+            sqlite3_bind_int(stmt, 1, req.transports);
+            sqlite3_bind_int(stmt, 2, req.squads);
+            sqlite3_bind_int64(stmt, 3, open.stagingId);
+            const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+            const int changed = ok ? sqlite3_changes(db) : 0;
+            sqlite3_finalize(stmt);
+            if (!ok) { joinError = "db_error"; return SQLITE_ERROR; }
+            if (changed == 0) { joinError = "window_closed"; return SQLITE_ABORT; }
+            joinedRow = Load(db, open.stagingId);
+            return joinedRow ? SQLITE_OK : SQLITE_ERROR;
         }
-        sqlite3_bind_int(stmt, 1, req.transports);
-        sqlite3_bind_int(stmt, 2, req.squads);
-        sqlite3_bind_int64(stmt, 3, open.stagingId);
-        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-        sqlite3_finalize(stmt);
-        if (!ok) { res.error = "db_error"; return res; }
-        // REVIEW 2026-09-10 (world-design.md F5): `sqlite3_changes()` is not
-        // checked. If the staging sweep materialised this row between
-        // `OpenFor` above and this UPDATE, zero rows change, the reload
-        // returns a `materialised` row, the route answers ok/joined and then
-        // opens an escrow row that MarkEngaged has already passed — force
-        // debited, never engaged, never settled. Proposed: treat
-        // `changes == 0` as `window_closed` (409) and run the read + UPDATE +
-        // escrow Open inside one SqliteWriteTransaction.
-        const auto reloaded = Load(db, open.stagingId);
-        if (!reloaded) { res.error = "db_error"; return res; }
+        // Nothing to join — roll back the empty txn and open a fresh window.
+        return SQLITE_ABORT;
+    });
+    if (!joinError.empty()) { res.error = joinError; return res; }
+    if (joinedRow) {
         res.ok = true;
         res.joined = true;
-        res.staging = *reloaded;
+        res.staging = *joinedRow;
         return res;
     }
 
@@ -330,14 +380,15 @@ WorldStagingCommitResult WorldStaging::Commit(sqlite3* db,
     // marches from wherever is nearest, and making the UI name an origin
     // before it can show a window would put the plumbing before the player.
     std::vector<std::string> origins;
-    // REVIEW 2026-09-10 (world-design.md F6): the named origin is not checked
-    // against what the faction holds (nor that it exists), so a committer can
-    // name the POI adjacent to the target and buy the minimum 1-hour warning
-    // from anywhere. Pricing is also single-edge: a two-hop march falls to the
-    // 12-hour default instead of the path sum. Proposed: refuse an origin the
-    // faction does not own (`bad_origin`) and price with Dijkstra over the
-    // edge list (patch in the report).
     if (!req.originPoiId.empty()) {
+        // A named origin must exist and be HELD by the attacker (F6) —
+        // otherwise naming the POI next door buys the minimum warning from
+        // anywhere on the map.
+        const auto origin = WorldDirector::LoadPoi(db, req.worldId, req.originPoiId);
+        if (!origin || origin->ownerFactionId != req.attackerFactionId) {
+            res.error = "bad_origin";
+            return res;
+        }
         origins.push_back(req.originPoiId);
     } else {
         for (const auto& p : WorldDirector::PoisFor(db, req.worldId))

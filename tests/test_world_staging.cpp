@@ -83,13 +83,15 @@ struct StagingDb {
         REQUIRE(WorldDirector::UpsertEdge(db, e));
     }
 
-    std::string Found(const std::string& name, int64_t account) {
+    std::string Found(const std::string& name, int64_t account,
+                      const std::string& sideKey = "compact") {
         WorldFactionFoundRequest r;
         r.worldId   = kW;
         r.name      = name;
         r.archetype = kArchetypeOrder;
         r.accountId = account;
         r.username  = "player" + std::to_string(account);
+        r.sideKey   = sideKey;
         const auto w = WorldDirector::Load(db, kW);
         REQUIRE(w.has_value());
         const auto res = WorldFactions::Found(
@@ -238,12 +240,33 @@ TEST_CASE("W10: pricing takes the cheapest edge, and respects one-way routes") {
     CHECK(CheapestTransitTo(edges, {}, "target") == 0);
 }
 
+TEST_CASE("review F6: a two-hop march is priced as the path sum, not the default") {
+    std::vector<WorldPoiEdgeRecord> edges;
+    auto edge = [&](const char* a, const char* b, int64_t w, bool bi) {
+        WorldPoiEdgeRecord e;
+        e.fromPoi = a; e.toPoi = b; e.transitWorldMs = w; e.bidirectional = bi;
+        edges.push_back(e);
+    };
+    edge("a", "b", 5 * kHourMs, true);
+    edge("b", "c", 7 * kHourMs, true);
+    // No direct a→c edge: the old single-edge scan answered 0 (→ the 12-hour
+    // default); the path answer is the honest 12 hours of marching.
+    CHECK(CheapestTransitTo(edges, {"a"}, "c") == 12 * kHourMs);
+    CHECK(CheapestTransitTo(edges, {"c"}, "a") == 12 * kHourMs);
+    // A cheaper long way around wins over an expensive direct edge.
+    edge("a", "c", 20 * kHourMs, true);
+    CHECK(CheapestTransitTo(edges, {"a"}, "c") == 12 * kHourMs);
+    // One-way in the middle blocks the return path.
+    edges[1].bidirectional = false;   // b → c only
+    CHECK(CheapestTransitTo(edges, {"c"}, "a") == 20 * kHourMs);
+}
+
 // ─────────────────────────── the store ─────────────────────────────────────
 
 TEST_CASE("W10: committing force opens a staging row priced by the edge") {
     StagingDb h;
     const std::string atk = h.Found("Attackers", 1);
-    const std::string def = h.Found("Defenders", 2);
+    const std::string def = h.Found("Defenders", 2, "union");
     h.AddPoi("home", atk);
     h.AddPoi("target", def);
     h.AddEdge("home", "target", 6 * kHourMs);
@@ -265,7 +288,7 @@ TEST_CASE("W10: committing force opens a staging row priced by the edge") {
 TEST_CASE("W10: an origin the committer did not name is inferred from what it holds") {
     StagingDb h;
     const std::string atk = h.Found("Attackers", 1);
-    const std::string def = h.Found("Defenders", 2);
+    const std::string def = h.Found("Defenders", 2, "union");
     h.AddPoi("far_home", atk);
     h.AddPoi("near_home", atk);
     h.AddPoi("target", def);
@@ -320,7 +343,7 @@ TEST_CASE("W10: Commit refuses what the design refuses") {
 TEST_CASE("W10: §7.2 late force joins the open window and never moves it") {
     StagingDb h;
     const std::string atk = h.Found("Attackers", 1);
-    const std::string def = h.Found("Defenders", 2);
+    const std::string def = h.Found("Defenders", 2, "union");
     h.AddPoi("home", atk);
     h.AddPoi("target", def);
     h.AddEdge("home", "target", 6 * kHourMs);
@@ -346,7 +369,7 @@ TEST_CASE("W10: two attackers gather against one POI as two rows") {
     StagingDb h;
     const std::string a = h.Found("Alpha", 1);
     const std::string b = h.Found("Bravo", 2);
-    const std::string def = h.Found("Defenders", 3);
+    const std::string def = h.Found("Defenders", 3, "union");
     h.AddPoi("target", def);
 
     REQUIRE(h.Commit("target", a).ok);

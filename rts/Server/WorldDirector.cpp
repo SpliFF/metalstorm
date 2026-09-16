@@ -125,6 +125,9 @@ nlohmann::json WorldDefaults::ToJson() const {
     j["foundFactionCost"]       = foundFactionCost;
     j["factionNameMaxLen"]      = factionNameMaxLen;
     j["factionNameMinLen"]      = factionNameMinLen;
+    j["escrowAnnihilatedCaptureFraction"] = escrowAnnihilatedCaptureFraction;
+    j["escrowWithdrewThresholdFraction"]  = escrowWithdrewThresholdFraction;
+    j["escrowHeldSpoilsTreasury"]         = escrowHeldSpoilsTreasury;
     j["authorityPerVictory"]       = authorityPerVictory;
     j["authorityPerDefeat"]        = authorityPerDefeat;
     j["authorityDecayPerWorldDay"] = authorityDecayPerWorldDay;

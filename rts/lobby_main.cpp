@@ -5345,15 +5345,36 @@ int main(int argc, char *argv[]) {
         req.squads     = j.value("squads", 1);
         req.accountId  = uid;
 
-        const auto result = WorldStaging::Commit(
-            mapDb, worldStagingRules(worldId), req, worldNowWorldMs(worldId),
-            WorldNowRealMs());
+        // Commit + escrow debit are ONE write (world-design F5): a commitment
+        // must never stand without its debit, so a failed escrow Open rolls
+        // the staging commit back rather than logging a warning past it.
+        WorldStagingCommitResult result;
+        const bool committed = SqliteWriteTransaction(
+            mapDb, "WorldCommitWithEscrow", [&] {
+              result = WorldStaging::Commit(mapDb, worldStagingRules(worldId),
+                                            req, worldNowWorldMs(worldId),
+                                            WorldNowRealMs());
+              if (!result.ok) return SQLITE_ABORT;  // refusal carried in result
+              // The escrow seam (transports §7.3): the committed force leaves
+              // the faction's pool the moment it is committed. THIS commit's
+              // counts, not the window's running total — a §7.2 join escrows
+              // what it added.
+              return WorldEscrow::Open(mapDb, result.staging, req.transports,
+                                       req.squads, req.accountId,
+                                       WorldNowRealMs())
+                         ? SQLITE_OK
+                         : SQLITE_ERROR;
+            });
         if (!result.ok) {
           // 409 for "the world is not in a state where this means anything"
-          // (you hold it already), 400 for an ask that is wrong on its face,
+          // (you hold it already, the window closed under you, a same-side
+          // or side-less war), 400 for an ask that is wrong on its face,
           // 404 for a place that is not there — the same three-way split the
           // founding route makes, for the same reason.
           const int status = result.error == "already_held"     ? 409
+                             : result.error == "window_closed"  ? 409
+                             : result.error == "no_side"        ? 409
+                             : result.error == "same_side"      ? 409
                              : result.error == "no_poi"         ? 404
                              : result.error == "no_world"       ? 404
                              : result.error == "no_faction"     ? 404
@@ -5364,16 +5385,13 @@ int main(int argc, char *argv[]) {
           err["error"] = result.error;
           return HttpAuth::JsonResponse(status, err.dump());
         }
-
-        // The escrow seam (transports §7.3): the committed force leaves the
-        // faction's pool the moment it is committed. THIS commit's counts,
-        // not the window's running total — a §7.2 join escrows what it added.
-        if (!WorldEscrow::Open(mapDb, result.staging, req.transports,
-                               req.squads, req.accountId, WorldNowRealMs()))
-          SLOG(SPRING_LOG_WARNING,
-               "world staging %lld: escrow row could not be opened — the "
-               "commitment stands but the force ledger did not debit",
-               static_cast<long long>(result.staging.stagingId));
+        if (!committed) {
+          SLOG(SPRING_LOG_ERROR,
+               "world staging: commit for faction '%s' at POI '%s' rolled "
+               "back — escrow row could not be opened",
+               req.attackerFactionId.c_str(), req.poiId.c_str());
+          return HttpAuth::JsonResponse(500, R"({"ok":false,"error":"db_error"})");
+        }
 
         nlohmann::json out;
         out["ok"]      = true;
@@ -5541,9 +5559,12 @@ int main(int argc, char *argv[]) {
         if (!result.ok) {
           // The staging commit's three-way split, for the same reason: 409
           // for "the world is not in a state where this means anything", 404
-          // for a place that is not there, 400 for the rest.
+          // for a place that is not there, 400 for the rest — and 403 for
+          // the authority gate, like the founding route: they are who they
+          // say, and it is not enough (world-design F13).
           const int status = result.error == "already_owner"          ? 409
                              : result.error == "already_claimed"      ? 409
+                             : result.error == "insufficient_authority" ? 403
                              : result.error == "no_poi"               ? 404
                              : result.error == "no_faction"           ? 404
                              : result.error == "db_error"             ? 500
@@ -8912,35 +8933,36 @@ int main(int argc, char *argv[]) {
             const auto escrowRules = WorldEscrowRules::FromWorldConfig(
                 world ? world->config : nlohmann::json::object());
 
-            // The attacker won iff the side its faction fields is among the
-            // sim's winner factions. An ending the sim never saw (operator
-            // retire, season end — no `war_outcome` row) settles as a loss
-            // for the expedition: it did not take the field.
-            bool attackerWon = false;
-            if (outcomeRow && !outcomeRow->winnerFactions.empty()) {
+            WorldEscrowSettleFacts facts;
+            // An ending the sim never saw (operator retire, season end — no
+            // `war_outcome` verdict) VOIDS the escrow: full return, no spoils,
+            // no capture. §7.5's table prices battle outcomes and a season
+            // boundary is not one (world-design F4/F14).
+            const bool verdict = outcomeRow && !outcomeRow->winnerFactions.empty();
+            if (!verdict) {
+              facts.outcome = WorldEscrowOutcome::Voided;  // nobody fought this out
+            } else {
+              // The attacker won iff the side its faction fields is among the
+              // sim's winner factions.
               const auto att = WorldFactions::Load(mapDb, staging->worldId,
                                                    staging->attackerFactionId);
-              if (att && !att->sideKey.empty()) {
-                const std::string list = "," + outcomeRow->winnerFactions + ",";
-                attackerWon =
-                    list.find("," + att->sideKey + ",") != std::string::npos;
+              const bool attackerWon =
+                  att && !att->sideKey.empty() &&
+                  SettlementNamesFaction(outcomeRow->winnerFactions, att->sideKey);
+              // Withdrawal counts are not yet durable across the seam (they
+              // live in perishable rulesParams — WarOutcome.h), so a losing
+              // expedition settles as `annihilated` today; the classifier
+              // already knows `withdrew`/`routed` for when the conduit lands.
+              facts.outcome = ClassifyEscrowOutcome(attackerWon, /*withdrawn=*/0,
+                                                    staging->squads, escrowRules);
+              if (!attackerWon) {
+                // §7.5's capture: the victor is whoever holds the ground — the
+                // POI's owning faction. An unowned POI names no victor and the
+                // captured share is destroyed instead.
+                if (const auto defPoi = WorldDirector::LoadPoi(
+                        mapDb, staging->worldId, staging->poiId))
+                  facts.victorFactionId = defPoi->ownerFactionId;
               }
-            }
-
-            WorldEscrowSettleFacts facts;
-            // Withdrawal counts are not yet durable across the seam (they
-            // live in perishable rulesParams — WarOutcome.h), so a losing
-            // expedition settles as `annihilated` today; the classifier
-            // already knows `withdrew`/`routed` for when the conduit lands.
-            facts.outcome = ClassifyEscrowOutcome(attackerWon, /*withdrawn=*/0,
-                                                  staging->squads, escrowRules);
-            if (!attackerWon) {
-              // §7.5's capture: the victor is whoever holds the ground — the
-              // POI's owning faction. An unowned POI names no victor and the
-              // captured share is destroyed instead.
-              if (const auto defPoi = WorldDirector::LoadPoi(
-                      mapDb, staging->worldId, staging->poiId))
-                facts.victorFactionId = defPoi->ownerFactionId;
             }
 
             int64_t nowWorldMs = 0;
@@ -9078,6 +9100,37 @@ int main(int argc, char *argv[]) {
         const auto reading = WorldDirector::ClockFor(mapDb, w.worldId, nowReal);
         if (!reading) continue;
         const auto rules = WorldStagingRules::FromWorldConfig(w.config);
+        // Rows whose attempts already exceed a LOWERED retry budget never
+        // appear in `DueStagings` again — retire them explicitly (flip +
+        // refund + alert) instead of leaving them open on the map with their
+        // force debited forever (world-design F7).
+        for (const auto& row : WorldStaging::OpenFor(mapDb, w.worldId)) {
+          if (rules.materialiseMaxAttempts <= 0) break;
+          if (row.attempts < rules.materialiseMaxAttempts) continue;
+          if (row.endsAtWorldMs > reading->worldMs) continue;
+          WorldStaging::MarkAttemptFailed(mapDb, row.stagingId,
+                                          "retry budget lowered", rules,
+                                          nowReal);
+          WorldEscrow::Release(mapDb, row.stagingId, "staging_failed", nowReal);
+          SLOG(SPRING_LOG_WARNING,
+               "world staging %lld at POI '%s' retired: attempts %d exceed "
+               "the lowered budget %d — force refunded",
+               static_cast<long long>(row.stagingId), row.poiId.c_str(),
+               row.attempts, rules.materialiseMaxAttempts);
+          const auto poiForNotice =
+              WorldDirector::LoadPoi(mapDb, w.worldId, row.poiId);
+          WorldNotificationEvent ev;
+          ev.worldId            = w.worldId;
+          ev.poiId              = row.poiId;
+          ev.poiName            = poiForNotice ? poiForNotice->name : row.poiId;
+          ev.kind               = WorldNotificationKind::StagingFailed;
+          ev.attackerFactionId  = row.attackerFactionId;
+          ev.defenderFactionId  =
+              poiForNotice ? poiForNotice->ownerFactionId : std::string();
+          ev.stagingId          = row.stagingId;
+          ev.worldMs            = reading->worldMs;
+          gWorldNotifications.Publish(ev);
+        }
         for (const auto& row :
              WorldStaging::DueStagings(mapDb, w.worldId, rules, reading->worldMs)) {
           uint32_t roomId = 0;

@@ -130,7 +130,10 @@ const char* WorldEscrowStateToString(WorldEscrowState s);
 WorldEscrowState WorldEscrowStateFromString(const std::string& s);
 
 /// §7.5's outcome vocabulary, as the world prices it.
-enum class WorldEscrowOutcome : uint8_t { Held, Withdrew, Routed, Annihilated };
+/// `Voided`: the war ended without an in-sim verdict (season_end, operator
+/// retire) — full return, no spoils, no capture. Not a §7.5 outcome; the
+/// battle never priced anybody.
+enum class WorldEscrowOutcome : uint8_t { Held, Withdrew, Routed, Annihilated, Voided };
 
 const char* WorldEscrowOutcomeToString(WorldEscrowOutcome o);
 
@@ -299,6 +302,12 @@ public:
     /// sweep's question. Room ids are reused; the state guard is what keeps a
     /// previous war's settled escrow out of this answer.
     static std::vector<int64_t> EngagedStagingsForRoom(sqlite3* db, uint32_t roomId);
+
+    /// True when `factionId` has any escrow row for the war in `roomId` in
+    /// state engaged or settled — "had force in that war" as a label read
+    /// (season digest attribution, world-design F2).
+    static bool EngagedOrSettledForRoom(sqlite3* db, uint32_t roomId,
+                                        const std::string& factionId);
 
     /// THE single settlement (§7.3/§7.5): flip this staging's `engaged` rows
     /// to `settled` and append the payout — `settlement_return` rows to the

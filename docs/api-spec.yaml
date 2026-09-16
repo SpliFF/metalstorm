@@ -487,7 +487,7 @@ paths:
                 poi: { type: string }
       responses:
         "200": { description: "{ok, claim}" }
-        "400": { description: "insufficient_authority (with have/need) — 400, not 403, in the shipped route" }
+        "403": { description: "insufficient_authority (with have/need)" }
         "403": { description: not_in_a_faction }
         "404": { description: no_poi / no_faction }
         "409": { description: already_owner / already_claimed }

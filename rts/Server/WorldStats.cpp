@@ -167,8 +167,14 @@ bool SettlementNamesFaction(const std::string& factions, const std::string& fact
 std::vector<WorldAuthorityAttribution> AttributeSettlement(
     const WorldSettlementRecord& settlement,
     const std::vector<WorldCommanderRecord>& commandersAtPoi,
+    const std::vector<WorldFactionSideKey>& factionSides,
     const WorldStatRules& rules) {
     std::vector<WorldAuthorityAttribution> out;
+    const auto sideOf = [&](const std::string& factionId) -> std::string {
+        for (const auto& fs : factionSides)
+            if (fs.factionId == factionId) return fs.sideKey;
+        return {};
+    };
     for (const auto& c : commandersAtPoi) {
         if (c.state != "active") continue;
         if (c.poiId != settlement.poiId) continue;
@@ -176,15 +182,12 @@ std::vector<WorldAuthorityAttribution> AttributeSettlement(
         // commander granted in the same millisecond a war settled (the
         // in-memory-test case, and a plausible real one) is included.
         if (settlement.recordedAt < c.createdAt) continue;
-        // REVIEW 2026-09-10 (docs/reviews/2026-09-10/world-design.md F1):
         // `settlement.factions` is `war_outcome.winnerFactions` = SIDE keys
-        // ("compact"/"union"), while `c.factionId` is a WORLD faction slug
-        // ("house-verendi"). They never match in production, so every
-        // commander is awarded the DEFEAT rate. The test fixture passes
-        // faction ids as winners, which is why the suite is green. Fix:
-        // resolve each commander's faction -> side_key before comparing
-        // (patch in the report); leave this line until that lands.
-        const bool won = SettlementNamesFaction(settlement.factions, c.factionId);
+        // ("compact"/"union"); a commander's `factionId` is a WORLD faction
+        // slug. Resolve the slug to its side before asking who won (F1).
+        const std::string side = sideOf(c.factionId);
+        const bool won = !side.empty() &&
+                         SettlementNamesFaction(settlement.factions, side);
         const double delta = won ? rules.authorityPerVictory : rules.authorityPerDefeat;
         if (delta == 0.0) continue;
         out.push_back({c.commanderId, delta, won ? "victory" : "defeat"});
@@ -557,13 +560,17 @@ int WorldStats::AccrueFromSettlements(sqlite3* db, const std::string& worldId,
     if (settlements.empty()) return 0;
     const auto commanders = CommandersFor(db, worldId);
     if (commanders.empty()) return 0;
+    // The slug→side map the pure rule compares winners against (F1).
+    std::vector<WorldFactionSideKey> sides;
+    for (const auto& f : WorldFactions::ListFor(db, worldId))
+        sides.push_back({f.factionId, f.sideKey});
     int applied = 0;
     for (const auto& s : settlements) {
         // The pure rule decides; this loop only supplies rows and persists
         // verdicts. `commanders` is passed whole rather than re-queried per
         // POI because a world's commander roster is small and one read beats
         // one query per settlement row.
-        for (const auto& award : AttributeSettlement(s, commanders, rules)) {
+        for (const auto& award : AttributeSettlement(s, commanders, sides, rules)) {
             WorldAuthorityEventRecord e;
             e.worldId     = worldId;
             e.commanderId = award.commanderId;

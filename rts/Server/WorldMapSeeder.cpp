@@ -19,11 +19,18 @@ double ToRadians(double deg) { return deg * kPi / 180.0; }
 WorldDefaults MergeDefaults(const nlohmann::json& config) {
     WorldDefaults d;
     if (!config.is_object()) return d;
-    d.poiBudgetInitial       = config.value("poiBudgetInitial", d.poiBudgetInitial);
-    d.poiBudgetMax           = config.value("poiBudgetMax", d.poiBudgetMax);
-    d.poiPerWorldAgeDay      = config.value("poiPerWorldAgeDay", d.poiPerWorldAgeDay);
-    d.poiPerRegisteredPlayer = config.value("poiPerRegisteredPlayer", d.poiPerRegisteredPlayer);
-    d.transitWorldMsPerKm    = config.value("transitWorldMsPerKm", d.transitWorldMsPerKm);
+    // `json::value` THROWS on a present-but-wrong-typed key (a string where a
+    // number belongs), and this runs at lobby boot — a hand-edited config must
+    // degrade to the default, never take the process down (world-design F16).
+    const auto num = [&](const char* k, double fb) {
+        const auto it = config.find(k);
+        return (it != config.end() && it->is_number()) ? it->get<double>() : fb;
+    };
+    d.poiBudgetInitial       = static_cast<int>(num("poiBudgetInitial", d.poiBudgetInitial));
+    d.poiBudgetMax           = static_cast<int>(num("poiBudgetMax", d.poiBudgetMax));
+    d.poiPerWorldAgeDay      = num("poiPerWorldAgeDay", d.poiPerWorldAgeDay);
+    d.poiPerRegisteredPlayer = num("poiPerRegisteredPlayer", d.poiPerRegisteredPlayer);
+    d.transitWorldMsPerKm    = num("transitWorldMsPerKm", d.transitWorldMsPerKm);
     return d;
 }
 
