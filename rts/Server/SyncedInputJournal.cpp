@@ -143,6 +143,11 @@ std::vector<uint8_t> EncodeAuthIdentity(const AuthIdentity& id) {
     b.push_back(id.spectator ? 1 : 0);
     PutStr(b, id.username);
     PutStr(b, id.role);
+    const int32_t tier = id.tier;
+    p = reinterpret_cast<const uint8_t*>(&tier);
+    b.insert(b.end(), p, p + sizeof(tier));
+    PutStr(b, id.mentor);
+    PutStr(b, id.callsign);
     return b;
 }
 
@@ -158,6 +163,14 @@ bool DecodeAuthIdentity(const std::vector<uint8_t>& payload, AuthIdentity& out) 
     out.team      = nums[0];
     out.playerNum = nums[1];
     out.spectator = spec != 0;
+    // The journey fields are as required as the rest. A recording is
+    // same-binary bound (ReplayFile.h kFormatVersion), so there is no older
+    // payload to be lenient towards — and a half-decoded identity would hand
+    // the replay a plausible player at the wrong tier, which is exactly the
+    // failure this decoder refuses everywhere else.
+    if (!TakeBytes(payload, off, &out.tier, sizeof(out.tier))) return false;
+    if (!TakeStr(payload, off, out.mentor)) return false;
+    if (!TakeStr(payload, off, out.callsign)) return false;
     return true;
 }
 
