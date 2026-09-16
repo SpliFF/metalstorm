@@ -39,6 +39,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // DynamicTexture allocates an OffscreenCanvas in a worker; the dev-hook
 // `window.__*` injections in scene-lighting/client-settings were switched to
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
+import { TerrainKnowledgeGate, type TerrainKnowledgeMask } from './terrain-knowledge.js';
 import {
     buildTerrainMesh, loadTerrainTextures, attachTerrainDetailFromDecals,
     setTerrainDetailPluginEnabled,
@@ -289,6 +290,13 @@ let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
 /// to a replay server (PLAN-replay task 4b: a live game never sends one).
 /// Gates forwarding 403s to the playback bar.
 let gpSawReplayState = false;
+/// This client's role from AuthResponse ('player' | 'spectator' | ...).
+/// Set in onAuthenticated; PLAN-beta-broadcast.md lane C reads it alongside
+/// gpIsBroadcast to gate outgoing commands.
+let gpRole = '';
+/// True once the most recent ReplayState said `broadcast: true` — a Mission
+/// Broadcast (delayed relay), not a live game or a finished recording.
+let gpIsBroadcast = false;
 let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
@@ -485,6 +493,15 @@ let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// PLAN-maps M4: the terrain is a chunk grid sharing one material, not a
 /// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
 let gpTerrain: TerrainMeshGroup | null = null;
+/// terrain-knowledge-is-LOS (K0): projects the server's per-ally ever-seen
+/// chunk mask onto `gpTerrain` — unknown chunks not drawn, fog curtain at the
+/// frontier. Created with the terrain but INERT until a 0x0A mask arrives, so
+/// a stock game (no `terrainknowledge` modoption → no 0x0A ever emitted) takes
+/// the identical path it does today. See DESIGN-TERRAIN-KNOWLEDGE.md.
+let gpTerrainKnowledge: TerrainKnowledgeGate | null = null;
+/// A mask that lands before `gpLoadMap` builds the terrain — same shape as the
+/// LOS bitmap store below, and for the same reason.
+let gpPendingTerrainKnowledge: TerrainKnowledgeMask | null = null;
 /// PLAN-maps.md §1.2.1 streaming v2 vertical slice. Opt-in via the
 /// `__terrainPages` debug handle only — `enable()` streams the map's real
 /// ground pages when it ships them (format v19), `enable({synthetic:true})`
@@ -946,6 +963,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     terrain.setReceiveShadows(true);
     gpTerrain = terrain;
     gpDeformTerrain = new DeformableTerrain(terrain);
+    // terrain-knowledge-is-LOS (K0). Inert until a 0x0A mask arrives; a mask
+    // that beat the terrain here is applied now.
+    gpTerrainKnowledge = new TerrainKnowledgeGate(scene, terrain);
+    if (gpPendingTerrainKnowledge) {
+        gpTerrainKnowledge.apply(gpPendingTerrainKnowledge);
+        gpPendingTerrainKnowledge = null;
+    }
     postLog(1, '[gp] terrain mesh built from MapData heightmap');
 
     // GW4-c4: hand the heightmap to the entity renderer so units clamp to the
@@ -1338,6 +1362,7 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
+            gpRole = role;
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
             // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
             // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
@@ -1411,6 +1436,7 @@ function gpConnect(msg: GpInitToWorker): void {
         // never receives one simply never shows a bar.
         onReplayState: (state) => {
             gpSawReplayState = true;
+            gpIsBroadcast = state.broadcast;
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
@@ -1500,6 +1526,9 @@ function gpConnect(msg: GpInitToWorker): void {
                 // PRESENTATION frame, so the notice lands with the explosion
                 // rather than ~D frames before the body arrives.
                 gpBattleEvents.noteDeath(entityId, x, z, frame);
+                // PLAN-decal-tracks §8 E2: close the track trail so a recycled
+                // id doesn't bridge a ribbon from the dead unit's last position.
+                gpDecalOverlay?.onEntityDestroy(entityId);
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 // PLAN-metalstorm-squads.md §6 (H2): cascade the squad's members
                 // + clear buffered state so a recycled id can't resurrect it.
@@ -2101,6 +2130,21 @@ function gpConnect(msg: GpInitToWorker): void {
             }
             dispatchRecvLuaUIMsg(data, playerId);
         },
+        // terrain-knowledge-is-LOS (envelope 0x0A) → the chunk visibility gate.
+        // The message is the WHOLE mask every time, so this needs no ordering,
+        // no ACK and no join-time special case: applying it twice is applying
+        // it once, and an out-of-order older mask cannot un-reveal a chunk.
+        // Costs nothing unless the bits actually changed.
+        onTerrainKnowledge: (mask) => {
+            if (gpTerrainKnowledge === null) {
+                gpPendingTerrainKnowledge = mask;
+                return;
+            }
+            if (gpTerrainKnowledge.apply(mask)) {
+                const st = gpTerrainKnowledge.stats();
+                postLog(1, `[gp] terrain knowledge: ${st.knownChunks}/${st.totalChunks} chunks known`);
+            }
+        },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
         // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.
@@ -2157,6 +2201,24 @@ function gpConnect(msg: GpInitToWorker): void {
         schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
+    // PLAN-beta-broadcast.md lane C: belt-and-braces client-side gate — the
+    // relay drops PlayerCommand from a broadcast spectator anyway, but there
+    // is no reason to send a doomed order and wait out the refusal. Wrapping
+    // here (rather than touching every call site — command-buffer.ts,
+    // worker-command-modes.ts, worker-build-placement.ts, and the three in
+    // this file) catches all of them, since they all hold this same `conn`.
+    {
+        const rawSendPlayerCommand = conn.sendPlayerCommand.bind(conn);
+        const rawSendPlayerCommandBatch = conn.sendPlayerCommandBatch.bind(conn);
+        conn.sendPlayerCommand = (...args: Parameters<Connection['sendPlayerCommand']>) => {
+            if (gpRole === 'spectator' && gpIsBroadcast) return;
+            rawSendPlayerCommand(...args);
+        };
+        conn.sendPlayerCommandBatch = (...args: Parameters<Connection['sendPlayerCommandBatch']>) => {
+            if (gpRole === 'spectator' && gpIsBroadcast) return;
+            rawSendPlayerCommandBatch(...args);
+        };
+    }
     // PLAN-latency L4.1: register every command that goes on the wire, in the
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).
@@ -2809,6 +2871,65 @@ export function gpInit(msg: GpInitToWorker): void {
          *  shipped default (one thin-instance pool per shape + material). */
         combatFxPooled: (on: boolean): boolean =>
             gpCombatFX?.setPooled(on) ?? false,
+    };
+    // terrain-knowledge-is-LOS (K0) debug handle. The REAL gate is driven by
+    // the server's 0x0A mask under the `terrainknowledge` modoption; this is
+    // the local override for capture work and A/B, so a frontier screenshot
+    // does not need a specially-launched room. From the main DevTools console:
+    //   window.__gp('__terrainKnowledge.stats()')
+    //   window.__gp('__terrainKnowledge.only([[0,0],[1,0]])')  // known chunks
+    //   window.__gp('__terrainKnowledge.reveal(2,0)')          // add one
+    //   window.__gp('__terrainKnowledge.all()')                // reveal all
+    (globalThis as Record<string, unknown>).__terrainKnowledge = {
+        stats: (): unknown => gpTerrainKnowledge?.stats() ?? 'no terrain',
+        /** Force the mask to exactly this chunk list (everything else
+         *  unknown). Synthesises a 0x0A message rather than reaching into the
+         *  gate, so it exercises the same code path the wire does — except for
+         *  the OR, which cannot un-reveal: `only` resets the gate first. */
+        only: (chunks: [number, number][]): unknown => {
+            if (!gpScene || !gpTerrain) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            const known = new Uint8Array(plan.chunksX * plan.chunksZ);
+            for (const [cx, cz] of chunks) {
+                if (cx < 0 || cx >= plan.chunksX || cz < 0 || cz >= plan.chunksZ)
+                    continue;
+                known[cz * plan.chunksX + cx] = 1;
+            }
+            gpTerrainKnowledge?.dispose();
+            gpTerrainKnowledge = new TerrainKnowledgeGate(gpScene, gpTerrain);
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0, known,
+            });
+            return gpTerrainKnowledge.stats();
+        },
+        /** Add one chunk to the held mask (the live-reveal path). */
+        reveal: (cx: number, cz: number): unknown => {
+            if (!gpTerrain || !gpTerrainKnowledge) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            const known = new Uint8Array(plan.chunksX * plan.chunksZ);
+            for (let z = 0; z < plan.chunksZ; z++)
+                for (let x = 0; x < plan.chunksX; x++)
+                    known[z * plan.chunksX + x] =
+                        gpTerrainKnowledge.isChunkKnown(x, z) ? 1 : 0;
+            if (cx >= 0 && cx < plan.chunksX && cz >= 0 && cz < plan.chunksZ)
+                known[cz * plan.chunksX + cx] = 1;
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0, known,
+            });
+            return gpTerrainKnowledge.stats();
+        },
+        all: (): unknown => {
+            if (!gpTerrain || !gpTerrainKnowledge) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0,
+                known: new Uint8Array(plan.chunksX * plan.chunksZ).fill(1),
+            });
+            return gpTerrainKnowledge.stats();
+        },
     };
     // PLAN-maps.md §1.2.1: streaming v2. `enable()` prefers the REAL page
     // source when the map ships one (`<mapDataUrl>/ground_pages.json`,

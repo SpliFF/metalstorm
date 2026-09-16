@@ -25,6 +25,7 @@ import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
 import { uiActionRegistry } from './ui-action-registry.js';
 import { globalSurface, parseMenuMount } from './global-surface.js';
 import { focusModel, type NLFocusView } from './focus-model.js';
+import { getAccessToken, browserTokenStore, type TokenStore } from '../../lobby/auth-tokens.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -141,6 +142,11 @@ export interface WidgetContext {
      * the shape and ships the helpers that read it.
      */
     focus?: WidgetFocusPort;
+    /** Authenticated door to the lobby's `/api/*` for a game-dir widget.
+     *  Always present on a context the loader builds (`loadWidget` below);
+     *  optional here only so the hand-built contexts in other widgets' tests
+     *  don't all need one to keep typechecking. */
+    api?: WidgetApiPort;
 }
 
 /** The focus slice a game-dir widget may read. Ids never cross this seam. */
@@ -162,6 +168,45 @@ function createFocusPort(): WidgetFocusPort {
         openSurface: (id) => focusModel.openSurface(id),
         closeSurface: (id) => focusModel.closeSurface(id),
         isSurfaceOpen: (id) => focusModel.isSurfaceOpen(id),
+    };
+}
+
+/**
+ * The lobby-API door for a game-dir widget (journey-lobby-routes fire 2 —
+ * `mentor-card.js`'s `fetch('/api/mentor/ai', {credentials:'include'})`
+ * always 401s: the lobby has no cookie auth, only `Authorization: Bearer`,
+ * and a game-dir module is a standalone ES module with no import of the
+ * client's token code to get one).
+ */
+export interface WidgetApiPort {
+    /** Fetch against the lobby, with the bearer token attached when one is
+     *  held. `path` is resolved against `lobbyBase` unless it is already
+     *  absolute; any `init.headers` a widget passes are kept, not replaced. */
+    fetch(path: string, init?: RequestInit): Promise<Response>;
+    /** The lobby's HTTP base, for a widget that needs to build its own URL. */
+    lobbyBase: string;
+}
+
+/**
+ * Build a `WidgetApiPort`. `store`/`fetchImpl` are injectable so this is
+ * testable without a browser; every real widget gets the browser defaults.
+ */
+export function createWidgetApiPort(
+    lobbyBase: string,
+    store: TokenStore = browserTokenStore,
+    fetchImpl: typeof fetch = fetch,
+): WidgetApiPort {
+    return {
+        lobbyBase,
+        fetch(path, init = {}) {
+            const url = /^https?:\/\//i.test(path)
+                ? path
+                : `${lobbyBase}${path.startsWith('/') ? '' : '/'}${path}`;
+            const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+            const token = getAccessToken(store);
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            return fetchImpl(url, { ...init, headers });
+        },
     };
 }
 
@@ -250,6 +295,9 @@ export class WidgetLoader {
     private uiRoot: HTMLElement | null = null;
     private sendCommandProvider: ((cmd: any) => void) | null = null;
     private gameId = '';
+    /** The lobby's HTTP base for this session, handed to every widget as
+     *  `ctx.api.lobbyBase` / used to resolve `ctx.api.fetch`'s relative paths. */
+    private httpBase = '';
     /** Local DB account id, surfaced as `ctx.identity.accountId`. Distinct
      *  from the sim playerNum threaded through as `playerId`. */
     private accountId = 0;
@@ -335,6 +383,7 @@ export class WidgetLoader {
         accountId: number = 0,
     ): Promise<void> {
         this.gameId = gameId;
+        this.httpBase = httpBase;
         this.isSpectator = role === 'spectator';
         // Held on the instance rather than threaded through armReveal /
         // loadWidget: it is session-constant and only the ctx builder reads it.
@@ -796,6 +845,7 @@ export class WidgetLoader {
             strategicMap: this.createStrategicMapStub(),
             setBadge: panel ? panel.setBadge : () => {},
             focus: createFocusPort(),
+            api: createWidgetApiPort(this.httpBase),
         };
 
         // Initialize widget

@@ -694,6 +694,22 @@ table ReplayState {
     /// This client's own POV: -1 = global view, else the team whose fog
     /// it is watching. Per-client, unlike everything above it.
     pov_team: int;
+
+    // ── Broadcast relay (PLAN-beta-broadcast.md lane S2) ────────────────
+    // A relay reuses ReplayState rather than inventing a second bar: the
+    // client already shows playback UI iff it has received one. These three
+    // say "this is a delayed broadcast, not a finished recording".
+    /// True when the feed is a `.msb` broadcast relayed behind a delay.
+    broadcast: bool = false;
+    /// How far behind the live mission this watcher is, in seconds. The
+    /// server's enforced delay is the floor of this, never the client's
+    /// choice — the bar shows it, it does not set it.
+    behind_seconds: int = 0;
+    /// Last frame the delay lets anyone see. Beyond it the cursor idles;
+    /// a seek past it is clamped. `end_frame` is what the log HOLDS,
+    /// `live_edge_frame` is what the watcher is ALLOWED, and on a live
+    /// mission those differ by the whole delay window.
+    live_edge_frame: int = 0;
 }
 
 // Union of all client→server message types

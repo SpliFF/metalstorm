@@ -253,6 +253,8 @@ button.world-chip[aria-pressed="true"] { border-color: var(--nui-accent); backgr
 /* ---- ledger tabs ---- */
 .world-tabs { display: flex; gap: 2px; margin: -4px -14px 10px; padding: 0 10px; border-bottom: 1px solid var(--nui-plate-color); }
 .world-tab {
+    appearance: none;
+    -webkit-appearance: none;
     padding: 6px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
@@ -263,6 +265,7 @@ button.world-chip[aria-pressed="true"] { border-color: var(--nui-accent); backgr
     cursor: pointer;
 }
 .world-tab:hover { color: var(--nui-accent); }
+.world-tab:focus-visible { outline: 1px solid var(--nui-accent); outline-offset: 1px; }
 .world-tab[aria-selected="true"] { color: var(--nui-accent); border-bottom-color: var(--nui-accent); }
 
 /* ---- alerts ---- */

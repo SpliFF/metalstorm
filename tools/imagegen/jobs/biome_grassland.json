@@ -1,11 +1,21 @@
 {
   "id": "biome_grassland",
   "class": "biome",
-  "prompt": "Dead scavenger-plains grassland, sparse sun-bleached tufts over cracked olive-drab dirt, sparse gravel, no lush green.",
-  "seed": 100401,
+  "prompt": "Dead scavenger-plains grassland: dense mat of dry straw-coloured dead grass blades and trampled hay-like tufts over olive-drab dirt, flat ground cover, no bare soil, no living green.",
+  "seed": 100411,
   "width": 1024,
   "height": 1024,
-  "colors": ["#3d3a2e", "#6b5a3e", "#8a7f6a"],
+  "colors": [
+    "#3d3a2e",
+    "#6b5a3e",
+    "#8a7f6a"
+  ],
   "output": "art/gen/biomes/grassland_diffuse.png",
-  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
 }

@@ -15,6 +15,16 @@ Idempotent: each job's manifest entry is keyed to a hash of the job spec +
 backend; a rerun with nothing changed regenerates nothing. `--force` bypasses
 that. `--all` also runs a completeness check at the end (every job has a
 manifest entry and every file it names exists on disk).
+
+Raw cache: the bytes a raster backend returns are cached under
+tools/imagegen/.cache/raw/<backend>/ keyed to (prompt, negative, seed, size),
+so `--force` re-runs every post step for free (that's what you iterate on)
+without re-sampling; `--no-raw-cache` re-samples too.
+
+Per-job pin: a job file may carry `"backend": "none"` + `"backend_reason"`
+to stay on the procedural placeholder whatever `--backend` says — used when
+the real backend's output is worse than the placeholder (the reason lands in
+the manifest entry so the call is on record).
 """
 from __future__ import annotations
 import argparse
@@ -40,12 +50,13 @@ GAME_ROOT = REPO_ROOT / 'data' / 'games' / 'metalstorm'
 JOBS_DIR = HERE / 'jobs'
 STYLE_PATH = HERE / 'style.json'
 MANIFEST_PATH = GAME_ROOT / 'art' / 'gen' / 'manifest.json'
+RAW_CACHE_DIR = HERE / '.cache' / 'raw'  # gitignored (.gitignore: .cache/)
 
 sys.path.insert(0, str(HERE))
 from backends import none as backend_none  # noqa: E402
 from backends import comfy_local as backend_comfy  # noqa: E402
 from backends import hosted as backend_hosted  # noqa: E402
-from post import seamless, resize, pbr, ktx2 as ktx2mod, svg_trace  # noqa: E402
+from post import seamless, resize, pbr, ktx2 as ktx2mod, svg_trace, alpha as alphamod, grade  # noqa: E402
 
 BACKENDS = {'none': backend_none, 'comfy_local': backend_comfy, 'hosted': backend_hosted}
 
@@ -65,7 +76,10 @@ def load_style() -> dict:
 
 def build_prompt(style: dict, job: dict) -> tuple[str, str]:
     cls = style['classes'][job['class']]
-    prompt = f"{cls['prefix']}. {job['prompt']}"
+    parts = [cls['prefix'], job['prompt']]
+    if cls.get('suffix'):  # CLIP weights early tokens: a class whose shared material terms
+        parts.append(cls['suffix'])  # come *after* the job's subject keeps the subject readable
+    prompt = '. '.join(part.strip().rstrip('.') for part in parts)
     negative = ', '.join(p for p in (style['global_negative'], cls.get('negative', ''),
                                       job.get('negative', '')) if p)
     return prompt, negative
@@ -89,10 +103,43 @@ def rel(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
 
+def effective_backend(job: dict, backend_name: str) -> str:
+    """A job pinned to a backend (`"backend": "none"`) wins over --backend."""
+    pinned = job.get('backend')
+    if pinned is None:
+        return backend_name
+    if pinned not in BACKENDS:
+        raise ValueError(f'{job["id"]}: unknown pinned backend {pinned!r}')
+    return pinned
+
+
+def raw_cache_path(backend_name: str, prompt: str, negative: str, seed: int,
+                   size: tuple[int, int]) -> Path:
+    key = json.dumps([prompt, negative, seed, list(size)], sort_keys=True)
+    return RAW_CACHE_DIR / backend_name / (hashlib.sha256(key.encode('utf-8')).hexdigest()[:24] + '.png')
+
+
+def generate_raw(backend_name: str, job: dict, prompt: str, negative: str,
+                 size: tuple[int, int], use_raw_cache: bool) -> bytes:
+    backend = BACKENDS[backend_name]
+    if backend_name == 'none':  # procedural and instant — never worth caching
+        return backend.generate(prompt, job['seed'], size, negative,
+                                asset_class=job['class'], params=job)
+    cache = raw_cache_path(backend_name, prompt, negative, job['seed'], size)
+    if use_raw_cache and cache.is_file():
+        return cache.read_bytes()
+    png_bytes = backend.generate(prompt, job['seed'], size, negative,
+                                 asset_class=job['class'], params=job)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(png_bytes)
+    return png_bytes
+
+
 def process_job(job: dict, backend_name: str, style: dict, force: bool,
-                 existing_manifest: dict) -> tuple[dict, bool]:
+                 existing_manifest: dict, use_raw_cache: bool = True) -> tuple[dict, bool]:
     output_rel_game = job['output']
     output_path = GAME_ROOT / output_rel_game
+    backend_name = effective_backend(job, backend_name)
     h = job_hash(job, backend_name)
 
     prior = existing_manifest.get(job['id'])
@@ -100,11 +147,9 @@ def process_job(job: dict, backend_name: str, style: dict, force: bool,
             all((REPO_ROOT / p).exists() for p in prior.get('outputs', [])):
         return prior, False
 
-    backend = BACKENDS[backend_name]
     prompt, negative = build_prompt(style, job)
     size = (job['width'], job['height'])
-    png_bytes = backend.generate(prompt, job['seed'], size, negative,
-                                  asset_class=job['class'], params=job)
+    png_bytes = generate_raw(backend_name, job, prompt, negative, size, use_raw_cache)
     img = Image.open(io.BytesIO(png_bytes))
     img.load()
 
@@ -112,7 +157,8 @@ def process_job(job: dict, backend_name: str, style: dict, force: bool,
     extra_rel: dict[str, Image.Image] = {}
     for step in post_steps:
         if step == 'seamless':
-            img = seamless.make_seamless(img)
+            if backend_name != 'none':  # the placeholder generators are periodic already
+                img = seamless.make_seamless(img)
         elif step == 'pow2':
             img = resize.to_pow2(img)
         elif step == 'pbr_derive':
@@ -123,18 +169,26 @@ def process_job(job: dict, backend_name: str, style: dict, force: bool,
             extra_rel[output_rel_game.replace('_diffuse.', '_roughness.')] = pbr.roughness_from_luminance(img)
         elif step == 'pbr_normal_only':
             img = pbr.normal_from_height(pbr.height_from_luminance(img))
+        elif step == 'overlay_alpha':
+            img = alphamod.overlay_alpha(img, backend_none.hex_to_rgb(job.get('tint', '#808080')))
+        elif step == 'bg_key':
+            img = alphamod.key_out_background(img, circle=job.get('key_circle', 0.5),
+                                              bright_unsat_is_bg=bool(job.get('key_bright_unsat', False)))
+        elif step == 'palette_grade':
+            if backend_name != 'none':  # the placeholder is painted from the palette already
+                img = grade.grade_to_palette(img, job.get('colors', []))
         elif step in ('svg_trace', 'ktx2'):
             pass  # handled below, after the PNG is saved
         else:
             raise ValueError(f'{job["id"]}: unknown post step {step!r}')
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(output_path)
+    img.save(output_path, optimize=True)
     outputs = [rel(output_path)]
     for extra_game_rel, extra_img in extra_rel.items():
         p = GAME_ROOT / extra_game_rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        extra_img.save(p)
+        extra_img.save(p, optimize=True)
         outputs.append(rel(p))
 
     derived: dict = {}
@@ -171,6 +225,9 @@ def process_job(job: dict, backend_name: str, style: dict, force: bool,
         'job_hash': h,
         **derived,
     }
+    if 'backend' in job:
+        entry['backend_pinned'] = True
+        entry['backend_reason'] = job.get('backend_reason', '(no reason given in the job file)')
     return entry, True
 
 
@@ -180,14 +237,18 @@ def main() -> int:
     ap.add_argument('--all', action='store_true', help='run every job in jobs/*.json')
     ap.add_argument('--job', action='append', default=[], help='run one job by id (repeatable)')
     ap.add_argument('--list', action='store_true', help='list job ids and exit')
-    ap.add_argument('--force', action='store_true', help='ignore the idempotency cache')
+    ap.add_argument('--force', action='store_true',
+                    help='ignore the idempotency cache (re-runs post steps; raw samples still come from .cache/raw)')
+    ap.add_argument('--no-raw-cache', action='store_true',
+                    help='also ignore tools/imagegen/.cache/raw — re-sample every raster job')
     args = ap.parse_args()
 
     jobs = load_jobs()
 
     if args.list:
         for job in jobs:
-            print(f"{job['id']:<24} class={job['class']:<16} -> {job['output']}")
+            pin = f"  [pinned backend={job['backend']}]" if 'backend' in job else ''
+            print(f"{job['id']:<24} class={job['class']:<16} -> {job['output']}{pin}")
         return 0
 
     if not args.all and not args.job:
@@ -214,7 +275,8 @@ def main() -> int:
     generated = skipped = failed = 0
     for job in selected:
         try:
-            entry, changed = process_job(job, backend_name, style, args.force, existing_manifest)
+            entry, changed = process_job(job, backend_name, style, args.force, existing_manifest,
+                                         use_raw_cache=not args.no_raw_cache)
         except Exception as exc:  # noqa: BLE001 — report and keep going
             print(f'FAIL {job["id"]}: {exc}', file=sys.stderr)
             failed += 1

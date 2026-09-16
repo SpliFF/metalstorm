@@ -230,6 +230,19 @@ describe('parsing GET /api/world/pois', () => {
         expect(g.pois).toEqual([]);
         expect(g.edges).toEqual([]);
     });
+
+    it('collapses a bidirectional edge seeded as one row per direction', () => {
+        const g = parseWorldGraph({
+            pois: [{ id: 'a', lat: 0, lon: 0 }, { id: 'b', lat: 1, lon: 1 }],
+            edges: [
+                { from: 'a', to: 'b', kind: 'transit', bidirectional: true, transitWorldMs: 100 },
+                { from: 'b', to: 'a', kind: 'transit', bidirectional: true, transitWorldMs: 100 },
+            ],
+        })!;
+        expect(g.edges).toHaveLength(1);
+        expect(edgesFor(g.edges, 'a')).toHaveLength(1);
+        expect(edgesFor(g.edges, 'b')).toHaveLength(1);
+    });
 });
 
 describe('hit test', () => {

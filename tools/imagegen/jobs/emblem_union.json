@@ -7,5 +7,11 @@
   "height": 512,
   "tint": "#c9a227",
   "output": "art/gen/emblems/union.png",
-  "post": ["pow2", "svg_trace"]
+  "post": [
+    "bg_key",
+    "pow2",
+    "svg_trace"
+  ],
+  "key_bright_unsat": true,
+  "key_circle": 0.48
 }

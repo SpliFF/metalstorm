@@ -7,5 +7,5 @@
   "height": 1024,
   "tint": "#6b5a3e",
   "output": "art/gen/overlays/dust_coat.png",
-  "post": ["seamless", "pow2"]
+  "post": ["overlay_alpha", "seamless", "pow2"]
 }
