@@ -809,7 +809,7 @@ Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl
 
 #### Map reverb
 
-`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
+`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. the game-processor worker posts `gp:soundPreset` after MapData lands and `main.ts` answers it with `AudioManager.setReverbPreset(resolveReverbPreset(preset), soundContentBaseUrl)` (`""` → `open`); the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
 
 #### Map reachability intent
 
