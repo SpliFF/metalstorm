@@ -54,7 +54,11 @@ iRot      = (rotBase, rotSpeed, orient, animFps)   orient 0=BB 1=GROUND 2=STRETC
 iAnim     = (animFrameStart, animFrameCount, _, _)
 iColStart = colourStart RGBA      iColEnd = colourEnd RGBA
 ```
-Uniforms: `uViewProj`, `uNow`, `uCamPos`, `uAtlasCols`, `uAtlasRows`;
+Uniforms: `uViewProj`, `uNow`, `uCamPos`, `uAtlasCols`, `uAtlasRows`, `uWind`
+(global drift vec3, elmos/s — `NativeFxRenderer.setWind`, step 7: added to
+every particle's centre over its age, `center += uWind * age`; the game pass
+sets a constant gentle breeze at construction, DIRECTION.md "smoke that
+lingers and drifts with a global wind vector");
 frag: `uParticleTex`, `uAtlasDimsInv`, `uDepthTex`, `uCamNearFar`, `uScreenSize`, `uSoftRange`.
 
 **muzzleFlash** (locs 2–4): `iPosLife=(pos.xyz,lifetime)`, `iBirth=(birthTime,size,spin,seed)`, `iColor=RGB+peakA`.
@@ -111,8 +115,43 @@ depth copy; a `DepthRenderer` copy is a High-preset item later. The native
 `shockwave*` + `shockwave-composite` pair stays **stage-only**: the game
 composites shockwaves through `distortion-renderer.ts`, and the offset pass
 needs render targets the in-scene pass deliberately does not allocate.
-Projectile-attached `trail` ribbons and `unit-fx.json` (`unit-fx-dispatch.ts`)
-are later L-FX steps; the trail pool exists and draws, nothing streams it yet.
+Projectile-attached `trail` ribbons are still a later step; the trail pool
+exists and draws, nothing streams it yet. No X4 binding interpreter — see
+step 6 below for what unit-fx-dispatch.ts does instead.
+
+## Quality gating + unit FX (steps 5–6)
+
+- **`gfx.nativeFx`** (bool, Low preset off) is the kill switch:
+  `game-processor.ts` skips building the pass at all when false, restart-only
+  (same semantics as `gfx.particleQuality`).
+- **`gfx.particleQuality`** (0/1/2, shared with the CEG particle system) now
+  also drives the native pool: `NativeFxGamePass`/`NativeFxRenderer` size the
+  particle pool to 8k/24k/50k rows at construction (`NativeFxPoolCapacities`,
+  restart-only — a WebGL buffer can't resize live) and scale every emitter's
+  spawn count 0.5/0.75/1.0 (`SpawnContext.countScale`, live via
+  `NativeFxGamePass.setQuality`, `native-fx/fx-game-loader.ts
+  NATIVE_FX_QUALITY_TIERS`).
+- **`client/src/core/unit-fx-dispatch.ts`** resolves `effects/unit-fx.json`
+  by the `ms_<class>_s<n>` def-name convention (exact `units[]` entry layered
+  over `scaleOverrides[class][scale]` layered over `byClass[class]`).
+  Dispatched from `game-processor.ts`: `death` fires on EntityDestroy at the
+  last known position (+ the new `sound` field, a gamedata/sounds.lua
+  SoundItem key played through the same synthesised-named-sound path
+  `onUiSound` uses — a key sounds.lua doesn't define yet just resolves to
+  nothing); `damageSmoke`/`damageSmokeHeavy` re-trigger as a loop, band
+  re-evaluated on a 1.5s cadence (the hysteresis); `moveDust` fires for
+  moving tanks/artillery, rate ∝ speed, capped at 40 concurrent emitters by
+  camera distance through the shared `EntityFxFence` (LOD skip/half-rate +
+  frame budget).
+- **Cross-lane hooks, duck-typed.** Hit-flinch
+  (`MotionLeanRegistry.impulse`) and the move-dust rate source
+  (`WheelSpinDriver.spinning`) are pres-anim additions. This lane's clone of
+  `main` predates that lane's land, so `game-processor.ts` reads them through
+  a runtime `typeof x.method === 'function'` check
+  (`gpMotionLeanImpulseSink`/`gpWheelSpinRate`) rather than a static import —
+  both activate automatically once pres-anim lands, no further change here.
+  Until then, hit-flinch is a no-op and move-dust never fires (speed always
+  reads 0).
 
 Tuning still happens in the `fx-viewer` scenario — it is the authoring loop,
 and it drives this exact renderer against the same authored files.

@@ -809,7 +809,7 @@ Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl
 
 #### Map reverb
 
-`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
+`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. the game-processor worker posts `gp:soundPreset` after MapData lands and `main.ts` answers it with `AudioManager.setReverbPreset(resolveReverbPreset(preset), soundContentBaseUrl)` (`""` → `open`); the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
 
 #### Map reachability intent
 
@@ -982,6 +982,7 @@ precedence on who may issue an order), `game_ai_caretaker`, `game_ai_guidance`,
 `squad`, `tick`, …)
 plus the `objectives/`, `regions/`, `parley/`, `authority/` and `civilians/`
 subtrees each gadget family delegates to (with their own `tests/`).
+`objectives/parley.lua` is the agreement objective type: a Mission whose victory is an accepted pact (`scenarios/recon_01.lua`).
 
 | Path | Purpose |
 |------|---------|
@@ -1016,6 +1017,16 @@ environment at `tools/forge` — see
 **world-scale contract is 8 elmos = 1 m**, applied at import (the whole model
 corpus was rescaled ×8, 2026-08-27); `tools/scripts/check_model_scale.py`
 gates authored-metre sizes against it.
+
+### Image generation (`tools/imagegen`)
+
+2D art (emblems, biome tileables, grime overlays, the FX atlas, water normal
+tiles) goes through `tools/imagegen/run.py`: one `generate(prompt, seed,
+size, negative)` adapter interface behind `backends/{none,comfy_local,
+hosted}.py` (procedural placeholder / local ComfyUI / a hosted API — see
+`tools/imagegen/README.md`), post-processed (seamless tiling, PBR derive,
+ktx2) into `data/games/metalstorm/art/gen/**`, with per-file provenance in
+`art/gen/manifest.json`.
 
 ## HTTP Routes
 

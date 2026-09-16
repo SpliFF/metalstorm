@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { pickUnitDefSound, SoundCategory } from './sound-events.js';
+import { pickUnitDefSound, SoundCategory, chooseSoundKey } from './sound-events.js';
 import type { SoundRefInfo } from './connection.js';
+import type { SoundItem } from './audio.js';
 
 const ref = (id: number, category: number, name: string): SoundRefInfo => ({
     id, category, name, path: `sounds/${name}`, volume: 1, pitch: 1,
@@ -38,5 +39,39 @@ describe('pickUnitDefSound', () => {
         expect(pickUnitDefSound(sounds, SoundCategory.Activate)).toBeNull();
         expect(pickUnitDefSound([], SoundCategory.Select)).toBeNull();
         expect(pickUnitDefSound(undefined, SoundCategory.Select)).toBeNull();
+    });
+});
+
+describe('chooseSoundKey', () => {
+    // Mirrors gamedata/sounds.lua's ac_fire / ac_fire_far pair: close item
+    // sets maxdist=900 (the switch point), far item has its own longer reach.
+    const items = new Map<string, SoundItem>([
+        ['ac_fire', { file: 'sounds/weapons/autocannon_fire.webm', maxdist: 900 }],
+        ['ac_fire_far', { file: 'sounds/weapons/autocannon_fire_far.webm', maxdist: 3200 }],
+        // A key with no `_far` sibling and no explicit maxdist at all.
+        ['ui_click', { file: 'sounds/ui/ui_click.webm' }],
+    ]);
+    const resolve = (name: string): SoundItem | undefined => items.get(name);
+
+    it('stays on the close key inside the switch distance', () => {
+        expect(chooseSoundKey('ac_fire', 899, resolve)).toBe('ac_fire');
+        expect(chooseSoundKey('ac_fire', 900, resolve)).toBe('ac_fire');
+    });
+
+    it('hands off to `_far` once past the close item\'s own maxdist', () => {
+        expect(chooseSoundKey('ac_fire', 901, resolve)).toBe('ac_fire_far');
+        expect(chooseSoundKey('ac_fire', 5000, resolve)).toBe('ac_fire_far');
+    });
+
+    it('falls back to the close key when no `_far` sibling is authored', () => {
+        expect(chooseSoundKey('ui_click', 100, resolve)).toBe('ui_click');
+        // No maxdist on the close item → default 900-elmo switch applies,
+        // but there's still nothing to hand off to.
+        expect(chooseSoundKey('ui_click', 5000, resolve)).toBe('ui_click');
+    });
+
+    it('falls back to the default 900-elmo switch when the close item is unresolved', () => {
+        expect(chooseSoundKey('unknown_key', 899, resolve)).toBe('unknown_key');
+        expect(chooseSoundKey('unknown_key', 901, resolve)).toBe('unknown_key');
     });
 });

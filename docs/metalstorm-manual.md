@@ -4,6 +4,18 @@ _Last updated: 2026-08-29. This manual documents the game as **implemented** on 
 
 > **Metalstorm** — _Team-based large-scale strategy. Objectives over micro; authority over APM. The team owns the army._ (`modinfo.lua`)
 
+## 0. Glossary — the words the game uses to players
+
+Player-facing text uses these five words. The code still says `war` and `room` in many places; those are identifiers, not vocabulary.
+
+| Word | Meaning | In the code |
+|---|---|---|
+| **World** | The one persistent game on the mega map. Where you land after login; every Mission is a drill-down from it. | the world layer, `world_*` tables, `/api/world/*` |
+| **Mission** | A bounded task on one map in one room. **Not always a battle:** a reconnaissance survey, an escort, or a parley are Missions too. Entered as Support (join a larger Faction Mission), Solo (your own, small roster), Tutorial, or Broadcast (a delayed replay). | a "war" / "room"; the `wars` table, `/api/wars/*`, `war_outcome` |
+| **Faction** | Your organisation in the World. A Mission's sides are which Faction each team fights for. | world factions (four archetypes) ↔ battle sides Compact / Union via `side_key` |
+| **Standing** | The one number your account earns by playing: +10 per Mission, +5 per credited objective, +15 per mentor endorsement. Gates what you may command and see. | `users.standing`, `rank_<player>` in the sim |
+| **Tier** | Standing, in five named bands: Recruit (0–19), Regular (20–59), Veteran (60–149), Officer (150–399), Commander (400+). | `Standing::TierFor`, per-player `tier` option |
+
 ## 1. The shape of the game
 
 Metalstorm is two games joined by a hard seam:
@@ -23,6 +35,14 @@ There is **one resource: authority.** In battle it is earned by completing objec
 
 **Teams own everything.** Units and orders belong to the team, never to the player. Any team player commands any team unit. Players drop in and out mid-game: a leaver's personal authority pool merges into the team pool and their objective participation redirects team-ward — no unit or order transfer exists anywhere in the code (`game_teams.lua` records this as a binding rule). `team_leader` is bookkeeping with no gameplay privilege.
 
+### 2.1 Standing and mentorship
+
+**Standing** is per account and only ever goes up (§0). Your **Tier** decides your command scope: a Recruit commands only the squads assigned to them (Support) or a capped Solo roster; a Regular may command any unassigned team squad and sees the scoreboard, event log and diplomacy; a Veteran may mentor, suggest objectives and post bounties; an Officer creates Missions and runs the AI-command panel. Command scope is **responsibility, not ownership**: the team still owns every unit, but an order on an assigned unit from a lower Tier than its responsible player is refused, and a superior's order on your unit is shown as "order from <callsign> (<tier>)" (`game_assignment.lua`).
+
+**Mentorship** pairs a Recruit with a Veteran or better on the same side (one active mentorship per mentee; `POST /api/mentor/*`). The mentor may assign tasks and command the mentee's squads; the mentee's HUD filters chatter to their mentor and their own squads ("Show everything" lifts it). If no human takes a Recruit on within thirty seconds the HUD offers an **AI mentor** (the strategos `mentor` profile, suggest-only); declining is a real answer. A mentor endorsement pays the mentee +15 Standing, once per pair per day.
+
+**First Missions.** Until Tier 1 the hub offers two ways in: **Solo** — `tutorial_01` (Basic Training) and `recon_01` (Survey, a Mission with no enemy that ends on a parley agreement), both with a capped roster and no World stake, but counting toward Standing — and **Support**, deploying into a running Faction Mission as a minor role.
+
 ## 3. Authority — the economy
 
 `LuaRules/Gadgets/game_authority.lua` owns pools; `game_authority_charge.lua` bills an order only after every other gadget has had its veto (a vetoed order is never charged).
@@ -40,6 +60,8 @@ cost = ceil(base_k × authority_cost_base × regionMod × orderClassMod × costS
 
 **Income:** objectives are the only primary income (§4). Teams start with 500; each joining player gets a grant (`authority_join_grant`, default 100); an optional per-minute stipend exists as a playtest lever. Long-horizon controls: a team soft ceiling (6000 × player count) with 2%/min overflow decay.
 
+**Reward derivation** (objectives §10.6, landed 2026-09-17): systemic objective rewards are no longer authored — each is a whole number of *median directives*, priced from this same config (`median_directive_basis`, the corpus-measured roster basis of a group-scoped directive), so what an objective pays and what an order costs move together. Reward normalisation (lever 2) stays **off**: measured with the lever on, it trims mint about 8 % and makes the opening minutes poorer, which is the wrong direction for the problem it was written for.
+
 **Escrow:** objective rewards and bounties are held in escrow until the objective resolves (`authority/escrow.lua`); outcomes are `complete | expired | failed | war_end`, and a war ending routes every refund team-ward.
 
 ## 4. Objectives and victory
@@ -55,7 +77,7 @@ Objectives are the game (`game_objectives.lua`, six types):
 | `extract` | two-phase: secure, then evacuate |
 | `infra` | timed survival, or an open-ended income building paying `rewardPerMinute` |
 
-A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense), under a **per-team ceiling of 9 concurrent systemic objectives** (the liveness backstop is exempt — a full board is not a starved one). Density selects the *mix* and the re-arm tempo, not income: the validated economy only admits roughly 800–1000 systemic objectives per 40-minute 2v2 war, which `node tools/economy-validation.js` is the gate for.
 
 Two of those rules exist to shape how a match FEELS rather than to supply it (both landed 2026-09-17):
 
@@ -98,7 +120,7 @@ Two of those rules exist to shape how a match FEELS rather than to supply it (bo
 
 **Governing directive (2026-08-29): the UI stays out of the way until needed.** Summary affordances, then click to drill into context-specific information and actions (including camera travel); one access point for global battle data (statistics, reports, events, objectives, diplomacy); depth on demand, never by default.
 
-**HUD** (`ui/metalstorm.ui.json`): six widgets keeping the centre of the screen clear — an authority pill (top-left), objectives + scoreboard (right rail, scoreboard collapsed), parley + AI-command panels (left rail, collapsed), and the command composer (bottom-centre). Every widget declares `nlAliases` so voice/text can address it.
+**HUD** (`ui/metalstorm.ui.json`): the centre of the screen stays clear. An authority pill (top-left), the focus strip and objective chips, the command composer (bottom-centre), and one **Battle** button (top-right, Tab) behind which the scoreboard, event log, reports, objectives board and diplomacy live as tabs. Both rails are empty except during a first Mission, when the **mentor card** and the tutorial's **coach card** sit on the left. Panels reveal by Tier (`revealOn`): scoreboard, events and diplomacy from Regular, the AI-command panel from Officer. Every widget declares `nlAliases` so voice/text can address it.
 
 **Natural-language commands** (`ui/nl-instructions.md` + `ui/nl-response.schema.json`): typed or spoken commands are interpreted **against the current focus** (selection, open panels) into a schema-constrained response — 7 action kinds (`command`, `guidance`, `camera`, `ui`, `query`, `group`, `refuse`), 11 verbs (attack, secure, defend, hold, patrol, screen, scout, escort, withdraw, reinforce, build), 24 unit-class nouns matching `customparams.ms_class` exactly, triggers (`now`, `under-attack`, `region-contested`, `objective-complete`, `strength-below`). Ambiguity produces clarify buttons, never a guess; refusal is first-class. The resolver/executor pipeline lives in `client/src/ui/native-ui/`.
 
@@ -122,7 +144,7 @@ Rank (`WorldStats`) is derived on read, never stored: 10 per held commander + it
 
 13 maps ship in `data/maps/`. Six carry a `metalstorm.reachability` declaration — all six declare `"split"`: their start positions sit in separate armour realms **on purpose**, making the crossing a transport problem, not a defect. The declaration is a bidirectional contract: `regions_from_map.py --verify` fails the map if reality stops matching it. `reachability_classes` scopes the claim (e.g. `meridian_basin` is split for armour but connected for infantry — infantry outclimbs armour, deliberately).
 
-The current **showcase war is `crossing_standoff`** on `scorched_crossing_v2.4` (4×4 region grid, symmetric approach to a central prize). The old `meridian_basin` scenario is **retired** (`retired = true` — a real scenario field honoured by the picker): its armour can't cross the map, which is correct for the map and wrong for that scenario. A tutorial (`tutorial_01`) runs on the same map with sequenced beats.
+The current **showcase war is `crossing_standoff`** on `scorched_crossing_v2.4` (4×4 region grid, symmetric approach to a central prize). The old `meridian_basin` scenario is **retired** (`retired = true` — a real scenario field honoured by the picker): its armour can't cross the map, which is correct for the map and wrong for that scenario. Two solo Missions run on the same map, sequenced by `game_tutorial.lua` from a `beats` table in the scenario file and narrated by the coach card (`ui/widgets/tutorial-guide.js`): **`tutorial_01`** (Basic Training: select, drill in, move to Grey Flat, hold it, open the Battle menu, move to and hold Storm Sound — the hold is the victory objective) and **`recon_01`** (Survey: three scout cars visit three regions, then a parley proposal to the Union post; the victory objective is a `parley` agreement and nothing staged can shoot). Reached from the hub's First mission card or `?play=<id>`; `tutorial_02/03` do not exist.
 
 Maps are produced by the **terragen** pipeline (`tools/mapgen` — erosion, rivers, biomes, optional road speed layers, vegetation; see [maps/generation.md](maps/generation.md)). World scale is **8 elmos = 1 m**, applied to models at import.
 

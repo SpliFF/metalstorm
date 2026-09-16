@@ -133,10 +133,22 @@ describe('createSendCommand — the RecvLuaMsg verb form (D28)', () => {
     it('refuses a verb with no gadget behind it rather than looking sent', () => {
         const conn = makeMockConnection();
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        createSendCommand(conn, 'player')('objectives.createBounty', { def: 'x', stake: 10 });
+        createSendCommand(conn, 'player')('marker.add', { x: 1, z: 2 });
         expect(conn.sendLuaRulesMsg).not.toHaveBeenCalled();
-        expect(warn).toHaveBeenCalledWith('[native-ui] no wire target for verb:', 'objectives.createBounty', { def: 'x', stake: 10 });
+        expect(warn).toHaveBeenCalledWith('[native-ui] no wire target for verb:', 'marker.add', { x: 1, z: 2 });
         warn.mockRestore();
+    });
+
+    it('carries the journey verbs — objectives/assign/tutorial now have gadgets', () => {
+        // PLAN-beta.md: game_objectives.lua grew the bounty/suggest handlers,
+        // game_assignment.lua is new. Same wire.lua codec as parley.
+        const conn = makeMockConnection();
+        const send = createSendCommand(conn, 'player');
+        send('objectives.createBounty', { type: 'control', region: 'raven_basin', player: 7 });
+        send('assign.set', { units: [11, 12], player: 7 });
+        send('tutorial.advance', { beat: 2 });
+        expect(conn.sendLuaRulesMsg).toHaveBeenCalledTimes(3);
+        expect(conn.sendLuaRulesMsg.mock.calls[1][0]).toContain('units=11,12');
     });
 
     it('drops a verb command for a spectator', () => {
