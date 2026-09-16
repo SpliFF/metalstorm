@@ -189,6 +189,51 @@ describe("Picture.refresh — board", function()
 end)
 
 --=============================================================================
+-- readDeparture — ms_departure_<teamId>_{x,z,r} rulesParams (transports
+-- plan §3.4). Until this landed, `picture.transports` did not exist at all,
+-- so Slate.transportGoals' WITHDRAW goal was unreachable regardless of the
+-- threat map — see outmatched-withdrawal in tools/ai-eval.
+--=============================================================================
+describe("Picture.refresh — transports (departure zone)", function()
+    it("reads a published departure zone onto picture.transports.departure", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = {
+                ['team:ms_departure_0_x'] = 120,
+                ['team:ms_departure_0_z'] = 1900,
+                ['team:ms_departure_0_r'] = 400,
+            },
+        })
+        local picture = refresh(Picture, ai)
+        assert.are.same({ x = 120, z = 1900, radius = 400 }, picture.transports.departure)
+        assert.is_false(picture.transports.stranded)
+    end)
+
+    it("defaults the radius when the gadget publishes none", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = { ['team:ms_departure_0_x'] = 10, ['team:ms_departure_0_z'] = 20 },
+        })
+        local picture = refresh(Picture, ai)
+        assert.are.equal(700, picture.transports.departure.radius)
+    end)
+
+    it("no departure published -> transports.departure is nil, not an error", function()
+        local Picture = freshPicture()
+        local ai = makeAI({ rulesParams = {} })
+        local picture = refresh(Picture, ai)
+        assert.is_nil(picture.transports.departure)
+    end)
+
+    it("degrades the same way without AI1 at all", function()
+        local Picture = freshPicture()
+        local ai = makeAI({})
+        local picture = refresh(Picture, ai)
+        assert.is_nil(picture.transports.departure)
+    end)
+end)
+
+--=============================================================================
 -- readEconomy — authority_* rulesParams (AI1), the AI3 own-pool gap.
 --=============================================================================
 describe("Picture.refresh — economy", function()

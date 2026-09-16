@@ -890,3 +890,56 @@ describe("a human's veto is excluded AND reported (PLAN-ai-synced-write task 5)"
         assert.are.same({}, ids(out.vetoed))
     end)
 end)
+
+--=============================================================================
+-- WITHDRAW (transports plan §3.4). Until picture.lua learned to read
+-- ms_departure_<teamId>_{x,z,r} (this fixed the ai-eval outmatched-withdrawal
+-- gap), `picture.transports` never existed for strategos and this whole path
+-- — real, scored, and previously untested by ANY busted spec — was dead code:
+-- a garrison overran its home region and strategos kept assaulting out.
+--=============================================================================
+describe("WITHDRAW (outmatched, with a departure zone, §11)", function()
+    -- A textbook 2-for-1 overrun: 3 own vs 6 enemy, ratio == 0.5 == the
+    -- default profile's own withdrawRatio exactly. `<=`, not `<`, is the
+    -- point of this fixture (Threat.losing's boundary fix).
+    local function overrunFixture(hasDeparture)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home = { owner = 0, value = 1.0, neighbors = { 'safe' } },
+                safe = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            intel   = { home = { strength = 6, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger  = { home = { strength = 3 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            transports = hasDeparture
+                and { departure = { x = 10, z = 10, radius = 400, region = 'safe' }, stranded = false }
+                or nil,
+        })
+    end
+
+    local function withdrawDirective(out)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'withdraw' then return d end
+        end
+        return nil
+    end
+
+    it("does nothing without a departure zone (picture.transports absent)", function()
+        assert.is_nil(withdrawDirective(plan(overrunFixture(false))))
+    end)
+
+    it("withdraws through the published departure zone once outmatched 2:1", function()
+        local d = withdrawDirective(plan(overrunFixture(true)))
+        assert.is_truthy(d)
+        assert.are.equal('WITHDRAW', d.directive)
+        assert.are.equal('safe', d.region)   -- (10,10) resolves into `safe`
+    end)
+
+    it("stranded (no transport left) refuses even with a departure zone published", function()
+        local p = overrunFixture(true)
+        p.transports.stranded = true
+        assert.is_nil(withdrawDirective(plan(p)))
+    end)
+end)

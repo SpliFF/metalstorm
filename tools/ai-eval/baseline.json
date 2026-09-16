@@ -8,9 +8,11 @@
   "fixtures": [
     "blind-start.json",
     "contact-reaction.json",
+    "objective-empty-ground.json",
     "objective-next-door.json",
     "outmatched-withdrawal.json",
-    "quiet-hold.json"
+    "quiet-hold.json",
+    "recorded-meridian-contact.json"
   ],
   "cells": {
     "garrison/blind-start": {
@@ -138,6 +140,68 @@
       "checksPassed": 5,
       "checksFailed": 0
     },
+    "garrison/objective-empty-ground": {
+      "ai": "garrison",
+      "fixture": "objective-empty-ground",
+      "directives": 22,
+      "spent": 44,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 12,
+        "Assault": 10
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "strategos/objective-empty-ground": {
+      "ai": "strategos",
+      "fixture": "objective-empty-ground",
+      "directives": 10,
+      "spent": 20,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 10,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 10
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true
+      },
+      "checksPassed": 5,
+      "checksFailed": 0
+    },
+    "null/objective-empty-ground": {
+      "ai": "null",
+      "fixture": "objective-empty-ground",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
+    },
     "garrison/objective-next-door": {
       "ai": "garrison",
       "fixture": "objective-next-door",
@@ -229,22 +293,25 @@
     "strategos/outmatched-withdrawal": {
       "ai": "strategos",
       "fixture": "outmatched-withdrawal",
-      "directives": 12,
-      "spent": 24,
+      "directives": 20,
+      "spent": 40,
       "violations": 0,
       "errors": 0,
       "worstLatency": 10,
       "unanswered": 0,
       "byType": {
         "Assault": 4,
+        "Withdraw": 8,
         "Defend": 8
       },
       "checks": {
         "0:booted": true,
         "1:noViolations": true,
-        "2:noErrors": true
+        "2:noErrors": true,
+        "3:reactionWithin": true,
+        "4:hasDirectiveTypeAfter": true
       },
-      "checksPassed": 3,
+      "checksPassed": 5,
       "checksFailed": 0
     },
     "null/outmatched-withdrawal": {
@@ -332,14 +399,75 @@
       },
       "checksPassed": 5,
       "checksFailed": 0
+    },
+    "garrison/recorded-meridian-contact": {
+      "ai": "garrison",
+      "fixture": "recorded-meridian-contact",
+      "directives": 40,
+      "spent": 80,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 0,
+      "unanswered": 0,
+      "byType": {
+        "Defend": 39,
+        "DefendFront": 1
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "strategos/recorded-meridian-contact": {
+      "ai": "strategos",
+      "fixture": "recorded-meridian-contact",
+      "directives": 39,
+      "spent": 78,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": 130,
+      "unanswered": 0,
+      "byType": {
+        "Assault": 33,
+        "Screen": 6
+      },
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true
+      },
+      "checksPassed": 3,
+      "checksFailed": 0
+    },
+    "null/recorded-meridian-contact": {
+      "ai": "null",
+      "fixture": "recorded-meridian-contact",
+      "directives": 0,
+      "spent": 0,
+      "violations": 0,
+      "errors": 0,
+      "worstLatency": null,
+      "unanswered": 1,
+      "byType": {},
+      "checks": {
+        "0:booted": true,
+        "1:noViolations": true,
+        "2:noErrors": true,
+        "3:maxDirectives": true
+      },
+      "checksPassed": 4,
+      "checksFailed": 0
     }
   },
   "totals": {
-    "cells": 15,
-    "checksPassed": 71,
+    "cells": 21,
+    "checksPassed": 95,
     "checksFailed": 0,
     "violations": 0,
     "errors": 0,
-    "spent": 192
+    "spent": 430
   }
 }

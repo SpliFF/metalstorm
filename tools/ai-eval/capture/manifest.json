@@ -1,0 +1,17 @@
+{
+    "name": "ai-eval:capture-meridian-basin",
+    "map": "meridian_basin",
+    "game": "metalstorm",
+    "scenario": "meridian_basin",
+    "modOptions": {
+        "objective_density": "1"
+    },
+    "aiSlots": [
+        { "aiId": "capture", "team": 0, "startPos": 0 },
+        { "aiId": "garrison", "team": 1, "startPos": 1 }
+    ],
+    "headless": {
+        "tickMode": "uncapped",
+        "stopAt": { "frame": 3000 }
+    }
+}

@@ -1,0 +1,427 @@
+{
+    "id": "recorded-meridian-contact",
+    "title": "A real headless run, captured (not hand-typed)",
+    "why": "Every other fixture in this matrix is synthetic: a human wrote the region graph, the power table, and the unit positions from imagination. This one is not. It is tools/ai-eval/capture.mjs's output from a real `spring-server --headless-run` of meridian_basin/metalstorm (tools/ai-eval/capture/manifest.json: the engine's Capture AI on team 0, garrison on team 1, 3000 frames, 2026-09-17) \u2014 the region graph (tools/ai-eval/fixtures/world/meridian-basin.regions.json, MapProcessor's own ExtractRegions output), the power table (.../meridian-basin.power.json, the real def-export), and every position/defId below are what AIStateSnapshot actually produced, not a guess at its shape. The moment worth keeping: a real enemy unit (defId 97, a tank_farm \u2014 a static site, not a raider) came into LOS at frame 1380, inside `north_market`, a region OUR side already owns \u2014 an intrusion onto held ground, the same shape outmatched-withdrawal hand-authors, this time from an actual run instead of an authored one.",
+    "frames": 2400,
+    "team": 0,
+    "player": 0,
+    "pool": 80,
+    "map": {
+        "width": 16384,
+        "height": 16384
+    },
+    "regions": "tools/ai-eval/fixtures/world/meridian-basin.regions.json",
+    "power": "tools/ai-eval/fixtures/world/meridian-basin.power.json",
+    "params": [
+        {
+            "scope": "game",
+            "key": "region_cinder_forge_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_northgate_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_northwatch_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_ash_habitat_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_granary_vale_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_north_market_team",
+            "value": 0
+        },
+        {
+            "scope": "game",
+            "key": "region_shale_habitat_team",
+            "value": 4
+        },
+        {
+            "scope": "game",
+            "key": "region_sorghum_vale_team",
+            "value": 4
+        },
+        {
+            "scope": "game",
+            "key": "region_south_market_team",
+            "value": 4
+        },
+        {
+            "scope": "game",
+            "key": "region_slag_forge_team",
+            "value": 4
+        },
+        {
+            "scope": "game",
+            "key": "region_southgate_team",
+            "value": 4
+        },
+        {
+            "scope": "game",
+            "key": "region_southwatch_team",
+            "value": 4
+        }
+    ],
+    "initial": {
+        "own": [
+            {
+                "id": 15976,
+                "defId": 99,
+                "x": 6454.59,
+                "y": 34.81,
+                "z": 1054.63,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 17637,
+                "defId": 99,
+                "x": 6746.5,
+                "y": 34.77,
+                "z": 1054.74,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 11194,
+                "defId": 99,
+                "x": 6453.71,
+                "y": 35.16,
+                "z": 1345.76,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 27350,
+                "defId": 99,
+                "x": 6743.3,
+                "y": 34.79,
+                "z": 1346,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 1701,
+                "defId": 83,
+                "x": 6289.5,
+                "y": 34.79,
+                "z": 1289.75,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 3631,
+                "defId": 83,
+                "x": 6378.44,
+                "y": 34.93,
+                "z": 1267.68,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 29343,
+                "defId": 83,
+                "x": 6533.51,
+                "y": 35.02,
+                "z": 1267.73,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 28296,
+                "defId": 83,
+                "x": 6288.51,
+                "y": 35.31,
+                "z": 1400.78,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 17312,
+                "defId": 83,
+                "x": 6377.5,
+                "y": 35.07,
+                "z": 1422.76,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 26270,
+                "defId": 83,
+                "x": 6532.57,
+                "y": 34.74,
+                "z": 1422.8,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 14665,
+                "defId": 42,
+                "x": 6140,
+                "y": 34.78,
+                "z": 1140,
+                "health": 1,
+                "hasCommands": false
+            },
+            {
+                "id": 14170,
+                "defId": 42,
+                "x": 6260,
+                "y": 34.74,
+                "z": 1140,
+                "health": 1,
+                "hasCommands": false
+            },
+            {
+                "id": 3123,
+                "defId": 71,
+                "x": 13184,
+                "y": 7.21,
+                "z": 1200,
+                "health": 1,
+                "hasCommands": false
+            },
+            {
+                "id": 22958,
+                "defId": 76,
+                "x": 6835.01,
+                "y": 34.77,
+                "z": 1335.36,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 27836,
+                "defId": 76,
+                "x": 6965.01,
+                "y": 34.74,
+                "z": 1335.36,
+                "health": 1,
+                "hasCommands": true
+            },
+            {
+                "id": 965,
+                "defId": 96,
+                "x": 5900,
+                "y": 46.82,
+                "z": 1400,
+                "health": 1,
+                "hasCommands": false
+            },
+            {
+                "id": 7086,
+                "defId": 1,
+                "x": 7200,
+                "y": 33.36,
+                "z": 1400,
+                "health": 1,
+                "hasCommands": false
+            }
+        ]
+    },
+    "timeline": [
+        {
+            "frame": 1380,
+            "event": {
+                "kind": "contact",
+                "region": "north_market",
+                "id": "tank-farm-sighted"
+            },
+            "own": [
+                {
+                    "id": 15976,
+                    "defId": 99,
+                    "x": 9873.08,
+                    "y": 31.37,
+                    "z": 1867.12,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 17637,
+                    "defId": 99,
+                    "x": 10427.7,
+                    "y": 13.11,
+                    "z": 2536.36,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 11194,
+                    "defId": 99,
+                    "x": 9584.29,
+                    "y": 36.73,
+                    "z": 1778.28,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 27350,
+                    "defId": 99,
+                    "x": 10101.6,
+                    "y": 21.87,
+                    "z": 2040.99,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 1701,
+                    "defId": 83,
+                    "x": 6393.9,
+                    "y": 0,
+                    "z": 3057.91,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 3631,
+                    "defId": 83,
+                    "x": 7000,
+                    "y": 0,
+                    "z": 2781.95,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 29343,
+                    "defId": 83,
+                    "x": 7104.27,
+                    "y": 4.48,
+                    "z": 2846.27,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 28296,
+                    "defId": 83,
+                    "x": 6488.36,
+                    "y": 0,
+                    "z": 3168.05,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 17312,
+                    "defId": 83,
+                    "x": 7015.9,
+                    "y": 0,
+                    "z": 2918.36,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 26270,
+                    "defId": 83,
+                    "x": 7180.17,
+                    "y": 5.49,
+                    "z": 2956.97,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 14665,
+                    "defId": 42,
+                    "x": 6140,
+                    "y": 34.78,
+                    "z": 1140,
+                    "health": 1,
+                    "hasCommands": false
+                },
+                {
+                    "id": 14170,
+                    "defId": 42,
+                    "x": 6260,
+                    "y": 34.74,
+                    "z": 1140,
+                    "health": 1,
+                    "hasCommands": false
+                },
+                {
+                    "id": 3123,
+                    "defId": 71,
+                    "x": 13184,
+                    "y": 7.21,
+                    "z": 1200,
+                    "health": 1,
+                    "hasCommands": false
+                },
+                {
+                    "id": 22958,
+                    "defId": 76,
+                    "x": 12158.2,
+                    "y": 12.57,
+                    "z": 3655.39,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 27836,
+                    "defId": 76,
+                    "x": 12256.3,
+                    "y": 11.33,
+                    "z": 3720,
+                    "health": 1,
+                    "hasCommands": true
+                },
+                {
+                    "id": 965,
+                    "defId": 96,
+                    "x": 5900,
+                    "y": 46.82,
+                    "z": 1400,
+                    "health": 1,
+                    "hasCommands": false
+                },
+                {
+                    "id": 7086,
+                    "defId": 1,
+                    "x": 7200,
+                    "y": 33.36,
+                    "z": 1400,
+                    "health": 1,
+                    "hasCommands": false
+                }
+            ],
+            "enemies": [
+                {
+                    "id": 30502,
+                    "defId": 97,
+                    "x": 12605,
+                    "z": 4232,
+                    "health": 1
+                }
+            ]
+        }
+    ],
+    "expect": [
+        {
+            "check": "booted"
+        },
+        {
+            "check": "noViolations"
+        },
+        {
+            "check": "noErrors"
+        }
+    ],
+    "expectByAi": {
+        "null": [
+            {
+                "check": "maxDirectives",
+                "value": 0
+            }
+        ]
+    }
+}

@@ -293,6 +293,30 @@ local function readGuidance(c, role)
     }
 end
 
+--- Departure zone for our team (PLAN-metalstorm-transports.md §3.4), if the
+-- transports gadget has published one — mirrors ai/lib/picture.lua's
+-- readDeparture exactly (same rulesParam names, same nil-on-either-missing
+-- contract). Until this read existed, strategos's Picture never carried a
+-- `transports` table at all, so Slate.transportGoals' WITHDRAW goal (real and
+-- tested — threat.lua/slate.lua already score and raise it) was PERMANENTLY
+-- unreachable: `outmatched-withdrawal` recorded a strategos that keeps
+-- assaulting enemy-held ground while six heavies sit on its own, not because
+-- the withdrawal logic was missing, but because the one signal that arms it
+-- was never read.
+--
+-- `stranded` (no transport left to leave on) has no published rulesParam
+-- anywhere yet (game_transports.lua does not mirror one) — honestly false
+-- until it does, same as ai/lib's own reader.
+local function readDeparture(c, teamId)
+    if not c.rulesParam or teamId == nil or teamId < 0 then return nil end
+    local AI = _G.AI
+    local x = tonumber(AI.getRulesParam('team', 'ms_departure_' .. teamId .. '_x'))
+    local z = tonumber(AI.getRulesParam('team', 'ms_departure_' .. teamId .. '_z'))
+    if x == nil or z == nil then return nil end
+    return { x = x, z = z,
+             radius = tonumber(AI.getRulesParam('team', 'ms_departure_' .. teamId .. '_r')) or 700 }
+end
+
 --=============================================================================
 -- Scenario-authored AI slot configuration (PLAN-metalstorm-ai.md §5 NPC column
 -- + §10 task 6 "per-slot profile"). game_scenario.lua's `ai` section publishes
@@ -796,6 +820,11 @@ function Picture.refresh(ctx)
         -- Scenario-authored NPC slate parameters (§5); nil for un-scripted AIs.
         script    = readScript(c),
         power     = power,
+        -- Slate.transportGoals' shape: { departure = {x,z,radius,region?},
+        -- stranded, arrivals }. `stranded`/`arrivals` are honest defaults
+        -- (nothing publishes them yet — see readDeparture's header).
+        transports = { departure = readDeparture(c, role and role.teamId),
+                       stranded = false, arrivals = {} },
 
         ledger    = buildLedger(c, regions, power),
         intel     = updateIntel(c, regions, memory, frame, config, power),
