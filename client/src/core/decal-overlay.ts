@@ -29,11 +29,23 @@
  * ACCUMULATE additively — overlapping craters deepen, traffic darkens — which a
  * signed 0.5-centered normal encoding could not do.
  *
- * Overlay channels (RGBA8), ADDITIVE blend, init/neutral = (0,0,0,0):
- *   R    depression depth 0..1   (plugin: normal = gradient; deeper = darker)
- *   G    albedo darkening 0..1   (plugin: albedo *= 1 - G*cap, cap ~50%)
- *   B,A  spare
- * Both channels saturate at 1.0 = the cap; that bounds heavily-worked ground.
+ * Overlay channels, ADDITIVE blend, init/neutral = (0,0,0,0). Two pixel
+ * formats, chosen once at construction (PLAN-decal-tracks §3):
+ *   - Primary: R11F_G11F_B10F (float, colour-renderable + additive-blendable
+ *     under WebGL2 `EXT_color_buffer_float`, same 32 bpp as the old RGBA8 —
+ *     zero VRAM change) —
+ *       R (11F) depression depth 0..1   (plugin: normal = gradient of raise-depth)
+ *       G (11F) albedo darkening 0..1   (plugin: albedo tinted dirt-brown, capped)
+ *       B (10F) raise 0..1              (displaced-soil berms/rims; additive like depth)
+ *   - Fallback (extension unavailable — flagged loudly in the console, not
+ *     silently): RGBA8 —
+ *       R+A     depression depth, packed coarse(R)+residual(A) for a bit more
+ *               than 8-bit precision (see `dDecSample` in decal-overlay-plugin.ts)
+ *       G       albedo darkening, as above
+ *       B       unused — no raise field; berms/rims don't render in this path.
+ * Both formats saturate their depth/darkening range at 1.0 = the cap; that
+ * bounds heavily-worked ground. Plugin surface height = raise − depth, so the
+ * gradient normal derived from that signed field gives pit walls AND ridges.
  *
  * Continuous vehicle tracks (tread/wheel) do NOT go through the mark list: they
  * accumulate as per-unit polyline trails (decal-trails.ts) and bake as one
@@ -62,6 +74,42 @@ import {
 } from '@babylonjs/core';
 import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
 import { TrailStore, tessellateTrail, writeRibbonIndices } from './decal-trails.js';
+
+/** Capability shape {@link chooseOverlayFormat} needs — just the one flag,
+ *  so it's testable with a plain object instead of a real engine. */
+export interface OverlayFormatCaps {
+    colorBufferFloat: boolean;
+}
+
+/** Result of the RTT pixel-format decision (PLAN-decal-tracks §3). */
+export interface OverlayFormat {
+    type: number;
+    format: number;
+    /** True when the format has a real B raise channel (float path); false in
+     *  the RGBA8 fallback, where depth is packed R+A and there is no raise. */
+    hasRaise: boolean;
+}
+
+/** Choose the overlay RTT pixel format: R11F_G11F_B10F (colour-renderable +
+ *  additive-blendable under WebGL2 `EXT_color_buffer_float`) when available —
+ *  same 32 bpp as the old RGBA8, now split R=depth/G=dark/B=raise instead of
+ *  R=depth/G=dark/(B,A spare). Falls back to RGBA8 (depth packed R+A, no
+ *  raise — §3) when the extension is missing; callers must flag that loudly,
+ *  not silently, since it drops berms/rims entirely. */
+export function chooseOverlayFormat(caps: OverlayFormatCaps): OverlayFormat {
+    if (caps.colorBufferFloat) {
+        return {
+            type: Constants.TEXTURETYPE_UNSIGNED_INT_10F_11F_11F_REV,
+            format: Constants.TEXTUREFORMAT_RGB,
+            hasRaise: true,
+        };
+    }
+    return {
+        type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
+        format: Constants.TEXTUREFORMAT_RGBA,
+        hasRaise: false,
+    };
+}
 
 /** Fine-window texture dimension (square). The window covers `winElmos` of
  *  world, so texel = winElmos / FINE_DIM; the window size is chosen from zoom
@@ -181,9 +229,18 @@ void main() {
 }
 `;
 
-// Blit fragment shader. Outputs depression depth (R) + darkening (G),
-// additively summed into the persistent overlay (PLAN-decal-vt.md V0).
-const BLIT_FRAG = /* glsl */ `
+/** Scar rim raise, as a fraction of the crater's depthAmp (PLAN-decal-tracks
+ *  §9 task 3d — deferred from fire 1 until the raise channel existed). A
+ *  ratio, not an independent amp, since depthAmp is the only per-scar knob
+ *  wired through today (always 0.5 — see addScar). */
+const SCAR_RIM_RATIO = 0.45;
+
+// Blit fragment shader. Outputs depression depth (R) + darkening (G) always;
+// raise (B) only when the RTT format has a real float B channel (PLAN-
+// decal-tracks §3) — the RGBA8 fallback packs depth across R (coarse byte) +
+// A (sub-LSB residual) instead, and has no raise field at all.
+function buildBlitFrag(hasRaise: boolean): string {
+    return /* glsl */ `
 precision highp float;
 varying vec2 vLocalUv;
 varying vec4 vParams;       // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
@@ -243,12 +300,13 @@ void main() {
     // can't accumulate additively).
     float depth = 0.0;  // depression magnitude → R
     float dark = 0.0;   // darkening → G
+    float raise = 0.0;  // raised rim/berm → B (PLAN-decal-tracks §3/§9 task 3)
 
     if (kind < 0.5) {
-        // SCAR crater: a depression bowl (R) + scorch soot (G). The raised rim
-        // is synthesised in the plugin from the depth edge, so only the
-        // depression — a scalar that sums — is stored, and overlapping craters
-        // deepen.
+        // SCAR crater: a depression bowl (R) + scorch soot (G) + a raised rim
+        // (B) of displaced soil right at the crater edge. The plugin derives
+        // the surface normal from raise-minus-depth's gradient, so the pit
+        // wall AND the rim ridge both come out of one signed field.
         vec2 c = vLocalUv - 0.5;
         float dist = length(c);
         float r = dist * 2.0;                 // 0 centre .. 1 edge
@@ -283,7 +341,16 @@ void main() {
         float scorch = clamp(max(core, max(streaks, spatter * 0.7)), 0.0, 1.0);
         dark = scorch * darkAmp;
 
-        if (depth < 0.004 && dark < 0.004) discard;
+        // Raised rim: a ring of displaced soil right at the crater edge,
+        // lower and thinner than the bowl is deep. Derived from depthAmp (the
+        // only per-scar amp wired through today) via a fixed ratio rather
+        // than an independent attribute.
+        float rim = smoothstep(rimR * 0.80, rimR * 0.98, r)
+                  * (1.0 - smoothstep(rimR * 0.98, rimR * 1.32, r));
+        rim *= 0.6 + 0.4 * fbm(vec2(ang * 10.0 + seed * 2.0, r * 6.0));
+        raise = clamp(rim, 0.0, 1.0) * depthAmp * ${SCAR_RIM_RATIO};
+
+        if (depth < 0.004 && dark < 0.004 && raise < 0.004) discard;
     } else {
         // TRACK: depression + darkening by category encoded in the kind value
         //   1 = tread, 2 = wheel, 3 = footprint, 4 = claw.
@@ -334,10 +401,19 @@ void main() {
     // age-scaled so old marks contribute less and recover toward neutral.
     depth *= vFade;
     dark  *= vFade;
-    // Additive (ALPHA_ONEONE): R += depth, G += dark, both saturate at 1.0 = cap.
-    gl_FragColor = vec4(depth, dark, 0.0, 0.0);
+    raise *= vFade;
+    // Additive (ALPHA_ONEONE): every channel saturates at 1.0 = cap.
+    ${hasRaise
+        ? '    gl_FragColor = vec4(depth, dark, raise, 0.0); // R=depth G=dark B=raise'
+        : `    // §3 fallback (no EXT_color_buffer_float): pack depth across R
+    // (coarse byte) + A (sub-LSB residual) for a bit more than 8-bit
+    // precision; no raise channel in RGBA8 — berms/rims don't render here.
+    float packHi = floor(depth * 255.0) / 255.0;
+    float packLo = depth - packHi;
+    gl_FragColor = vec4(packHi, dark, 0.0, packLo);`}
 }
 `;
+}
 
 // --- Ribbon path (PLAN-decal-tracks §2) ------------------------------------
 // Continuous tracks (tread/wheel) are ONE triangle strip per unit trail instead
@@ -363,7 +439,15 @@ void main() {
 }
 `;
 
-const RIBBON_FRAG = /* glsl */ `
+/** Ribbon berm/rim raise, as a fraction of the ribbon's depthAmp — mirrors
+ *  {@link SCAR_RIM_RATIO}. §4's lug-grid/berm pattern rewrite (task 4) will
+ *  replace this with proper artist-tunable content; task 3 just needs the
+ *  raise channel genuinely written so the plugin's gradient normal has a
+ *  ridge to derive. */
+const RIBBON_RAISE_RATIO = 0.5;
+
+function buildRibbonFrag(hasRaise: boolean): string {
+    return /* glsl */ `
 precision highp float;
 varying vec4 vRibbon;       // x=across -1..1  y=s  z=fade  w=kind
 varying vec3 vRibbon2;      // x=width y=darkAmp z=depthAmp
@@ -379,6 +463,7 @@ void main() {
     float edge = 1.0 - smoothstep(0.84, 1.0, abs(across));
 
     float shape;
+    float berm;
     if (kind < 1.5) {
         // TREAD: two ruts at the real gauge, with a rung ripple whose pitch is
         // WORLD-constant (elmos), so rungs keep their spacing and phase through
@@ -389,23 +474,50 @@ void main() {
         float pitch = max(6.0, width * 0.5);      // elmos between rungs
         float rung = 0.88 + 0.12 * sin(s / pitch * 6.2831853);
         shape = edge * smoothstep(0.10, 0.40, ruts) * rung;
+        // Berm ridges along both outer edges + a low centre ridge between the
+        // ruts (§4's "classic ladder imprint with pushed-up edges" — the full
+        // lug-grid detail is task 4; this is the raise channel's initial content).
+        float outerL = exp(-pow((across + 0.86) / 0.10, 2.0));
+        float outerR = exp(-pow((across - 0.86) / 0.10, 2.0));
+        float centre = exp(-pow(across / 0.14, 2.0)) * 0.5;
+        berm = edge * clamp(outerL + outerR + centre, 0.0, 1.0) * rung;
     } else {
-        // WHEEL / bike: one narrow central rut.
+        // WHEEL / bike: one narrow central rut, side berms flanking it.
         float d = across / 0.16;
         shape = edge * smoothstep(0.05, 0.30, clamp(1.0 - d * d, 0.0, 1.0));
+        float sideL = exp(-pow((across + 0.34) / 0.09, 2.0));
+        float sideR = exp(-pow((across - 0.34) / 0.09, 2.0));
+        berm = edge * clamp(sideL + sideR, 0.0, 1.0);
     }
 
     float depth = shape * vRibbon2.z * fade;
     float dark  = shape * vRibbon2.y * fade;
-    if (depth < 0.004 && dark < 0.004) discard;
-    gl_FragColor = vec4(depth, dark, 0.0, 0.0);
+    float raise = berm * vRibbon2.z * ${RIBBON_RAISE_RATIO} * fade;
+    if (depth < 0.004 && dark < 0.004 && raise < 0.004) discard;
+    ${hasRaise
+        ? '    gl_FragColor = vec4(depth, dark, raise, 0.0); // R=depth G=dark B=raise'
+        : `    // §3 fallback: pack depth across R (coarse byte) + A (residual);
+    // no raise channel in RGBA8 (see buildBlitFrag for the same scheme).
+    float packHi = floor(depth * 255.0) / 255.0;
+    float packLo = depth - packHi;
+    gl_FragColor = vec4(packHi, dark, 0.0, packLo);`}
 }
 `;
+}
 
-/** Per-pass amplitudes for a ribbon (same values the chained-quad path used, so
- *  accumulated traffic darkens at the same rate — minus the joint double-add). */
-const RIBBON_DARK_AMP = 0.18;
-const RIBBON_DEPTH_AMP = 0.06;
+/** Per-pass amplitudes for a ribbon (PLAN-decal-tracks §9 task 3c re-tune).
+ *  Fire 1 kept these at the old chained-quad values deliberately, to isolate
+ *  the Q1 structural fix (no more joint double-stamp) from any amp change —
+ *  see the lane notes' note 2. That fix alone makes a trail read slightly
+ *  lighter than before (the old joints summed depth twice; the ribbon never
+ *  does), so re-tuned up ~20-25% here to land back near the old visual
+ *  density minus the joint-artifact spikes. Also now safe to tune freely at
+ *  all: float storage (§3) means these small per-pass increments no longer
+ *  quantise into visible 8-bit "shelf" steps once the gradient normal
+ *  differentiates them (Q5) — unlike the RGBA8 fallback, which still bands.
+ *  Unverified against a live render this fire (no live-server mutex held). */
+const RIBBON_DARK_AMP = 0.22;
+const RIBBON_DEPTH_AMP = 0.075;
 /** Floats per ribbon vertex: position(3) + ribbon(4) + ribbon2(3). */
 const RIBBON_POS = 3, RIBBON_A = 4, RIBBON_B = 3;
 
@@ -463,6 +575,11 @@ export interface FineWindowState {
     extent: number;
     /** 1 = fine window valid, 0 = use coarse only (far zoom / window ≥ map) */
     enabled: number;
+    /** 1 = overlay RTTs are float R11F_G11F_B10F with a real B raise channel;
+     *  0 = RGBA8 fallback (§3) — no raise, depth packed R+A. Set once at
+     *  construction (never changes); the plugin reads it to gate raise
+     *  sampling and the R+A depth reconstruction. */
+    hasRaise: number;
 }
 
 export class DecalOverlay {
@@ -512,12 +629,30 @@ export class DecalOverlay {
     private uOrigin = new Vector2(0, 0);
     private uInvExtent = new Vector2(1, 1);
     /** Shared with the terrain plugin (by reference) — updated each tick. */
-    readonly fineState: FineWindowState = { originX: 0, originZ: 0, extent: 0, enabled: 0 };
+    readonly fineState: FineWindowState = { originX: 0, originZ: 0, extent: 0, enabled: 0, hasRaise: 0 };
+    /** RTT pixel format decided once at construction (PLAN-decal-tracks §3). */
+    private formatChoice: OverlayFormat;
 
     constructor(scene: Scene, worldWidthElmos: number, worldHeightElmos: number) {
         this.scene = scene;
         this.worldW = Math.max(1, worldWidthElmos);
         this.worldH = Math.max(1, worldHeightElmos);
+
+        const caps = scene.getEngine().getCaps();
+        this.formatChoice = chooseOverlayFormat({ colorBufferFloat: !!caps.colorBufferFloat });
+        this.fineState.hasRaise = this.formatChoice.hasRaise ? 1 : 0;
+        if (!this.formatChoice.hasRaise) {
+            // Loud, not silent (§3): this path drops the raise channel
+            // entirely (no berms, no scar rims) and depth precision is
+            // reduced to an 8-bit-coarse + residual pack instead of a real
+            // float channel.
+            console.warn(
+                '[decals] EXT_color_buffer_float unavailable — falling back to the RGBA8 ' +
+                'decal overlay (PLAN-decal-tracks §3): no raise channel (no berms/scar rims), ' +
+                'reduced depth precision. A WebGL2 driver with float colour-buffer rendering ' +
+                'restores full decal quality.',
+            );
+        }
 
         // Coarse: whole map at low res. Density ~ map/16, clamped — it's only
         // the far/outside-window fallback, so it can be coarse.
@@ -533,7 +668,7 @@ export class DecalOverlay {
 
         this.blitMat = new ShaderMaterial(
             'decalBlit', scene,
-            { vertexSource: BLIT_VERT, fragmentSource: BLIT_FRAG },
+            { vertexSource: BLIT_VERT, fragmentSource: buildBlitFrag(this.formatChoice.hasRaise) },
             {
                 attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'params', 'fade'],
                 uniforms: ['uOrigin', 'uInvExtent'],
@@ -548,7 +683,7 @@ export class DecalOverlay {
 
         this.ribbonMat = new ShaderMaterial(
             'decalRibbon', scene,
-            { vertexSource: RIBBON_VERT, fragmentSource: RIBBON_FRAG },
+            { vertexSource: RIBBON_VERT, fragmentSource: buildRibbonFrag(this.formatChoice.hasRaise) },
             {
                 attributes: ['position', 'ribbon', 'ribbon2'],
                 uniforms: ['uOrigin', 'uInvExtent'],
@@ -594,8 +729,8 @@ export class DecalOverlay {
             name, dim, this.scene,
             {
                 generateMipMaps: false,
-                type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
-                format: Constants.TEXTUREFORMAT_RGBA,
+                type: this.formatChoice.type,
+                format: this.formatChoice.format,
                 samplingMode: Texture.BILINEAR_SAMPLINGMODE,
             },
         );
@@ -643,6 +778,9 @@ export class DecalOverlay {
     get coarseTexel(): number { return 1 / this.coarseDim; }
     /** 1 / fine texture dimension. */
     get fineTexel(): number { return 1 / FINE_DIM; }
+    /** True when the overlay RTTs are float R11F_G11F_B10F with a real raise
+     *  channel; false in the RGBA8 fallback (§3 — no berms/scar rims). */
+    get hasRaiseChannel(): boolean { return this.formatChoice.hasRaise; }
 
     /** Supply the sorted track-type-name table (index == wire trackTypeId;
      *  see {@link buildTrackTypeNames}). */
