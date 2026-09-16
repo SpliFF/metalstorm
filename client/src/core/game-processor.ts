@@ -110,7 +110,7 @@ import { CegRuntime } from './ceg-runtime.js';
 import {
     createNativeFxGamePass, NATIVE_FX_QUALITY_TIERS, type NativeFxGamePass,
 } from './native-fx/fx-game-loader.js';
-import { UnitFxDispatch, type MotionLeanImpulseSink } from './unit-fx-dispatch.js';
+import { UnitFxDispatch } from './unit-fx-dispatch.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -533,23 +533,6 @@ let gpNativeFx: NativeFxGamePass | null = null;
 /// its resolved unit-fx.json and its NativeFxSink.
 let gpUnitFx: UnitFxDispatch | null = null;
 
-/// Duck-type gpMotionLean against pres-anim's `impulse` addition (motion-
-/// lean.ts is pres-anim's owned file; this clone of main may predate that
-/// lane's land). Re-checked per call by unit-fx-dispatch.ts's
-/// `getMotionLean`, so hit-flinch activates the moment it lands — no
-/// reconstruction needed here.
-function gpMotionLeanImpulseSink(): MotionLeanImpulseSink | null {
-    const reg = gpMotionLean as unknown as { impulse?: unknown } | null;
-    return reg && typeof reg.impulse === 'function' ? (reg as MotionLeanImpulseSink) : null;
-}
-
-/// Same duck-typing for pres-anim's `WheelSpinDriver.spinning` (the move-
-/// dust rate source) — see gpMotionLeanImpulseSink's doc.
-function gpWheelSpinRate(unitId: number): number {
-    const ws = gpWheelSpin as unknown as { spinning?: (id: number) => number } | null;
-    return typeof ws?.spinning === 'function' ? ws.spinning(unitId) : 0;
-}
-
 /// Empty entity iterator — the FX construction block's default before/if
 /// gpCtx.entityRenderer isn't up yet, so UnitFxDispatch.tick()'s sweep has
 /// something to iterate.
@@ -684,6 +667,12 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
         weaponDefIds: (id) => {
             const defId = r.getEntityDefId(id);
             return defId === undefined ? null : gpDefCache?.getUnitDef(defId)?.weaponDefIds ?? null;
+        },
+        // recoil-driver.ts's kick input: aoe/projectileSpeed straight off the
+        // fired weapon's def, so RecoilDriver.kick() fires on every shot.
+        weaponAoeVelocity: (weaponDefId) => {
+            const wd = gpDefCache?.getWeaponDef(weaponDefId);
+            return wd ? { aoe: wd.aoe, projectileSpeed: wd.projectileSpeed } : undefined;
         },
     }, r);
     gpClipPolicy = new ClipAutoPolicy({
@@ -1714,9 +1703,8 @@ function gpConnect(msg: GpInitToWorker): void {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
                     // L-FX step 6 / pres-anim contract: hit-flinch nudges the
-                    // target away from the attacker. No-ops (via
-                    // gpMotionLeanImpulseSink) until pres-anim's `impulse`
-                    // lands. result===0 is Hit (see CombatFX.onCombatEvents).
+                    // target away from the attacker via MotionLeanRegistry.
+                    // impulse(). result===0 is Hit (see CombatFX.onCombatEvents).
                     if (ev.result === 0 && ev.attackerId) {
                         const atk = gpCtx.entityRenderer?.getEntityPosition(ev.attackerId);
                         const tgt = gpCtx.entityRenderer?.getEntityPosition(ev.targetId);
@@ -3029,8 +3017,9 @@ export function gpInit(msg: GpInitToWorker): void {
                 clientSettings.subscribe('gfx.particleQuality',
                     (v) => pass.setQuality(Number(v)));
                 // L-FX step 6: unit-side death/damage-smoke/move-dust dispatch.
-                // motionLean/wheelSpin are duck-typed against pres-anim's
-                // in-progress hooks — see gpMotionLeanImpulseSink's doc.
+                // Hit-flinch (getMotionLean) and the move-dust rate
+                // (getUnitSpeed) ride pres-anim's MotionLeanRegistry.impulse /
+                // WheelSpinDriver.spinning.
                 gpUnitFx = new UnitFxDispatch({
                     unitFx: pass.unitFx,
                     sink: pass,
@@ -3038,8 +3027,8 @@ export function gpInit(msg: GpInitToWorker): void {
                     getEntities: () => gpCtx.entityRenderer?.getEntities() ?? EMPTY_ENTITIES(),
                     getEntityPosition: (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null,
                     playNamedSound: (name, x, y, z) => gpPlayNamedSound(name, x, y, z),
-                    getMotionLean: gpMotionLeanImpulseSink,
-                    getUnitSpeed: gpWheelSpinRate,
+                    getMotionLean: () => gpMotionLean,
+                    getUnitSpeed: (id) => gpWheelSpin?.spinning(id) ?? 0,
                     // Share the LOD/budget fence with the legacy per-frame
                     // entity-script path (entity-fx-fence.ts) rather than a
                     // second independent budget — one combined 3-5ms/frame
