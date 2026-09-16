@@ -8,7 +8,10 @@ Reference configuration for developing Spring RTS Web with [Claude Code](https:/
 bash tools/claude-config/setup.sh
 ```
 
-This copies the reference settings to `.claude/` (won't overwrite existing files) and installs MCP server dependencies.
+This copies the reference **permissions** template to `.claude/settings.json`
+(won't overwrite an existing file) and installs the MCP server's dependencies.
+It does not need to touch MCP server registration — that part is already
+checked into the repo (see `.mcp.json` below) and works with no setup step.
 
 ## What's Included
 
@@ -22,21 +25,45 @@ Auto-approves common development commands so Claude doesn't prompt for every bui
 - Git: `add`, `commit`, `push`, `status`, `stash`
 - Process management: `pkill spring-*`
 
-### settings.local.json (MCP server)
+`.claude/settings.json` is gitignored (personal, per-checkout), so this file
+is a template you opt into — edit your own copy freely without affecting
+other developers.
 
-Configures the `spring-debug` MCP server which gives Claude access to:
+### `.mcp.json` (repo root, tracked) — the real MCP config
 
-| Tool | Description |
-|------|-------------|
-| `get_logs` | Query log server for recent entries |
-| `search_logs` | Full-text log search |
-| `exec_lua` | Execute Lua/server commands on the game server |
-| `list_processes` | List game server processes |
-| `get_lua_source` | Read Lua source files |
-| `query_db` | SQL queries against the game database |
-| `list_sessions` | Game session history |
+This is the config Claude Code actually loads; nothing under `tools/claude-config/`
+needs to be copied for MCP servers to work. It declares two servers:
 
-The MCP server connects to `http://localhost:8010` (log server) and `http://localhost:8011` (lobby) by default. Change these in `settings.local.json` if your ports differ.
+- **`spring-debug`** — `node tools/debug-mcp/server.js`, talking to the log
+  server (`:8010`) and lobby (`:8011`) over HTTP. **77 tools as of 2026-09-17**,
+  spanning process/log introspection, game & sim control, unit/combat verbs,
+  browser/client relay, scenario authoring, the world layer (`world_*`) and AI
+  players (`ai_*`, `nl_command`). The tool *schemas* live in
+  `tools/debug-mcp/tools.js` — that file, not `server.js`, is the source of
+  truth (`server.js` just wires the transport), and it's what
+  `tools/claude-config/check-skills.sh` diffs every skill/agent against. The
+  full per-tool table is documented in `.claude/skills/spring-debug/SKILL.md`,
+  not duplicated here.
+- **`chrome-devtools`** — `npx chrome-devtools-mcp@latest --isolated`, for
+  driving a real Chrome instance directly (see the `game-browser-test` skill).
+
+### settings.local.json (template — usually unneeded)
+
+This template pre-dates `.mcp.json` and duplicates its `spring-debug` entry
+(without the `chrome-devtools` server). Since `.mcp.json` is tracked and
+already registers `spring-debug` for everyone, you don't need to copy this
+file at all in the common case. It's kept only for the one thing `.mcp.json`
+can't give you per-checkout: pointing `spring-debug` at **non-default ports**.
+If you do that, copy it to `.claude/settings.local.json` (which layers on top
+of `.mcp.json`) and edit the `env` block there.
+
+### The `taskherd` MCP server is not part of this repo's config
+
+If you see a `taskherd` server available in a session, it comes from your
+**user-level** `~/.claude.json`, not from anything under `.claude/` or
+`.mcp.json` in this repo — `setup.sh` does not install or touch it, and there
+is nothing to copy here. It's scoped to whichever machine has taskherd
+installed, not to this checkout.
 
 ## Manual Setup
 
@@ -44,16 +71,30 @@ If you prefer not to run the setup script:
 
 1. Create `.claude/` in the project root
 2. Copy `settings.json` to `.claude/settings.json`
-3. Copy `settings.local.json` to `.claude/settings.local.json`
-4. Run `npm install` in `tools/debug-mcp/`
+3. Run `npm install` in `tools/debug-mcp/`
+4. (Optional, non-default ports only) copy `settings.local.json` to
+   `.claude/settings.local.json` and edit its `env` block
 
 ## Customizing
 
 - **Add permissions**: Edit `.claude/settings.json` to auto-approve additional commands
-- **Change ports**: Edit the `env` section in `.claude/settings.local.json`
-- **Disable MCP**: Remove the `mcpServers` section from `.claude/settings.local.json`
+- **Change MCP server ports**: Copy `settings.local.json` to `.claude/settings.local.json` and edit its `env` block (see above)
+- **Disable a repo-level MCP server**: not per-checkout — it's declared in the tracked `.mcp.json`
 
-Most of `.claude/` is gitignored, so your local settings won't affect other
-developers — but `.claude/skills/` is **tracked** and shared via the repo, and
-`.claude/agents/` is tracked too (force-added past the ignore rule). Changes
-there DO affect everyone, and `tools/claude-config/check-skills.sh` gates them.
+## `.claude/` and git
+
+Most of `.claude/` is gitignored (`.claude/*` with `!.claude/skills/`), so
+`.claude/settings.json` and `.claude/settings.local.json` are personal and
+won't affect other developers. Two directories are the exception and ARE
+tracked, shared, and reviewed like any other code:
+
+- `.claude/skills/` — re-included directly in `.gitignore`
+- `.claude/agents/` — force-added (`git add -f`) past the same ignore rule
+
+Both are gated by `make check-skills` (`tools/claude-config/check-skills.sh`):
+it harvests every MCP tool name + argument, HTTP route, SQL table/column, and
+`window.test` method straight from the code and fails the build if a skill or
+agent names something that doesn't exist. It's wired into `make test-debug-mcp`
+as a prerequisite, so `make test-debug-mcp` runs it automatically; run it on
+its own with `make check-skills`. It needs only node — no lobby, no game
+server, no build — so it's safe and fast to run in a fresh worktree.
