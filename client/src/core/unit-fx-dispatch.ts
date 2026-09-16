@@ -8,10 +8,10 @@
  *
  * PLAN-beta-presentation L-FX step 6. `MotionLeanRegistry.impulse` (hit-
  * flinch) and `WheelSpinDriver.spinning` (move-dust rate) are pres-anim
- * dependencies; this snapshot of main predates that lane's land, so both are
- * held as STRUCTURAL (duck-typed) deps — `onHit`/the move-dust rate no-op
- * until an object with the matching method is wired in, which needs no
- * change here once pres-anim lands (see the lane's field notes).
+ * dependencies, kept STRUCTURAL (duck-typed) here rather than imported
+ * directly so this file has no compile-time dependency on pres-anim's
+ * module — `onHit`/the move-dust rate simply no-op if the caller ever wires
+ * in an object without the matching method.
  */
 
 import { EntityFxFence } from './entity-fx-fence.js';

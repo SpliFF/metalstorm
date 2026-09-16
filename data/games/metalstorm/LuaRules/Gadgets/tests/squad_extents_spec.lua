@@ -43,11 +43,16 @@ end
 -- ── The golden table ───────────────────────────────────────────────────────
 -- def -> the ground radius it covers on screen, in elmos. Same numbers as
 -- `M3_SQUAD_EXTENTS` in member-spacing.test.js, derived there from formation.js.
+-- RE-DERIVED 2026-09-17 with the `sizes` correction of units-assets review
+-- 2026-09-10 finding 4 (every clearance row is now the SHIPPED hull's measured
+-- extent): tanks s1 135->143, s2 145->170, s3 126->139, s4 104->81, mechs s1
+-- 53->90. The soldier rows do not move — 0.75->0.8 and 0.8->1.0 m both still
+-- round to a 3-elmo clearance radius at 8 elmos/m.
 local GOLDEN_OUTER_RADIUS = {
-    ms_tanks_s1     = 135, ms_tanks_s2     = 145, ms_tanks_s3   = 126,
+    ms_tanks_s1     = 143, ms_tanks_s2     = 170, ms_tanks_s3   = 139,
     ms_soldiers_s1  =  55, ms_soldiers_s2  =  37,
     ms_artillery_s1 = 163, ms_artillery_s2 = 134,
-    ms_mechs_s1     =  53, ms_engineers_s1 =  27,
+    ms_mechs_s1     =  90, ms_engineers_s1 =  27,
     ms_civilians    =  17, ms_ships_s1     = 448, ms_subs_s3    = 594,
 }
 
@@ -86,9 +91,10 @@ describe("squad ground extent (the Lua port of formation.js)", function()
     end)
 
     it("measures a single hull as its own clearance, with no formation involved", function()
-        -- Scale 4 is one super-heavy model. `ms_tanks_s4` declares a 13 m hull,
-        -- so 104 elmos of radius and not a slot in sight.
-        assert.are.equal(104, tonumber(def('ms_tanks_s4').customparams.squad_footprint_radius))
+        -- Scale 4 is one super-heavy model. `ms_tanks_s4` declares the shipped
+        -- 20.3 m hull (it declared a 26 m one until 2026-09-17), so 81 elmos
+        -- of radius and not a slot in sight.
+        assert.are.equal(81, tonumber(def('ms_tanks_s4').customparams.squad_footprint_radius))
     end)
 
     it("treats scale 4 as a single hull even when the squad curve says otherwise", function()
@@ -121,7 +127,7 @@ describe("between-squad separation", function()
         local d = def('ms_tanks_s2')
         local floorOnly = FLOOR.VEH
         assert.is_true(floorOnly < 33, 'the pre-M3 floor really was below the measured 32.5')
-        assert.are.equal(2 * 145, floorOnly + d.separationDistance,
+        assert.are.equal(2 * 170, floorOnly + d.separationDistance,
             'two tank squads now stand a full formation apart')
     end)
 
