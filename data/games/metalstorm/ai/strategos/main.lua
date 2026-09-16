@@ -276,7 +276,7 @@ local function handleParley(frame, picture, role, plan)
     for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role, plan)) do
         if not ledger.answered[r.id] and not ledger.deferred[r.id] then
             local p = live[r.id]
-            local ok, why = self.actuators:respondProposal(p or r.id, r.decision, r.extra)
+            local ok, why = self.actuators:respondProposal(p or r.id, r.decision, r.extra, r.explicit)
             if ok then
                 ledger.answered[r.id] = frame
                 self.actuators:chat(string.format(
