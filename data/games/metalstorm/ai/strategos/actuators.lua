@@ -251,7 +251,31 @@ function Actuators:respondProposal(proposal, decision, extra)
         return false, 'deferred'
     end
     local fields = { id = id, decision = d }
-    if d == 'counter' and extra and extra.kind then fields.kind = extra.kind end
+    if d == 'counter' and extra then
+        -- A counter restates the kind, the terms, or both. The term names are
+        -- game_parley.lua's ONE flat field set — the same names `propose`
+        -- sends — and anything left out falls back to the original proposal's
+        -- terms in GG.Parley.Respond. Without the terms a counter could only
+        -- re-send the very number it was objecting to, which is how the
+        -- planner's "counter at what we can actually pay" would have become
+        -- "repeat their demand back at them".
+        fields.kind = extra.kind
+        local t = extra.terms
+        if t then
+            fields.duration = t.duration
+            fields.regionKey = t.regionKey
+            fields.amount = t.amount
+            fields.perMinute = t.perMinute and '1' or nil
+            fields.payer = t.payer
+            fields.corridor = t.corridor
+            fields.unitClass = t.unitClass
+            fields.objectiveId = t.objectiveId
+            fields.split = t.split
+            fields.innerKind = t.innerKind
+            fields.orElse = t.orElse
+            fields.regionKeys = t.regionKeys
+        end
+    end
     local ok = self:sendMessage(Wire.encode('parley.respond', fields))
     if ok then self.stats.responses = self.stats.responses + 1
     else self.stats.refused = self.stats.refused + 1 end
