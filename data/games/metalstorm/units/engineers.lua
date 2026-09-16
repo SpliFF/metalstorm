@@ -30,13 +30,17 @@ return mk{
     -- baseSpeed 1.4 e/f = 42 e/s at s1 — same walking-pace fix as soldiers.lua.
     baseHp = 300, baseMass = 80, baseSpeed = 1.4, baseSquad = 8,
     baseFootprint = 2,
-    -- s1-s3 share the soldiers body plan (gen_infantry.py) — same ground
+    -- s1-s2 share the soldiers body plan (gen_infantry.py) — same ground
     -- extent, plus a hard hat and a wrench. See soldiers.lua for the
-    -- derivation. s4 is NOT a person: ms_engineers_s4.gltf is a 10.5 x 19.9 m
-    -- tracked fabrication crawler (2026-08-20), so its clearance is that hull
-    -- length — the old 0.95 gave a 20 m crawler a 4-elmo clearance and a
-    -- 10 m footprint (units-assets review 2026-09-10).
-    sizes = { 0.7, 0.75, 0.8, 19.9 },
+    -- derivation. NEITHER s3 NOR s4 is a person: ms_engineers_s4.gltf is a
+    -- 10.5 x 19.9 m tracked fabrication crawler (2026-08-20) and, since
+    -- 2026-09-17, ms_engineers_s3.gltf is a 3.1 x 5.9 m tracked works rig —
+    -- the model the s3 override has described ("rig pair", VEH, footprint 3)
+    -- since it was written. Both clearances are the measured hull, not the
+    -- infantry stance: the old 0.95 gave a 20 m crawler a 4-elmo clearance
+    -- and a 10 m footprint, and the old 0.8 packed two 6 m rigs into a metre
+    -- of ground (units-assets review 2026-09-10 finding 4).
+    sizes = { 0.7, 0.75, 5.9, 19.9 },
     scales = {
         [1] = { -- 60 HP per member × 8 (builder default 300 gave 37.5/member).
                 maxdamage = 480,
@@ -64,7 +68,12 @@ return mk{
                 footprint = 2,
                 override = crew(120, 140) },
         [3] = { -- A rig PAIR is vehicles, not infantry: VEH movedef (24° slope,
-                -- real crush) instead of the 45°-slope foot class.
+                -- real crush) instead of the 45°-slope foot class. One squad
+                -- MEMBER is one rig (models/ms_engineers_s3.gltf, 2026-09-17:
+                -- blade, glazed cab, fabrication deck, stowed A-frame jib);
+                -- the def's squad of two is the "pair". No impostor sheet —
+                -- it is a vehicle tier now, not one of the four infantry
+                -- bodies the impostor lane bakes.
                 footprint = 3,
                 override = crew(300, 180, {
                     description = 'Heavy construction rig pair',

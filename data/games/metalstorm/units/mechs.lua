@@ -26,12 +26,16 @@ return mk{
     -- (3/5/7.5/11 m); a walker's ground extent is its stance, NOT its height —
     -- spacing them by height would leave a squad of light mechs three
     -- body-widths apart.
-    -- PROPOSED (units-assets review 2026-09-10, not applied): the shipped glTF
-    -- ground extents are s1 2.8 x 3.0 (members clip at 1.8), s2 2.5 x 2.5,
-    -- s3 3.4 x 4.1, s4 fable_colossus 8.8 x 8.3 — i.e. { 3.0, 3.0, 4.5, 8.8 }.
-    -- Pinned by tests/squad_extents_spec.lua + client member-spacing.test.js;
-    -- change both golden tables with it.
-    sizes = { 1.8, 3.0, 4.5, 6.6 },
+    -- APPLIED 2026-09-17 (units-assets review 2026-09-10 finding 4): the rows
+    -- are the shipped glTF ground extents — s1 2.8 x 3.0 (the old 1.8 had
+    -- light mechs walking through each other), s2 2.5 x 2.5, s3 3.4 x 4.1,
+    -- s4 fable_colossus 8.8 x 8.3. s2 keeps 3.0 rather than dropping to its
+    -- measured 2.5: a heavier walker must never crowd tighter than a lighter
+    -- one, or a mixed line reads as a mistake.
+    -- Moves the ms_mechs_s1 golden radius pinned by
+    -- LuaRules/Gadgets/tests/squad_extents_spec.lua AND
+    -- client/squads/member-spacing.test.js — both were re-derived with it.
+    sizes = { 3.0, 3.0, 4.5, 8.8 },
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S2' } },
                 description = 'Recon walker pack',
