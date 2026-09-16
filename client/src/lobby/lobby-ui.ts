@@ -96,6 +96,9 @@ import {
 import {
     describeReplayEntry, parseWatchFrame, type ReplayListing,
 } from './replay-browser.js';
+import {
+    describeBroadcastEntry, type BroadcastListing,
+} from './broadcast-browser.js';
 import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
 import { WorldScreen } from './world-screen.js';
 
@@ -1193,7 +1196,10 @@ export class LobbyUI {
         on('hub-browser-btn', () => { this.watchMode = false; this.showBrowser(); });
         on('hub-help-btn', () => openHelp('getting-started'));
         on('hub-explore-btn', () => { this.watchMode = false; this.pendingOpenWorld = true; this.showBrowser(); });
-        on('hub-spectate-btn', () => { this.watchMode = true; this.showBrowser(); });
+        // Spectate is Mission Broadcast (PLAN-beta.md directive #6: delayed,
+        // never live) — the hub card opens the broadcasts panel directly
+        // rather than the mission browser's live-watch flow.
+        on('hub-spectate-btn', () => this.showBroadcastsPanel());
         on('hub-solo-btn', () => { window.location.href = tutorialUrl(window.location.search); });
         const msg = document.getElementById('hub-msg');
         on('hub-support-btn', () => {
@@ -2999,6 +3005,118 @@ export class LobbyUI {
             return;
         }
         console.log(`[lobby] watching '${file}' in room ${resp.id} on port ${resp.game_server_port}`);
+        this.updateCurrentRoomFromJson(resp);
+    }
+
+    // =================== BROADCASTS (PLAN-beta-broadcast.md lane C) =======
+    //
+    // A self-built DOM overlay rather than a `templates.*` panel: it opens
+    // from the hub, which is a different screen from the mission browser
+    // that owns `replay-panel`'s markup, and `client/src/ui/lobby/**` /
+    // `lobby.css` belong to other lanes (journey-lobby-entry, pres-ui-ds) —
+    // building it here keeps this lane inside the files it owns. Inline
+    // styles for the same reason; a follow-up can move them to a stylesheet
+    // once this panel has an owner in `ui/lobby/`.
+
+    /// Cached rows from the last `/api/broadcasts/list`. Null until the
+    /// first fetch resolves or the lobby has no broadcast-lobby routes yet.
+    private broadcasts: BroadcastListing[] | null = null;
+    private broadcastPanelEl: HTMLElement | null = null;
+
+    /// Wired from the hub's Spectate card.
+    private showBroadcastsPanel(): void {
+        if (!this.broadcastPanelEl) this.broadcastPanelEl = this.buildBroadcastsPanel();
+        this.broadcastPanelEl.style.display = 'flex';
+        void this.refreshBroadcasts();
+    }
+
+    private buildBroadcastsPanel(): HTMLElement {
+        const overlay = document.createElement('div');
+        overlay.id = 'broadcasts-panel';
+        overlay.style.cssText = 'display:none;position:fixed;inset:0;z-index:300;' +
+            'align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+        overlay.onclick = (ev: MouseEvent) => { if (ev.target === overlay) overlay.style.display = 'none'; };
+
+        const card = document.createElement('div');
+        card.style.cssText = 'background:#16181c;color:#fff;border-radius:8px;padding:16px 18px;' +
+            'width:min(560px,92vw);max-height:80vh;overflow:auto;font:13px system-ui,sans-serif;';
+
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
+        const title = document.createElement('h3');
+        title.textContent = 'Mission Broadcasts';
+        title.style.margin = '0';
+        const close = document.createElement('button');
+        close.textContent = 'Close';
+        close.className = 'secondary';
+        close.onclick = () => { overlay.style.display = 'none'; };
+        head.append(title, close);
+
+        const list = document.createElement('div');
+        list.id = 'broadcast-list';
+        card.append(head, list);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
+    private async refreshBroadcasts(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/broadcasts/list');
+            this.broadcasts = (resp && Array.isArray(resp.broadcasts))
+                ? (resp.broadcasts as BroadcastListing[]) : null;
+        } catch {
+            this.broadcasts = null;
+        }
+        this.renderBroadcastList();
+    }
+
+    private renderBroadcastList(): void {
+        const el = document.getElementById('broadcast-list');
+        if (!el) return;
+        const list = this.broadcasts;
+        if (list === null) {
+            el.innerHTML = '<div class="empty-state">Mission Broadcasts are not available on this lobby yet.</div>';
+            return;
+        }
+        if (list.length === 0) {
+            el.innerHTML = '<div class="empty-state">No Missions being broadcast right now.</div>';
+            return;
+        }
+        el.innerHTML = list.map(r => {
+            const m = describeBroadcastEntry(r);
+            return '<div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;' +
+                'border-bottom:1px solid rgba(255,255,255,0.12);">' +
+                `<div style="display:flex;justify-content:space-between;gap:8px;">` +
+                `<span>${this.esc(m.title)}</span><span style="opacity:0.75;white-space:nowrap;">${this.esc(m.chip)}</span></div>` +
+                (m.detail ? `<div style="font-size:11px;opacity:0.6;">${this.esc(m.detail)}</div>` : '') +
+                `<button class="broadcast-watch-btn" data-file="${this.esc(r.file)}">${this.esc(m.watchLabel)}</button>` +
+                '</div>';
+        }).join('');
+        el.querySelectorAll<HTMLButtonElement>('.broadcast-watch-btn').forEach(btn => {
+            btn.onclick = () => { void this.watchBroadcast(btn.getAttribute('data-file')!); };
+        });
+    }
+
+    /// Ask the lobby to join (or spawn) the relay room for a broadcast file,
+    /// and adopt the room it returns — same shape and reasoning as
+    /// `watchReplay` above; the response is an ordinary room JSON with
+    /// `is_broadcast: true`.
+    async watchBroadcast(file: string): Promise<void> {
+        const resp = await this.lobbyPost('/api/broadcasts/watch', { file });
+        if (!resp || resp.error) {
+            const msg = resp?.error ?? 'could not start a broadcast relay';
+            console.error(`[lobby] watch broadcast '${file}' failed: ${msg}`);
+            const el = document.getElementById('broadcast-list');
+            if (el) {
+                const note = document.createElement('div');
+                note.className = 'replay-error';
+                note.textContent = `Could not watch ${file}: ${msg}`;
+                el.prepend(note);
+            }
+            return;
+        }
+        if (this.broadcastPanelEl) this.broadcastPanelEl.style.display = 'none';
         this.updateCurrentRoomFromJson(resp);
     }
 
