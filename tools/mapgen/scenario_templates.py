@@ -22,7 +22,9 @@ shipped inventory a cluster can draw on is:
     support buildings    ms_command_post, ms_watchtower, ms_comms_relay,
                          ms_field_workshop, ms_supply_dump, ms_water_works,
                          ms_rail_platform, ms_pontoon_wharf, ms_mooring_mast,
-                         ms_barricade_set
+                         ms_barricade_set and its three split elements
+                         (ms_barricade_wall, ms_barricade_corner,
+                         ms_barricade_gate), ms_trench_segment
     resource sites       ms_grain_silo, ms_oil_derrick, ms_tank_farm,
                          ms_timber_yard, ms_metal_pit, ms_port_crane
     defenses             ms_staticdefense_s1..s4
@@ -198,6 +200,19 @@ CLUSTER_TEMPLATES = {
             # override path at all.
             ("ms_supply_dump",      2, 1, 2),
             ("ms_staticdefense_s1", 1, 1, 2),
+            # FIELD ENGINEERING (2026-09-17). The units-assets lane split the
+            # barricade kit into a wall, a corner and a gate, and added the
+            # trench segment — four support-family defs that, like the eleven
+            # above, would otherwise be named by no template at all. This is
+            # the cluster that reads as sappers at work, so this is where they
+            # belong; min 1 each for the same coverage reason as the rest of
+            # this table. The town planner places the SAME three defs on a
+            # town's boundary (town_templates.PERIMETER) — that is a different
+            # placer with a different job, and neither reads the other.
+            ("ms_barricade_wall",   2, 1, 3),
+            ("ms_barricade_corner", 1, 1, 2),
+            ("ms_barricade_gate",   1, 1, 1),
+            ("ms_trench_segment",   2, 1, 3),
         ],
         "garrison": [
             ("ms_engineers_s1", 3, 1, 2),

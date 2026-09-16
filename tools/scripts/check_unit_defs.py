@@ -63,7 +63,9 @@ GRAVITY = 130.0            # engine default, elmos/s²; the maps ship no overrid
 # 'y' = height, 'z' = length, 'x' = span, 'ground' = max(x, z).
 SCALE_TABLE = {
     'soldiers':      ('y', [1.8, 1.85, 1.9, 2.1]),
-    'engineers':     ('y', [1.8, 1.85, 1.9, None]),   # s4 is a 20 m crawler by ruling
+    # s3 (6 m works rig, 2026-09-17) and s4 (20 m crawler) are vehicles by
+    # ruling — the humanoid height row only describes s1/s2.
+    'engineers':     ('y', [1.8, 1.85, None, None]),
     'tanks':         ('z', [4.5, 8.5, 12, 26]),
     'artillery':     ('z', [4.5, 7.5, 10.5, 15]),
     'mechs':         ('y', [3, 5, 7.5, 11]),

@@ -91,6 +91,12 @@ Cannons satisfy v²/g ≥ range. Per-scale HP/speed/DPS for the 11×4 classes: r
   `defs_reconciled_spec.lua`, which is about the balance-patch DELTA digest, not def truth.
 
 ## Not done (wrapped early on coordinator directive)
+> CLOSED 2026-09-17 by the forge run on this lane: the three barricade split
+> models, `ms_trench_segment` and the `ms_engineers_s3` rig are built, wired and
+> censused, and the pinned tanks/mechs/soldiers `sizes` corrections are applied
+> with both golden tables re-derived. Still open from this list: wiring the 30
+> orphan models as defs/features. See the lane's 2026-09-17 commit.
+
 - Task 2(c) forge builds: none built. Queue with stems/budgets: `ms_barricade_wall` /
   `ms_barricade_corner` / `ms_barricade_gate` (split the `ms_barricade_set` sample with root offsets
   zeroed, ≤400 tris each, 1024², pieces body[/gate]) — unblocks town-planner §T3;
