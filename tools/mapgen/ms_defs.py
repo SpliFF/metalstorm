@@ -286,7 +286,10 @@ _SCALED_FILES = ("staticdefense.lua", "soldiers.lua", "tanks.lua",
 # The §M1 one-off vehicles: plain literal defs, same shape as civvehicles.lua.
 # transports.lua is deliberately absent — ms_landing_ship is movementclass SHIP
 # and the generator has no water placement, so offering it would only let a
-# template name a def that can never be sited.
+# template name a def that can never be sited. civships.lua (the four civilian
+# hulls, 2026-09-17) is absent for exactly the same reason: every def in it is
+# SHIP, and a harbour town's ferry is a hand-authored scenario's to stage until
+# there is water placement.
 _FLAT_FILES = ("civilians.lua", "civvehicles.lua", "irregulars.lua",
                "logistics.lua", "recon_vehicles.lua", "command_vehicles.lua")
 # The carrier. Read despite being a `fable_*` showcase def and despite being

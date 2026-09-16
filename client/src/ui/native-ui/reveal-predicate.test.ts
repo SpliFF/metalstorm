@@ -4,6 +4,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { parseRevealPredicate } from './reveal-predicate';
 import { UIStore, type DirectiveSummary, type OrgGroupSummary } from './ui-store';
 
@@ -131,5 +134,50 @@ describe('parseRevealPredicate — evaluation', () => {
         expect([t('game:n > 4'), t('game:n < 6'), t('game:n >= 5'),
                 t('game:n <= 5'), t('game:n == 5'), t('game:n != 5')])
             .toEqual([true, true, true, true, true, false]);
+    });
+});
+
+describe('parseRevealPredicate — me: (tier gating, PLAN-beta.md §(b))', () => {
+    it('reads the local player\'s own rulesParam', () => {
+        const store = new UIStore();
+        const gate = parseRevealPredicate('me:rank >= 1')!;
+        expect(gate.paths).toEqual(['gameRulesParams']);
+
+        // Nothing published yet: absent reads as absent, never as 0 >= 1.
+        expect(gate.test(store, ME)).toBe(false);
+
+        store.updateGameRulesParams({ rank_0: 4, rank_3: 0 });
+        expect(gate.test(store, ME)).toBe(false);          // ME is player 3
+        store.updateGameRulesParams({ rank_3: 1 });
+        expect(gate.test(store, ME)).toBe(true);
+        expect(parseRevealPredicate('me:rank >= 3')!.test(store, ME)).toBe(false);
+        store.dispose();
+    });
+});
+
+describe("metalstorm's manifest gates", () => {
+    const manifest = JSON.parse(readFileSync(join(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../../../data/games/metalstorm/ui/metalstorm.ui.json',
+    ), 'utf8')) as { widgets: { id: string; revealOn?: string }[] };
+
+    it('parses every revealOn in the manifest', () => {
+        // A predicate the parser rejects fails OPEN, so a typo here would show
+        // a Recruit the whole HUD and nothing would say so at runtime.
+        for (const w of manifest.widgets) {
+            if (w.revealOn) expect(parseRevealPredicate(w.revealOn), w.id).not.toBeNull();
+        }
+    });
+
+    it('gates the tier-1 and tier-3 panels (PLAN-beta.md)', () => {
+        const gate = (id: string) => manifest.widgets.find((w) => w.id === id)?.revealOn;
+        for (const id of ['scoreboard-panel', 'event-log', 'parley-panel']) {
+            expect(gate(id), id).toBe('me:rank >= 1');
+        }
+        expect(gate('ai-command-panel')).toBe('me:rank >= 3');
+        // The Recruit HUD: these arrive whole, whatever the standing.
+        for (const id of ['focus-hud', 'objective-hud', 'moment-hud', 'mentor-card']) {
+            expect(gate(id), id).toBeUndefined();
+        }
     });
 });

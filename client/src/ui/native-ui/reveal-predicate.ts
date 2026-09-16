@@ -23,6 +23,7 @@
  *     comparison := source op number
  *     source     := "game:" KEY        -- game rules param
  *                 | "team:" KEY        -- local player's team rules param
+ *                 | "me:" KEY          -- game rules param `KEY_<playerId>`
  *                 | "selection.count" | "orgGroups.count" | "directives.count"
  *     op         := ">=" | "<=" | "==" | "!=" | ">" | "<"
  *
@@ -35,6 +36,13 @@
  *     "team:ai_teammates > 0"               onboarding §5 (guidance panel)
  *     "game:score_events >= 1"              onboarding §5 (scoreboard)
  *     "hasOrgGroups && team:authority_pool > 0"
+ *     "me:rank >= 1"                        PLAN-beta.md (tier-gated HUD)
+ *
+ * `me:` is the per-player form: the journey layer publishes standing as
+ * `rank_<playerId>` (game scope, public — a faction can see who is new), so
+ * "my rank" is one key lookup away from an id the loader already holds. It is
+ * a SOURCE and not a new clause kind precisely so tier gating reuses the same
+ * comparison, paths and one-way disclosure as everything else.
  *
  * Deliberately absent: `||`, negation, parentheses, string comparison. Add them
  * when a real manifest needs one — an unused operator is an untested operator.
@@ -117,6 +125,8 @@ function readSource(
         raw = store.gameRulesParam(source.slice(5));
     } else if (source.startsWith('team:')) {
         raw = store.teamRulesParam(identity.teamId, source.slice(5));
+    } else if (source.startsWith('me:')) {
+        raw = store.gameRulesParam(`${source.slice(3)}_${identity.playerId}`);
     } else {
         return undefined;
     }
@@ -130,6 +140,7 @@ function sourcePath(source: string): RevealStorePath | null {
     const count = COUNT_SOURCES[source];
     if (count) return count.path;
     if (source.startsWith('game:')) return 'gameRulesParams';
+    if (source.startsWith('me:')) return 'gameRulesParams';
     if (source.startsWith('team:')) return 'teamRulesParams';
     return null;
 }

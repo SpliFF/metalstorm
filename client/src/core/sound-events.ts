@@ -60,6 +60,32 @@ export function pickUnitDefSound(
     return variants[Math.floor(rng() * variants.length)];
 }
 
+/** Default close→`_far` switch distance (elmos) when the close SoundItem sets
+ *  no explicit `maxdist` — matches the 900-elmo switch PLAN-beta-
+ *  presentation.md's L-AUDIO section specifies. Every authored weapon-fire
+ *  key in gamedata/sounds.lua sets `maxdist = 900` on its close variant, so
+ *  in practice this constant is only the fallback for a key that omits it. */
+const DEFAULT_FAR_SWITCH_DIST = 900;
+
+/** Pick which SoundItem key to play for `name` at `distance` elmos from the
+ *  listener. Past the close item's `maxdist` (falling back to
+ *  DEFAULT_FAR_SWITCH_DIST when unset — data-driven per family, not a global
+ *  constant), hand off to `<name>_far` when that key resolves; otherwise stay
+ *  on the close `name` (silence beyond maxdist is `play()`'s own gate, not
+ *  this function's concern). Pure function of its inputs — `resolveItem` is
+ *  injected so this is unit-testable without an AudioManager. */
+export function chooseSoundKey(
+    name: string,
+    distance: number,
+    resolveItem: (key: string) => SoundItem | undefined,
+): string {
+    const closeItem = resolveItem(name);
+    const switchDist = closeItem?.maxdist ?? DEFAULT_FAR_SWITCH_DIST;
+    if (distance <= switchDist) return name;
+    const farKey = `${name}_far`;
+    return resolveItem(farKey) ? farKey : name;
+}
+
 /** A SoundEvent with its SoundRef already resolved against the def cache. The
  *  ref lookup needs the unit/weapon defs; in the game-processor worker (GW4) the
  *  defs live next to the connection, so the worker resolves the ref there and
@@ -127,9 +153,19 @@ export class SoundEventPlayer {
     }
 
     private playResolvedNow(e: SoundEventInfo, ref: SoundRefInfo): void {
-        // Resolve SoundItem (per gamedata/sounds.lua) if a name is set.
-        const item: SoundItem | undefined =
-            ref.name ? this.audio.resolveSoundItem(ref.name) : undefined;
+        // Resolve SoundItem (per gamedata/sounds.lua) if a name is set. Past
+        // the close item's switch distance, hand off to the family's `_far`
+        // sibling (chooseSoundKey) instead of playing the close clip at
+        // long range.
+        let item: SoundItem | undefined;
+        if (ref.name) {
+            const { x: lx, y: ly, z: lz } = this.audio.getListenerPosition();
+            const dx = e.x - lx, dy = e.y - ly, dz = e.z - lz;
+            const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            const key = chooseSoundKey(ref.name, distance,
+                (n) => this.audio.resolveSoundItem(n));
+            item = this.audio.resolveSoundItem(key);
+        }
 
         // Pick a URL. SoundItem.file wins when present, otherwise the
         // server's already-`.webm` path on the SoundRef. Either way

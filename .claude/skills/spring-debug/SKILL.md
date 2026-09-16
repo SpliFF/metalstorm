@@ -70,9 +70,21 @@ Def / cheat verbs not covered by spring-test's table (argument names verified ag
 | `set_unit_invulnerable` | `{unitId, invulnerable?, roomId?}` |
 | `spawn_at_camera` | `{defName, team?, count?, offset?}` — relays only the camera read, spawns server-side |
 
-**62 tools as of 2026-09-10.** The list above is a map, not the source of truth — `grep -o "name: '[a-z_]*'" tools/debug-mcp/server.js | sort -u` is, and `tools/claude-config/check-skills.sh` diffs the skills against it. Persistent-world driving (`/api/world/*` through `api_request`) is its own skill: **world-layer**.
+**77 tools as of 2026-09-17.** The list above is a map, not the source of truth — `tools/debug-mcp/tools.js` is (the schemas moved out of `server.js` so `gen-docs.mjs` can render them without booting a stdio server), and `tools/claude-config/check-skills.sh` diffs every skill against it.
 
-> **PENDING lane 7 (mcp-control, 2026-09-10):** new `world_*` / `ai_*` / `nl_command` tools are being added to `tools/debug-mcp/server.js`. When they land, list them here and in the `world-layer` / `ai-player` skills (the coordinator fills this in): `world_status`, `world_pois`, `world_faction_*`, `world_stage`, `world_claim`, `ai_health`, `ai_guidance`, `nl_command` — placeholder names, replace with the shipped ones.
+The world, AI and natural-language tools landed 2026-09-17 and have skills of
+their own — they are listed here only so this table is not silently a subset:
+
+| Family | Tools | Skill |
+|--------|-------|-------|
+| World layer | `world_status`, `world_pois`, `world_factions`, `world_claims`, `world_commit`, `world_commit_cancel`, `world_seasons`, `world_pause`, `world_notifications` | **world-layer** |
+| AI players | `ai_list`, `ai_health`, `ai_directives`, `ai_guidance`, `ai_context` | **ai-player** |
+| Natural language | `nl_command` | **ai-player** |
+
+Reach for those skills rather than this table: each family has traps that are
+not visible in a tool name (`world_status {detail:'stats'}` is a write;
+`nl_command` parses and never executes; `ai_guidance` reporting
+`applied:false` is the gadget refusing, which is usually the answer you wanted).
 
 ## Self-diagnosis: SQLite binding & SPRING_DB (read this when probes look wrong)
 

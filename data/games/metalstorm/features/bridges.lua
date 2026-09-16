@@ -185,9 +185,12 @@ local function span(t)
     t.metal          = 0
     t.energy         = 0
     t.customparams   = t.customparams or {}
-    t.customparams.ms_feature_kind = 'bridge'
+    -- Defaults, not overrides: the ancient span below publishes its own kind
+    -- and its own (36 m) pitch, and a posture helper must not silently undo a
+    -- def's measured number.
+    t.customparams.ms_feature_kind = t.customparams.ms_feature_kind or 'bridge'
     t.customparams.chain_axis  = 'z'   -- tiles along local Z (RH, -Z forward)
-    t.customparams.chain_pitch = '24'  -- metres between segment centres; measured, exact
+    t.customparams.chain_pitch = t.customparams.chain_pitch or '24'  -- metres between segment centres; measured, exact
     t.customparams.cosmetic_span = '1' -- non-blocking pending the deck-pathing engine ask
     t.customparams.generator = 'Claude Fable 5 (tools/forge)'
     return t
@@ -230,6 +233,46 @@ return {
             -- it is the surface §2j option A put at y = 0. Model floor at
             -- -3.80 (was 3.80 above a pier-base origin running 0.00..4.15).
             deck_top = '0',
+        },
+    },
+
+    -- ------------------------------------------------------------------
+    -- Batch-04 ancient span (units-assets review finding 9, 2026-09-17)
+    -- ------------------------------------------------------------------
+    -- 12.9 m wide, 13.4 m tall, 36.0 m per segment. One impossible shallow
+    -- monolithic arc with no mid-span supports, a seamless deck carrying an
+    -- active cyan guide-channel, a perfect floating alloy ring threaded
+    -- around mid-span, half-plinth footings at both tile ends so segments
+    -- chain. The ancient counterpart of the two steel spans above, and the
+    -- same posture: cosmetic, non-blocking, unselectable, permanent, floating.
+    --
+    -- ⚠️ THE ORIGIN IS THE FOOTINGS, NOT THE DECK. This model predates §2j
+    -- option A and was never re-authored: measured off the shipped glTF the
+    -- footings sit at y = 0 and the trafficable deck is a 136-vertex plateau
+    -- at y = +7.0 m (56 elmos) across the mid-span. So unlike the two spans
+    -- above, its `deck_top` is POSITIVE — which, under the seating encoding
+    -- the header calls out, means the engine DOES seat this one: it holds the
+    -- y it was staged at instead of being clamped up to the ground. Over
+    -- water that changes nothing (`floating` already holds it). On dry ground
+    -- it is the case seating was built for: stage it at grade and the deck
+    -- reads 7 m above the valley floor, footings on the ground. Value is in
+    -- engine world units (elmos), which is what FeatureSeating::
+    -- ResolveDeckHeight consumes.
+    --
+    -- NOT placed automatically. BRIDGE_SPANS names it under "ancient" the way
+    -- the rail span is named under "rail": available to hand-authored
+    -- scenarios, not chosen by scenariogen's crossing placer, which lays road.
+    ms_anc_bridge_span = span{
+        description = 'Ancient bridge span — self-supporting monolithic arc, 36 m segment',
+        object      = 'ms_anc_bridge_span',
+        footprintx  = 6, footprintz = 18,     -- 12 x 36 m
+        health      = 30000,
+        mass        = 40000,
+        customparams = {
+            ms_feature_kind = 'ancient',      -- overrides span()'s 'bridge': it is both, and the relic reading wins for consumers that filter on kind
+            relic_kind  = 'span',
+            chain_pitch = '36',   -- metres between segment centres; measured, exact (overrides span()'s 24)
+            deck_top    = '56',   -- elmos: the deck plateau at +7.0 m over a footings origin; POSITIVE, so seated
         },
     },
 }

@@ -172,6 +172,21 @@ describe('compileEffect row packing', () => {
     });
 });
 
+describe('SpawnContext.countScale (gfx.particleQuality, L-FX step 5)', () => {
+    it('scales every particle emitter\'s spawn count and rounds to at least 1', () => {
+        const full = compileEffect(LIB, 'boom', ctx());
+        const half = compileEffect(LIB, 'boom', ctx({ countScale: 0.5 }));
+        expect(half.particleCount).toBe(Math.round(full.particleCount * 0.5));
+        expect(half.particleCount).toBeGreaterThanOrEqual(1);
+    });
+
+    it('defaults to 1 (no scaling) when unset', () => {
+        const withUndefined = compileEffect(LIB, 'boom', ctx());
+        const withExplicitOne = compileEffect(LIB, 'boom', ctx({ countScale: 1 }));
+        expect(withUndefined.particleCount).toBe(withExplicitOne.particleCount);
+    });
+});
+
 describe('pack helpers', () => {
     it('packTracer writes the 4×vec4 layout at an offset', () => {
         const out = new Float32Array(2 * TRACER_FLOATS);
