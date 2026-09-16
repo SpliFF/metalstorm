@@ -1,0 +1,292 @@
+/*
+ * welcome.css — the entry flow's shared chrome (`.entry-*`) plus the welcome
+ * and sign-up screens. intro.css and hub.css build on these classes; the
+ * three sheets are injected together (LobbyUI.injectStyles), after lobby.css.
+ *
+ * Spends tokens.css only: stencilled steel plate, Barlow Condensed display,
+ * Plex Mono readouts, hazard yellow for the one primary verb per screen.
+ * `#lobby.lobby-entry` is set by LobbyUI while an entry screen is up so the
+ * flex-centred lobby backdrop becomes a full-bleed stage.
+ */
+
+#lobby.lobby-entry {
+    padding: 0;
+    display: block;
+    background: var(--nui-bg-sunken);
+    color: var(--nui-text);
+    font: var(--nui-font);
+    font-size: 14px;
+}
+
+.entry {
+    position: relative;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    isolation: isolate;
+}
+
+/* The stage: dark glass, a faint diagonal stencil grain, a warm sun-bleach
+   top-left and the phosphor cold ambient bottom-right. Fixed so it never
+   scrolls with a tall screen. */
+.entry-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+        radial-gradient(ellipse 60% 50% at 18% 12%, var(--nui-gold-wash), transparent 70%),
+        radial-gradient(ellipse 50% 45% at 88% 92%, var(--nui-accent-wash), transparent 70%),
+        repeating-linear-gradient(135deg, var(--nui-row-wash) 0 1px, transparent 1px 18px),
+        var(--nui-bg-sunken);
+}
+.entry-backdrop::after {
+    /* one chalk hairline across the top, the plate's rivet row */
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: 56px;
+    height: 1px;
+    background: var(--nui-border);
+}
+
+/* ── top bar ───────────────────────────────────────────────────────── */
+.entry-top {
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 28px;
+}
+.entry-stamp {
+    font: var(--nui-font-display-hi);
+    font-size: 15px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    color: var(--nui-text-dim);
+    white-space: nowrap;
+}
+.entry-stamp i { font-style: normal; color: var(--nui-gold); margin: 0 4px; }
+.entry-top-tools { display: flex; gap: 6px; align-items: center; }
+
+/* ── type ──────────────────────────────────────────────────────────── */
+.entry-kicker {
+    margin: 0 0 8px;
+    font: var(--nui-font-mono-hi);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nui-accent);
+}
+.entry-title {
+    margin: 0 0 18px;
+    font: 700 clamp(64px, 9vw, 128px)/0.92 var(--nui-family-display);
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    color: var(--nui-text-bright);
+}
+.entry-title::after {
+    content: '';
+    display: block;
+    width: 96px; height: 4px;
+    margin-top: 18px;
+    background: var(--nui-gold);
+}
+.entry-lede {
+    margin: 0 0 20px;
+    max-width: 46ch;
+    font-size: 17px;
+    line-height: 1.5;
+    color: var(--nui-text);
+}
+.entry-points { list-style: none; margin: 0; padding: 0; max-width: 52ch; }
+.entry-points li {
+    position: relative;
+    padding: 6px 0 6px 22px;
+    line-height: 1.45;
+    color: var(--nui-text-dim);
+    border-top: 1px solid var(--nui-border);
+}
+.entry-points li:last-child { border-bottom: 1px solid var(--nui-border); }
+.entry-points li::before {
+    content: '';
+    position: absolute;
+    left: 4px; top: 13px;
+    width: 8px; height: 8px;
+    background: var(--nui-gold);
+    clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+.entry-points b { color: var(--nui-text-bright); font-weight: 600; }
+.entry-mono {
+    font: var(--nui-font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--nui-text-faint);
+}
+.entry-hint { margin: 4px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--nui-text-faint); }
+.entry-msg { margin: 0; min-height: 20px; font: var(--nui-font-mono); color: var(--nui-text-dim); }
+.entry-msg.error, .entry-msg.msg.error { color: var(--nui-bad); }
+.entry-msg.ok { color: var(--nui-good); }
+
+/* ── stage + hero + card ───────────────────────────────────────────── */
+.entry-stage {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(360px, 440px);
+    gap: 48px;
+    align-items: center;
+    padding: 32px 64px 48px;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+}
+.entry-stage-narrow { grid-template-columns: minmax(360px, 480px); justify-content: center; }
+.entry-hero { padding-top: 12px; }
+
+.entry-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 22px 24px 20px;
+    background-color: var(--nui-plate-color); background-image: var(--nui-plate);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
+}
+/* rivets: top-level plate only */
+.entry-card::before, .entry-card::after {
+    content: '';
+    position: absolute;
+    top: 6px; width: 5px; height: 5px;
+    background: var(--nui-rivet);
+}
+.entry-card::before { left: 6px; }
+.entry-card::after { right: 6px; }
+.entry-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin: 0 0 4px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--nui-border);
+    font: var(--nui-font-display-hi);
+    font-size: 17px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    color: var(--nui-text-bright);
+}
+
+/* ── fields ────────────────────────────────────────────────────────── */
+.entry-field { display: flex; flex-direction: column; gap: 5px; }
+.entry-field > span, .entry-field-label {
+    font: var(--nui-font-mono-hi);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nui-text-dim);
+}
+.entry-field input,
+.entry-login select.game-select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--nui-bg-sunken);
+    color: var(--nui-accent);
+    border: 1px solid var(--nui-border-sunken);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
+    font: var(--nui-font-mono-hi);
+    font-size: 16px;
+    letter-spacing: 0.02em;
+    outline: none;
+}
+.entry-field input::placeholder { color: var(--nui-text-faint); }
+.entry-field input:focus, .entry-login select.game-select:focus {
+    border-color: var(--nui-accent-dim);
+    box-shadow: var(--nui-edge-sunken), 0 0 0 1px var(--nui-accent-dim);
+}
+.entry-login select.game-select { color: var(--nui-text); appearance: auto; }
+
+/* ── buttons ───────────────────────────────────────────────────────── */
+.entry-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 12px 18px;
+    background: var(--nui-bg-raised);
+    color: var(--nui-text-bright);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
+    font: var(--nui-font-display-hi);
+    font-size: 16px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 120ms ease, filter 120ms ease;
+}
+.entry-btn:hover { background: var(--nui-bg-hover); }
+.entry-btn:disabled { opacity: 0.45; cursor: default; }
+.entry-btn b { font-weight: 700; color: inherit; }
+.entry-btn-primary {
+    background: var(--nui-gold);
+    color: var(--nui-text-on-accent);
+    border-color: transparent;
+}
+.entry-btn-primary:hover { background: var(--nui-gold); filter: brightness(1.08); }
+.entry-btn-primary b { color: inherit; }
+.entry-btn-ghost { background: transparent; border-color: var(--nui-border); color: var(--nui-text); }
+.entry-btn-ghost:hover { background: var(--nui-row-wash); }
+.entry-link {
+    background: transparent;
+    border: 0;
+    padding: 6px 10px;
+    color: var(--nui-text-dim);
+    font: var(--nui-font-display);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: var(--nui-radius);
+}
+.entry-link:hover { background: var(--nui-row-wash); color: var(--nui-text-bright); }
+.entry-inline-link {
+    background: none; border: 0; padding: 0;
+    color: var(--nui-accent); font: inherit; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+}
+.entry-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.entry-divider {
+    display: flex; align-items: center; gap: 10px;
+    margin: 2px 0;
+    font: var(--nui-font-mono); letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--nui-text-faint);
+}
+.entry-divider::before, .entry-divider::after { content: ''; flex: 1; height: 1px; background: var(--nui-border); }
+
+.entry-foot {
+    padding: 14px 28px;
+    border-top: 1px solid var(--nui-border);
+    display: flex; justify-content: center;
+}
+
+/* ── login / sign-up ───────────────────────────────────────────────── */
+.entry-login[data-mode="login"] .signup-only { display: none !important; }
+.entry-login[data-mode="signup"] .login-only { display: none !important; }
+.entry-login .login-faction-group { display: flex; flex-direction: column; gap: 5px; }
+.entry-login .login-faction-desc { min-height: 34px; }
+.entry-login .login-totp-group { display: flex; flex-direction: column; }
+.entry-login .login-guest { text-align: center; margin-top: 14px; }
+
+/* ── the Mission list in watch mode ────────────────────────────────── */
+/* Watch-as lands on the browser with Watch as the primary verb and the
+   create/deploy controls out of the way (lobby.css styles the rest). */
+#lobby.lobby-watch .war-actions .spectate-btn { background: var(--nui-gold); color: var(--nui-text-on-accent); }
+#lobby.lobby-watch .war-actions .join-btn,
+#lobby.lobby-watch #create-room-btn,
+#lobby.lobby-watch #deploy-btn { display: none; }
+
+@media (max-width: 900px) {
+    .entry-stage { grid-template-columns: 1fr; padding: 24px 20px 40px; gap: 28px; }
+    .entry-top { padding: 0 16px; }
+}

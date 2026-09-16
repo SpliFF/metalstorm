@@ -1,0 +1,123 @@
+/* intro.css — the three briefing slides. Builds on welcome.css's .entry-*. */
+.entry-intro { min-height: 100vh; }
+.intro-progress { display: flex; gap: 6px; }
+.intro-progress i { width: 34px; height: 3px; background: var(--nui-border); }
+.entry-intro[data-slide="0"] .intro-progress i:nth-child(1),
+.entry-intro[data-slide="1"] .intro-progress i:nth-child(-n+2),
+.entry-intro[data-slide="2"] .intro-progress i { background: var(--nui-gold); }
+
+.intro-stage {
+    flex: 1;
+    display: grid;
+    padding: 28px 64px 20px;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+}
+.intro-slide {
+    grid-area: 1 / 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(360px, 520px);
+    gap: 40px;
+    align-items: center;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(18px);
+    transition: opacity 220ms ease, transform 220ms ease, visibility 0s linear 220ms;
+}
+.entry-intro[data-slide="0"] .intro-slide[data-slide="0"],
+.entry-intro[data-slide="1"] .intro-slide[data-slide="1"],
+.entry-intro[data-slide="2"] .intro-slide[data-slide="2"] {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition-delay: 0s;
+}
+
+/* The picture plate. The gradient underneath is the placeholder until the
+   game ships `ui/lobby/intro/*.jpg`; a missing image shows it, not a hole. */
+.intro-art {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    min-height: 320px;
+    border: 1px solid var(--nui-hairline);
+    box-shadow: var(--nui-edge);
+    background-size: cover;
+    background-position: center;
+    background-color: var(--nui-bg-head);
+    background-image: linear-gradient(160deg, var(--nui-bg-raised), var(--nui-bg-sunken));
+}
+.intro-art::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 55%, var(--nui-scrim));
+}
+.intro-art-label {
+    position: absolute;
+    left: 14px; bottom: 12px;
+    z-index: 1;
+    padding: 4px 8px;
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-border);
+    font: var(--nui-font-mono-hi);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nui-text-dim);
+}
+.intro-text h2 {
+    margin: 0 0 14px;
+    font: 700 clamp(34px, 3.6vw, 52px)/1.02 var(--nui-family-display);
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    color: var(--nui-text-bright);
+}
+.intro-text p { margin: 0 0 12px; font-size: 16px; line-height: 1.55; color: var(--nui-text); max-width: 52ch; }
+.intro-faction-note { color: var(--nui-text-dim) !important; }
+
+.intro-custom {
+    margin-top: 18px;
+    padding: 14px 16px 16px;
+    background-color: var(--nui-plate-color); background-image: var(--nui-plate);
+    border: 1px solid var(--nui-hairline);
+    box-shadow: var(--nui-edge);
+    display: flex; flex-direction: column; gap: 10px;
+}
+.intro-custom-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font: var(--nui-font-display-hi); font-size: 14px; letter-spacing: var(--nui-track);
+    text-transform: uppercase; color: var(--nui-text-bright);
+}
+.intro-kinds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.intro-kind {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 10px 10px 9px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-border);
+    border-radius: var(--nui-radius);
+    color: var(--nui-text);
+    text-align: left;
+    cursor: pointer;
+    font: var(--nui-font);
+}
+.intro-kind:hover { background: var(--nui-bg-hover); }
+.intro-kind.selected { border-color: var(--nui-gold); background: var(--nui-gold-wash); }
+.intro-kind-glyph { font-size: 20px; line-height: 1; color: var(--nui-gold); }
+.intro-kind-name {
+    font: var(--nui-font-display-hi); font-size: 14px; letter-spacing: var(--nui-track);
+    text-transform: uppercase; color: var(--nui-text-bright);
+}
+.intro-kind-blurb { font-size: 11.5px; line-height: 1.35; color: var(--nui-text-dim); }
+
+.intro-nav {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 14px 64px 24px;
+    max-width: 1400px; width: 100%; margin: 0 auto;
+}
+.intro-nav-status { flex: 1; text-align: center; }
+.entry-intro[data-slide="0"] #intro-back-btn { visibility: hidden; }
+
+@media (max-width: 900px) {
+    .intro-stage, .intro-nav { padding-left: 20px; padding-right: 20px; }
+    .intro-slide { grid-template-columns: 1fr; gap: 20px; }
+    .intro-kinds { grid-template-columns: 1fr 1fr; }
+}

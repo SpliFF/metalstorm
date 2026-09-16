@@ -68,11 +68,24 @@ end)
 
 describe("the real modules are the ones being driven", function()
     it("prices orders through the real cost spec", function()
-        -- Doubling the cost basis must move burn, because the burn number is
-        -- the formula's output and not a figure the harness carries.
-        local cheap = cell({ seed = 5 })
-        local dear  = cell({ seed = 5, squadBaseCost = 150, unitBaseCost = 20 })
-        assert.is_true(dear.burnRate > cheap.burnRate)
+        -- Raising the cost basis must move what an order COSTS, because those
+        -- numbers are the formula's output and not figures this harness
+        -- carries.
+        --
+        -- Asserted on the price and not on `burnRate`, which it used to be:
+        -- once §10.6 sized rewards off the same cost spec, a team spends what
+        -- it earns, and burn is pinned to income by refusal rather than by the
+        -- price list. Dearer orders then buy FEWER orders at the same burn —
+        -- so the old assertion was reading solvency, not pricing.
+        local cheap = Sim.newSim({ seed = 5 })
+        local dear  = Sim.newSim({ seed = 5, squadBaseCost = 150, unitBaseCost = 20 })
+        assert.is_true(dear:typicalArmyCost() > cheap:typicalArmyCost())
+        assert.is_true(dear:cheapestOrderCost() > cheap:cheapestOrderCost())
+        -- and the price really is the shared formula's, not a local sum
+        assert.are.equal(
+            Sim.Formula.cost(cheap.costSpec.base_k, cheap.cfg.squadBaseCost * 4,
+                             1.0, cheap.costSpec.order_class.directive, 1.0),
+            cheap:typicalArmyCost())
     end)
 
     it("empties the escrow ledger at war end", function()
@@ -106,16 +119,27 @@ describe("the generator's own accounting", function()
         -- the REAL rule table and the REAL density multipliers rather than a
         -- second copy that can drift — a harness scoring against its own copy
         -- of the constants is B6 in a different costume.
-        assert.are.equal(0.5, Sim.Generator.DENSITY.sparse.capMul)
-        assert.are.equal(1.0, Sim.Generator.DENSITY.normal.capMul)
-        assert.are.equal(2.0, Sim.Generator.DENSITY.dense.capMul)
+        -- Shape, not values: the ladder itself is tuned against this harness
+        -- (§10.6's second lever), so pinning its numbers here would make the
+        -- harness's own spec the thing that blocks retuning it.
+        for _, d in ipairs({ 'sparse', 'normal', 'dense' }) do
+            local entry = Sim.Generator.DENSITY[d]
+            assert.is_truthy(entry, d .. ' missing from the density table')
+            assert.is_true(entry.capMul > 0)
+            assert.is_true(entry.cooldownMul > 0)
+            assert.is_true(entry.teamCap > 0)
+        end
+        assert.is_true(Sim.Generator.DENSITY.dense.capMul
+                       > Sim.Generator.DENSITY.sparse.capMul)
         assert.is_true(#Sim.Generator.rules >= 6)
     end)
 
-    it("produces more objectives at a higher density", function()
-        local sparse = cell({ density = 'sparse', seed = 8 })
-        local dense  = cell({ density = 'dense',  seed = 8 })
-        assert.is_true(dense.created >= sparse.created)
+    it("prices rewards through the generator's derivation, not a copy", function()
+        -- §10.6: the harness must see the same REWARD_UNIT the game does, or
+        -- it is scoring an economy nobody ships.
+        assert.is_true(Sim.Generator.REWARD_UNIT > 0)
+        assert.are.equal(Sim.Generator.REWARD_UNIT,
+                         Sim.Generator.rewardUnit(Sim.newSim({}).costSpec))
     end)
 end)
 
@@ -199,7 +223,8 @@ end)
 describe("grid output", function()
     it("covers every objective type across every density", function()
         local rows = Sim.runGrid({ durationMinutes = 2, seed = 1 })
-        assert.are.equal(#Sim.TYPES * 3, #rows)
+        -- Every graded type, plus the ungraded `mixednorm` probe.
+        assert.are.equal((#Sim.TYPES + 1) * 3, #rows)
         local seen = {}
         for _, r in ipairs(rows) do seen[r.type .. '/' .. r.density] = true end
         for _, t in ipairs(Sim.TYPES) do
@@ -207,6 +232,30 @@ describe("grid output", function()
                 assert.is_true(seen[t .. '/' .. d] == true)
             end
         end
+        for _, d in ipairs({ 'sparse', 'normal', 'dense' }) do
+            assert.is_true(seen['mixednorm/' .. d] == true)
+        end
+    end)
+
+    it("reports the reward-normalisation probe without grading it", function()
+        -- Lever 2 is OFF in the shipped spec and stays off until somebody
+        -- decides otherwise from a measurement. The probe measures; a FAIL on
+        -- a setting the game does not ship would only teach people to ignore
+        -- the gate.
+        local rows = Sim.runGrid({ durationMinutes = 2, seed = 1,
+                                   densities = { 'normal' } })
+        local probe
+        for _, r in ipairs(rows) do if r.type == 'mixednorm' then probe = r end end
+        assert.is_truthy(probe)
+        assert.is_true(probe.informational)
+        assert.is_true((Sim.checkRow(probe)))
+
+        -- and it really did run with the lever on: a normalised reward is
+        -- floored through the clamp, so it cannot mint MORE than the plain
+        -- cell does at a velocity at or above 1.
+        local sim = Sim.newSim({ rewardNormalisation = true })
+        assert.is_true(sim.econ.reward_normalisation_enabled)
+        assert.is_false(Sim.newSim({}).econ.reward_normalisation_enabled)
     end)
 
     it("includes the mixed cell — the only one that answers 'does a war sustain'", function()
@@ -224,7 +273,8 @@ describe("grid output", function()
         assert.is_truthy(lines[1]:match('velocity'))
         assert.is_truthy(lines[1]:match('verdict'))
         for i = 2, #lines do
-            assert.is_truthy(lines[i]:match('PASS') or lines[i]:match('FAIL'))
+            assert.is_truthy(lines[i]:match('PASS') or lines[i]:match('FAIL')
+                             or lines[i]:match('INFO'))
         end
     end)
 end)

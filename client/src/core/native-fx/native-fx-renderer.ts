@@ -132,6 +132,14 @@ const POOL = {
     shock: 32,
 } as const;
 
+/** Per-pool capacity override (PLAN-beta-presentation L-FX step 5:
+ *  `gfx.particleQuality` → pool caps 8k/24k/50k). Structural — a pool not
+ *  named here keeps its POOL default. Capacity is fixed at construction
+ *  (a WebGL buffer can't be resized live), matching the existing
+ *  `gfx.particleQuality` semantics for the CEG particle system
+ *  (`requiresRestart` in client-settings.ts). */
+export type NativeFxPoolCapacities = Partial<Record<keyof typeof POOL, number>>;
+
 /** Files the renderer needs from shaders/fx/. Exported so callers can drive
  *  their fetch loop off the same list (single source of truth). */
 export const NATIVE_FX_SHADER_FILES = [
@@ -181,14 +189,22 @@ export class NativeFxRenderer {
 
     private width = 0;
     private height = 0;
-    private tracerGen = new Int32Array(POOL.tracer);
-    private trailGen = new Int32Array(POOL.trail);
+    private tracerGen: Int32Array;
+    private trailGen: Int32Array;
     /** Rows the CPU touched since the last draw (row-index ranges per pool),
      *  flushed with one bufferSubData per pool per frame. */
     private dirtyTracer = new Set<number>();
     private dirtyTrail = new Set<number>();
+    /** Global wind drift (elmos/s), added to every particle's position over
+     *  its age (uWind — PLAN-beta-presentation L-FX step 7). Applies to the
+     *  whole particle pass, not per-effect: smoke (long-lived) visibly
+     *  drifts: sparks/fireballs (short-lived) barely move under it. */
+    private wind: [number, number, number] = [0, 0, 0];
 
-    constructor(gl: WebGL2RenderingContext, sources: NativeFxSources, textures: NativeFxTextures) {
+    constructor(
+        gl: WebGL2RenderingContext, sources: NativeFxSources, textures: NativeFxTextures,
+        capacities?: NativeFxPoolCapacities,
+    ) {
         this.gl = gl;
         this.tex = textures;
         this.distortionAvailable = gl.getExtension('EXT_color_buffer_float') !== null;
@@ -196,6 +212,9 @@ export class NativeFxRenderer {
         for (const f of NATIVE_FX_SHADER_FILES) {
             if (!sources[f]) throw new Error(`[native-fx] missing shader source "${f}"`);
         }
+        const cap = { ...POOL, ...capacities };
+        this.tracerGen = new Int32Array(cap.tracer);
+        this.trailGen = new Int32Array(cap.trail);
 
         // ── programs ────────────────────────────────────────────────────────
         this.link('particle', sources['particle.vert.glsl'], sources['particle.frag.glsl']);
@@ -224,12 +243,12 @@ export class NativeFxRenderer {
         // ── instance pools + VAOs (attribute locations match the .glsl
         //    layout(location=N) declarations exactly) ─────────────────────────
         this.pools = {
-            particle: this.makePool(PARTICLE_FLOATS, POOL.particle, 2, 7, true),
-            muzzle:   this.makePool(MUZZLE_FLOATS, POOL.muzzle, 2, 3, true),
-            tracer:   this.makePool(TRACER_FLOATS, POOL.tracer, 2, 4, true),
-            trail:    this.makePool(TRAIL_FLOATS, POOL.trail, 2, 3, true),
+            particle: this.makePool(PARTICLE_FLOATS, cap.particle, 2, 7, true),
+            muzzle:   this.makePool(MUZZLE_FLOATS, cap.muzzle, 2, 3, true),
+            tracer:   this.makePool(TRACER_FLOATS, cap.tracer, 2, 4, true),
+            trail:    this.makePool(TRAIL_FLOATS, cap.trail, 2, 3, true),
             // shockwave.vert has NO aUV: instance attribs start at location 1.
-            shock:    this.makePool(SHOCK_FLOATS, POOL.shock, 1, 2, false),
+            shock:    this.makePool(SHOCK_FLOATS, cap.shock, 1, 2, false),
         };
 
         // ── render targets (sized on first beginFrame/resize) ───────────────
@@ -315,6 +334,12 @@ export class NativeFxRenderer {
         const cpu = this.pools.trail.cpu;
         cpu[o + 10] = 0; cpu[o + 11] = 0;   // invisible (trail has no lifetime attr)
         this.dirtyTrail.add(h.row);
+    }
+
+    /** Set the global wind drift (elmos/s) `uWind` adds to every particle's
+     *  position over its age. Persistent — not per-effect/per-frame. */
+    setWind(x: number, y: number, z: number): void {
+        this.wind = [x, y, z];
     }
 
     counts(): PoolCounts {
@@ -639,6 +664,7 @@ export class NativeFxRenderer {
         gl.uniform3f(u.uCamPos, ...d.camPos);
         gl.uniform1f(u.uAtlasCols, this.tex.atlasCols);
         gl.uniform1f(u.uAtlasRows, this.tex.atlasRows);
+        gl.uniform3f(u.uWind, this.wind[0], this.wind[1], this.wind[2]);
         this.bindTex(0, this.tex.atlas, u.uParticleTex);
         gl.uniform2f(u.uAtlasDimsInv, 1 / this.tex.atlasCols, 1 / this.tex.atlasRows);
         this.bindTex(1, d.depthTex ?? this.tex.atlas, u.uDepthTex);
