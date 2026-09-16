@@ -30,6 +30,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Fresh-process re-capture (`--resume-verify`)](#fresh-process-re-capture---resume-verify)
   - [Resuming across a balance patch](#resuming-across-a-balance-patch-gamedatamigrationslua)
   - [The two-def-load harness](#the-two-def-load-harness-toolsscriptsdef-reconcile-resumesh)
+- [Gadget Lua Tests (`make test-gadget-lua`)](#gadget-lua-tests-make-test-gadget-lua)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -1675,6 +1676,21 @@ refuses to attach. The tree is cloned instead (`cp -Rc`, ~0.2 s on APFS).
 
 Read the arm table the script prints, not the exit code of any single server: every
 headless run exits 134 in the static-destruction abort (PLAN-replay T2-b).
+
+---
+
+## Gadget Lua Tests (`make test-gadget-lua`)
+
+| Family | cwd | busted args |
+|---|---|---|
+| authority | `LuaRules/Gadgets/authority` | `.` |
+| civilians / objectives / parley / regions | `LuaRules/Gadgets/<name>` | `tests/` |
+| gadgets-mock | `LuaRules/Gadgets` | `tests/` |
+| scenario | `data/games/metalstorm` | 11 scenario-cwd specs by name |
+
+`ai/` already covered by `make test-ai-lua`. `gadgets-mock` (149 known errors) and `scenario` (3 failures/1 error) carry known pre-existing red — reported, not fixed.
+
+Exit status is a **regression gate**, not a strict all-green check: each family's fail/error counts are compared against `tools/scripts/gadget-baseline.json`, and the target only exits non-zero if a family gets worse than its recorded baseline (or is missing from it). Run one family with `make test-gadget-lua FAMILY=<name>`; rewrite the baseline (a deliberate act, not something routine testing should ever do) with `make test-gadget-lua-baseline`.
 
 ---
 

@@ -1,59 +1,41 @@
 {
-  "description": "Economy validation grid (PLAN-metalstorm-economy.md §4): batch matrix for tuning ceiling/decay and reward normalisation constants. Runs over {2,4,8} players/side × {sparse,normal,dense} objective density × {aggressive,default,turtle} AI profiles × 4 seeds, simulated 2 weeks each.",
+  "status": "RETIRED 2026-09-17 — this file is a pointer, not a config.",
 
-  "comment": "This is a config TEMPLATE — the batch driver (tools/headless-batch/) expands it into N individual configs by iterating the matrix variables. Each cell is one headless run.",
+  "replaced_by": "data/games/metalstorm/LuaRules/Gadgets/authority/economy_sim.lua",
+  "run_it_with": "node tools/economy-validation.js",
 
-  "matrix": {
-    "playersPerSide": [2, 4, 8],
-    "objectiveDensity": ["sparse", "normal", "dense"],
-    "aiProfile": ["aggressive", "default", "turtle"],
-    "seed": [1001, 1002, 1003, 1004]
-  },
+  "why": [
+    "This was a headless-batch matrix for tuning the economy constants. Every layer of it was dead — PLAN-economy-grid.md §2's autopsy B1-B7, all re-verified 2026-09-17 against source.",
+    "B1: the matrix is not in the batch driver's input format ({matrix:{name:[...]}} vs the {axes:[{path,values}]} expandMatrix wants), so it expanded to ONE run, the template verbatim.",
+    "B2/B3/B4/B5: the map id, the scenario, the aiId and the AI profile named below do not exist. `scenario` and `modoptions` are not headless-manifest fields at all, so every cell would have fallen through to game_start.lua's six-unit stub force with zero AIs.",
+    "B6 is the one that made repair pointless: the economy metrics never reach the stats dump. StatsDump is a fixed 15-field C++ struct with no Lua hook, and velocity/pool-ratio/dead-frames live in a Lua-local inside authority/metrics.lua. tools/economy-validation.js read run.data.economy.teams, a key the engine has never written, so every criterion iterated an empty object and returned true. The grid passed vacuously on ANY dump.",
+    "B7d: gsRNG.SetSeed(18655, true) is hard-coded, so the four-seed axis produced four byte-identical runs.",
+    "All of that follows from measuring the economy from OUTSIDE the sim. The economy is arithmetic — a cost formula, an escrow ledger, rate EMAs, the generator's caps and rewards — and needs no map, units or pathfinder to exercise. The harness now drives those real modules directly in pure Lua, so the numbers are real, the seed axis is real, and a cell runs in milliseconds instead of hours."
+  ],
 
-  "comment_map_rebind": "map/scenario rebound 2026-08-06 by the metalstorm-scenario-maps lane. `meridian_basin_beta` (PLAN-economy-grid.md defect B2) was never a real map id — it was the working name for the beta map that shipped as `meridian_basin`. That map is itself unplayable: its start positions sit in three disconnected components of the VEH/HEAVY passability mask, so armour cannot reach its own victory objective (PLAN-metalstorm-wars.md §7.6). PLAN-economy-grid.md §3's decision to 'run the existing meridian_basin.lua scenario' is therefore void — that scenario is retired. The grid now targets the replacement showcase war. The economy lane still owns whether this map's 7168-elmo square and 16-region graph suit its matrix; this rebind only removes the dangling reference.",
+  "not_covered_by_the_replacement": "Whether units can physically reach the objectives, whether strategos spends the way the player model assumes, and whether a map's regions produce the contest the control rule keys on. Those need a live match and always will — see PLAN-economy-grid.md for the headless-parity work (manifest scenario/modoptions/seed fields, the rulesParams snapshot into the dump) that would be needed to measure them.",
 
-  "baseConfig": {
-    "map": "scorched_crossing_v2.4",
-    "game": "metalstorm",
-    "scenario": "crossing_standoff",
-
-    "comment_slots": "Slots are generated from matrix variables — see batch driver",
-    "aiSlots_template": [
-      {"aiId": "strategic", "team": 0, "profile": "{aiProfile}"},
-      {"aiId": "strategic", "team": 1, "profile": "{aiProfile}"}
-    ],
-
-    "modoptions": {
-      "authority_cost_scale": 1.0,
-      "authority_join_grant": 100,
-      "authority_team_stipend": 0
+  "retired_config": {
+    "comment": "Kept verbatim for provenance only. Do not feed this to anything.",
+    "matrix": {
+      "playersPerSide": [2, 4, 8],
+      "objectiveDensity": ["sparse", "normal", "dense"],
+      "aiProfile": ["aggressive", "default", "turtle"],
+      "seed": [1001, 1002, 1003, 1004]
     },
-
-    "headless": {
-      "tickMode": "uncapped",
-      "stopAt": {
-        "comment": "2 weeks simulated time = 14 days × 24 h/day × 60 min/h × 60 s/min × 30 frames/s",
-        "frame": 36288000
-      },
-      "statsDump": "economy_grid/{playersPerSide}p_{objectiveDensity}_{aiProfile}_s{seed}.json",
-      "stateHashEvery": 54000,
-      "comment_hash": "Every 30 minutes sim time for determinism checks"
+    "baseConfig": {
+      "map": "scorched_crossing_v2.4",
+      "game": "metalstorm",
+      "scenario": "crossing_standoff",
+      "aiSlots_template": [
+        { "aiId": "strategic", "team": 0, "profile": "{aiProfile}" },
+        { "aiId": "strategic", "team": 1, "profile": "{aiProfile}" }
+      ],
+      "modoptions": {
+        "authority_cost_scale": 1.0,
+        "authority_join_grant": 100,
+        "authority_team_stipend": 0
+      }
     }
-  },
-
-  "acceptance": {
-    "comment": "Criteria from PLAN-metalstorm-economy.md §4. A run passes if ALL conditions hold. The grid passes if ≥90% of runs pass.",
-    "velocity_range": [0.6, 1.5],
-    "velocity_after_frame": 2592000,
-    "comment_velocity": "Velocity ∈ [0.6, 1.5] after day 1 (= 86400 s × 30 Hz)",
-
-    "pool_ratio_max": 8,
-    "comment_pool_ratio": "Pool ratio < 8 sustained (checked at end)",
-
-    "dead_team_time_pct_max": 1,
-    "comment_dead_time": "Dead-team time < 1% of runtime (excluding end-game — defined as final 10% of frames)",
-
-    "join_grant_mint_pct_max": 10,
-    "comment_join_grant": "Churn-amplified runs: join grants < 10% of total mint (the grant-inflation check)"
   }
 }

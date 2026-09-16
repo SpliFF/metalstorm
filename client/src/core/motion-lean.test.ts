@@ -300,3 +300,61 @@ describe('MotionLeanRegistry', () => {
         expect(slow.reg.offsetFor(7, 0, 0, 0)!.dx).toBeCloseTo(MAX_ELMOS, 5);
     });
 });
+
+describe('MotionLeanRegistry — impulse (hit-flinch)', () => {
+    it('nudges in the given direction immediately, normalised', () => {
+        const { reg, frame } = mk();
+        reg.impulse(7, 3, 4, 2); // dir (3,4) len 5 -> unit (0.6, 0.8), mag 2 (under the cap)
+        frame(0);
+        const o = reg.offsetFor(7, 0, 0, 0)!;
+        expect(o.dx).toBeCloseTo(0.6 * 2, 5);
+        expect(o.dz).toBeCloseTo(0.8 * 2, 5);
+        expect(o.dHeading).toBe(0);
+    });
+
+    it('clamps magnitude to the impulse cap', () => {
+        const { reg, frame } = mk();
+        reg.impulse(7, 1, 0, 999);
+        frame(0);
+        const o = reg.offsetFor(7, 0, 0, 0)!;
+        expect(o.dx).toBeLessThanOrEqual(3 + 1e-9);
+    });
+
+    it('eases back to null within the ease window', () => {
+        const { reg, frame } = mk();
+        reg.impulse(7, 1, 0, 3);
+        frame(219);
+        expect(reg.offsetFor(7, 0, 0, 0)).not.toBeNull();
+        frame(1);
+        expect(reg.offsetFor(7, 0, 0, 0)).toBeNull();
+    });
+
+    it('ignores a degenerate direction or non-positive magnitude', () => {
+        const { reg, frame } = mk();
+        reg.impulse(7, 0, 0, 3);
+        reg.impulse(8, 1, 0, 0);
+        frame(0);
+        expect(reg.offsetFor(7, 0, 0, 0)).toBeNull();
+        expect(reg.offsetFor(8, 0, 0, 0)).toBeNull();
+    });
+
+    it('sums with an active move-order lean rather than replacing it', () => {
+        const { reg, frame } = mk();
+        reg.onCommandSent({ commandId: CMD_MOVE, unitIds: [7], params: [1000, 0, 0] });
+        frame(RAMP_MS);
+        const leanOnly = reg.offsetFor(7, 0, 0, 0)!.dx;
+        reg.impulse(7, 1, 0, 3);
+        // Same frame's memo is stale; roll to the next one to re-evaluate.
+        frame(0);
+        const combined = reg.offsetFor(7, 0, 0, 0)!;
+        expect(combined.dx).toBeCloseTo(leanOnly + 3, 5);
+    });
+
+    it('drop() clears a pending impulse', () => {
+        const { reg, frame } = mk();
+        reg.impulse(7, 1, 0, 3);
+        reg.drop(7);
+        frame(0);
+        expect(reg.offsetFor(7, 0, 0, 0)).toBeNull();
+    });
+});

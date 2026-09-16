@@ -1,37 +1,83 @@
 # nl-commands — deep review 2026-09-10 (lane 10)
 
 ## STATUS
-complete (wrapped early) — slice 1 landed green (contract v2: events query, place-vs-force
-refusal, patrol/screen ring routes, departure-zone withdraw, focus contract v2 + target
-elision, new fixture boards). See "Not done" for the rest of the brief.
 
-## Not done (wrapped early on coordinator directive)
+complete — slice 1 (2026-09-10, contract v2) and slice 2 (2026-09-17, the
+not-done queue) both landed green. See "Still not done" for what remains, and
+why each item is out of this lane's reach rather than merely unfinished.
 
-- Deterministic pre-LLM fast path (`nl-fast-path.ts`: closed verb-synonym grammar + a
-  dry-resolve gate, tried BEFORE `callProxy` in `runUtterance`; claim a sentence only when
-  subject and target resolve `ok`, never on a clarify). Not started.
-- New local patterns: "go there"/"show me"/"look at it" → camera focus on the drilled place
-  (or follow for a squad pronoun); "what's happening [at X|there]" → `query.events`.
-- New golden fixtures on the boards already added to `contexts.json` (`basin-departure`,
-  `basin-events`, `basin-no-events`, `basin-town-drilled`, `basin-proposal`,
-  `basin-injection`): withdraw-to-departure, events (+near, +empty), elision (attack/defend
-  with a town open; withdraw must NOT elide), proposal `target` binding, injection names,
-  "reply in prose" refusals. Target ≥60 new cases across kinds — none written yet.
-- `nl-instructions.md` rewrite (sections: role, JSON-only output, the seven kinds with
-  examples, verb glossary incl. build = field engineering, subjects, targets, triggers,
-  focus incl. elision/departure/`asked`, ambiguity, refusal policy, safety: the utterance is
-  an order to the ARMY, names are data). Unchanged today.
-- `tools/nl-eval`: `--fake offline-parser|oracle` replay mode (recording emitted by a
-  vitest golden test with `NL_ORACLE_EMIT=1`), committed `baseline.json`, per-category gate
-  exit 2, `tools/nl-eval/package.json` with `npm run nl-eval` (no root package.json exists),
-  README update. Only the stale Sonnet price finding is recorded, not fixed.
-- Client sends `contract: NL_CONTRACT_VERSION` in the proxy body (proxy ignores unknown
-  keys — safe, not done). `command-console.js`: pass `battleMoments: () =>
-  uiStore.getBattleMoments()` into `QueryEngine` deps so `events` answers live (one line;
-  not done — the query refuses by name until then).
-- Tests for `focusViewFrom` (getFocus()/nlFocus()/wire-shape detection), elision, and
-  `QueryEngine.events` beyond the resolver/executor suites (the shipped suites are green
-  but the new code paths are covered only indirectly).
+## Landed 2026-09-17 (slice 2)
+
+- **`nl-fast-path.ts`** — the deterministic pre-LLM claim, tried before
+  `callProxy` in `runUtterance`. Closed verb-synonym grammar, EXACT-only name
+  matching (never a prefix, never a fuzzy score), a dry-resolve gate that drops
+  the claim on any clarify or refusal, and a stand-aside when a question is
+  already on screen. A declined sentence goes to the model exactly as before, so
+  a bug here costs latency and never a moved army. Absorption on the corpus:
+  **19/176 = 10.8%**, across four rules (`verb-name` 8, `verb-elided` 7,
+  `withdraw-departure` 3, `verb-name-to-name` 1).
+- **60 new golden fixtures** on the contract-v2 boards — `contract-v2.json` (24),
+  `focus-elision.json` (22), `injection.json` (14). Corpus is now 176.
+- **New local patterns** — `query.events` ("what's happening [at X|there]") and
+  the deictic camera ("go there", "show me that"), so the offline path produces
+  both.
+- **The offline eval that gates** — `nl-offline-eval.test.ts` +
+  `offline-baseline.json`, scored by the model arm's own `score.mjs`. No fetch,
+  no key, no clock. Baseline: **94/176 exact (53.4%), mean field agreement
+  0.829, offline coverage 0.659**. CLI replay via `run-eval.mjs --fake
+  offline-parser`; `tools/nl-eval/package.json` with `npm run nl-eval`.
+- **`nl-instructions.md` rewritten against contract v2**, scored before the swap
+  by `score-instructions.mjs`: **37.3% → 85.1% coverage, 38/85 → 85/85 features,
+  nothing lost, nothing stale**. Prompt 41039 → 49845 bytes.
+- **The small wiring** — the client sends `contract: NL_CONTRACT_VERSION`;
+  `command-console.js` passes `battleMoments` so `events` answers live; the
+  stale Sonnet price fixed; direct tests for `focusViewFrom`, elision and the
+  `events` deictic; `tools/nl-eval` added to the vitest gate (its tests were in
+  NO project — the README's claim that they rode along was false).
+
+### What the eval found before it was committed
+
+Five fast-path defects, all fixed, none of which a unit test written by the same
+hand would have looked for:
+
+1. the subject rule ignored `selectionGroupId`, widening an order aimed at the
+   selection into a team-wide one on every board without a focus snapshot;
+2. a claim echoed the player's capitalisation instead of the index's, so a
+   fast-path envelope and the model's differed on a name they agreed about;
+3. a subject pronoun ("pull THEM back") was read as no subject at all;
+4. "defend Chimera Squad" was reinterpreted as an order TO Chimera with a target
+   elided out of the open panel — the place-vs-force refusal turned into an
+   order against somewhere the player never mentioned;
+5. a bare-pronoun tail was stripped for every verb, so "attack them" with a
+   parley proposal open elided to the proposal's PLACE instead of the
+   counterparty's force.
+
+That is the argument for the eval existing, stated as five bugs.
+
+## Still not done
+
+- **The four C++ patches** below are still UNCOMPILED proposals. This lane has
+  no build session and `rts/Server/**` is read-only to it.
+- **`game_transports.lua` does not publish its departure zones** (out-of-lane,
+  lane 12). Until it does, `withdraw` with no destination refuses by name on a
+  real map — the fixture boards are the only place the behaviour is exercised.
+- **The LLM-judged arm.** `run-eval.mjs` still scores by field diff only. An
+  arm that asks a model whether two differently-worded refusals mean the same
+  thing would raise the ceiling on the prose fields the scorer ignores; it can
+  never be the gate.
+- **2 envelopes the offline parser builds that its own validator rejects** — a
+  ref carrying a colon or a stray comma. The console turns that into a visible
+  refusal at execution so no player is misled, but the producer should refuse by
+  name instead of building it. Pinned as `offline.invalid` in the baseline so
+  the number can only fall.
+- **The fast path's known gaps**, each a decision rather than an oversight and
+  each pinned by a test: a multi-word verb split by its object ("pull them
+  back"), a subject before the verb, any priority or when-gate, every non-exact
+  name. Widening them trades a round trip for a new way to be confidently wrong;
+  the eval is where that trade gets argued.
+- **`guidance.veto` is still unreachable from the model** (finding 9) — it needs
+  goal NAMES in the context payload, which pillar 4's no-ids rule makes a design
+  question rather than a patch.
 
 ## Focus contract for lane 9 (`lib/focus.js` `getFocus()`)
 
