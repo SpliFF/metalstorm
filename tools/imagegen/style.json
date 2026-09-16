@@ -1,5 +1,5 @@
 {
-  "_doc": "Prompt prefixes per asset class, keyed to data/games/metalstorm/art/DIRECTION.md (of record 2026-09-17). One place to retune the look for every backend at once — style.json is not backend-specific.",
+  "_doc": "Prompt prefixes per asset class, keyed to data/games/metalstorm/art/DIRECTION.md (of record 2026-09-17). One place to retune the look for every backend at once — style.json is not backend-specific. A class may carry a `suffix` (appended after the job prompt) — used where the shared prefix was drowning the job subject in CLIP (biomes all came back as cracked mud, 2026-09-17).",
   "palette": {
     "olive_drab": "#3d3a2e",
     "dust_khaki": "#6b5a3e",
@@ -17,16 +17,17 @@
   "global_negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border",
   "classes": {
     "emblem": {
-      "prefix": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered, isolated on transparent background, screen-printed stencil look, no gradients",
-      "negative": "photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character"
+      "prefix": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients",
+      "negative": "photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern"
     },
     "lobby_background": {
       "prefix": "wide establishing shot, post-collapse dust-bowl battlefield horizon at low warm sun, aerial-perspective haze toward a desaturated horizon, olive-drab and dust-khaki terrain, distant silhouettes of scavenged war machines, cool blue-grey sky, cinematic wide composition, moody atmospheric",
       "negative": "characters in foreground, readable text, UI elements, vibrant sunset colors, lush vegetation"
     },
     "biome": {
-      "prefix": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights",
-      "negative": "perspective, horizon, sky, single large object, vignette, non-uniform lighting"
+      "prefix": "seamless tileable top-down ground texture",
+      "suffix": "post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
+      "negative": "perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers"
     },
     "overlay": {
       "prefix": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting",
