@@ -114,7 +114,7 @@ export function noticeFor(ev: WarStateEvent, rows: WarRow[]): WarNotice | null {
     return {
         roomId: row.id,
         kind: ev.kind,
-        title: row.name || `War ${row.id}`,
+        title: row.name || `Mission ${row.id}`,
         detail,
         cls: CLASS_FOR[ev.kind],
         // A war that came back is joinable now. A hibernated one is joinable

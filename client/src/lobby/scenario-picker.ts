@@ -206,10 +206,10 @@ export function noWarNote(
     return {
         className: 'scenario-note endless',
         text: reason === 'retired'
-            ? 'This map\'s war has been retired — its armies cannot cross it. '
-                + 'Creating a battle here stages no war and it will have no '
+            ? 'This map\'s mission has been retired — its armies cannot cross it. '
+                + 'Creating a battle here stages no mission and it will have no '
                 + 'ending; pick another map for a real match.'
-            : 'No war is authored for this map, so this battle stages none and '
+            : 'No mission is authored for this map, so this battle stages none and '
                 + 'has no ending. Leave by detaching.',
     };
 }
@@ -232,20 +232,20 @@ export function scenarioNote(
     if (!picked) {
         return {
             className: 'scenario-note endless',
-            text: 'No war will be staged, so this battle has no ending. '
+            text: 'No mission will be staged, so this battle has no ending. '
                 + 'Leave by detaching.',
         };
     }
     if (!picked.terminal) {
         return {
             className: 'scenario-note endless',
-            text: 'This war declares no victory objective — it has no ending. '
+            text: 'This mission declares no victory objective — it has no ending. '
                 + 'Leave by detaching.',
         };
     }
     return {
         className: 'scenario-note',
-        text: `Ends when the war's victory objective is completed.`,
+        text: `Ends when the mission's victory objective is completed.`,
     };
 }
 

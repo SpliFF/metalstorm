@@ -997,8 +997,7 @@ export class WorldScreen {
               `${poi.battleStatus === 'active' ? 'Battle in progress' : 'Mission staging'} on <code>${esc(poi.mapId ?? '')}</code></div>` +
               (this.deps.onJoinRoom
                   ? `<div class="world-actions"><button type="button" class="world-btn world-btn-primary" data-act="join-room" data-arg="${poi.warRoomId}">` +
-                    `${poi.battleStatus === 'active' ? 'Watch / join battle' : 'Go to staging Mission'}</button></div>`
-                  : '')
+                    `${poi.battleStatus === 'active' ? 'Watch / join battle' : 'Go to staging mission'}</button></div>`                  : '')
             : poi.mapId
             ? `<div class="world-detail-map">Quiet · battle map <code>${esc(poi.mapId)}</code></div>`
             : '<div class="world-detail-map world-detail-dim">No battle map — world only.</div>';
@@ -1207,8 +1206,7 @@ export class WorldScreen {
                 control = `<div class="world-sub">${esc(claimIneligibleText(e.reason, e))}</div>`;
             }
         }
-        const rule = '<div class="world-sub">Ownership moves at Mission end only to a winning-side faction with a claim filed before the Mission ended; the earliest claim wins, and a defended place never changes hands.</div>';
-        return head + control + this.messageHtml('poi', 'claim') + rule;
+        const rule = '<div class="world-sub">Ownership moves at mission end only to a winning-side faction with a claim filed before the mission ended; the earliest claim wins, and a defended place never changes hands.</div>';        return head + control + this.messageHtml('poi', 'claim') + rule;
     }
 
     private async fileClaim(poi: WorldPoi): Promise<void> {
@@ -1712,8 +1710,7 @@ export class WorldScreen {
         if (!el) return;
         const where = formatLatLon(poi.lat, poi.lon);
         const what = poi.battleStatus === 'active' ? 'battle in progress'
-            : poi.battleStatus === 'staging' ? 'Mission staging'
-            : poi.mapId ? 'battle map' : 'world only';
+            : poi.battleStatus === 'staging' ? 'mission staging'            : poi.mapId ? 'battle map' : 'world only';
         const held = poi.owner ? ` · ${this.factionName(poi.owner)}` : '';
         el.innerHTML = `<strong>${esc(poi.name)}</strong><span>${esc(where)} · ${what}${esc(held)}</span>`;
         el.style.display = '';

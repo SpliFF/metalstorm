@@ -98,7 +98,7 @@ describe('the status line names the war', () => {
         // `war_name` comes from `rooms.GetRoom`, which can miss; the binding
         // that says they are fighting cannot.
         expect(friendStatusLine(row({ username: 'x', presence: 'fighting', war_room_id: 4 })))
-            .toBe('fighting in a war');
+            .toBe('fighting in a mission');
     });
 });
 
@@ -211,7 +211,7 @@ describe('formatFriendJoin', () => {
 
     it('refuses without seating, and each refusal names its own reason', () => {
         for (const [outcome, pattern] of [
-            ['not_in_a_war', /not in a war/],
+            ['not_in_a_war', /not in a mission/],
             ['faction_absent', /no side for your faction/],
             ['side_full', /full/],
             ['no_faction', /no faction/],

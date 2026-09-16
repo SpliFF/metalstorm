@@ -145,7 +145,7 @@ describe('Deploy\'s real contract', () => {
     });
 
     it('an older lobby that never seeds still gets the old sentence', () => {
-        expect(formatDeploy({ ...base, outcome: 'seed' })).toMatch(/create a new war/);
+        expect(formatDeploy({ ...base, outcome: 'seed' })).toMatch(/create a new mission/);
     });
 
     it('a room without a held seat is not enterable and says so', () => {
@@ -159,7 +159,7 @@ describe('Deploy\'s real contract', () => {
 
     it('names the rejoin fall-through to the veteran it happens to', () => {
         const s = formatDeploy({ ...base, room_id: 4, room_name: 'Y', rejoin_fell_through: true, underdog_by: 2 });
-        expect(s).toMatch(/^Your own war could not seat you back, so: deploying to “Y”/);
+        expect(s).toMatch(/^Your own mission could not seat you back, so: deploying to “Y”/);
         expect(s).toMatch(/outnumbered there by 2/);
     });
 });

@@ -1537,7 +1537,7 @@ export class LobbyUI {
         const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement | null;
         if (logoutBtn) {
             logoutBtn.title = 'Logging out ends this guest account — claim it '
-                + 'first to keep your war seats and everything you have earned.';
+                + 'first to keep your mission seats and everything you have earned.';
         }
 
         // A guest must not be offered 2FA, and the reason is a one-way door
@@ -3242,7 +3242,7 @@ export class LobbyUI {
         const options = [
             serverDefault
                 ? `<option value="">${this.esc(serverDefault.displayName)} (default for this map)</option>`
-                : `<option value="">No war (default) — a free-form battle with no ending</option>`,
+                : `<option value="">No mission (default) — a free-form battle with no ending</option>`,
             ...offerable.map(s => {
                 const selAttr = s.id === this.selectedScenarioId ? ' selected' : '';
                 return `<option value="${this.esc(s.id)}"${selAttr}>`
@@ -3366,10 +3366,10 @@ export class LobbyUI {
             // is endless.
             const warn = known && !terminal
                 ? ` <span class="scenario-note endless">(no ending)</span>` : '';
-            parts.push(`War: <strong>${this.esc(label)}</strong>${warn}`);
+            parts.push(`Mission: <strong>${this.esc(label)}</strong>${warn}`);
         } else if (gameHasScenarios) {
             parts.push(
-                `War: <span class="scenario-note endless">none — this war `
+                `Mission: <span class="scenario-note endless">none — this mission `
                 + `cannot end</span>`);
         }
         return parts.length > 0 ? parts.join(' &middot; ') : '';
@@ -3453,15 +3453,15 @@ export class LobbyUI {
             // player to two different places, and the second one is the whole
             // reason the default filter exists.
             const why = this.warFilter === 'my-faction'
-                ? 'No war is fielding your faction right now.'
+                ? 'No mission is fielding your faction right now.'
                 : this.warFilter === 'my-wars'
-                    ? 'You hold no seat in any war yet.'
+                    ? 'You hold no seat in any mission yet.'
                     : this.warFilter === 'friends-here'
                         // Says which fact is missing: presence, not friendship.
                         // "You have no friends" would be wrong for a player
                         // whose friends are simply not fighting right now.
-                        ? 'None of your friends are in a war right now.'
-                        : 'No wars are running.';
+                        ? 'None of your friends are in a mission right now.'
+                        : 'No missions are running.';
             list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
@@ -3540,7 +3540,7 @@ export class LobbyUI {
             // naive "is it full" test gets wrong.
             const canFight = row.returning ||
                 (!!this.myFaction && hasRoomForFaction(row.war, this.myFaction));
-            return renderTemplate(this.templates.browserWarEntry, {
+            return renderTemplate(this.templates.browserMissionEntry, {
                 id: row.id,
                 name: this.esc(row.name),
                 // The ROOM state is dropped once the WAR state is known: a

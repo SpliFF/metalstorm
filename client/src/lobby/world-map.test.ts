@@ -917,12 +917,12 @@ describe('the hover chip summary', () => {
         expect(b.kind).toBe('outpost');
 
         const c = poiSummary(g.pois[2], g);
-        expect(c.stateLabel).toBe('War staging');
+        expect(c.stateLabel).toBe('Mission staging');
         expect(c.stat).toEqual({ label: 'Lands in', value: '6h' });   // the SOONEST window
 
         const d = poiSummary(g.pois[3], g);
         expect(d.stateLabel).toBe('Battle in progress');
-        expect(d.stat).toEqual({ label: 'Battle room', value: '#7' });
+        expect(d.stat).toEqual({ label: 'Battle mission', value: '#7' });
     });
 
     it('knows what is yours', () => {
