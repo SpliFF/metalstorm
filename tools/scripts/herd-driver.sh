@@ -3,7 +3,7 @@
 # No scheduler exists; the hourly LaunchAgent stays disabled. Stop: touch .tasks/driver.stop
 REPO="${REPO:-/Users/shannon/WarriorHut/Projects/springrts-web}"
 INTERVAL="${INTERVAL:-120}"
-export PATH="$HOME/.nvm/versions/node/v22.13.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/v22.13.0/bin:/usr/bin:/bin:$PATH"
 LOG="$REPO/.tasks/logs/driver.log"
 mkdir -p "$REPO/.tasks/logs"
 echo "$(date '+%F %T') driver start pid $$ interval ${INTERVAL}s" >> "$LOG"
