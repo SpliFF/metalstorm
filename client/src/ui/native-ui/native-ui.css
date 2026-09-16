@@ -17,9 +17,13 @@
  * be expressed here go in the game's own stylesheet (declared via the
  * manifest's `styles` array), layered on top of these tokens.
  *
- * Visual language deliberately matches the engine's existing chrome (the
- * economy bar / build menu): dark gradient frames, sunken near-black inputs,
- * 1px bevelled borders, system-ui 12px.
+ * Visual language: the ONE metaphor of `data/games/metalstorm/art/
+ * DIRECTION.md` — a stencilled steel plate. Matte steel panels, 1px chalk
+ * hairline, rivets on top-level panels only, phosphor-on-black recessed
+ * readouts, hazard stripe only on destructive actions, radius <= 2px, no
+ * drop shadows (a 1px inset edge instead). Every colour, typeface and
+ * texture in this file comes from `tokens.css`; naming one here is a test
+ * failure (tokens.test.ts).
  *
  * Occlusion budget (PLAN-native-ui.md "modest compositing" + the HUD's own
  * job of staying out of the way): panels dock to the screen EDGES in fixed
@@ -29,33 +33,12 @@
  */
 
 #ui-root {
-    /* ── palette ───────────────────────────────────────────────────── */
-    --nui-bg: linear-gradient(180deg, #1a1d22 0%, #12151a 100%);
-    --nui-bg-head: #0f1216;
-    --nui-bg-sunken: #0a0c10;
-    --nui-bg-raised: #21262e;
-    --nui-bg-hover: #2b323c;
-
-    --nui-border: #2a2f38;
-    --nui-border-hi: #3a4150;
-    --nui-border-sunken: #05070a;
-
-    --nui-text: #d8dee6;
-    --nui-text-dim: #96a2b0;
-    --nui-text-faint: #6b7684;
-
-    --nui-accent: #4a9eff;
-    --nui-accent-dim: #2f6ba8;
-    --nui-gold: #d4a93a;
-    --nui-good: #6fca7a;
-    --nui-bad: #e06767;
-
-    /* ── type ──────────────────────────────────────────────────────── */
-    --nui-font: 12px/1.4 system-ui, sans-serif;
-    --nui-font-mono: 11px/1.4 ui-monospace, Menlo, monospace;
+    /* Palette, type and texture come from tokens.css (loaded as a real
+       stylesheet by index.html). What lives here is the GEOMETRY this file
+       owns: rail metrics and the occlusion budget. Those numbers are a
+       contract with widget-loader.ts and hud/hud.css — do not move them. */
 
     /* ── metrics ───────────────────────────────────────────────────── */
-    --nui-radius: 4px;
     --nui-gap: 6px;
     --nui-pad: 8px;
     --nui-rail-w: 236px;
@@ -153,7 +136,7 @@
 .nui-panel__body::-webkit-scrollbar-thumb,
 .nui-menu::-webkit-scrollbar-thumb {
     background: var(--nui-border-hi);
-    border-radius: 3px;
+    border-radius: var(--nui-radius);
 }
 .ui-mount-left::-webkit-scrollbar-track,
 .ui-mount-right::-webkit-scrollbar-track,
@@ -169,13 +152,28 @@
     flex-direction: column;
     min-width: 0;
     background: var(--nui-bg);
-    border: 1px solid var(--nui-border);
-    border-top-color: var(--nui-border-hi);
+    border: 1px solid var(--nui-hairline);
     border-radius: var(--nui-radius);
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45);
+    /* No drop shadow — the metaphor's depth is a 1px inset lip. */
+    box-shadow: var(--nui-edge);
     color: var(--nui-text);
     font: var(--nui-font);
     overflow: hidden;
+}
+
+/* Rivets and grime belong to the TOP-LEVEL plate only: a panel folded into
+   another surface (the rung-4 pane) is a section of that plate, not a second
+   one bolted on. Four corner rivets, painted as background layers so nothing
+   is added to the DOM; the grime layer is `none` until an overlay texture
+   exists, at which point every large panel picks it up with no rule change. */
+.ui-mount > .nui-panel {
+    background-image: var(--nui-rivet), var(--nui-rivet), var(--nui-rivet), var(--nui-rivet),
+                      var(--nui-grime), var(--nui-plate);
+    background-position:
+        4px 4px, calc(100% - 4px) 4px, 4px calc(100% - 4px), calc(100% - 4px) calc(100% - 4px),
+        0 0, 0 0;
+    background-size: 6px 6px, 6px 6px, 6px 6px, 6px 6px, auto, auto;
+    background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat, no-repeat;
 }
 
 /* Collapsible headers are real <button>s (widget-loader.ts) so the panels can
@@ -191,11 +189,12 @@
     box-sizing: border-box;
     background: var(--nui-bg-head);
     border: none;
-    border-bottom: 1px solid var(--nui-border);
+    border-bottom: 1px solid var(--nui-hairline);
     border-radius: 0;
     color: var(--nui-text-dim);
-    font: 600 10px/1 system-ui, sans-serif;
-    letter-spacing: 0.08em;
+    font: var(--nui-font-display);
+    font-size: 11px;
+    letter-spacing: var(--nui-track);
     text-transform: uppercase;
     text-align: left;
     user-select: none;
@@ -204,7 +203,7 @@
 
 /* Only collapsible panels advertise the affordance. */
 .nui-panel--collapsible > .nui-panel__head { cursor: pointer; }
-.nui-panel--collapsible > .nui-panel__head:hover { background: #141920; color: var(--nui-text); }
+.nui-panel--collapsible > .nui-panel__head:hover { background: var(--nui-bg-raised); color: var(--nui-text); }
 .nui-panel--collapsible > .nui-panel__head:focus-visible {
     outline: 1px solid var(--nui-accent);
     outline-offset: -2px;
@@ -233,9 +232,10 @@
     min-width: 14px;
     padding: 1px 5px;
     background: var(--nui-accent-dim);
-    border-radius: 7px;
-    color: #eaf3ff;
-    font: 600 9px/1.3 system-ui, sans-serif;
+    border-radius: var(--nui-radius);
+    color: var(--nui-text-bright);
+    font: var(--nui-font-mono-hi);
+    font-size: 9px;
     letter-spacing: 0;
     text-align: center;
 }
@@ -252,7 +252,7 @@
 .nui-panel__body::-webkit-scrollbar { width: 6px; }
 .nui-panel__body::-webkit-scrollbar-thumb {
     background: var(--nui-border-hi);
-    border-radius: 3px;
+    border-radius: var(--nui-radius);
 }
 .nui-panel__body::-webkit-scrollbar-track { background: transparent; }
 
@@ -276,8 +276,9 @@
 .nui-group__title {
     margin: 0 0 4px;
     color: var(--nui-text-faint);
-    font: 600 9px/1 system-ui, sans-serif;
-    letter-spacing: 0.08em;
+    font: var(--nui-font-display);
+    font-size: 10px;
+    letter-spacing: var(--nui-track);
     text-transform: uppercase;
 }
 
@@ -337,9 +338,9 @@
     padding: 3px 6px;
     background: var(--nui-bg-sunken);
     border: 1px solid var(--nui-border-sunken);
-    border-top-color: #1c2028;
-    border-radius: 2px;
-    color: var(--nui-text);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
+    color: var(--nui-accent);
     font: var(--nui-font-mono);
     outline: none;
 }
@@ -347,7 +348,7 @@
 :where(#ui-root) select:focus,
 :where(#ui-root) textarea:focus {
     border-color: var(--nui-accent-dim);
-    box-shadow: 0 0 0 1px var(--nui-accent-dim);
+    box-shadow: var(--nui-edge-sunken), 0 0 0 1px var(--nui-accent-dim);
 }
 :where(#ui-root) input::placeholder { color: var(--nui-text-faint); }
 :where(#ui-root) select { cursor: pointer; }
@@ -366,30 +367,45 @@
     flex: none;
     padding: 4px 10px;
     background: var(--nui-bg-raised);
-    border: 1px solid var(--nui-border-hi);
-    border-radius: 2px;
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
     color: var(--nui-text);
-    font: 600 11px/1.2 system-ui, sans-serif;
+    font: var(--nui-font-display);
+    font-size: 12px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
     white-space: nowrap;
     cursor: pointer;
 }
-.nui-btn:hover:not(:disabled) { background: var(--nui-bg-hover); color: #fff; }
+.nui-btn:hover:not(:disabled) { background: var(--nui-bg-hover); color: var(--nui-text-bright); }
 .nui-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* The affirmative button is a phosphor-edged plate, not a coloured slab:
+   nothing in the chrome is allowed to glow unless it is powered. */
 .nui-btn--primary {
-    background: linear-gradient(180deg, #3f8fe0 0%, #2f6ba8 100%);
-    border-color: #58a6f0;
-    color: #fff;
+    border-color: var(--nui-accent-dim);
+    box-shadow: var(--nui-edge), inset 0 0 0 1px var(--nui-accent-dim);
+    color: var(--nui-accent);
 }
 .nui-btn--primary:hover:not(:disabled) {
-    background: linear-gradient(180deg, #4fa3f5 0%, #3679b8 100%);
+    background: var(--nui-bg-hover);
+    border-color: var(--nui-accent);
+    color: var(--nui-accent);
 }
+
+/* Destructive: a hazard stripe down the left edge and nothing else. It is
+   the ONE place the stripe appears, which is what makes it mean something. */
 .nui-btn--danger {
-    background: #4a2222;
-    border-color: #7a3131;
-    color: #f0c0c0;
+    padding-left: 14px;
+    border-color: var(--nui-bad-fill);
+    background-image: var(--nui-hazard-stripe);
+    background-repeat: no-repeat;
+    background-position: left center;
+    background-size: 5px 100%;
+    color: var(--nui-bad);
 }
-.nui-btn--danger:hover:not(:disabled) { background: #5f2a2a; color: #fff; }
+.nui-btn--danger:hover:not(:disabled) { background-color: var(--nui-bad-wash); color: var(--nui-text-bright); }
 
 /* Full-width disclosure button that opens an inline form. */
 .nui-btn--block { width: 100%; }
@@ -410,8 +426,8 @@
     align-items: center;
     gap: 6px;
     padding: 3px 5px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 2px;
+    background: var(--nui-row-wash);
+    border-radius: var(--nui-radius);
     min-width: 0;
 }
 .nui-list > li.nui-empty {
@@ -434,10 +450,11 @@
 }
 .nui-table th {
     padding: 2px 4px;
-    border-bottom: 1px solid var(--nui-border);
+    border-bottom: 1px solid var(--nui-hairline);
     color: var(--nui-text-faint);
-    font: 600 9px/1.2 system-ui, sans-serif;
-    letter-spacing: 0.06em;
+    font: var(--nui-font-display);
+    font-size: 10px;
+    letter-spacing: var(--nui-track);
     text-transform: uppercase;
     text-align: right;
 }
@@ -462,50 +479,56 @@
     width: 100%;
     min-width: 24px;
     background: var(--nui-bg-sunken);
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
     overflow: hidden;
 }
 .nui-meter__fill {
     height: 100%;
-    background: linear-gradient(90deg, var(--nui-accent-dim), var(--nui-accent));
+    background: var(--nui-accent);
 }
 
 .nui-badge {
     flex: none;
     padding: 1px 5px;
     background: var(--nui-bg-raised);
-    border-radius: 7px;
+    border-radius: var(--nui-radius);
     color: var(--nui-text-dim);
-    font: 600 9px/1.4 system-ui, sans-serif;
+    font: var(--nui-font-display);
+    font-size: 10px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
     white-space: nowrap;
 }
-.nui-badge--good { background: rgba(111, 202, 122, 0.16); color: var(--nui-good); }
-.nui-badge--bad { background: rgba(224, 103, 103, 0.16); color: var(--nui-bad); }
-.nui-badge--accent { background: var(--nui-accent-dim); color: #eaf3ff; }
-.nui-badge--gold { background: rgba(212, 169, 58, 0.16); color: var(--nui-gold); }
+.nui-badge--good { background: var(--nui-good-wash); color: var(--nui-good); }
+.nui-badge--bad { background: var(--nui-bad-wash); color: var(--nui-bad); }
+.nui-badge--accent { background: var(--nui-accent-dim); color: var(--nui-text-bright); }
+.nui-badge--gold { background: var(--nui-gold-wash); color: var(--nui-gold); }
 
 /* Clickable token in a composed sentence (command composer slots). */
 .nui-chip {
     flex: none;
     padding: 3px 9px;
     background: var(--nui-bg-raised);
-    border: 1px solid var(--nui-border-hi);
-    border-radius: 10px;
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
     color: var(--nui-text);
-    font: 600 11px/1.3 system-ui, sans-serif;
+    font: var(--nui-font-display);
+    font-size: 12px;
+    letter-spacing: var(--nui-track);
     white-space: nowrap;
     cursor: pointer;
 }
 .nui-chip:hover { background: var(--nui-bg-hover); border-color: var(--nui-accent-dim); }
 .nui-chip--filled {
-    background: rgba(74, 158, 255, 0.18);
+    background: var(--nui-accent-wash);
     border-color: var(--nui-accent-dim);
-    color: #cfe4ff;
+    color: var(--nui-accent);
 }
 .nui-chip--required {
-    background: rgba(224, 103, 103, 0.14);
-    border-color: #6d3535;
-    color: #efbdbd;
+    background: var(--nui-bad-wash);
+    border-color: var(--nui-bad-fill);
+    color: var(--nui-bad);
 }
 .nui-chip--optional {
     border-style: dashed;
@@ -516,12 +539,16 @@
 .nui-stat {
     display: inline-flex;
     align-items: baseline;
-    gap: 4px;
+    gap: 5px;
+    padding: 1px 6px;
+    background: var(--nui-bg-sunken);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
     font: var(--nui-font-mono);
     white-space: nowrap;
 }
-.nui-stat__label { color: var(--nui-text-faint); font-size: 10px; }
-.nui-stat__value { color: var(--nui-gold); font-weight: 700; font-size: 13px; }
+.nui-stat__label { color: var(--nui-text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: var(--nui-track); }
+.nui-stat__value { color: var(--nui-accent); font: var(--nui-font-mono-hi); font-size: 13px; }
 
 /* ── dropdown menu (composer slot pickers) ─────────────────────────── */
 
@@ -532,19 +559,19 @@
     max-height: 220px;
     overflow-y: auto;
     padding: 3px;
-    background: #161a20;
-    border: 1px solid var(--nui-border-hi);
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-hairline);
     border-radius: var(--nui-radius);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--nui-edge);
 }
 .nui-menu__item {
     padding: 4px 8px;
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
     color: var(--nui-text);
     font-size: 11px;
     cursor: pointer;
 }
-.nui-menu__item:hover { background: var(--nui-accent-dim); color: #fff; }
+.nui-menu__item:hover { background: var(--nui-accent-dim); color: var(--nui-text-bright); }
 
 /* ── toasts ────────────────────────────────────────────────────────── */
 
@@ -565,10 +592,10 @@
 }
 .nui-toast {
     padding: 4px 10px;
-    background: rgba(16, 19, 24, 0.94);
-    border: 1px solid var(--nui-border-hi);
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-hairline);
     border-left-width: 3px;
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
     font-size: 11px;
     white-space: nowrap;
     animation: nui-toast-in 0.15s ease;
@@ -654,19 +681,19 @@
     gap: 8px;
     min-width: 0;
     padding: 4px 10px;
-    background: rgba(16, 19, 24, 0.9);
-    border: 1px solid var(--nui-border-hi);
-    border-radius: 12px;
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
     color: var(--nui-text);
     font: var(--nui-font);
     text-align: left;
     cursor: pointer;
 }
-.nui-dd__chip:hover { background: rgba(35, 41, 50, 0.94); border-color: var(--nui-accent-dim); }
+.nui-dd__chip:hover { background: var(--nui-bg-hover); border-color: var(--nui-accent-dim); }
 .nui-dd.is-open > .nui-dd__row > .nui-dd__chip {
     border-color: var(--nui-accent-dim);
-    border-bottom-left-radius: 2px;
-    border-bottom-right-radius: 2px;
+    border-bottom-color: transparent;
 }
 
 .nui-dd__title {
@@ -674,18 +701,22 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 700;
+    font: var(--nui-font-display-hi);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
 }
 
 .nui-dd__state {
     flex: none;
     padding: 1px 6px;
     background: var(--nui-bg-raised);
-    border-radius: 7px;
+    border-radius: var(--nui-radius);
     color: var(--nui-text-dim);
-    font: 600 9px/1.4 system-ui, sans-serif;
+    font: var(--nui-font-display);
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--nui-track);
 }
 .nui-dd__state[hidden] { display: none; }
 
@@ -707,9 +738,9 @@
     color: var(--nui-text-faint);
     font-size: 9px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--nui-track);
 }
-.nui-dd__stat-value { color: var(--nui-text); font-weight: 700; font-size: 12px; }
+.nui-dd__stat-value { color: var(--nui-accent); font: var(--nui-font-mono-hi); font-size: 12px; }
 .nui-dd__stat-value--good { color: var(--nui-good); }
 .nui-dd__stat-value--bad { color: var(--nui-bad); }
 .nui-dd__stat-value--accent { color: var(--nui-accent); }
@@ -729,6 +760,7 @@
     background: var(--nui-bg);
     border: 1px solid var(--nui-accent-dim);
     border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
     /* Rung 2 is a handful of facts, never a scrolling document. The cap is
        what stops a context panel growing into the resident data panel the
        directive rejects; anything that needs more room is a rung-4 surface
@@ -755,9 +787,10 @@
     flex: none;
     min-width: 62px;
     color: var(--nui-text-faint);
+    font: var(--nui-font-display);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--nui-track);
 }
 .nui-dd__fact-value {
     flex: 1 1 auto;
@@ -773,7 +806,7 @@
     flex-wrap: wrap;
     gap: 4px;
     padding-top: 5px;
-    border-top: 1px solid var(--nui-border);
+    border-top: 1px solid var(--nui-hairline);
 }
 .nui-dd__actions[hidden] { display: none; }
 
@@ -845,7 +878,7 @@
 }
 
 @keyframes nui-objective-flash {
-    0%, 100% { background: rgba(16, 19, 24, 0.9); }
+    0%, 100% { background: var(--nui-bg-float); }
     50%      { background: var(--nui-accent-dim); }
 }
 
@@ -942,7 +975,7 @@
     width: 22px;
     height: 22px;
     padding: 0;
-    background: rgba(16, 19, 24, 0.82);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bad);
     border-radius: 50%;
     color: var(--nui-bad);
@@ -978,8 +1011,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     padding: 3px 9px;
-    background: rgba(16, 19, 24, 0.9);
-    border: 1px solid var(--nui-border);
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-hairline);
     border-left: 3px solid var(--nui-gold);
     border-radius: var(--nui-radius);
     color: var(--nui-text);
@@ -1018,9 +1051,9 @@
     display: flex;
     flex-direction: column;
     background: var(--nui-bg);
-    border: 1px solid var(--nui-border-hi);
+    border: 1px solid var(--nui-hairline);
     border-radius: var(--nui-radius);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--nui-edge);
     pointer-events: auto;
     z-index: 40;
 }
@@ -1032,7 +1065,7 @@
     gap: var(--nui-gap);
     padding: 4px 6px;
     background: var(--nui-bg-head);
-    border-bottom: 1px solid var(--nui-border);
+    border-bottom: 1px solid var(--nui-hairline);
 }
 .nui-global__tabs { display: flex; gap: 2px; flex: 1; }
 
@@ -1042,14 +1075,17 @@
     border: 1px solid transparent;
     border-radius: var(--nui-radius);
     color: var(--nui-text-dim);
-    font: var(--nui-font);
+    font: var(--nui-font-display);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
     cursor: pointer;
 }
 .nui-global__tab:hover { color: var(--nui-text); background: var(--nui-bg-hover); }
 .nui-global__tab.is-active {
     color: var(--nui-text);
     background: var(--nui-bg-raised);
-    border-color: var(--nui-border-hi);
+    border-color: var(--nui-hairline);
 }
 .nui-global__tab[hidden] { display: none; }
 
@@ -1089,7 +1125,8 @@
     padding: 3px 6px;
     background: var(--nui-bg-sunken);
     border-left: 3px solid var(--nui-border-hi);
-    border-radius: 2px;
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
 }
 .nui-log__row--good { border-left-color: var(--nui-good); }
 .nui-log__row--bad { border-left-color: var(--nui-bad); }
@@ -1111,7 +1148,7 @@
     color: var(--nui-accent);
     font: var(--nui-font-mono);
 }
-.nui-briefing__title { margin: 4px 0 0; font-size: 13px; }
+.nui-briefing__title { margin: 4px 0 0; font: var(--nui-font-display-hi); font-size: 16px; letter-spacing: var(--nui-track); text-transform: uppercase; }
 .nui-briefing__subtitle { margin: 0; color: var(--nui-text-dim); font-style: italic; }
 .nui-briefing__para { margin: 0; color: var(--nui-text-dim); line-height: 1.5; }
 .nui-briefing__tips-head { margin: 6px 0 0; font-size: 11px; color: var(--nui-text-faint); }
@@ -1141,11 +1178,12 @@ button.ms-authority-bar:focus-visible { outline: 1px solid var(--nui-accent); ou
 .ms-auth-ledger__head {
     margin-top: 4px;
     padding-top: 4px;
-    border-top: 1px solid var(--nui-border);
+    border-top: 1px solid var(--nui-hairline);
     color: var(--nui-text-faint);
+    font: var(--nui-font-display);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--nui-track);
 }
 .ms-auth-ledger__row--award .nui-dd__fact-value,
 .ms-auth-ledger__row--refund .nui-dd__fact-value { color: var(--nui-good); }

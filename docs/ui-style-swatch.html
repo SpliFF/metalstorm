@@ -1,0 +1,298 @@
+<!doctype html>
+<!--
+  ui-style-swatch.html — every design-system primitive on one page, with no
+  game stack behind it (L-UI-DS has no live server).
+
+  Serve it, don't open it from file://: tokens.css asks for `/fonts/*.woff2`,
+  which only resolves when `client/public/` is the web root. From the repo:
+
+      ln -s client/public/fonts /tmp/swatch/fonts   # or serve client/public
+      python3 -m http.server -d . 8099              # then /docs/ui-style-swatch.html
+
+  Under `vite dev` (port 8012) both paths already resolve as-is.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metalstorm UI — stencilled steel plate</title>
+    <link rel="stylesheet" href="../client/src/ui/native-ui/tokens.css" />
+    <link rel="stylesheet" href="../client/src/ui/native-ui/native-ui.css" />
+    <link rel="stylesheet" href="../client/src/ui/hud/hud.css" />
+    <link rel="stylesheet" href="../data/games/metalstorm/ui/metalstorm.ui.css" />
+    <style>
+      /* Swatch-only scaffolding. Nothing here is part of the design system. */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        /* Stand-in for the battle behind the HUD: dust-bowl ground values. */
+        background:
+          radial-gradient(120% 80% at 50% 0%, #6b5a3e 0%, #3d3a2e 55%, #22231d 100%);
+        min-height: 100vh;
+        padding: 24px;
+      }
+      #ui-root { display: block; }
+      .ui-mount { position: static; }
+      .sheet {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .col { width: 300px; display: flex; flex-direction: column; gap: 8px; }
+      h1 {
+        font: var(--nui-font-display-hi);
+        font-size: 28px;
+        letter-spacing: var(--nui-track);
+        text-transform: uppercase;
+        color: var(--nui-text);
+        margin-bottom: 4px;
+      }
+      h1 + p {
+        font: var(--nui-font);
+        color: var(--nui-text-dim);
+        margin-bottom: 20px;
+        max-width: 70ch;
+      }
+      .swatches { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 20px; }
+      .sw {
+        width: 92px; height: 52px;
+        display: flex; align-items: flex-end;
+        padding: 3px 4px;
+        border: 1px solid var(--nui-hairline);
+        font: var(--nui-font-mono);
+        font-size: 9px;
+        color: var(--ms-chalk);
+        text-shadow: 0 1px 2px #000;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Stencilled steel plate</h1>
+    <p>
+      Matte steel panels, 1px chalk hairline, corner rivets on top-level panels only,
+      phosphor-on-black recessed readouts, hazard stripe only on destructive actions,
+      radius 2px, no drop shadows. Palette and type of record:
+      <code>data/games/metalstorm/art/DIRECTION.md</code>.
+    </p>
+
+    <div class="swatches">
+      <div class="sw" style="background: var(--ms-olive)">olive-drab</div>
+      <div class="sw" style="background: var(--ms-khaki)">dust khaki</div>
+      <div class="sw" style="background: var(--ms-bone)">bleached bone</div>
+      <div class="sw" style="background: var(--ms-steel)">worn steel</div>
+      <div class="sw" style="background: var(--ms-steel-lit)">scuffed steel</div>
+      <div class="sw" style="background: var(--ms-rust)">rust</div>
+      <div class="sw" style="background: var(--ms-hazard)">hazard</div>
+      <div class="sw" style="background: var(--ms-chalk); color: var(--ms-steel); text-shadow: none">chalk</div>
+      <div class="sw" style="background: var(--ms-hot)">hot orange</div>
+      <div class="sw" style="background: var(--ms-phosphor); color: var(--ms-steel); text-shadow: none">phosphor</div>
+      <div class="sw" style="background: var(--ms-blood)">blood red</div>
+      <div class="sw" style="background: var(--ms-green)">signal green</div>
+    </div>
+
+    <div id="ui-root">
+      <div class="sheet">
+        <!-- ── rail: panels, lists, controls ───────────────────────── -->
+        <div class="ui-mount ui-mount-left col">
+          <section class="nui-panel nui-panel--collapsible">
+            <button class="nui-panel__head">
+              <span class="nui-panel__caret">▾</span>
+              <span class="nui-panel__title">Objectives</span>
+              <span class="nui-panel__badge">3</span>
+            </button>
+            <div class="nui-panel__body">
+              <ul class="nui-list ms-obj-list">
+                <li class="ms-obj ms-obj--strategic">
+                  <div class="ms-obj__line">
+                    <span class="ms-obj__icon">◆</span>
+                    <span class="ms-obj__type">Hold Ridgeline <span class="ms-obj-sub">sector 4</span></span>
+                    <span class="nui-badge nui-badge--gold">120</span>
+                  </div>
+                  <div class="nui-meter"><div class="nui-meter__fill" style="width: 62%"></div></div>
+                </li>
+                <li class="ms-obj is-suggested">
+                  <div class="ms-obj__line">
+                    <span class="ms-obj__icon">▲</span>
+                    <span class="ms-obj__type">Extract Survey Team</span>
+                    <span class="nui-badge nui-badge--accent">Yours</span>
+                  </div>
+                  <div class="nui-meter"><div class="nui-meter__fill" style="width: 18%"></div></div>
+                </li>
+                <li class="ms-obj ms-obj--outcome is-complete">
+                  <div class="ms-obj__line">
+                    <span class="ms-obj__icon">■</span>
+                    <span class="ms-obj__type">Escort Convoy</span>
+                    <span class="ms-obj__outcome-tag">complete</span>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="nui-panel">
+            <button class="nui-panel__head"><span class="nui-panel__title">Standing</span></button>
+            <div class="nui-panel__body">
+              <div class="nui-group">
+                <h4 class="nui-group__title">Pools</h4>
+                <div class="nui-row">
+                  <span class="nui-stat"><span class="nui-stat__label">Auth</span><span class="nui-stat__value">418</span></span>
+                  <span class="nui-stat"><span class="nui-stat__label">Team</span><span class="nui-stat__value">1 240</span></span>
+                </div>
+              </div>
+              <div class="nui-group">
+                <h4 class="nui-group__title">Controls</h4>
+                <div class="nui-row">
+                  <label class="nui-field"><span>Callsign</span><input type="text" value="HALBERD-2" /></label>
+                </div>
+                <div class="nui-row">
+                  <label class="nui-field"><span>Stance</span>
+                    <select><option>Hold</option><option>Advance</option></select>
+                  </label>
+                </div>
+                <div class="nui-row">
+                  <button class="nui-btn nui-btn--primary">Commit</button>
+                  <button class="nui-btn">Clear</button>
+                  <button class="nui-btn nui-btn--danger">Abort</button>
+                </div>
+                <div class="nui-row">
+                  <button class="nui-btn nui-btn--sm">Preset</button>
+                  <button class="nui-btn nui-btn--sm" disabled>Disabled</button>
+                </div>
+              </div>
+              <div class="nui-group">
+                <h4 class="nui-group__title">Signals</h4>
+                <div class="nui-row">
+                  <span class="nui-badge">idle</span>
+                  <span class="nui-badge nui-badge--good">nominal</span>
+                  <span class="nui-badge nui-badge--bad">lost</span>
+                  <span class="nui-badge nui-badge--gold">alert</span>
+                </div>
+                <div class="nui-row">
+                  <span class="nui-chip nui-chip--filled">3rd Armour</span>
+                  <span class="nui-chip nui-chip--required">target</span>
+                  <span class="nui-chip nui-chip--optional">by 04:00</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ── rail: table, log, toasts ─────────────────────────────── -->
+        <div class="ui-mount ui-mount-right col">
+          <section class="nui-panel">
+            <button class="nui-panel__head"><span class="nui-panel__title">Scoreboard</span></button>
+            <div class="nui-panel__body">
+              <table class="nui-table">
+                <thead><tr><th>Player</th><th>Kills</th><th>Lost</th></tr></thead>
+                <tbody>
+                  <tr class="ms-score-teamhead is-own-team"><td colspan="3">Compact — 2nd Column</td></tr>
+                  <tr class="is-self"><td class="ms-score-player">halberd</td><td>14</td><td>3</td></tr>
+                  <tr><td class="ms-score-player">verity-long-callsign</td><td>9</td><td>7</td></tr>
+                  <tr class="ms-score-teamhead"><td colspan="3">Union</td></tr>
+                  <tr><td class="ms-score-player">dogleg</td><td>11</td><td>6</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="nui-panel">
+            <button class="nui-panel__head"><span class="nui-panel__title">Events</span></button>
+            <div class="nui-panel__body">
+              <div class="nui-log">
+                <div class="nui-log__row nui-log__row--accent"><span class="nui-log__when">4:12</span><span class="nui-log__text">Contact, grid 18-4</span></div>
+                <div class="nui-log__row nui-log__row--good"><span class="nui-log__when">4:31</span><span class="nui-log__text">Ridgeline held</span></div>
+                <div class="nui-log__row nui-log__row--bad"><span class="nui-log__when">5:02</span><span class="nui-log__text">Convoy lead destroyed</span></div>
+              </div>
+            </div>
+          </section>
+
+          <div class="nui-toasts" style="position: static">
+            <div class="nui-toast nui-toast--good">+40 authority</div>
+            <div class="nui-toast nui-toast--bad">Refused: insufficient standing</div>
+          </div>
+        </div>
+
+        <!-- ── drilldown ladder + rung 4 ────────────────────────────── -->
+        <div class="col" style="width: 380px">
+          <div class="nui-objectives" style="max-width: none">
+            <div class="nui-objectives__stack">
+              <div class="nui-dd is-victory">
+                <div class="nui-dd__row">
+                  <button class="nui-dd__chip">
+                    <span class="nui-dd__title">Hold Ridgeline</span>
+                    <span class="nui-dd__state">active</span>
+                    <span class="nui-dd__stats">
+                      <span class="nui-dd__stat"><span class="nui-dd__stat-label">hold</span><span class="nui-dd__stat-value">62%</span></span>
+                    </span>
+                    <span class="nui-dd__caret">▾</span>
+                  </button>
+                </div>
+              </div>
+              <div class="nui-dd is-open">
+                <div class="nui-dd__row">
+                  <button class="nui-dd__chip">
+                    <span class="nui-dd__title">3rd Armour</span>
+                    <span class="nui-dd__state">engaged</span>
+                    <span class="nui-dd__stats">
+                      <span class="nui-dd__stat"><span class="nui-dd__stat-label">str</span><span class="nui-dd__stat-value">7/12</span></span>
+                    </span>
+                    <span class="nui-dd__caret">▴</span>
+                  </button>
+                </div>
+                <div class="nui-dd__panel">
+                  <p class="nui-dd__prose">Dug in on the south spur. Taking indirect fire from the quarry; ammunition state amber.</p>
+                  <div class="nui-dd__body">
+                    <div class="nui-dd__fact"><span class="nui-dd__fact-label">Position</span><span class="nui-dd__fact-value">18-4 / spur</span></div>
+                    <div class="nui-dd__fact"><span class="nui-dd__fact-label">Orders</span><span class="nui-dd__fact-value">hold, fire at will</span></div>
+                  </div>
+                  <div class="nui-dd__actions">
+                    <button class="nui-btn nui-btn--sm nui-go-there">Go there</button>
+                    <button class="nui-btn nui-btn--sm">Reassign</button>
+                    <button class="nui-btn nui-btn--sm nui-btn--danger">Withdraw</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="nui-access">
+            <button class="nui-access__summary">Ridgeline: 62% held, 2 objectives open</button>
+            <button class="nui-access__btn is-open">Mission</button>
+          </div>
+
+          <div class="nui-global" style="position: static; transform: none; width: 100%; max-height: none">
+            <div class="nui-global__header">
+              <div class="nui-global__tabs">
+                <button class="nui-global__tab is-active">Events</button>
+                <button class="nui-global__tab">Reports</button>
+                <button class="nui-global__tab">Board</button>
+              </div>
+              <button class="nui-global__close">✕</button>
+            </div>
+            <div class="nui-global__body">
+              <div class="nui-global__pane">
+                <div class="nui-briefing">
+                  <div class="nui-briefing__clock">T+05:12</div>
+                  <h3 class="nui-briefing__title">Ridgeline</h3>
+                  <p class="nui-briefing__subtitle">Compact 2nd Column — support mission</p>
+                  <p class="nui-briefing__para">The ridge is the only road east that a tracked column can take. Hold it until the survey team is clear, then fall back through the quarry.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── HUD shells (hud.css) ───────────────────────────────────── -->
+    <div style="display: flex; gap: 16px; align-items: flex-start; margin-top: 20px">
+      <div class="hud-panel" style="min-width: 220px">
+        <div style="font: var(--nui-font-display); font-size: 13px; letter-spacing: var(--nui-track); text-transform: uppercase; color: var(--nui-text)">4 units selected</div>
+        <div style="font: var(--nui-font-mono); color: var(--nui-text-dim)">ms_tanks_s3 ×3 · ms_engineers_s4 ×1</div>
+      </div>
+      <button id="hud-quit-btn" style="margin-left: 0">Leave mission</button>
+      <div id="hud-speed" style="position: static; transform: none">×2.0</div>
+      <div id="hud-help" style="position: static">Drag to select · Right-click to order · Esc for menu</div>
+    </div>
+  </body>
+</html>
