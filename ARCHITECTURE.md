@@ -320,6 +320,7 @@ ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
 | `core/weapon-fx-resolver.ts` | Pure weapon def → `effects/weapon-fx.json` slots (exact → `defaults[weapontype]` → `__fallback`, case-insensitive) + the `NativeFxSink` interface the dispatch sites hold. |
 | `core/native-fx/fx-game-loader.ts` | The game's native-FX pass: fetches the authored GLSL + effect JSON over the game VFS and draws `NativeFxRenderer.renderInto` from `scene.onAfterRenderingGroupObservable`. Null for games with no `effects/` library. |
 | `core/native-fx/fx-atlas-placeholder.ts` | Procedural stand-in FX atlas + trail strips, canvas-agnostic (OffscreenCanvas in the worker, DOM canvas on the stage). |
+| `core/decal-trails.ts` | Per-unit track **trail polylines** + centripetal Catmull-Rom ribbon tessellation (PLAN-decal-tracks §2), the geometry source for `decal-overlay.ts`'s continuous (tread/wheel) track bake — one joint-free triangle strip per trail with world-space arc length `s` as the pattern parameter, per-point age fade and a global point budget. Pure TS, no Babylon. |
 | `core/perf-overlay.ts` | Frame-rate / draw-call overlay (toggleable, F11; `?perfprobe` adds Babylon SceneInstrumentation). |
 | `core/frame-profiler.ts` | Permanent per-phase frame-time accumulator (camera/entity/fx/decals+lights/render/ui/total) with rolling-window mean/p50/p95/p99/max; zero hot-path allocation. Driven by the game-processor render loop (`beginFrame`/`gpMark`/`endFrame`); dump via `window.test.perfDump()` / `window.__gp('__frameProfiler.dump()')`. PLAN-perf P0 attribution instrumentation. |
 | `core/widget-profiler.ts` | On-demand per-widget LuaUI cost profiler (PLAN-perf N1). Wraps every widget callin in the Fengari runtime with a `performance.now()` timing closure (same hook site as BAR's tracy zones — handler dispatch is dynamic `w:Callin(...)` lookup in both cawidgets and barwidgets), plus per-block timers inside the runFrame chunk and a JS-side fixed-tax split of `gpRunUiPass` (GL-state save / Fengari / restore / wipeCaches). `window.test.uiProfileStart()` / `uiProfileDump()` / `uiProfileStop()`. Off by default; ~3 ms/frame overhead while active. |
@@ -1909,6 +1910,40 @@ and controller are per-client answers) on every landed control and on a 1 s
 wall-clock heartbeat; **a live game never sends one, and that absence is the
 client's entire mode signal** — the playback bar mounts on the first one it
 receives.
+
+### Broadcast tap (`.msb`)
+
+Delayed spectating records **effects**, not causes: `--broadcast-out <file>` seats a
+global-visibility spectator session under a reserved id (`broadcast::kTapClientId`,
+`rts/Server/BroadcastTap.h`) that is never in `playerHandler`, and the single outbound
+funnel (`WebTransportServer::SendStream`/`BroadcastStream`, via `SetTapSink`) writes every
+byte it would have sent to a `.msb` log — so the log can only contain what a spectator was
+entitled to see, by construction rather than by a second filter.
+`rts/Server/BroadcastLog.{h,cpp}` owns that container: magic `MSBCAST\0` + version +
+a reused `replay::Header` JSON + marker-framed `R` records / `K` keyframes / `T` trailer,
+uncompressed, with a **streaming reader over a growing file** (a short tail is the recorder
+mid-write, not corruption) and a keyframe index built by skipping payloads.
+Every 1800 frames the streamer writes a `K` and re-emits the tap's join bundle
+(`StateStreamer::EmitJoinBundle`) so a backward seek lands on a whole world; the
+`GetClientCount() > 0` gates are `GameServerContext::HasStreamConsumers()` instead, because
+a tapped mission must keep streaming with nobody connected. Playback is a memcpy and a
+clock, never a sim — the relay that serves it is PLAN-beta-broadcast.md lane S2.
+
+### Broadcast relay (delayed spectating)
+
+`spring-server --broadcast <log> --broadcast-delay-seconds N` (`rts/Server/BroadcastRelay.{h,cpp}`)
+boots like `--replay` up to map/game load so the content routes answer, then never fires
+GameStart and never ticks the sim: each watcher gets its own `broadcast::Reader` and
+`BroadcastCursor` (byte offset, virtual wall clock, speed, paused) over the same `.msb`, paced
+by wall-clock deltas, and a backward seek jumps to the nearest `K` and catches up with
+Control/Vision/Bulk uncapped plus only the last State record per lane. The delay is enforced
+here and nowhere else — `liveEdgeMs = now - delay`, no record past it is ever emitted, seeks
+clamp to it, and the floor `kMinBroadcastDelaySec = 3600` is compiled in and lowerable only by
+`--dev-broadcast-floor` (never a modoption). Inbound is an **allow-list**
+(`ClientMessageHandler`: Handshake, AuthRequest, Ping, ReplayControl; ViewportUpdate ignored,
+everything else dropped), watchers take the replay spectator seat (team -1, reserved player
+number, absent from `playerHandler`), and `ReplayState` carries
+`broadcast`/`behind_seconds`/`live_edge_frame` with `controller_player_num` = the watcher's own.
 
 ### Replay browsing
 

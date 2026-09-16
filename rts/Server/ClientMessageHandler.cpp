@@ -24,6 +24,7 @@
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
 #include "ReplayControlDeck.h"
+#include "BroadcastRelay.h"
 #include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
@@ -92,6 +93,42 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
     if (ctx.logMessages) {
         SLOG(SPRING_LOG_DEBUG, "msg: client=%u type=%d size=%zu",
             msg.clientId, (int)clientMsg->payload_type(), msg.data.size());
+    }
+
+    // ── Broadcast relay admission (PLAN-beta-broadcast.md lane S2) ─────────
+    //
+    // A relay has no simulation to affect — it never GameStarts and never
+    // ticks — so "refuse the sim-affecting verbs" is not a strong enough rule
+    // here: it would leave a watcher able to reach the console, the eval
+    // relay, chat and the GM verbs on a process that boots a real game's Lua.
+    // So this is an ALLOW-LIST, not a deny-list, and a verb added to the
+    // protocol tomorrow is dropped by default rather than admitted by default.
+    //
+    // Five things get in. Handshake and AuthRequest, because a watcher must
+    // authenticate to watch anything (the same gap PLAN-replay §7.11 T2-a-3
+    // closed for replay spectators). Ping, so the connection can be kept.
+    // ReplayControl, which is the playback bar and is handled by the relay
+    // loop, not here. ViewportUpdate, which is accepted and IGNORED — a `.msb`
+    // is a global-view feed with no per-watcher filtering to steer, and
+    // dropping it silently would be indistinguishable from a broken client.
+    if (broadcast::IsRelaying()) {
+        const auto ptype = clientMsg->payload_type();
+        const bool admitted =
+            ptype == SpringWeb::ClientPayload_Handshake ||
+            ptype == SpringWeb::ClientPayload_AuthRequest ||
+            ptype == SpringWeb::ClientPayload_Ping ||
+            ptype == SpringWeb::ClientPayload_ReplayControl;
+        if (ptype == SpringWeb::ClientPayload_ViewportUpdate) return;
+        if (!admitted) {
+            static std::unordered_set<ClientID> warnedBroadcastClients;
+            if (warnedBroadcastClients.insert(msg.clientId).second) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "broadcast: client %u sent verb %u — dropped (a relay "
+                    "admits watchers, not players)",
+                    msg.clientId, static_cast<unsigned>(ptype));
+            }
+            return;
+        }
     }
 
     // ── Journal chokepoint #1 of 5: inbound client verbs (PLAN-replay task 1).
@@ -243,8 +280,13 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // player number from the reserved range, and deliberately absent
             // from `playerHandler`/`clientPlayerNum` so no synced pass can see
             // it (the reasoning is in ReplayPlayer.h next to the constants).
+            // A broadcast watcher takes the identical seat: forced spectator,
+            // team -1, a player number from the reserved range, absent from
+            // `playerHandler`. A relay has no sim for it to be absent FROM,
+            // which makes the rule cheaper here, not weaker.
             const bool replaySpectator =
-                replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
+                (replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId)) ||
+                broadcast::IsRelaying();
 
             // ── Dynamic join: a war may promote a non-roster account ────────
             // (PLAN-metalstorm-lobby.md §2.1/§2.3, task 2.) Task 1 let a
@@ -849,6 +891,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 auto* s = sessions.GetSession(msg.clientId);
                 if (!s) return;
                 s->replaySpectatorPlayerNum = pNum;
+                // A relay gives every watcher its own cursor, so there is no
+                // shared deck to hold and no controller to succeed to — the
+                // relay loop sees the session number and opens a cursor for it.
+                if (broadcast::IsRelaying()) return;
                 replay::Controls().Attach(pNum);
                 SLOG(SPRING_LOG_NOTICE,
                     "replay: spectator playerNum %d attached to the playback "

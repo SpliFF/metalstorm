@@ -93,4 +93,50 @@ inline void BroadcastReplayState(GameServerContext& ctx) {
     }
 }
 
+// ── Broadcast relay (PLAN-beta-broadcast.md lane S2) ──────────────────────
+//
+// A relay reuses `ReplayState` rather than inventing a second bar: the client
+// already shows playback UI iff it has received one, so a broadcast needs no
+// new mode signal, only three more fields on the message it already draws.
+//
+// What it does NOT reuse is the controller rule. A replay is one shared
+// timeline with one driver (ReplayControlDeck.h); a broadcast gives every
+// watcher its own cursor over the same file, so `controller_player_num` is
+// always the watcher's OWN number — the buttons are always yours, and nobody
+// else's seek moves your picture.
+
+/// One watcher's answer, gathered by the relay loop (server_main.cpp), which
+/// owns the cursors. Nothing here is read off a sim: a relay never ticks one.
+struct BroadcastStateFields {
+    int32_t startFrame    = 0;
+    int32_t endFrame      = 0;   ///< last frame the LOG holds
+    int32_t liveEdgeFrame = 0;   ///< last frame the DELAY allows
+    int32_t currentFrame  = 0;
+    int32_t behindSeconds = 0;
+    bool    paused        = false;
+    float   speed         = 1.0f;
+    bool    truncated     = false;   ///< no trailer: the mission is still live
+    int32_t playerNum     = -1;      ///< this watcher's own number
+    std::string gameId;
+    std::string mapId;
+};
+
+inline std::vector<uint8_t> BuildBroadcastState(const BroadcastStateFields& f) {
+    flatbuffers::FlatBufferBuilder fbb(256);
+    // A broadcast seeks by keyframe, so the seek-bar ticks are real for the
+    // first time — but the relay addresses them by wall time, and the bar is
+    // drawn in frames, so they are left empty until the client lane needs them.
+    const std::vector<int32_t> noCheckpoints;
+    auto st = SpringWeb::CreateReplayStateDirect(fbb,
+        f.startFrame, f.endFrame, f.currentFrame, f.paused, f.speed,
+        /*seeking=*/false, /*seek_target=*/f.currentFrame,
+        /*controller_player_num=*/f.playerNum,
+        &noCheckpoints, f.truncated,
+        f.gameId.empty() ? nullptr : f.gameId.c_str(),
+        f.mapId.empty() ? nullptr : f.mapId.c_str(),
+        /*pov_team=*/-1,          // a `.msb` is the global view and only that
+        /*broadcast=*/true, f.behindSeconds, f.liveEdgeFrame);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ReplayState, st.Union());
+}
+
 }  // namespace Protocol

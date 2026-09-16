@@ -1,6 +1,8 @@
 {
   "id": "fx_atlas",
   "class": "fx_atlas",
+  "backend": "none",
+  "backend_reason": "kept on the procedural placeholder: a single SDXL sample of a 'sprite sheet' is not aligned to the 8x8 cell grid effects/library.json's atlas.frames indexes into, so every named frame would land on arbitrary pixels - worse than the placeholder's one-blob-per-cell. Real FX sprites need a per-frame job class (one isolated sprite per sample, composited into the grid), not this job. Deferred.",
   "prompt": "Smoke/fire/dust VFX flipbook sprite sheet matching data/games/metalstorm/effects/library.json's atlas frame map.",
   "seed": 100601,
   "width": 1024,

@@ -5,7 +5,17 @@
   "seed": 100403,
   "width": 1024,
   "height": 1024,
-  "colors": ["#6b5a3e", "#8a7f6a", "#3d3a2e"],
+  "colors": [
+    "#6b5a3e",
+    "#8a7f6a",
+    "#3d3a2e"
+  ],
   "output": "art/gen/biomes/desert_diffuse.png",
-  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
 }
