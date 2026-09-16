@@ -53,6 +53,50 @@
 --
 -- Run it: `lua authority/economy_sim.lua` (from LuaRules/Gadgets) prints the
 -- grid as TSV; `tools/economy-validation.js` is the thin band-checking runner.
+--
+-- ── WHAT IT MEASURED, 2026-09-17 (after §10.6) ────────────────────────────
+--
+-- The reading that prompted §10.6's derivation, taken on the authored reward
+-- literals, was that the generator minted 2x to 50x what a team could spend
+-- (mixed cells: velocity 0.96/0.44/0.32, pool ratio 18/258/412). With rewards
+-- derived from `authority_cost.lua`'s median directive cost and a per-team
+-- concurrency ceiling added to the generator, the same cells over 16 seeds:
+--
+--   cell           velocity  mint/min  burn/min  pool x (max)  objs/war
+--   mixed sparse     1.037     158.5     164.3   4.20 (7.36)     1003
+--   mixed normal     1.033     158.2     163.4   4.46 (7.24)      972
+--   mixed dense      1.033     158.2     163.4   4.46 (7.24)      972
+--
+-- Three things worth carrying forward, none of them the generator's to fix:
+--
+--   1. TIME-TO-BROKE IS NOW THE BINDING BAND, and it is not an income
+--      property. A team starts on 700 authority (STARTING_TEAM_AUTHORITY 500
+--      + two join grants) against a modelled burn of about 165/min — roughly
+--      four minutes of runway with no income at all. Every configuration that
+--      keeps the late-war pool inside the ratio band spends the early war at
+--      or near zero, and one of sixteen sparse seeds still trips the ten-
+--      minute floor. Velocity and pool ratio, by contrast, are comfortably in
+--      band on every seed. Whoever owns the starting grant should decide
+--      whether 700 or the ten-minute floor is the wrong number.
+--
+--   2. THE ADMISSIBLE ECONOMY IS NARROW. Once rewards are derived, the whole
+--      grid only accepts about 800-1000 systemic objectives per 40-minute
+--      2v2: fewer starves the opening, more ends the war at a pool ratio of
+--      18+. `objective_density` therefore cannot be a volume knob any more —
+--      see generator.lua's DENSITY comment.
+--
+--   3. LEVER 1 CANNOT ENGAGE AT THESE NUMBERS. `soft_ceiling_C_base` is 6000
+--      per player (12000 for a 2v2 team) while the pool-ratio band tops out
+--      at 8 x a typical army command, i.e. about 480. The soft ceiling sits
+--      twenty-five times above the band it is supposed to defend, so the
+--      overflow decay never fires in any cell (`decayBurned` is 0 across the
+--      grid). game_authority.lua's E1 assert pins C_base >= 2 x maxOrderCost
+--      and derives maxOrderCost from a unit base of 500 — an order of
+--      magnitude above anything in the shipped corpus, whose largest group
+--      basis is 16. That is an authority-lane question, untouched here.
+--
+-- The `mixednorm` rows are the reward-normalisation probe (§3.2 lever 2),
+-- measured and never graded — see `M.INFO_TYPES`.
 
 local M = {}
 
@@ -205,6 +249,12 @@ WORLD_SCRIPT = {
             if t ~= 'mixed' and t ~= 'kill' then WORLD_SCRIPT[t](world, sim) end
         end
     end,
+    -- The reward-normalisation probe (PLAN-metalstorm-economy.md §3.2 lever 2).
+    -- Same war as `mixed`; the only difference is that the sim mints through
+    -- the clamp (see `Sim:mint`'s caller in `resolve`). Reported, never graded
+    -- — it exists so the decision to enable the lever can be made from a
+    -- measurement instead of an argument.
+    mixednorm = function(world, sim) WORLD_SCRIPT.mixed(world, sim) end,
     -- A building taking damage between ticks -> infra.
     infra = function(world, sim)
         world.infraBuildings = function()
@@ -325,6 +375,9 @@ local DEFAULTS = {
     stakeAmount = 40,
     startingPool = 500,
     joinGrant = 100,
+    -- nil = "whatever authority_cost.lua says" (off, as shipped). The
+    -- `mixednorm` cell sets it true; nothing else touches it.
+    rewardNormalisation = nil,
 }
 
 function M.newSim(opts)
@@ -334,10 +387,19 @@ function M.newSim(opts)
     for k, v in pairs(opts) do cfg[k] = v end
 
     local costSpec = opts.costSpec or loadCostSpec(opts.costSpecPath)
+    -- The normalisation probe flips the lever on a COPY of the economy block.
+    -- The shipped spec is a shared table (`loadCostSpec` dofile's it once per
+    -- cell, but a caller may pass one in) and a probe that mutated it would
+    -- silently enable the lever for every cell after it.
+    local econ = {}
+    for k, v in pairs(costSpec.economy or {}) do econ[k] = v end
+    if cfg.rewardNormalisation ~= nil then
+        econ.reward_normalisation_enabled = cfg.rewardNormalisation
+    end
     local sim = setmetatable({
         cfg = cfg,
         costSpec = costSpec,
-        econ = costSpec.economy or {},
+        econ = econ,
         rng = newRng(cfg.seed),
         metrics = Metrics.newState(),
         escrow = Escrow.newState(),
@@ -439,6 +501,19 @@ function Sim:spend(team, amount)
     return true
 end
 
+--- Lever 2, exactly as game_objectives.lua applies it: scale the AUTHORED
+--- reward of a SYSTEMIC objective by 1/velocity, clamped, and never touch the
+--- escrowed stake (a staked bounty pays back what was staked). A no-op while
+--- `reward_normalisation_enabled` is false, which is how the spec ships.
+function Sim:normalisedReward(rec)
+    if not self.econ.reward_normalisation_enabled then return rec.reward end
+    local velocity = Metrics.velocity(self.metrics, rec.team)
+    if velocity == 0 then velocity = 1.0 end
+    local scale = math.max(self.econ.reward_scale_min or 0.5,
+                           math.min(self.econ.reward_scale_max or 2.0, 1 / velocity))
+    return math.floor(rec.reward * scale)
+end
+
 function Sim:mint(team, amount)
     if amount <= 0 then return end
     self.pools[team] = (self.pools[team] or 0) + amount
@@ -455,7 +530,8 @@ function Sim:resolve(rec, outcome)
 
     if outcome == 'complete' then
         self.completed = self.completed + 1
-        self:mint(rec.team, rec.reward + Escrow.total(self.escrow, rec.handle))
+        self:mint(rec.team, self:normalisedReward(rec)
+                            + Escrow.total(self.escrow, rec.handle))
         Escrow.settle(self.escrow, rec.handle, 'complete')
         -- Gameplay rule (a): a completed control chains into the next region.
         -- The registry calls this from resolveObjective; the harness has to
@@ -574,15 +650,28 @@ function Sim:step(world, objectiveType, density)
 end
 
 --- Run one cell to completion and return its row.
+--- Cells that are MEASURED but not GRADED. `mixednorm` is the reward-
+--- normalisation probe: it is the same war as `mixed` with §3.2's lever 2
+--- switched on, and its whole purpose is to report what the lever would do
+--- before anybody enables it. Grading it would make the gate red for a
+--- setting the game does not ship, which is how a gate stops being read.
+M.INFO_TYPES = { mixednorm = true }
+
 function M.runCell(objectiveType, density, opts)
     opts = opts or {}
     opts.density = density
+    if M.INFO_TYPES[objectiveType] then opts.rewardNormalisation = true end
     local sim = M.newSim(opts)
     local world = newScriptedWorld(sim, objectiveType, density)
 
     local totalFrames = sim.cfg.durationMinutes * FRAMES_PER_MINUTE
     while sim.frame < totalFrames do
         sim:step(world, objectiveType, density)
+        -- Tuning hook: called with the live sim after every eval tick. Nothing
+        -- in the graded grid uses it; it exists so a tuning session can read
+        -- the pool TRAJECTORY (the thing time-to-broke is a summary of)
+        -- without forking this file or exporting its locals.
+        if opts.onTick then opts.onTick(sim) end
     end
 
     -- War end: every still-live objective sweeps with its stakes routed
@@ -611,6 +700,7 @@ function M.runCell(objectiveType, density, opts)
 
     return {
         type = objectiveType,
+        informational = M.INFO_TYPES[objectiveType] or nil,
         density = density,
         seed = sim.cfg.seed,
         velocity = velocity / n,
@@ -655,6 +745,7 @@ M.SUSTAIN_TYPE = 'mixed'
 function M.checkRow(row, bands)
     bands = bands or M.BANDS
     local failures = {}
+    if row.informational then return true, failures end
     if row.velocity < bands.velocity[1] or row.velocity > bands.velocity[2] then
         failures[#failures + 1] = string.format('velocity %.3f outside [%.2f, %.2f]',
             row.velocity, bands.velocity[1], bands.velocity[2])
@@ -686,7 +777,10 @@ function M.runGrid(opts)
     opts = opts or {}
     local densities = opts.densities or { 'sparse', 'normal', 'dense' }
     local rows = {}
-    for _, objectiveType in ipairs(TYPES) do
+    local types = { }
+    for _, t in ipairs(TYPES) do types[#types + 1] = t end
+    types[#types + 1] = 'mixednorm'      -- the ungraded probe, last
+    for _, objectiveType in ipairs(types) do
         for _, density in ipairs(densities) do
             local cellOpts = {}
             for k, v in pairs(opts) do cellOpts[k] = v end
@@ -715,7 +809,7 @@ function M.formatTSV(rows)
         local cells = {}
         for i, col in ipairs(COLUMNS) do
             if col == 'verdict' then
-                cells[i] = ok and 'PASS' or 'FAIL'
+                cells[i] = row.informational and 'INFO' or (ok and 'PASS' or 'FAIL')
             elseif col == 'failures' then
                 cells[i] = table.concat(failures, '; ')
             else

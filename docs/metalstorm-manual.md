@@ -60,6 +60,8 @@ cost = ceil(base_k × authority_cost_base × regionMod × orderClassMod × costS
 
 **Income:** objectives are the only primary income (§4). Teams start with 500; each joining player gets a grant (`authority_join_grant`, default 100); an optional per-minute stipend exists as a playtest lever. Long-horizon controls: a team soft ceiling (6000 × player count) with 2%/min overflow decay.
 
+**Reward derivation** (objectives §10.6, landed 2026-09-17): systemic objective rewards are no longer authored — each is a whole number of *median directives*, priced from this same config (`median_directive_basis`, the corpus-measured roster basis of a group-scoped directive), so what an objective pays and what an order costs move together. Reward normalisation (lever 2) stays **off**: measured with the lever on, it trims mint about 8 % and makes the opening minutes poorer, which is the wrong direction for the problem it was written for.
+
 **Escrow:** objective rewards and bounties are held in escrow until the objective resolves (`authority/escrow.lua`); outcomes are `complete | expired | failed | war_end`, and a war ending routes every refund team-ward.
 
 ## 4. Objectives and victory
@@ -75,7 +77,7 @@ Objectives are the game (`game_objectives.lua`, six types):
 | `extract` | two-phase: secure, then evacuate |
 | `infra` | timed survival, or an open-ended income building paying `rewardPerMinute` |
 
-A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense), under a **per-team ceiling of 9 concurrent systemic objectives** (the liveness backstop is exempt — a full board is not a starved one). Density selects the *mix* and the re-arm tempo, not income: the validated economy only admits roughly 800–1000 systemic objectives per 40-minute 2v2 war, which `node tools/economy-validation.js` is the gate for.
 
 Two of those rules exist to shape how a match FEELS rather than to supply it (both landed 2026-09-17):
 
