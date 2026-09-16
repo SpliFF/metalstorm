@@ -27,7 +27,8 @@
     width: 560px;
     max-width: calc(100vw - 32px);
     padding: var(--nui-pad);
-    background: var(--nui-bg);
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
     border: 1px solid var(--nui-border);
     border-top-color: var(--nui-border-hi);
     border-radius: var(--nui-radius);
