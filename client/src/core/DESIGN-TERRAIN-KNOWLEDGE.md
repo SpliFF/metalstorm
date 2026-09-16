@@ -1,6 +1,6 @@
 # DESIGN — Terrain knowledge is LOS
 
-**Status:** K0 (design + skeleton) landed. K1+ implement *inside* this document.
+**Status:** K0 (design + skeleton) landed; K0b closed the vertical slice on the server path (§12). K1+ implement *inside* this document.
 **Arc directive:** user, 2026-08-30, recorded verbatim in the `terrain-streaming`
 lane notes under "NEW ARC — TERRAIN KNOWLEDGE IS LOS". That entry is binding;
 this document is its expansion, not its amendment. Where this document makes a
@@ -566,3 +566,61 @@ as known ground → opaque grey curtain → void. **Two honest caveats visible i
 them:** map features are still drawn beyond the frontier (leak L5, K1's to
 close), and `meridian_basin`'s forest is dense enough that a player-height
 frontier shot is obscured by trees — the legible captures are elevated.
+
+## 12. K0b slice — the SERVER path, measured
+
+Same map, same player path (fresh non-admin account `k0bscout`, role
+`player`), but this time the gate was driven by a real `spring-server` built
+from this branch and launched by a lane lobby — **not** by the
+`__terrainKnowledge` debug handle, which was never called.
+
+How the flag reached the sim, and the cheapest path that does: the room host
+POSTs `/api/rooms/modoption` `{key:"terrainknowledge", value:"1"}` before
+start (host-only, pre-game only, no key whitelist — `RoomManager::SetModOption`).
+The lobby turns every room modoption into a `--modoption key=value` argv pair
+for the spawned server, `server_main.cpp` feeds it to
+`CGameSetup::SetModOption`, and `StreamTerrainKnowledge` reads it on its first
+tick. No scenario manifest, no headless config, no lobby change needed. The
+`/api/rooms/direct` manifest's `modoptions` object is the other route (dev-only).
+
+Proof it was the server: the room's process was
+`spring-server --room 2 … --modoption terrainknowledge=1`, its
+`/api/metrics` `identity.engineHash` matched the on-disk lane binary
+(`c9fd4aa7cc218050`), and `game-2.log` carries
+`[terrain-knowledge] ON - 8x8 chunks of 256 quads, 3 ally team(s)`.
+The client's net inspector counted the `0x0A` messages directly.
+
+| observation (room 2, `meridian_basin`) | value |
+| --- | --- |
+| first `0x0A` arrives | frame 30 (the first 1 Hz tick), 16 bytes |
+| spawn-only mask, because the server said so | **4 of 64** — chunks (0,0) (1,0) (0,1) (1,1); curtain 16 verts |
+| scout `19462` ordered from (2220, 980) to (5200, 5300) | |
+| reveal 1 — scout at (3749, 2133) | 5 chunks, revision 2, mask frame 1260 |
+| reveal 2 — scout at (4381, 2818) | 6 chunks, revision 3, mask frame 1530 |
+| reveal 3 — scout at (5136, 3731) | 7 chunks, revision 4, mask frame 1860 |
+| reveal 4 — scout at (5633, 4081) | **9 chunks**, revision 5, mask frame 2010 |
+| final known set | (0..1, 0..1) + (2,0) (2,1) (2,2) (3,1) (3,2); curtain 36 verts |
+| `0x0A` messages received over the whole drive | **5**, 80 bytes total — one per revision |
+| late join (page reload into room 1 at frame 9090, 8 chunks known) | first message carries the full 8-chunk mask; `revisions: 1` on the fresh client |
+
+Two things the slice makes precise:
+
+- **The streamer sends on revision change, not every second.** §1.3/§4.2
+  describe "the entire mask, every second"; `StreamTerrainKnowledge` keeps a
+  per-client `(allyTeam, revision)` stamp and skips when it is unchanged ("a
+  bandwidth skip only"). Correctness is unchanged — the message is still the
+  whole mask, still idempotent, and late join still gets everything on the
+  first tick — but "self-healing after a drop within one second" only holds
+  if the `Vision` stream class is reliable. If it is not, a dropped mask stays
+  dropped until the next reveal. Worth one line of certainty in K1.
+- **Reveal-on-touch, as designed.** The scout's 450-elmo sight revealed chunk
+  (2,0) at x = 3749 — ~350 elmos short of the 4096 boundary — i.e. the chunk
+  lit up the moment the LOS disc clipped it, and the whole 2048-elmo chunk came
+  with it. That is the §2.2 over-reveal, now observed rather than computed.
+
+Screenshots: `.tasks/notes/assets/terrain-knowledge-k0/k0b-server-before-drive.png`
+and `k0b-server-after-drive.png` (same camera, frames 150 and 2790: the x = 4096
+curtain wall is gone and the mountain behind it is meshed; the z = 4096 wall
+still stands), `k0b-server-room1-frontier.png` (the 8-chunk block's south wall
+from above: known ground → grey curtain → void). Features still draw beyond
+the curtain (L5, K1's).
