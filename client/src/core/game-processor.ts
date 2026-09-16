@@ -16,7 +16,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Matrix, Color3, Color4, Mesh, MeshBuilder,
-    StandardMaterial, RenderTargetTexture } from '@babylonjs/core';
+    RenderTargetTexture } from '@babylonjs/core';
 // P5: high-res RTT screenshot. Imported from its module path (not the barrel)
 // so the DumpTools side-effects it needs come along in a tree-shaken build.
 import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools.js';
@@ -54,10 +54,12 @@ import { withPageDiskCache } from './terrain-page-cache.js';
 import { planPageGrid } from './terrain-page-grid.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
-    loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
-    type MapLighting,
+    loadMapLighting, defaultMapLighting, loadMapWaterAbsorption, loadMapAtmosphere,
+    normaliseSunDir, type MapLighting,
 } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
+import { createAtmosphere, applyMapAtmosphere, type Atmosphere } from './atmosphere.js';
+import { createWaterSurface } from './water-surface.js';
 import type { ShadowDepthBoundsMode } from './shadow-depth-bounds.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
@@ -105,6 +107,7 @@ import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
+import { createNativeFxGamePass, type NativeFxGamePass } from './native-fx/fx-game-loader.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -490,6 +493,9 @@ let gpTerrainPagesEnabling = false;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
+/// L-ATMOS: sky dome + fog, built once per session (createAtmosphere),
+/// retuned once per map load (applyMapAtmosphere) — see atmosphere.ts.
+let gpAtmosphere: Atmosphere | null = null;
 let gpDistortion: DistortionRenderer | null = null;
 let gpMuzzleFlare: MuzzleFlareRenderer | null = null;
 /// PLAN.md Stage B1: latches true on the first frame ZK's authored deferred
@@ -516,6 +522,12 @@ function parseDeferredLights(str: string, stride: number): number[][] {
 let gpCegRuntime: CegRuntime | null = null;
 let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;
+/// Metalstorm native-FX pass (native-fx/fx-game-loader.ts). Null on games
+/// that ship no effects/ library — every non-Metalstorm game today.
+let gpNativeFx: NativeFxGamePass | null = null;
+/// How long a native impact's ground scar lives (seconds). The art brief
+/// asks for persistent scarring; the decal overlay fades them out.
+const NATIVE_FX_SCAR_TTL_S = 90;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// PLAN-maps.md M6: distance LOD for map features that ship a baked impostor
@@ -877,6 +889,18 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         if (gpCtx.sceneLighting === sceneLighting) {
             applyMapLighting(lighting, sceneLighting);
             gpCtx.mapLighting = lighting;
+            // PLAN-beta-presentation.md L-ATMOS: sky luminance/turbidity are
+            // derived from this same sun direction, so the atmosphere apply
+            // is sequenced after the lighting apply (both fire-and-forget
+            // off the same mapinfo.lua fetch; loadMapAtmosphere is a second
+            // HTTP-cached read of it, same pattern as loadMapWaterAbsorption).
+            if (gpAtmosphere && gpScene === scene) {
+                void loadMapAtmosphere(mapSourceAbs).then((atmo) => {
+                    if (gpAtmosphere && gpScene === scene) {
+                        applyMapAtmosphere(gpAtmosphere, scene, atmo, normaliseSunDir(lighting.sunDir));
+                    }
+                });
+            }
         }
     });
 
@@ -1003,13 +1027,11 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     }).catch((err) => postLog(2, `[gp] renderMapFeatures failed: ${err}`));
 
     // Water plane at Y=0 (maps with voidWater=true ship their own fluid widget).
-    // FIDELITY-STANDIN: a flat alpha-blended plane instead of Recoil's BumpWater
-    // (reflection/refraction/waves). The tint follows BumpWater's SurfaceColor
-    // define exactly — surfaceColor * 0.4 at surfaceAlpha (BumpWater.cpp:429).
-    // water.baseColor is NOT the surface colour: it (with absorb/minColor) is
-    // the underwater TERRAIN shade, applied by WaterAbsorptionPlugin below.
-    // Using it here painted pools_of_ilys's pink absorb base across the whole
-    // surface at an invented 0.4 alpha floor — the G1a solid-magenta pools.
+    // PLAN-beta-presentation.md L-ATMOS step 4: procedural scroll-bump +
+    // Fresnel + shore-foam material (water-surface.ts), replacing the flat
+    // StandardMaterial stand-in. Still NOT Recoil's BumpWater and NOT
+    // Babylon's WaterMaterial — both need a reflection RTT (a second scene
+    // render), too costly at XL900 scale.
     if (!map.water.voidWater) {
         const water = MeshBuilder.CreateGround('water', {
             width: map.widthElmos, height: map.heightElmos,
@@ -1017,17 +1039,18 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         water.position.set(map.widthElmos / 2, 0, map.heightElmos / 2);
         water.isPickable = false;
         water.renderingGroupId = 1;
-        const wmat = new StandardMaterial('waterMat', scene);
-        const [r, g, b] = map.water.surfaceColor;
-        wmat.diffuseColor = new Color3(r * 0.4, g * 0.4, b * 0.4);
-        wmat.emissiveColor = new Color3(r * 0.12, g * 0.12, b * 0.12);
-        wmat.specularColor = new Color3(0.2, 0.2, 0.2);
-        wmat.alpha = map.water.surfaceAlpha;
-        wmat.backFaceCulling = false;
-        water.material = wmat;
+        createWaterSurface(scene, water, {
+            surfaceColor: map.water.surfaceColor,
+            surfaceAlpha: map.water.surfaceAlpha,
+            heightmap: map.heightmap,
+            mapx: map.mapx,
+            mapy: map.mapy,
+            minHeight: map.minHeight,
+            maxHeight: map.maxHeight,
+        });
         water.receiveShadows = false;
         sceneLighting.csm.removeShadowCaster(water, false);
-        postLog(1, '[gp] water plane: flat surfaceColor stand-in (no BumpWater reflection/refraction)');
+        postLog(1, '[gp] water plane: procedural scroll-bump + Fresnel + shore foam (water-surface.ts)');
     }
 
     // Underwater terrain absorption (Recoil SMF_WATER_ABSORPTION): depth-graded
@@ -2464,7 +2487,11 @@ export function gpInit(msg: GpInitToWorker): void {
     // RH scene so the glTF loader + the server's RH wire format line up
     // (PLAN-coordinate-system) — same setup main.ts used before the move.
     scene.useRightHandedSystem = true;
-    scene.clearColor = new Color4(0.05, 0.08, 0.12, 1);
+    // Placeholder until the map's mapinfo.lua atmosphere resolves and
+    // createAtmosphere/applyMapAtmosphere (atmosphere.ts) take over — a
+    // desaturated dusk-grey reads better than near-black during the gap.
+    scene.clearColor = new Color4(0.45, 0.47, 0.52, 1);
+    gpAtmosphere = createAtmosphere(scene);
 
     // Preserve the depth buffer across rendering groups so meshes in a higher
     // group still depth-test against the terrain (group 0). Babylon's DEFAULT is
@@ -2905,6 +2932,32 @@ export function gpInit(msg: GpInitToWorker): void {
     combatFX.setDistortion(gpDistortion);
     gpCombatFX = combatFX;
 
+    // L-FX steps 1-4: the Metalstorm native-FX pass. Async (it fetches the
+    // authored GLSL + effect JSON over the game VFS) and best-effort — a game
+    // without an effects/ library resolves to null and every dispatch site
+    // keeps the CEG path it has today. Once up, a weapon def that authors NO
+    // CEG and resolves through effects/weapon-fx.json draws natively instead.
+    createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '')
+        .then((pass) => {
+            if (!pass || !gpCombatFX) { pass?.dispose(); return; }
+            gpNativeFx = pass;
+            // Impact scars ride the decal overlay's existing snapshot shape —
+            // no new decal API (PLAN-beta-presentation L-DECALS contract).
+            pass.setScarSink((x, y, z, radius) => {
+                gpDecalOverlay?.onSnapshot([{
+                    x, y, z, radius,
+                    ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
+                    r: 0.5, g: 0.5, b: 0.5, a: 1,
+                }]);
+            });
+            projectileRenderer.setNativeFx(pass);
+            combatFX.setNativeFx(pass);
+            combatFX.setLightPool(gpCtx.fxLightPool);
+            (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
+            postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
+        })
+        .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+
     // Dynamic feature renderer — getRuntime()-spawned features (wrecks, debris,
     // reclaim removals). Map-placed features load once via renderMapFeatures
     // in gpLoadMap.
@@ -3110,6 +3163,7 @@ export function gpInit(msg: GpInitToWorker): void {
             updateLiveProjectiles(gpCtx.projectileRenderer.snapshotForWorker());
         }
         gpCegRuntime?.tick(fxDt);
+        gpNativeFx?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
         gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
@@ -4236,6 +4290,9 @@ export function gpShutdown(): void {
     gpCtx.projectileRenderer = null;
     gpCegRuntime?.dispose();
     gpCegRuntime = null;
+    gpNativeFx?.dispose();
+    gpNativeFx = null;
+    delete (globalThis as Record<string, unknown>).__nativeFx;
     gpBuildBeamRenderer?.dispose();
     gpBuildBeamRenderer = null;
     gpCombatFX?.dispose();
@@ -4271,6 +4328,12 @@ export function gpShutdown(): void {
     gpDeformTerrain = null;
     gpMapData = null;
     gpStartCameraFramed = false;   // re-frame the next game's start on load
+    // dispose() (not just null) — it holds a clientSettings 'gfx.sky'
+    // subscription that outlives scene.dispose() below and must be dropped
+    // explicitly, or every game session leaks one more closure onto a dead
+    // dome (see atmosphere.ts).
+    gpAtmosphere?.dispose();
+    gpAtmosphere = null;
     gpCtx.sceneLighting = null;
     gpEngine?.stopRenderLoop();
     // scene.dispose() tears down the terrain mesh, fog, water, lights, CSM,

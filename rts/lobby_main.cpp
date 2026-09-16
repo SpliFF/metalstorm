@@ -2185,6 +2185,8 @@ int main(int argc, char *argv[]) {
 
   // --- HTTP auth endpoints ---
   HttpAuth::RegisterEndpoints(net, db, factionRegistry);
+  // PLAN-beta-journey.md §(b): /api/account/{me,profile}. Lobby-only.
+  HttpAuth::RegisterAccountRoutes(net, db);
 
   // Version endpoint — clients use this to get the build stamp for
   // cache-busting

@@ -290,6 +290,38 @@ describe('WheelSpinDriver', () => {
     });
 });
 
+describe('WheelSpinDriver — spinning() (dust hook)', () => {
+    it('reports 0 for an untracked unit', () => {
+        const { driver } = makeRig();
+        expect(driver.spinning(1)).toBe(0);
+    });
+
+    it('reports the same rate tick() is driving the pose from', () => {
+        const { driver, sink } = makeRig();
+        drive(driver, 1, 6, 0.3, { frame: 0, x: 0 });
+        const rate = driver.spinning(1);
+        expect(rate).toBeGreaterThan(0);
+        expect(sink.rollOf(1)).not.toBeNull();
+    });
+
+    it('reports 0 once the unit has stopped', () => {
+        const { driver } = makeRig();
+        drive(driver, 1, 6, 0.3, { frame: 0, x: 0 });
+        expect(driver.spinning(1)).toBeGreaterThan(0);
+        // Hold position for well past the deadband window.
+        drive(driver, 1, 0, 0.5, { frame: 9, x: 1.8 });
+        expect(driver.spinning(1)).toBe(0);
+    });
+
+    it('reports 0 once the sim takes the pieces over', () => {
+        const { driver, state } = makeRig();
+        drive(driver, 1, 6, 0.3, { frame: 0, x: 0 });
+        expect(driver.spinning(1)).toBeGreaterThan(0);
+        state.simDriven = true;
+        expect(driver.spinning(1)).toBe(0);
+    });
+});
+
 describe('wheelRadiusFor', () => {
     it('reads a usable customparam and rejects everything else', () => {
         expect(wheelRadiusFor({ customParams: { wheel_radius: '2.5' } })).toBe(2.5);

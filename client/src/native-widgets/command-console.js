@@ -752,6 +752,12 @@ function buildLocalPorts(resolver) {
             teamRulesParam: (key) => state.ctx?.store.teamRulesParam(state.ctx.identity.teamId, key),
             playerId: state.ctx?.identity.playerId ?? 0,
             ...(camera ? { focusCamera: (x, z) => camera.focusOn(x, z) } : {}),
+            // "What's happening?" (contract v2). The moments are the HUD's own
+            // record of the battle, which makes the answer LOS-honest by
+            // construction — there is nothing in here the player was not shown.
+            // Without this port the query refuses by name, which is the honest
+            // answer but not a useful one.
+            battleMoments: () => state.ctx?.store.getBattleMoments() ?? [],
         });
     }
 

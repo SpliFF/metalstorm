@@ -1,0 +1,657 @@
+{
+  "_comment": "Contract v2 (2026-09-10) — the three things the envelope grew and the one refusal it learned to word honestly: `query.events`, a `withdraw` that may omit its destination, `patrol`/`screen` aimed at a NAMED PLACE (compiled to a ring route), and a place-vs-force refusal that says which it is. Every fixture here runs on one of the boards added with the contract, so the behaviour is measured against a world that has a departure zone / a battle log / neither, rather than against `basin` with a flag flipped. The TS suites execute `expected` and assert the dispatch; tools/nl-eval scores the MODEL against the same `expected`.",
+  "fixtures": [
+    {
+      "name": "\"withdraw\" with no destination — the nearest departure zone",
+      "utterance": "withdraw",
+      "context": "basin-departure",
+      "note": "Chimera is selected and stands at (900,1100); West Departure Zone at (200,1000) is nearer than East at (3800,3000). The envelope carries NO target: picking the zone is the resolver's job, and a model that named one would be guessing at distances it cannot measure.",
+      "expected": {
+        "say": "Chimera Squad is pulling back to the nearest departure zone.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "selection"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"pull back\" is the same order",
+      "utterance": "pull back",
+      "context": "basin-departure",
+      "expected": {
+        "say": "Chimera Squad is pulling back.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "selection"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "\"fall back\" is the same order again",
+      "utterance": "fall back",
+      "context": "basin-departure",
+      "expected": {
+        "say": "Falling back.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "selection"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "a NAMED squad gets ITS nearest zone, not the selection's",
+      "utterance": "pull Warhound Squad back",
+      "context": "basin-departure",
+      "note": "Warhound stands at (2800,2800): East wins. The fixture cannot see which zone was chosen from the send shape alone — that is `nl-resolver.test.ts`'s job — but it does pin that the order goes to group 3 and not to the selected group 1.",
+      "expected": {
+        "say": "Warhound Squad is pulling back.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "entity-ref",
+                "name": "Warhound Squad"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "a destination the player NAMED is never overridden by a zone",
+      "utterance": "withdraw Chimera Squad to East Departure Zone",
+      "context": "basin-departure",
+      "expected": {
+        "say": "Chimera Squad is withdrawing to East Departure Zone.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "entity-ref",
+                "name": "Chimera Squad"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "East Departure Zone"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "no departure zone on the map — refuse by name, do not invent one",
+      "utterance": "pull back",
+      "context": "basin",
+      "note": "`basin` marks no landmark matching DEPARTURE_NAME. The model still emits the targetless withdraw (it cannot know what the map marks); the RESOLVER is what refuses, and it says so in words that name the fix.",
+      "expected": {
+        "say": "Pulling back.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "any"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "departure zone"
+        ]
+      }
+    },
+    {
+      "name": "\"patrol Osprey Fen\" — a named place becomes a ring route",
+      "utterance": "patrol Osprey Fen",
+      "context": "basin",
+      "note": "A sentence cannot draw a polyline. Before contract v2 this refused with \"use the composer's map arm\", which made 2 of the 11 advertised verbs unreachable from voice.",
+      "expected": {
+        "say": "Patrolling Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ],
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"screen Northgate\" — the other route verb, same rule",
+      "utterance": "screen Northgate",
+      "context": "basin",
+      "expected": {
+        "say": "Screening Northgate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "screen",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Northgate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "a named squad on patrol",
+      "utterance": "Chimera Squad patrol Fallow Gate",
+      "context": "basin",
+      "expected": {
+        "say": "Chimera Squad is patrolling Fallow Gate.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "entity-ref",
+                "name": "Chimera Squad"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Fallow Gate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "a patrol with a radius — the ring is the painted circle",
+      "utterance": "patrol a wide circle around Randtown",
+      "context": "basin",
+      "expected": {
+        "say": "Patrolling around Randtown.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "area-around",
+                "name": "Randtown",
+                "radius": 900
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "StandingOrder"
+          }
+        ]
+      },
+      "note": "A team-wide (`any`) subject on a standing verb compiles to a StandingOrder, not a GroupDirective: `groupId 0` is the compile table's condition-scoped subject and there is no group to direct. Pinned here because the two wire types reach completely different gadget handlers."
+    },
+    {
+      "name": "\"AI, patrol Osprey Fen\" is advice, not a route (D60)",
+      "utterance": "AI, patrol Osprey Fen",
+      "context": "basin",
+      "note": "An AI-subject order compiles to guidance, which carries a target entity and has no OrderShape at all — so the verb:shape table's route-only rule does not apply to it. Getting this wrong refused a sentence the guidance path can carry perfectly well.",
+      "expected": {
+        "say": "Advising the AI to patrol Osprey Fen.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": {
+                "type": "ai"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Osprey Fen"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "refusals": 0
+      }
+    },
+    {
+      "name": "\"defend Kestrel Flight\" — a force is not a place, and the refusal says which",
+      "utterance": "defend Kestrel Flight",
+      "context": "basin",
+      "note": "The old answer was \"I don't know a place called 'Kestrel Flight'\", which is false — the game knows it perfectly well — and sent the player checking their spelling instead of fixing the sentence.",
+      "expected": {
+        "say": "Defending Kestrel Flight.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "defend",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Kestrel Flight"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "one of your forces, not a place"
+        ]
+      }
+    },
+    {
+      "name": "the model may refuse a force-as-place in its own words instead",
+      "utterance": "hold Ironback Platoon",
+      "context": "basin",
+      "note": "Both halves of the contract are legal: the model can emit the order and let the resolver word the refusal, or refuse itself. What it must never do is quietly retarget the sentence at a place with a similar name.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "refuse",
+            "reason": "\"Ironback Platoon\" is one of your forces, not a place — name where you want them to hold."
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1
+      }
+    },
+    {
+      "name": "\"what's happening\" — the events query, newest first",
+      "utterance": "what's happening",
+      "context": "basin-events",
+      "ports": true,
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0,
+        "saysLike": [
+          "Latest:"
+        ]
+      }
+    },
+    {
+      "name": "\"what's happening at Slag Forge\" — narrowed to one place",
+      "utterance": "what's happening at Slag Forge",
+      "context": "basin-events",
+      "ports": true,
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Slag Forge"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0,
+        "saysLike": [
+          "Near Slag Forge"
+        ]
+      }
+    },
+    {
+      "name": "\"what's happening there\" — the model writes the RESOLVED place",
+      "utterance": "what's happening there",
+      "context": "basin-events",
+      "ports": true,
+      "note": "Slag Forge is the drilled panel. Rule 10: with a focus in context the model names what it read, never the pronoun. The OFFLINE producer emits \"there\" and `bindFocusReferences` binds it — both arrive at the same envelope, which is the whole point of the contract.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Slag Forge"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "saysLike": [
+          "Near Slag Forge"
+        ]
+      }
+    },
+    {
+      "name": "\"sitrep\" is the same question",
+      "utterance": "sitrep",
+      "context": "basin-events",
+      "ports": true,
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "saysLike": [
+          "Latest:"
+        ]
+      }
+    },
+    {
+      "name": "an EMPTY battle log answers \"nothing yet\" — it does not refuse",
+      "utterance": "what's happening",
+      "context": "basin-no-events",
+      "ports": true,
+      "note": "An empty history and an absent port are different states and get different answers. Collapsing them would tell a player in a quiet minute that the game had stopped recording.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0,
+        "saysLike": [
+          "Nothing has happened yet"
+        ]
+      }
+    },
+    {
+      "name": "an empty log, narrowed to a place, says so about that place",
+      "utterance": "what's happening at Randtown",
+      "context": "basin-no-events",
+      "ports": true,
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Randtown"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "refusals": 0,
+        "saysLike": [
+          "Nothing has happened near Randtown"
+        ]
+      }
+    },
+    {
+      "name": "no battle log at all — refuse by name",
+      "utterance": "what's happening",
+      "context": "basin",
+      "ports": true,
+      "note": "`basin` declares no `moments`, so the port is absent. LOS honesty: \"nothing happened\" would be a claim the client cannot make.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "battle log"
+        ]
+      }
+    },
+    {
+      "name": "events near a place the map does not have — refuse, do not widen",
+      "utterance": "what's happening at Atlantis",
+      "context": "basin-events",
+      "ports": true,
+      "note": "Dropping the unknown `near` and answering the whole map would answer a different question.",
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Atlantis"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1
+      }
+    },
+    {
+      "name": "events is a QUERY — it never moves anything",
+      "utterance": "what happened at Northgate",
+      "context": "basin-events",
+      "ports": true,
+      "expected": {
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Northgate"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 0,
+        "saysLike": [
+          "Near Northgate"
+        ]
+      }
+    },
+    {
+      "name": "a question and an order in one breath — the query first, then the move",
+      "utterance": "what's happening at Slag Forge, then get everyone to Northgate",
+      "context": "basin-events",
+      "ports": true,
+      "note": "Two actions, in the order the sentence said them (§1). A reordered pair is a different plan: the answer is what the player is about to decide the move on.",
+      "expected": {
+        "say": "Checking Slag Forge, then moving on Northgate.",
+        "actions": [
+          {
+            "kind": "query",
+            "query": {
+              "op": "events",
+              "near": "Slag Forge"
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": {
+                "type": "any"
+              },
+              "target": {
+                "type": "entity-ref",
+                "name": "Northgate"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          {
+            "type": "GroupDirective",
+            "groupId": 0
+          }
+        ],
+        "saysLike": [
+          "Near Slag Forge"
+        ]
+      }
+    },
+    {
+      "name": "withdraw with no zone AND no destination is one refusal, not two",
+      "utterance": "everyone pull out",
+      "context": "basin-no-events",
+      "expected": {
+        "say": "Pulling out.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "withdraw",
+              "subject": {
+                "type": "any"
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [],
+        "refusals": 1,
+        "saysLike": [
+          "departure zone"
+        ]
+      }
+    }
+  ]
+}

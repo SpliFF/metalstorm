@@ -1,0 +1,48 @@
+<!-- Metalstorm welcome — overrides client/src/ui/lobby/welcome/welcome.html
+     with the game's own copy. Every id is the engine template's. -->
+<div class="entry entry-welcome">
+    <div class="entry-backdrop"></div>
+    <header class="entry-top">
+        <span class="entry-stamp">Metalstorm <i>//</i> public beta</span>
+        <div class="entry-top-tools">
+            <button type="button" class="entry-link" id="welcome-help-btn">Field manual</button>
+        </div>
+    </header>
+    <main class="entry-stage">
+        <section class="entry-hero">
+            <p class="entry-kicker">Scavenger armies · one World · Missions that stick</p>
+            <h1 class="entry-title">Metalstorm</h1>
+            <p class="entry-lede">Two Factions fight over what the collapse left behind. The team owns the
+                army; you lend it your judgement. Objectives over reflexes, authority over clicks.</p>
+            <ul class="entry-points">
+                <li><b>Watch</b> a live Mission with nothing but a callsign.</li>
+                <li><b>Sign up</b>, choose the Compact or the Union, and take your first Mission — Solo or in Support.</li>
+                <li><b>Earn Standing.</b> Command grows with it; so does what your Faction shows you.</li>
+            </ul>
+        </section>
+        <section class="entry-card" aria-label="Enter">
+            <div class="entry-card-head">
+                <span>Choose a callsign</span>
+                <span class="entry-mono">no account needed</span>
+            </div>
+            <label class="entry-field">
+                <span>Callsign</span>
+                <input type="text" id="welcome-callsign" maxlength="32" autocomplete="off"
+                       spellcheck="false" placeholder="raven" autofocus>
+            </label>
+            <button type="button" class="entry-btn entry-btn-primary" id="welcome-watch-btn">
+                Watch as <b id="welcome-watch-name">…</b>
+            </button>
+            <p class="entry-msg" id="welcome-msg"></p>
+            <div class="entry-divider"><span>to play</span></div>
+            <div class="entry-row">
+                <button type="button" class="entry-btn" id="welcome-signup-btn">Sign up</button>
+                <button type="button" class="entry-btn entry-btn-ghost" id="welcome-login-btn">Log in</button>
+            </div>
+            <p class="entry-hint">A callsign and a password. Your Faction is chosen once; it is your side in every Mission.</p>
+        </section>
+    </main>
+    <footer class="entry-foot">
+        <span class="entry-mono">Spectating is free · sign up to play · nothing you choose here is locked</span>
+    </footer>
+</div>

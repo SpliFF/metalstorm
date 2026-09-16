@@ -219,6 +219,17 @@ export interface ClassCountResolution {
 export class NLResolver {
     constructor(private readonly deps: ResolverDeps) {}
 
+    /**
+     * The entity index this resolver reads.
+     *
+     * Exposed for `nl-fast-path.ts`, whose exact-name test needs the raw
+     * scores — read-only, and the SAME object, so the fast path can never
+     * consult a different world than the resolver it is gating itself on.
+     */
+    get index(): ResolverIndex {
+        return this.deps.index;
+    }
+
     // ───────────────────────── entities ─────────────────────────
 
     /**

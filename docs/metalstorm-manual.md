@@ -55,7 +55,12 @@ Objectives are the game (`game_objectives.lua`, six types):
 | `extract` | two-phase: secure, then evacuate |
 | `infra` | timed survival, or an open-ended income building paying `rewardPerMinute` |
 
-A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: six rules (control, district, escort, infra, transport, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+A **systemic generator** (`objectives/generator.lua`) keeps battles supplied: seven rules (control, district, escort, infra, transport, `chain`, and a `liveness` starvation guard) with per-rule cooldowns and caps, scaled by the `objective_density` modoption (sparse/normal/dense).
+
+Two of those rules exist to shape how a match FEELS rather than to supply it (both landed 2026-09-17):
+
+- **The chain.** Complete a `control` and the board immediately offers the adjacent region you do not own, scoped to your team, at **+25 %** reward and on a **3-minute** clock. Every other generator rule is reactive — something became contested, something took damage, a convoy appeared — so nothing rewarded pressing an advantage. The chain is an offer, not a requirement; declining it costs nothing and the short clock keeps a declined chain off the board.
+- **The comeback valve.** Objectives are the only primary authority income, so losing ground loses income, which buys fewer orders, which loses more ground. For a team behind on **owned regions**, team-scoped systemic rewards scale by `1 + deficit` capped at **×1.5**, and the liveness backstop gives it a fresh objective after one eval tick instead of two. Open races are never scaled (there is no behind team to price them for), the leader's rewards are never cut, nothing costs less, and no authority is minted directly — a team still has to go and complete the objective. The multiplier is published publicly as `objective_comeback_<team>`, so it reads as a stated rule rather than as the game quietly helping someone.
 
 **Victory** (`game_gameover.lua`): the engine's last-team-standing fallback is deliberately disabled for Metalstorm. A **scenario is a war template**, and it declares which objective is terminal via `victory = true`. Completing it drives `active → winding_down (10 s grace) → resolving → GameOver`, with winners collected **by faction** across all that faction's teams. A scenario with no victory objective never ends in-session — players leave by detaching, and the war persists (hibernation is a server property, not a war state). Unresolved objectives at war end settle per `objectives/warend.lua` (complete → paid; anything else → its terminal state with war-end escrow).
 
@@ -129,11 +134,11 @@ Maps are produced by the **terragen** pipeline (`tools/mapgen` — erosion, rive
 
 ## 11. Match setup (modoptions)
 
-`modoptions.lua`: `persistent` (default **true** — wars persist/hibernate), `authority_reward_scale`, `authority_cost_scale` (0 = free orders), `authority_join_grant`, `authority_team_stipend`, `objective_density` (sparse/normal/dense), `ai_caretaker`, `build_time_scale`.
+`modoptions.lua`: `persistent` (default **true** — wars persist/hibernate), `authority_reward_scale`, `authority_cost_scale` (0 = free orders), `authority_join_grant`, `authority_team_stipend`, `objective_density` (sparse/normal/dense), `battle_production` (default off — lifts the field-engineering gate for playtests), `ai_caretaker`, `build_time_scale`.
 
 ## 12. Known gaps (design ≠ enforcement, honest edition)
 
-- **"Field engineering only" is convention, not a code gate.** The four factories still declare full `buildoptions` and nothing in `LuaRules/` vetoes factory production — the invariant currently rests on scenarios not handing players a factory. (`units/buildings_military.lua` documents the intent.)
+- **Enforced** since 2026-09-10: `LuaRules/Configs/field_engineering.lua` + `game_authority.lua` veto factory production and non-support structures (`AllowCommand` on build orders, `AllowUnitCreation` backstop); modoption `battle_production` lifts it for playtests.
 - **World holdings aren't seeded yet:** committing force a faction doesn't have is refused by nothing (the counts are unbounded integers); the escrow ledger opens negative until a world-holdings milestone lands. Held POIs have no defender *force* in the world — the battle's defender is whatever the scenario fields.
 - **Account world authority has no income.** It starts at 100; founding spends 50 and each claim 25 (half back on a loss). Commander authority accrues from settlements; the account purse never does, so the claim rule goes quiet after a couple of filings. Treasury has no sink and Capacity is never spent — both are displays.
 - **Commander victory attribution and the season digest compare a world faction id against a battle side key** (`war_outcome.winnerFactions` holds side keys), so in production a commander is only ever awarded the defeat rate and `settlementsWon` is bucketed by side, not faction. Patch proposed in the 2026-09-10 world-design review.
