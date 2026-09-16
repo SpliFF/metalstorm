@@ -56,6 +56,26 @@ function numParam(name: string, fallback: number): number {
 let _sId = 0;
 let _tId = 0;
 
+/** Native-FX pool counters, read out of the game-processor worker. Null when
+ *  the pass never came up (non-Metalstorm game, or the asset fetch failed). */
+interface NativeFxCounts {
+    particles: number; muzzles: number; tracers: number;
+    trailSegments: number; shocks: number;
+}
+
+async function nativeFxCounts(): Promise<NativeFxCounts | null> {
+    const gp = (window as unknown as { __gp?: (e: string) => Promise<unknown> }).__gp;
+    if (!gp) return null;
+    const out = await gp(
+        'JSON.stringify(globalThis.__nativeFx ? globalThis.__nativeFx.counts() : null)');
+    if (typeof out !== 'string') return null;
+    try {
+        return JSON.parse(out) as NativeFxCounts | null;
+    } catch {
+        return null;
+    }
+}
+
 const scenario: Scenario = {
     name: 'weapon-fx',
     description: 'Slow-motion engagement bench for diagnosing CEG / projectile / impact rendering. Use +/-/Pause to control speed, T to toggle tracking camera.',
@@ -127,6 +147,27 @@ const scenario: Scenario = {
         const sId = _sId;
         const tId = _tId;
 
+        // L-FX gate: the native FX stack is actually spawning for this volley.
+        // The pools are lifetime spawn counters, so any non-zero proves
+        // resolver -> compiler -> pool -> draw survived end to end. Poll: the
+        // first shot is a reload cycle away and the pass loads its assets
+        // asynchronously.
+        let fx: NativeFxCounts | null = null;
+        const fxDeadline = performance.now() + 30_000;
+        while (performance.now() < fxDeadline) {
+            fx = await nativeFxCounts();
+            if (fx && (fx.particles + fx.muzzles + fx.tracers) > 0) break;
+            await sleep(1000);
+        }
+        const fxResult: AssertionResult = {
+            name: 'native FX pools spawned after a volley',
+            ok: !!fx && (fx.particles + fx.muzzles + fx.tracers) > 0,
+            detail: fx
+                ? `particles=${fx.particles} muzzles=${fx.muzzles} tracers=${fx.tracers} `
+                    + `trailSegs=${fx.trailSegments}`
+                : 'no __nativeFx in the worker (pass not up)',
+        };
+
         // Long idle observation window — the user is here to watch
         // effects and capture screenshots, not race a timer. 5 wall
         // minutes is plenty even at full slowmo; the scenario exits
@@ -139,6 +180,7 @@ const scenario: Scenario = {
         }
 
         return [
+            fxResult,
             { name: 'shooter survived observation window', ok: true,
               detail: `shooter=#${sId}` },
             { name: 'target id captured', ok: true, detail: `target=#${tId}` },

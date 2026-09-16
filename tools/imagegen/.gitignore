@@ -1,0 +1,4 @@
+# Local Python virtualenv — machine-specific, recreate with
+#   python3 -m venv tools/imagegen/.venv && tools/imagegen/.venv/bin/pip install numpy pillow requests
+.venv/
+__pycache__/

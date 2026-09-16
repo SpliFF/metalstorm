@@ -1,0 +1,11 @@
+{
+  "id": "biome_grassland",
+  "class": "biome",
+  "prompt": "Dead scavenger-plains grassland, sparse sun-bleached tufts over cracked olive-drab dirt, sparse gravel, no lush green.",
+  "seed": 100401,
+  "width": 1024,
+  "height": 1024,
+  "colors": ["#3d3a2e", "#6b5a3e", "#8a7f6a"],
+  "output": "art/gen/biomes/grassland_diffuse.png",
+  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+}

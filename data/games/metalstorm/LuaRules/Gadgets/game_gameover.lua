@@ -53,6 +53,8 @@ if not gadgetHandler:IsSyncedCode() then
     return false
 end
 
+local Tick = VFS.Include("LuaRules/Gadgets/tick.lua")
+
 -- §7 "players notified; a grace period for a final push". 10 s at 30 Hz —
 -- long enough to read as a beat and to let the client show the wind-down,
 -- short enough that it is not a stall on a finished war.
@@ -368,6 +370,12 @@ end
 -- war because a census was unavailable is the one failure mode worth spending
 -- a flag to make unrepresentable.
 local FOOTHOLD_PERIOD = 150   -- frames (5 s); a strategic quantity, not a tick
+-- ARCHITECTURE "never gate on frame % PERIOD": a skipped sim tick steps over
+-- the multiple and the census is dropped for good (tick.lua's header has the
+-- measurements). `due` is the right policy — the foothold count OBSERVES
+-- current ownership, so a multi-period skip collapses to one fresh reading
+-- rather than inventing repeats of a world that was only observable once.
+local footholdGate = Tick.new(FOOTHOLD_PERIOD)
 
 local function publishFootholds()
     local regions = GG.Scenario and GG.Scenario.data and GG.Scenario.data.world
@@ -421,6 +429,7 @@ function gadget:Save(state)
     state.winningTeam = winningTeam
     state.winners = winners
     state.endlessChecked = endlessChecked
+    state.footholdGate = Tick.save(footholdGate)
 end
 
 function gadget:Load(state)
@@ -432,6 +441,7 @@ function gadget:Load(state)
     winningTeam    = state.winningTeam
     winners        = state.winners
     endlessChecked = state.endlessChecked or false
+    Tick.load(footholdGate, state.footholdGate)
     -- Re-publish: the rulesParams a client reads are restored by the snapshot's
     -- own team/game sections, but GG.WarState is this gadget's live mirror and
     -- other gadgets (game_objectives) branch on it in the same tick.
@@ -450,7 +460,7 @@ function gadget:GameFrame(frame)
     -- Keeps running through wind-down: the census is what the Director archives
     -- as the war's final territorial state, and freezing it at the moment the
     -- victory objective completed would miss the grace period's last push.
-    if frame % FOOTHOLD_PERIOD == 0 then
+    if Tick.due(footholdGate, frame) then
         publishFootholds()
     end
 end

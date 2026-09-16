@@ -286,6 +286,18 @@ export class WheelSpinDriver {
         this.latestFrame = -1;
     }
 
+    /** Current wheel angular speed (rad/s) for a unit — 0 if untracked,
+     *  stopped, ineligible, or sim-driven. Query-only (no side effects),
+     *  unlike `tick()`; PLAN-beta-presentation.md L-ANIM's dust hook for
+     *  `unit-fx-dispatch.ts` to scale moveDust emission rate by. */
+    spinning(unitId: number): number {
+        const m = this.motion.get(unitId);
+        if (!m || m.ineligible || this.deps.simDrivesPieces(unitId)) return 0;
+        const speed = this.effectiveSpeed(m);
+        if (speed <= STOP_SPEED) return 0;
+        return this.spinRate(unitId, speed);
+    }
+
     /** Debug view, mirroring ClipAutoPolicy.stats(). */
     stats(): { tracked: number; spinning: number; ineligible: number } {
         let spinning = 0;

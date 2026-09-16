@@ -26,6 +26,12 @@ import replayEntryHtml from './browser/replay-entry.html?raw';
 import mapCardHtml from './browser/map-card.html?raw';
 import roomHtml from './room/room.html?raw';
 import playerRowHtml from './room/player-row.html?raw';
+import welcomeHtml from './welcome/welcome.html?raw';
+import welcomeCss from './welcome/welcome.css?raw';
+import introHtml from './intro/intro.html?raw';
+import introCss from './intro/intro.css?raw';
+import hubHtml from './hub/hub.html?raw';
+import hubCss from './hub/hub.css?raw';
 
 /// Bundle of templates the lobby renders. Each entry is a raw string —
 /// CSS for `styles`, HTML for everything else. `renderTemplate` from
@@ -47,6 +53,14 @@ export interface LobbyTemplates {
     browserMapCard: string;
     room: string;
     roomPlayerRow: string;
+    /// Entry flow (PLAN-beta-journey.md §(e)): welcome → intro → hub, each
+    /// with its own stylesheet so a game can restyle one without the rest.
+    welcome: string;
+    welcomeStyles: string;
+    intro: string;
+    introStyles: string;
+    hub: string;
+    hubStyles: string;
 }
 
 /// Each template's relative path under `<game>/ui/lobby/`. The same
@@ -63,6 +77,12 @@ const TEMPLATE_PATHS: Record<keyof LobbyTemplates, string> = {
     browserMapCard:  'browser/map-card.html',
     room:            'room/room.html',
     roomPlayerRow:   'room/player-row.html',
+    welcome:         'welcome/welcome.html',
+    welcomeStyles:   'welcome/welcome.css',
+    intro:           'intro/intro.html',
+    introStyles:     'intro/intro.css',
+    hub:             'hub/hub.html',
+    hubStyles:       'hub/hub.css',
 };
 
 const DEFAULT_TEMPLATES: LobbyTemplates = {
@@ -76,6 +96,12 @@ const DEFAULT_TEMPLATES: LobbyTemplates = {
     browserMapCard:  mapCardHtml,
     room:            roomHtml,
     roomPlayerRow:   playerRowHtml,
+    welcome:         welcomeHtml,
+    welcomeStyles:   welcomeCss,
+    intro:           introHtml,
+    introStyles:     introCss,
+    hub:             hubHtml,
+    hubStyles:       hubCss,
 };
 
 /// Return a copy of the bundled engine-default templates. Use this for

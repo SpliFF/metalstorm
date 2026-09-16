@@ -698,6 +698,21 @@ SHIPPED_REACHABILITY = {
     "frost_reach": reach.SPLIT,
     "dune_reach": reach.SPLIT,
     "verdant_shoals": reach.SPLIT,
+    # 2026-09-17: pelagic_expanse was MISSING here, so it fell through to
+    # reach.DEFAULT_INTENT ("connected") and shipped a mapinfo.lua that
+    # declared a connectivity it does not have. It is the same 9-island
+    # archipelago recipe as skerry_reach at a different seed;
+    # `regions_from_map.py data/maps/pelagic_expanse --verify` reads its eight
+    # starts in SIX disconnected VEH components (INFANTRY 4, HEAVY 7). A stale
+    # declaration is the more dangerous of the two failures the gate catches,
+    # because it SILENCES the gate — verify_scenario_maps.py inherits this exit
+    # code, so a war offered on this map failed a check about the map. Found
+    # while authoring scenarios/pelagic_landing.lua.
+    "pelagic_expanse": reach.SPLIT,
+    # pelagic_vastness reads the same way: 8 starts in 8 disconnected VEH
+    # components, declared "connected". Measured 2026-09-17 with the same
+    # --verify run; no war targets it yet, so nothing was failing on it.
+    "pelagic_vastness": reach.SPLIT,
 }
 
 # The classes each terrain's split claim speaks for (PLAN-maps M9o / lane

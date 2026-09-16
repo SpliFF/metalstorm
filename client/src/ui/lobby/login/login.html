@@ -1,36 +1,61 @@
-<div class="lobby-card">
-    <h1>Spring RTS Web</h1>
-    <form id="login-form" class="lobby-form">
-        <input type="text" id="login-user" placeholder="Username" autofocus>
-        <input type="password" id="login-pass" placeholder="Password">
-        <input type="password" id="login-pass2" placeholder="Confirm password (new accounts)">
-        <div id="login-faction-group" class="login-faction-group hidden">
-            <select id="login-faction" class="game-select">
-                <option value="">Choose your faction…</option>
-            </select>
-            <p id="login-faction-desc" class="hint login-faction-desc"></p>
+<!-- Sign up / log in (reached from the welcome screen). Every id here is a
+     contract with LobbyUI.doLogin(): a filled confirm-password field is what
+     turns "log in" into "register", so the sign-up mode simply reveals it.
+     `mode` is filled by LobbyUI: `signup` or `login`. -->
+<div class="entry entry-login" data-mode="{{mode}}">
+    <div class="entry-backdrop"></div>
+    <header class="entry-top">
+        <span class="entry-stamp">{{game_title}} <i>//</i> <span class="signup-only">enlist</span><span class="login-only">return</span></span>
+        <div class="entry-top-tools">
+            <button type="button" class="entry-link" id="login-back-btn">← Back</button>
         </div>
-        <!-- Two-factor challenge (PLAN-metalstorm-lobby.md §7.2, task 8d).
-             Hidden until the server answers a correct password with
-             `totp_required` — an always-visible code field would ask every
-             player on every login for something almost none of them have, and
-             would read as "this account needs a code" when it does not. -->
-        <div id="login-totp-group" class="login-totp-group hidden">
-            <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code"
-                   placeholder="6-digit code (or a recovery code)">
-            <p class="hint">From your authenticator app.</p>
+    </header>
+    <main class="entry-stage entry-stage-narrow">
+        <form id="login-form" class="entry-card entry-login-card" autocomplete="on">
+            <div class="entry-card-head">
+                <span class="signup-only">Sign up to play</span>
+                <span class="login-only">Log in</span>
+                <span class="entry-mono signup-only">recruit · standing 0</span>
+            </div>
+            <label class="entry-field">
+                <span>Callsign</span>
+                <input type="text" id="login-user" placeholder="raven" autofocus autocomplete="username">
+            </label>
+            <label class="entry-field">
+                <span>Password</span>
+                <input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password">
+            </label>
+            <label class="entry-field signup-only">
+                <span>Confirm password</span>
+                <input type="password" id="login-pass2" placeholder="••••••••" autocomplete="new-password">
+            </label>
+            <div id="login-faction-group" class="login-faction-group signup-only">
+                <span class="entry-field-label">Your Faction</span>
+                <select id="login-faction" class="game-select">
+                    <option value="">Choose your Faction…</option>
+                </select>
+                <p id="login-faction-desc" class="entry-hint login-faction-desc"></p>
+            </div>
+            <!-- Two-factor challenge (PLAN-metalstorm-lobby.md §7.2, task 8d):
+                 hidden until the server answers a correct password with
+                 `totp_required`. -->
+            <div id="login-totp-group" class="login-totp-group hidden">
+                <label class="entry-field">
+                    <span>Authenticator code</span>
+                    <input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code"
+                           placeholder="6-digit code (or a recovery code)">
+                </label>
+            </div>
+            <button type="submit" id="login-btn" class="entry-btn entry-btn-primary">
+                <span class="signup-only">Create account</span><span class="login-only">Log in</span>
+            </button>
+            <p id="login-msg" class="entry-msg msg"></p>
+            <p class="entry-hint signup-only">Your Faction is chosen once. Everything else — callsign, look, role — can change later.</p>
+            <p class="entry-hint login-only">New here? <button type="button" class="entry-inline-link" id="login-switch-btn">Sign up instead</button></p>
+        </form>
+        <!-- Guest sign-in (task 8c): outside the form so it cannot submit it. -->
+        <div class="login-guest">
+            <button type="button" class="entry-link" id="login-guest-btn">Just watch — no account</button>
         </div>
-        <button type="submit" id="login-btn">Login / Register</button>
-        <p id="login-msg" class="msg"></p>
-        <p class="hint">New username? Enter a password twice to register.</p>
-    </form>
-    <!-- Guest sign-in (PLAN-metalstorm-lobby.md §7.1, task 8c). Outside the
-         form so it cannot submit it, and below the hint rather than beside the
-         button: it is the third-choice path, not a peer of "Login". A guest
-         account is real — it holds a war seat and everything earned in one —
-         and claiming it later keeps all of that. -->
-    <div class="login-guest">
-        <button type="button" id="login-guest-btn" class="link-button">Play as a guest</button>
-        <p class="hint">No sign-up. You can claim the account later and keep everything.</p>
-    </div>
+    </main>
 </div>

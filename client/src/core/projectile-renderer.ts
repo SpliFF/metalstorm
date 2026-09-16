@@ -53,8 +53,10 @@ import {
     ProjectileType,
     effectForFire,
     effectForImpact,
+    hasAuthoredCeg,
     impactContextFlags,
 } from './weapon-fx-dispatch.js';
+import type { NativeFxSink, WeaponFxSlots } from './weapon-fx-resolver.js';
 import { isBallistic } from './projectile-ballistics.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
@@ -396,6 +398,16 @@ const MAX_ORPHAN_LIFE_MS = 15_000;
 /// sees the bolt / laser flash.
 const DEFAULT_BEAM_LIFE_S = 0.12;
 
+/** Native-FX muzzle light (L-FX step 4): dim, brief, straw-warm — the art
+ *  brief's "dim brief muzzle light", not a flare. The pool gates itself on
+ *  `gfx.fxLights`. */
+const NATIVE_MUZZLE_LIGHT_COLOR: readonly [number, number, number] = [1.0, 0.82, 0.5];
+const NATIVE_MUZZLE_LIGHT_PEAK = 0.35;
+const NATIVE_MUZZLE_LIGHT_RANGE = 90;
+const NATIVE_MUZZLE_LIGHT_TTL_SEC = 0.08;
+/** Smallest ground scar a native impact raises (elmos). */
+const NATIVE_SCAR_MIN_RADIUS = 6;
+
 /// Hard upper bound on beam visual duration. Caps overdraw on very
 /// long-lived BeamLasers without affecting sim damage timing (the
 /// renderer fades the visual; the server controls hit/damage windows).
@@ -602,6 +614,12 @@ export class ProjectileRenderer {
     /// Null until injected; spawn calls are guarded.
     private cegRuntime: CegRuntime | null = null;
 
+    /// Metalstorm native-FX pass. When a weapon def authors no CEG and
+    /// `effects/weapon-fx.json` resolves it, the authored native effect wins
+    /// and the Babylon/CEG fallback is skipped (L-FX step 4). Null on games
+    /// that ship no FX library — every non-Metalstorm game today.
+    private nativeFx: NativeFxSink | null = null;
+
     /// Dynamic FX light pool (PLAN-weapon-fx-gaps Phase L). Null until
     /// injected from main.ts; emits a muzzle flash on fire and an
     /// explosion light on impact. Guarded everywhere.
@@ -701,6 +719,19 @@ export class ProjectileRenderer {
 
     setLightPool(pool: FxLightPool | null): void {
         this.lightPool = pool;
+    }
+
+    setNativeFx(sink: NativeFxSink | null): void {
+        this.nativeFx = sink;
+    }
+
+    /// Native FX slots for a weapon def id, or null when the native path does
+    /// not apply (no library, unknown def, or the def authors its own CEG).
+    private nativeSlots(weaponDefId: number): WeaponFxSlots | null {
+        if (!this.nativeFx || !weaponDefId) return null;
+        const def = this.weaponDefs.get(weaponDefId);
+        if (!def || hasAuthoredCeg(def)) return null;
+        return this.nativeFx.resolve(def.name, def.projectileType);
     }
 
     /// PLAN.md Stage B1d. Toggle suppression of this renderer's invented
@@ -1031,22 +1062,39 @@ export class ProjectileRenderer {
         // renders as the procedural placeholder created in setWeaponDefs.
         this.ensureWeaponAssetsLoaded(ev.weaponDefId);
 
-        // Muzzle CEG. Direction is the firing axis derived from the
-        // initial velocity; fall back to "toward target" when the
-        // server reports zero velocity (e.g. shields/projectors).
-        if (this.cegRuntime) {
+        // Muzzle. Direction is the firing axis derived from the initial
+        // velocity; fall back to "toward target" when the server reports zero
+        // velocity (e.g. shields/projectors).
+        //
+        // Native first: a Metalstorm def (no authored CEG) whose weapon-fx.json
+        // entry names a `muzzle` effect draws that and skips BOTH the CEG
+        // dispatch and the generic muzzle-flare quad below — the authored
+        // flash IS the muzzle, and two of them read as one wrong one.
+        const nativeSlots = this.nativeSlots(ev.weaponDefId);
+        const nativeMuzzle = !!(nativeSlots?.muzzle && this.nativeFx);
+        if (nativeMuzzle || this.cegRuntime) {
             const dir = unitDirection(
                 ev.vel.x, ev.vel.y, ev.vel.z,
                 ev.targetPos.x - ev.pos.x,
                 ev.targetPos.y - ev.pos.y,
                 ev.targetPos.z - ev.pos.z,
             );
-            const def = this.weaponDefs.get(ev.weaponDefId);
-            const fxName = effectForFire(def);
-            if (fxName) {
-                this.cegRuntime.spawn(fxName,
-                    ev.pos.x, ev.pos.y, ev.pos.z,
-                    dir.x, dir.y, dir.z);
+            if (nativeMuzzle) {
+                this.nativeFx!.spawn(nativeSlots!.muzzle!,
+                    ev.pos.x, ev.pos.y, ev.pos.z, dir.x, dir.y, dir.z);
+                // Dim brief muzzle light — the pool gates itself on
+                // `gfx.fxLights`, so the Low preset drops it.
+                this.lightPool?.emit(ev.pos.x, ev.pos.y, ev.pos.z,
+                    NATIVE_MUZZLE_LIGHT_COLOR, NATIVE_MUZZLE_LIGHT_PEAK,
+                    NATIVE_MUZZLE_LIGHT_RANGE, NATIVE_MUZZLE_LIGHT_TTL_SEC);
+            } else {
+                const def = this.weaponDefs.get(ev.weaponDefId);
+                const fxName = effectForFire(def);
+                if (fxName) {
+                    this.cegRuntime!.spawn(fxName,
+                        ev.pos.x, ev.pos.y, ev.pos.z,
+                        dir.x, dir.y, dir.z);
+                }
             }
         }
 
@@ -1068,7 +1116,7 @@ export class ProjectileRenderer {
         // for them — it was the wrong colour and shape for a beam. Other
         // weapon types still get the generic muzzle flare.
         const fv = this.weaponVisuals.get(ev.weaponDefId);
-        if (this.muzzleFlare && fv?.kind !== 'beam') {
+        if (this.muzzleFlare && fv?.kind !== 'beam' && !nativeMuzzle) {
             const mdef = this.weaponDefs.get(ev.weaponDefId);
             if (mdef) {
                 const size = Math.min(Math.max((mdef.aoe ?? 0) * 0.2, 4), 30);
@@ -1454,7 +1502,17 @@ export class ProjectileRenderer {
         // `weaponDefId` on the event is the authoritative def for
         // free-floating explosions (unit death / self-destruct, where
         // there's no live projectile entry to look up).
-        if (this.cegRuntime) {
+        // Native first (see onFired): an authored `impact` effect wins, and
+        // also raises a ground scar through the decal overlay's snapshot path.
+        const impactDefId = ev.weaponDefId || p?.weaponDefId || 0;
+        const nativeImpact = this.nativeSlots(impactDefId);
+        if (nativeImpact?.impact && this.nativeFx) {
+            this.nativeFx.spawn(nativeImpact.impact,
+                ev.pos.x, ev.pos.y, ev.pos.z, 0, 1, 0);
+            this.nativeFx.scar(ev.pos.x, ev.pos.y, ev.pos.z,
+                Math.max(NATIVE_SCAR_MIN_RADIUS,
+                    this.weaponDefs.get(impactDefId)?.aoe ?? 0));
+        } else if (this.cegRuntime) {
             const def = ev.weaponDefId
                 ? this.weaponDefs.get(ev.weaponDefId)
                 : (p ? this.weaponDefs.get(p.weaponDefId) : undefined);
