@@ -272,6 +272,9 @@ function staleTokens(text, contract) {
         'near', 'radius', 'count', 'scale', 'class', 'side', 'when', 'priority',
         'intent', 'clarify', 'group', 'groupRef', 'targetRef', 'subjectRef',
         'panelId', 'regionRef', 'objectiveRef', 'goalRef', 'filterClass',
+        // `player`: the `objectives.createBounty` action field carrying a
+        // callsign (PLAN-beta.md "Mentorship" — journey-hud lane D).
+        'player',
         'memberRefs', 'standing', 'onSight', 'value', 'amount', 'rateCap', 'slot',
         'dir', 'op', 'x', 'z', 'percent', 'true', 'false', 'null', 'type', 'say',
         // Context payload field names. They belong in the document — the model
