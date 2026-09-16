@@ -45,7 +45,7 @@ sys.path.insert(0, str(HERE))
 from backends import none as backend_none  # noqa: E402
 from backends import comfy_local as backend_comfy  # noqa: E402
 from backends import hosted as backend_hosted  # noqa: E402
-from post import seamless, resize, pbr, ktx2 as ktx2mod, svg_trace  # noqa: E402
+from post import seamless, resize, pbr, ktx2 as ktx2mod, svg_trace, alpha as alphamod  # noqa: E402
 
 BACKENDS = {'none': backend_none, 'comfy_local': backend_comfy, 'hosted': backend_hosted}
 
@@ -123,6 +123,10 @@ def process_job(job: dict, backend_name: str, style: dict, force: bool,
             extra_rel[output_rel_game.replace('_diffuse.', '_roughness.')] = pbr.roughness_from_luminance(img)
         elif step == 'pbr_normal_only':
             img = pbr.normal_from_height(pbr.height_from_luminance(img))
+        elif step == 'overlay_alpha':
+            img = alphamod.overlay_alpha(img, backend_none.hex_to_rgb(job.get('tint', '#808080')))
+        elif step == 'bg_key':
+            img = alphamod.key_out_background(img)
         elif step in ('svg_trace', 'ktx2'):
             pass  # handled below, after the PNG is saved
         else:

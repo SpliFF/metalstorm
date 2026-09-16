@@ -17,7 +17,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from post import seamless, resize, pbr  # noqa: E402
+from post import seamless, resize, pbr, alpha  # noqa: E402
 from backends import none as backend_none  # noqa: E402
 import run as imagegen_run  # noqa: E402
 
@@ -63,6 +63,29 @@ class NoneBackendTest(unittest.TestCase):
         b = backend_none.generate('p', 2, (64, 64), 'n', asset_class='biome', params={})
         self.assertNotEqual(a, b)
 
+    def test_fx_atlas_deterministic_across_processes(self):
+        # cell_seed used to fold in the builtin hash() of the frame name,
+        # which is salted per-process (PYTHONHASHSEED) — a rerun of `run.py`
+        # with an identical job spec produced a different fx_atlas.png every
+        # time. Run generate() in two subprocesses with different explicit
+        # hash seeds: only a process-stable mixing function (zlib.crc32)
+        # makes them agree.
+        import subprocess
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from backends import none as backend_none\n"
+            "params = {'cols': 2, 'rows': 1, 'frames': {'smoke': 0, 'dust': 1}}\n"
+            "sys.stdout.buffer.write(backend_none.generate('p', 100601, (64, 64), 'n', "
+            "asset_class='fx_atlas', params=params))\n"
+        ) % here
+        outs = []
+        for seed in ('1', '2'):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            r = subprocess.run([sys.executable, '-c', code], capture_output=True, env=env, check=True)
+            outs.append(r.stdout)
+        self.assertEqual(outs[0], outs[1])
+
     def test_emblem_shapes_render_and_svg_agree_on_shape_count(self):
         shapes = backend_none.emblem_shapes('#c9a227')
         img = backend_none.render_shapes(shapes, 128, 128)
@@ -80,6 +103,40 @@ class PbrTest(unittest.TestCase):
         self.assertEqual(normal.size, (32, 32))
         self.assertEqual(rough.size, (32, 32))
         self.assertEqual(normal.mode, 'RGB')
+
+
+class AlphaTest(unittest.TestCase):
+    def test_overlay_alpha_leaves_existing_rgba_untouched(self):
+        img = Image.new('RGBA', (8, 8), (10, 20, 30, 40))
+        out = alpha.overlay_alpha(img, (255, 0, 0))
+        self.assertIs(out, img)
+
+    def test_overlay_alpha_recolors_rgb_and_derives_alpha_from_grey_deviation(self):
+        arr = np.full((16, 16), 128, dtype=np.uint8)
+        arr[4:8, 4:8] = 255  # a bright patch far from mid-grey
+        img = Image.fromarray(arr, 'L').convert('RGB')
+        out = alpha.overlay_alpha(img, (122, 90, 62))
+        self.assertEqual(out.mode, 'RGBA')
+        a = np.asarray(out)[..., 3]
+        self.assertGreater(a[5, 5], a[0, 0])  # the deviating patch reads more opaque
+        rgb = np.asarray(out)[..., :3]
+        self.assertTrue((rgb == np.array([122, 90, 62])).all())
+
+    def test_key_out_background_keys_uniform_corners_transparent(self):
+        arr = np.zeros((32, 32, 3), dtype=np.uint8)
+        arr[10:22, 10:22] = (200, 180, 40)  # a badge shape in the middle
+        img = Image.fromarray(arr, 'RGB')
+        out = alpha.key_out_background(img)
+        a = np.asarray(out)[..., 3]
+        self.assertLess(a[0, 0], 10)
+        self.assertGreater(a[16, 16], 200)
+
+    def test_key_out_background_skips_images_with_real_alpha(self):
+        arr = np.zeros((8, 8, 4), dtype=np.uint8)
+        arr[..., 3] = np.tile(np.arange(8, dtype=np.uint8) * 30, (8, 1))
+        img = Image.fromarray(arr, 'RGBA')
+        out = alpha.key_out_background(img)
+        self.assertIs(out, img)
 
 
 class JobHashTest(unittest.TestCase):

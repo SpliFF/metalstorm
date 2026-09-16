@@ -182,18 +182,19 @@
   "emblem_compact": {
     "backend": "none",
     "class": "emblem",
-    "job_hash": "472cde599418fd6e",
+    "job_hash": "a3a97eee17285189",
     "job_id": "emblem_compact",
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern",
     "outputs": [
       "data/games/metalstorm/art/gen/emblems/compact.png",
       "data/games/metalstorm/art/gen/emblems/compact.svg"
     ],
     "post": [
+      "bg_key",
       "pow2",
       "svg_trace"
     ],
-    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered, isolated on transparent background, screen-printed stencil look, no gradients. The Meridian Compact \u2014 engineers and orbital surveyors, methodical builders. A drafting-compass/survey-transit motif crossed with a fabricator gear, phosphor-cyan accent on worn steel.",
+    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Meridian Compact \u2014 engineers and orbital surveyors, methodical builders. A drafting-compass/survey-transit motif crossed with a fabricator gear, phosphor-cyan accent on worn steel.",
     "seed": 100201,
     "size": [
       512,
@@ -205,18 +206,19 @@
   "emblem_union": {
     "backend": "none",
     "class": "emblem",
-    "job_hash": "285bf9d872980f5a",
+    "job_hash": "99baef4f6e0f7c99",
     "job_id": "emblem_union",
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern",
     "outputs": [
       "data/games/metalstorm/art/gen/emblems/union.png",
       "data/games/metalstorm/art/gen/emblems/union.svg"
     ],
     "post": [
+      "bg_key",
       "pow2",
       "svg_trace"
     ],
-    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered, isolated on transparent background, screen-printed stencil look, no gradients. The Foundry Union \u2014 foundry crews and shipyard guilds, hands-on-the-line loyalty. A crossed hammer-and-wrench motif over a furnace-hatch roundel, hazard-yellow accent on worn steel.",
+    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Foundry Union \u2014 foundry crews and shipyard guilds, hands-on-the-line loyalty. A crossed hammer-and-wrench motif over a furnace-hatch roundel, hazard-yellow accent on worn steel.",
     "seed": 100202,
     "size": [
       512,
@@ -266,13 +268,14 @@
   "overlay_dust_coat": {
     "backend": "none",
     "class": "overlay",
-    "job_hash": "476a0c3d99068134",
+    "job_hash": "ffc1c09f66207f42",
     "job_id": "overlay_dust_coat",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
       "data/games/metalstorm/art/gen/overlays/dust_coat.png"
     ],
     "post": [
+      "overlay_alpha",
       "seamless",
       "pow2"
     ],
@@ -287,13 +290,14 @@
   "overlay_oil_stains": {
     "backend": "none",
     "class": "overlay",
-    "job_hash": "29e7b986d024be49",
+    "job_hash": "6e04d32e9dbeeb7b",
     "job_id": "overlay_oil_stains",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
       "data/games/metalstorm/art/gen/overlays/oil_stains.png"
     ],
     "post": [
+      "overlay_alpha",
       "seamless",
       "pow2"
     ],
@@ -308,13 +312,14 @@
   "overlay_rust_streaks": {
     "backend": "none",
     "class": "overlay",
-    "job_hash": "5a8f9215dc6aa595",
+    "job_hash": "1ee5f204afdf59be",
     "job_id": "overlay_rust_streaks",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
       "data/games/metalstorm/art/gen/overlays/rust_streaks.png"
     ],
     "post": [
+      "overlay_alpha",
       "seamless",
       "pow2"
     ],
@@ -329,13 +334,14 @@
   "overlay_soot_scorch": {
     "backend": "none",
     "class": "overlay",
-    "job_hash": "67185e7888ff51e7",
+    "job_hash": "88ce58b1bd50fd7e",
     "job_id": "overlay_soot_scorch",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
       "data/games/metalstorm/art/gen/overlays/soot_scorch.png"
     ],
     "post": [
+      "overlay_alpha",
       "seamless",
       "pow2"
     ],

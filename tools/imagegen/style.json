@@ -17,8 +17,8 @@
   "global_negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border",
   "classes": {
     "emblem": {
-      "prefix": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered, isolated on transparent background, screen-printed stencil look, no gradients",
-      "negative": "photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character"
+      "prefix": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients",
+      "negative": "photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern"
     },
     "lobby_background": {
       "prefix": "wide establishing shot, post-collapse dust-bowl battlefield horizon at low warm sun, aerial-perspective haze toward a desaturated horizon, olive-drab and dust-khaki terrain, distant silhouettes of scavenged war machines, cool blue-grey sky, cinematic wide composition, moody atmospheric",

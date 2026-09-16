@@ -7,5 +7,5 @@
   "height": 512,
   "tint": "#7fd0c8",
   "output": "art/gen/emblems/compact.png",
-  "post": ["pow2", "svg_trace"]
+  "post": ["bg_key", "pow2", "svg_trace"]
 }

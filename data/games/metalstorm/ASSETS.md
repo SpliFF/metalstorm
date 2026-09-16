@@ -309,16 +309,42 @@ post-step provenance per file lives in `data/games/metalstorm/art/gen/manifest.j
 a human-readable index into it, not the record of truth.
 
 **Current backend: `none`** (procedural placeholders — palette-gradient
-noise; emblems are flat geometric badges; deterministic per seed). ComfyUI
-Desktop was confirmed live on `127.0.0.1:8188` (0.36.0, device `mps`, 32 GB)
-2026-09-17 but has **zero checkpoints installed** (`GET
-/object_info/CheckpointLoaderSimple` returns an empty list) — `comfy_local`
-is wired up and will be picked automatically once an SDXL base checkpoint
-(`sd_xl_base_1.0*.safetensors`) is installed through ComfyUI Desktop's own
-model manager; this tool does not download models. No `FAL_KEY` /
-`REPLICATE_API_TOKEN` were set at generation time either. Every row below
-gets regenerated in place (same output paths, `run.py` overwrites) the day a
-real backend is selected — no job files change.
+noise; emblems are flat geometric badges; deterministic per seed), still,
+as of 2026-09-17 — **not by choice this round**. ComfyUI Desktop now has
+`sd_xl_base_1.0.safetensors` installed and `run.py --backend auto --list`
+correctly resolves to `comfy_local` (`GET /object_info/CheckpointLoaderSimple`
+lists the checkpoint; the pipeline's `requests` dependency was missing from
+`tools/imagegen/.venv` and has been installed). But every submission to
+`POST /prompt` — of any job, any content — crashes inside ComfyUI's own
+`KSampler` at the very first sampling step with a `BrokenPipeError` raised
+from its tqdm progress-bar write, before a single image is produced.
+`lsof -p <pid>` on the ComfyUI Desktop backend process confirms its stdout
+and stderr (fds 1/2) are unix-domain sockets pointing at `->(none)` — the
+pipe to its Electron log window is disconnected, not something reachable
+from the HTTP API or fixable from `tools/imagegen`. **TOOLING GAP**: a human
+needs to quit and reopen ComfyUI Desktop (or use its own restart control) to
+reopen that pipe; nothing else about the setup is broken. The workflow this
+tool submits is otherwise ready — SDXL base checkpoint only, no refiner,
+sampler steps 28 / cfg 6.5 / `dpmpp_2m` + `karras`, sized per job (1024²
+for biomes/overlays/fx, 512² for emblems/water tiles, 2048×1024 for the
+lobby background) — and two post-processing gaps that only raster backends
+hit were closed in the same pass so the pipeline is generation-ready the
+moment the pipe is restored:
+- `overlay` class jobs (grime overlays) now run `post/alpha.py`'s
+  `overlay_alpha` first: a raster backend has no alpha channel, so alpha is
+  derived from the generated pixels' deviation from the prompt's "neutral
+  mid-grey base" and recoloured to the job's flat tint (a no-op for `none`,
+  which already emits real alpha).
+- `emblem` class jobs now run `bg_key` first: SDXL renders "isolated on
+  [black background]" as an actual background, not real transparency, so
+  the four corners are chroma-keyed out to alpha (also a no-op for `none`).
+  `style.json`'s emblem prefix was retuned to ask for a flat solid black
+  backdrop specifically so this keying has something reliable to key
+  against.
+
+Every row below gets regenerated in place (same output paths, `run.py`
+overwrites) the day the ComfyUI pipe is restored — no job files change
+beyond the two post-steps above, already landed.
 
 | Asset (path in tree) | Class | Backend | Seed | Prompt (summary) |
 |---|---|---|---|---|
@@ -341,10 +367,12 @@ real backend is selected — no job files change.
 
 All rows: License `Generated (tools/imagegen, backend=none)`; Modifications
 = seamless offset-blend (biome/overlay/water classes) + power-of-two resize
-+ (biome only) height→normal/luminance→roughness PBR derivation reusing
-`tools/fable-model-forge/normals.py`'s Sobel bake + ktx2 encode via
-`tools/textureconverter`. Full text lives in `art/gen/manifest.json`, not
-duplicated here.
++ (overlay class) `overlay_alpha` alpha derivation + (emblem class) `bg_key`
+background chroma-key (both no-ops for `backend=none`, which already emits
+real alpha; see above) + (biome only) height→normal/luminance→roughness PBR
+derivation reusing `tools/fable-model-forge/normals.py`'s Sobel bake + ktx2
+encode via `tools/textureconverter`. Full text lives in
+`art/gen/manifest.json`, not duplicated here.
 
 ## Audio
 

@@ -7,5 +7,5 @@
   "height": 1024,
   "tint": "#2b2e31",
   "output": "art/gen/overlays/oil_stains.png",
-  "post": ["seamless", "pow2"]
+  "post": ["overlay_alpha", "seamless", "pow2"]
 }

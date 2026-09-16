@@ -65,7 +65,7 @@ def _build_workflow(ckpt: str, prompt: str, negative: str, seed: int,
         '3': {'class_type': 'CLIPTextEncode', 'inputs': {'text': negative, 'clip': ['1', 1]}},
         '4': {'class_type': 'EmptyLatentImage', 'inputs': {'width': w, 'height': h, 'batch_size': 1}},
         '5': {'class_type': 'KSampler', 'inputs': {
-            'seed': seed, 'steps': 24, 'cfg': 6.5, 'sampler_name': 'dpmpp_2m',
+            'seed': seed, 'steps': 28, 'cfg': 6.5, 'sampler_name': 'dpmpp_2m',
             'scheduler': 'karras', 'denoise': 1.0,
             'model': ['1', 0], 'positive': ['2', 0], 'negative': ['3', 0], 'latent_image': ['4', 0],
         }},
