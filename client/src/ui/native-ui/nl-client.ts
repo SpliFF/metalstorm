@@ -32,6 +32,7 @@ import type { AcceleratorResult } from './free-text-accelerator.js';
 import { matchLocalPattern, type LocalPatternDeps } from './nl-local-patterns.js';
 import {
     MAX_ACTIONS,
+    NL_CONTRACT_VERSION,
     validateNLResponse,
     type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
     type NLWhen, type ValidationResult,
@@ -816,6 +817,14 @@ async function callProxy(utterance: string, proxy: ProxyDeps): Promise<ProxyOutc
             },
             body: JSON.stringify({
                 utterance,
+                // The envelope contract this client understands. The proxy
+                // ignores unknown keys today, so this changes nothing yet — and
+                // that is the point of sending it now: by the time a server
+                // wants to route on it, every deployed client is already
+                // saying which contract it speaks, instead of the newer half of
+                // the fleet being silently misparsed by the older half of the
+                // servers. See NL_CONTRACT_VERSION.
+                contract: NL_CONTRACT_VERSION,
                 context: proxy.context,
                 ...(proxy.history?.length ? { history: [...proxy.history] } : {}),
             }),

@@ -24,6 +24,14 @@
  * agreed with, so a bug here costs latency, never a moved army. A sentence it
  * declines is not refused; it is simply not claimed.
  *
+ * Known and deliberate gaps, each one a sentence the model handles: a
+ * multi-word verb split by its object ("pull THEM back"), a subject named
+ * before the verb ("Chimera Squad attack Northgate"), any priority or
+ * when-gate, and every name that is not an exact hit. Widening the grammar to
+ * cover them is not obviously wrong — but each one trades a round trip for a
+ * new way to be confidently mistaken, and the eval is where that trade has to
+ * be argued (`nl-offline-eval.test.ts` pins the absorption rate per rule).
+ *
  * It reads the CURRENT FOCUS through the same port everything else does
  * (`nl-focus.ts`, `bindFocusReferences`). There is deliberately no state in
  * this file: a fast path with its own idea of what is selected is the
@@ -157,7 +165,23 @@ export function fastPathParse(
     const verb = matchVerb(text);
     if (!verb) return null;
 
-    const rest = text.slice(verb.phrase.length).trim();
+    let rest = text.slice(verb.phrase.length).trim();
+
+    // "withdraw them" — a tail that is NOTHING BUT a pronoun says who acts, and
+    // `subjectFor` reads it off the whole sentence already. Stripping it lets
+    // the bare-verb rules below see a bare verb instead of sending the pronoun
+    // to the exact-name test, which would fail on it.
+    //
+    // `withdraw` ONLY, and the restriction is load-bearing. For every other
+    // verb the same pronoun has a second reading — "attack them" with a parley
+    // proposal open is an attack on the counterparty's FORCE, which the brief
+    // carries as `target` — and stripping it would turn that sentence into a
+    // bare "attack", which elides to the proposal's PLACE and sends the squad
+    // somewhere nobody asked for. Withdraw is safe because its elided target is
+    // the departure zone and never anything a pronoun could have named.
+    if (verb.verb === 'withdraw' && rest && findSubjectDeictic(rest) === rest.toLowerCase()) {
+        rest = '';
+    }
     const built = buildIntent(verb.verb, rest, focus, deps, text);
     if (!built) return null;
 
