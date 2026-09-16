@@ -13,30 +13,49 @@ import sys
 import unittest
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from post import seamless, resize, pbr, alpha  # noqa: E402
+from post import seamless, resize, pbr, alpha, grade  # noqa: E402
 from backends import none as backend_none  # noqa: E402
+from backends import comfy_local as backend_comfy  # noqa: E402
 import run as imagegen_run  # noqa: E402
 
 
 class SeamlessTest(unittest.TestCase):
-    def test_offset_blend_reduces_the_seam_it_creates(self):
-        # A hard ramp: seam sits at the col63->col0 wrap today. After the
-        # offset-blend's half-roll, that seam relocates to the centre
-        # (col31/col32) — the blend's whole job is to soften it there.
-        arr = np.tile(np.linspace(0, 255, 64).astype(np.uint8), (64, 1))
-        img = Image.fromarray(arr, 'L')
+    def _wrap_jumps(self, out):
+        return (np.abs(out[:, 0].astype(int) - out[:, -1].astype(int)).max(),
+                np.abs(out[0, :].astype(int) - out[-1, :].astype(int)).max())
 
-        rolled = np.roll(arr, shift=32, axis=1)
-        center_jump_unblended = abs(int(rolled[32, 31]) - int(rolled[32, 32]))
+    def test_cross_fade_wraps_in_both_axes_without_a_centre_seam(self):
+        # A hard ramp in x plus a hard ramp in y: the raw image jumps by ~255
+        # at both wraps. After the four-way cross-fade the output must wrap
+        # within a few grey levels in x AND y, and — the failure mode of a
+        # plain half-roll — must not have moved the seam to the centre.
+        x = np.linspace(0, 255, 64)
+        arr = np.clip((x[None, :] * 0.5 + x[:, None] * 0.5), 0, 255).astype(np.uint8)
+        img = Image.fromarray(arr, 'L')
+        raw_x, raw_y = self._wrap_jumps(arr)
+        self.assertGreater(min(raw_x, raw_y), 100)
 
         out = np.asarray(seamless.make_seamless(img))
-        center_jump_blended = abs(int(out[32, 31]) - int(out[32, 32]))
+        self.assertEqual(out.shape, arr.shape)
+        wx, wy = self._wrap_jumps(out)
+        self.assertLess(wx, 12)
+        self.assertLess(wy, 12)
+        centre_jump_x = np.abs(out[:, 31].astype(int) - out[:, 32].astype(int)).max()
+        centre_jump_y = np.abs(out[31, :].astype(int) - out[32, :].astype(int)).max()
+        self.assertLess(centre_jump_x, 12)
+        self.assertLess(centre_jump_y, 12)
 
-        self.assertLess(center_jump_blended, center_jump_unblended)
+    def test_centre_is_untouched_and_rgba_is_preserved(self):
+        rng = np.random.default_rng(3)
+        arr = rng.integers(0, 256, (64, 64, 4), dtype=np.uint8)
+        out = np.asarray(seamless.make_seamless(Image.fromarray(arr, 'RGBA')))
+        self.assertEqual(out.shape, arr.shape)
+        # Plateau weights are exactly 1 in the middle: the source survives there verbatim.
+        np.testing.assert_array_equal(out[24:40, 24:40], arr[24:40, 24:40])
 
 
 class ResizeTest(unittest.TestCase):
@@ -139,6 +158,22 @@ class AlphaTest(unittest.TestCase):
         self.assertIs(out, img)
 
 
+class TexturedKeyTest(unittest.TestCase):
+    def test_key_out_background_survives_a_mottled_grey_backdrop(self):
+        rng = np.random.default_rng(11)
+        grey = rng.integers(90, 200, (128, 128, 1)).repeat(3, axis=-1).astype(np.uint8)  # mottled, unsaturated
+        yy, xx = np.indices((128, 128))
+        grey[(xx > 104) & (yy < 24)] = 245  # a bright blotch in a corner, outside the corner band
+        disc = (xx - 64) ** 2 + (yy - 64) ** 2 < 40 ** 2
+        grey[disc] = (0xc9, 0xa2, 0x27)  # hazard-yellow badge
+        grey[disc & (np.abs(xx - 64) < 4)] = (10, 10, 10)  # a black stroke through it
+        out = np.asarray(alpha.key_out_background(Image.fromarray(grey, 'RGB'), feather=0))
+        self.assertLess(out[5:20, 5:20, 3].mean(), 10)  # textured corner keyed out
+        self.assertLess(out[2:20, 108:126, 3].mean(), 10)  # corner blotch cut by the centred-badge prior
+        self.assertGreater(out[64, 40, 3], 245)  # yellow kept
+        self.assertGreater(out[40, 64, 3], 245)  # black stroke kept (enclosed)
+
+
 class JobHashTest(unittest.TestCase):
     def test_hash_stable_and_sensitive_to_spec_changes(self):
         job = {'id': 'x', 'seed': 1, 'width': 4, 'height': 4, '_source': 'x.json'}
@@ -151,3 +186,85 @@ class JobHashTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ComfyLocalSizingTest(unittest.TestCase):
+    def test_native_size_targets_one_megapixel_on_the_latent_grid(self):
+        self.assertEqual(backend_comfy.native_size((1024, 1024)), (1024, 1024))
+        self.assertEqual(backend_comfy.native_size((512, 512)), (1024, 1024))
+        w, h = backend_comfy.native_size((2048, 1024))
+        self.assertEqual((w % 64, h % 64), (0, 0))
+        self.assertAlmostEqual(w * h / (1024 * 1024), 1.0, delta=0.08)
+        self.assertAlmostEqual(w / h, 2.0, delta=0.15)
+
+
+class BackendPinTest(unittest.TestCase):
+    def test_pinned_job_ignores_requested_backend(self):
+        self.assertEqual(imagegen_run.effective_backend({'id': 'j'}, 'comfy_local'), 'comfy_local')
+        self.assertEqual(imagegen_run.effective_backend({'id': 'j', 'backend': 'none'}, 'comfy_local'), 'none')
+        with self.assertRaises(ValueError):
+            imagegen_run.effective_backend({'id': 'j', 'backend': 'midjourney'}, 'none')
+
+    def test_pinned_job_runs_the_pin_and_records_the_reason(self):
+        import tempfile
+        from pathlib import Path
+        style = imagegen_run.load_style()
+        job = {'id': 't_pin', 'class': 'overlay', 'backend': 'none', 'backend_reason': 'because',
+               'prompt': 'x', 'seed': 7, 'width': 64, 'height': 64, 'tint': '#6b5a3e',
+               'output': 'art/gen/_test/pin.png', 'post': [], '_source': 't.json'}
+        with tempfile.TemporaryDirectory() as td:
+            orig = imagegen_run.REPO_ROOT, imagegen_run.GAME_ROOT
+            imagegen_run.REPO_ROOT, imagegen_run.GAME_ROOT = Path(td), Path(td) / 'game'
+            try:
+                # backend requested is comfy_local (unreachable here) — the pin must never touch it
+                entry, changed = imagegen_run.process_job(job, 'comfy_local', style, True, {})
+            finally:
+                imagegen_run.REPO_ROOT, imagegen_run.GAME_ROOT = orig
+            self.assertTrue(changed)
+            self.assertEqual(entry['backend'], 'none')
+            self.assertTrue(entry['backend_pinned'])
+            self.assertEqual(entry['backend_reason'], 'because')
+            self.assertEqual(entry['job_hash'], imagegen_run.job_hash(job, 'none'))
+
+    def test_raw_cache_key_depends_on_prompt_seed_and_size_only(self):
+        a = imagegen_run.raw_cache_path('comfy_local', 'p', 'n', 1, (64, 64))
+        self.assertEqual(a, imagegen_run.raw_cache_path('comfy_local', 'p', 'n', 1, (64, 64)))
+        self.assertNotEqual(a, imagegen_run.raw_cache_path('comfy_local', 'p', 'n', 2, (64, 64)))
+        self.assertNotEqual(a, imagegen_run.raw_cache_path('comfy_local', 'p', 'n', 1, (128, 64)))
+        self.assertNotEqual(a, imagegen_run.raw_cache_path('hosted', 'p', 'n', 1, (64, 64)))
+        self.assertEqual(a.parts[-3:-1], ('raw', 'comfy_local'))
+
+
+class GradeTest(unittest.TestCase):
+    def test_gain_lands_the_mean_on_the_palette_and_keeps_black_black(self):
+        rng = np.random.default_rng(5)
+        arr = np.clip(rng.normal(185, 20, (32, 32, 3)), 0, 255).astype(np.uint8)
+        arr[0, 0] = 0
+        out = np.asarray(grade.grade_to_palette(Image.fromarray(arr, 'RGB'), ['#6b5a3e', '#8a7f6a', '#3d3a2e']))
+        target = grade.palette_mean(['#6b5a3e', '#8a7f6a', '#3d3a2e'])
+        for c in range(3):
+            self.assertAlmostEqual(out[..., c].mean(), target[c], delta=2.0)
+        self.assertEqual(tuple(out[0, 0]), (0, 0, 0))
+
+    def test_no_colors_is_a_no_op(self):
+        img = Image.new('RGB', (4, 4), (200, 100, 50))
+        self.assertIs(grade.grade_to_palette(img, []), img)
+
+
+class BuildPromptTest(unittest.TestCase):
+    def test_class_suffix_trails_the_job_subject(self):
+        style = {'global_negative': 'g', 'classes': {'c': {'prefix': 'P', 'suffix': 'S', 'negative': 'n'}}}
+        prompt, negative = imagegen_run.build_prompt(style, {'class': 'c', 'prompt': 'J.'})
+        self.assertEqual(prompt, 'P. J. S')
+        self.assertEqual(negative, 'g, n')
+        style['classes']['c'].pop('suffix')
+        self.assertEqual(imagegen_run.build_prompt(style, {'class': 'c', 'prompt': 'J'})[0], 'P. J')
+
+
+class Ktx2EncodingTest(unittest.TestCase):
+    def test_roughness_goes_etc1s_everything_else_uastc(self):
+        from pathlib import Path
+        from post import ktx2
+        self.assertEqual(ktx2.encoding_for(Path('x/desert_roughness.png')), 'etc1s')
+        self.assertEqual(ktx2.encoding_for(Path('x/desert_normal.png')), 'uastc')
+        self.assertEqual(ktx2.encoding_for(Path('x/desert_diffuse.png')), 'uastc')

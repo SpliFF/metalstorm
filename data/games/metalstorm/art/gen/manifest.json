@@ -1,27 +1,28 @@
 {
   "biome_desert": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "8877ca8b1c2a0464",
+    "job_hash": "5c1aa98f8c0cad38",
     "job_id": "biome_desert",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/desert_diffuse.png": "data/games/metalstorm/art/gen/biomes/desert_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/desert_normal.png": "data/games/metalstorm/art/gen/biomes/desert_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/desert_roughness.png": "data/games/metalstorm/art/gen/biomes/desert_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/desert_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/desert_normal.png",
       "data/games/metalstorm/art/gen/biomes/desert_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Dust-bowl desert floor, fine dust-khaki sand with wind-ripple striations, sun-bleached-bone salt crust patches, sparse cracked hardpan.",
+    "prompt": "seamless tileable top-down ground texture. Dust-bowl desert floor, fine dust-khaki sand with wind-ripple striations, sun-bleached-bone salt crust patches, sparse cracked hardpan. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
     "seed": 100403,
     "size": [
       1024,
@@ -30,28 +31,29 @@
     "source_job": "biome_desert.json"
   },
   "biome_forest_floor": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "bca5595a360c7553",
+    "job_hash": "80247b123fd697cd",
     "job_id": "biome_forest_floor",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/forest_floor_diffuse.png": "data/games/metalstorm/art/gen/biomes/forest_floor_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/forest_floor_normal.png": "data/games/metalstorm/art/gen/biomes/forest_floor_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/forest_floor_roughness.png": "data/games/metalstorm/art/gen/biomes/forest_floor_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/forest_floor_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/forest_floor_normal.png",
       "data/games/metalstorm/art/gen/biomes/forest_floor_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Dead-forest floor litter, root scars and bare duff over worn-steel-toned soil, scattered deadfall bark chips, no living canopy.",
+    "prompt": "seamless tileable top-down ground texture. Dead-forest floor: thick brown leaf litter, twigs, bark fragments and exposed root scars over dark worn-steel-grey soil, no cracks. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
     "seed": 100402,
     "size": [
       1024,
@@ -60,29 +62,30 @@
     "source_job": "biome_forest_floor.json"
   },
   "biome_frostwaste": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "64d425ce368a4507",
+    "job_hash": "8b8c5f7f63922d95",
     "job_id": "biome_frostwaste",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/frostwaste_diffuse.png": "data/games/metalstorm/art/gen/biomes/frostwaste_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/frostwaste_normal.png": "data/games/metalstorm/art/gen/biomes/frostwaste_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/frostwaste_roughness.png": "data/games/metalstorm/art/gen/biomes/frostwaste_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/frostwaste_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/frostwaste_normal.png",
       "data/games/metalstorm/art/gen/biomes/frostwaste_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Ash-grey frost waste, thin bleached-bone frost crust over worn-steel-toned frozen dirt, scattered ash drifts, no clean pristine snow.",
-    "seed": 100406,
+    "prompt": "seamless tileable top-down ground texture. Ash-grey frost waste: frozen gravel and grit under a dirty rime-ice glaze, sooty ash drifts, frost-heave lumps, uniform coverage, no clean pristine snow. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
+    "seed": 100416,
     "size": [
       1024,
       1024
@@ -90,29 +93,30 @@
     "source_job": "biome_frostwaste.json"
   },
   "biome_grassland": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "e7019d1094a1b2d2",
+    "job_hash": "a85746beea0f35bb",
     "job_id": "biome_grassland",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/grassland_diffuse.png": "data/games/metalstorm/art/gen/biomes/grassland_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/grassland_normal.png": "data/games/metalstorm/art/gen/biomes/grassland_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/grassland_roughness.png": "data/games/metalstorm/art/gen/biomes/grassland_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/grassland_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/grassland_normal.png",
       "data/games/metalstorm/art/gen/biomes/grassland_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Dead scavenger-plains grassland, sparse sun-bleached tufts over cracked olive-drab dirt, sparse gravel, no lush green.",
-    "seed": 100401,
+    "prompt": "seamless tileable top-down ground texture. Dead scavenger-plains grassland: dense mat of dry straw-coloured dead grass blades and trampled hay-like tufts over olive-drab dirt, flat ground cover, no bare soil, no living green. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
+    "seed": 100411,
     "size": [
       1024,
       1024
@@ -120,28 +124,29 @@
     "source_job": "biome_grassland.json"
   },
   "biome_rockfield": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "72e8bfaa5b6446d7",
+    "job_hash": "0251db9305aec301",
     "job_id": "biome_rockfield",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/rockfield_diffuse.png": "data/games/metalstorm/art/gen/biomes/rockfield_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/rockfield_normal.png": "data/games/metalstorm/art/gen/biomes/rockfield_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/rockfield_roughness.png": "data/games/metalstorm/art/gen/biomes/rockfield_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/rockfield_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/rockfield_normal.png",
       "data/games/metalstorm/art/gen/biomes/rockfield_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Broken rockfield, angular scuffed-steel-toned shattered rock plates with rust-stained fracture seams, bleached-bone scree between slabs.",
+    "prompt": "seamless tileable top-down ground texture. Broken rockfield: angular shattered rock slabs and gravel scree, rust-stained fracture seams, no soil. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
     "seed": 100404,
     "size": [
       1024,
@@ -150,28 +155,29 @@
     "source_job": "biome_rockfield.json"
   },
   "biome_wetland": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "biome",
-    "job_hash": "8c1db124792d1fdc",
+    "job_hash": "3d82413ae5bfe6c5",
     "job_id": "biome_wetland",
     "ktx2": {
       "data/games/metalstorm/art/gen/biomes/wetland_diffuse.png": "data/games/metalstorm/art/gen/biomes/wetland_diffuse.ktx2",
       "data/games/metalstorm/art/gen/biomes/wetland_normal.png": "data/games/metalstorm/art/gen/biomes/wetland_normal.ktx2",
       "data/games/metalstorm/art/gen/biomes/wetland_roughness.png": "data/games/metalstorm/art/gen/biomes/wetland_roughness.ktx2"
     },
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, single large object, vignette, non-uniform lighting, lush green grass, flowers",
     "outputs": [
       "data/games/metalstorm/art/gen/biomes/wetland_diffuse.png",
       "data/games/metalstorm/art/gen/biomes/wetland_normal.png",
       "data/games/metalstorm/art/gen/biomes/wetland_roughness.png"
     ],
     "post": [
+      "palette_grade",
       "seamless",
       "pow2",
       "pbr_derive",
       "ktx2"
     ],
-    "prompt": "seamless tileable top-down ground texture, ORM texture set source, physically-based terrain material, gritty weathered post-collapse dust-bowl surface, even diffuse lighting, no cast shadows, no baked highlights. Stagnant bog mudflat, dark olive-drab mud with dried-blood-red algae streaks and cracked dry-edge polygons, rust-stained standing puddles.",
+    "prompt": "seamless tileable top-down ground texture. Stagnant bog mudflat: wet dark mud with dull algae streaks, shallow standing puddles, cracked dry-edge polygons at the margins. post-collapse wasteland terrain, physically-based material albedo, even diffuse lighting, no cast shadows, no baked highlights, gritty and weathered",
     "seed": 100405,
     "size": [
       1024,
@@ -180,9 +186,9 @@
     "source_job": "biome_wetland.json"
   },
   "emblem_compact": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "emblem",
-    "job_hash": "a3a97eee17285189",
+    "job_hash": "14eb5bb9090d8571",
     "job_id": "emblem_compact",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern",
     "outputs": [
@@ -194,19 +200,19 @@
       "pow2",
       "svg_trace"
     ],
-    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Meridian Compact \u2014 engineers and orbital surveyors, methodical builders. A drafting-compass/survey-transit motif crossed with a fabricator gear, phosphor-cyan accent on worn steel.",
-    "seed": 100201,
+    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Meridian Compact \u2014 engineers and orbital surveyors. Bold flat vector badge: a thick-stroked drafting compass opened over a plain fabricator gear silhouette, two colours only, phosphor-cyan shapes on worn steel, heavy simple geometry readable as a tiny icon, no fine lines, no lettering, no blueprint grid",
+    "seed": 100211,
     "size": [
       512,
       512
     ],
     "source_job": "emblem_compact.json",
-    "svg": "data/games/metalstorm/art/gen/emblems/compact.svg"
+    "svg": "FALLBACK: potrace not installed \u2014 wrote an embedded-raster .svg fallback (TOOLING GAP)"
   },
   "emblem_union": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "emblem",
-    "job_hash": "99baef4f6e0f7c99",
+    "job_hash": "70f115cd0783c036",
     "job_id": "emblem_union",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, photographic, 3d render, drop shadow, realistic metal reflections, ornate filigree, crest with fine detail, mascot character, vignette, background texture, checkerboard pattern",
     "outputs": [
@@ -218,26 +224,28 @@
       "pow2",
       "svg_trace"
     ],
-    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Foundry Union \u2014 foundry crews and shipyard guilds, hands-on-the-line loyalty. A crossed hammer-and-wrench motif over a furnace-hatch roundel, hazard-yellow accent on worn steel.",
+    "prompt": "military faction emblem, stencilled worn-steel insignia badge, post-collapse scavenger-army heraldry, flat bold geometric shapes, high-contrast silhouette, centered icon filling most of the frame, flat solid black background, no scene, no vignette, screen-printed stencil look, no gradients. The Foundry Union \u2014 foundry crews and shipyard guilds, hands-on-the-line loyalty. A crossed hammer-and-wrench motif over a furnace-hatch roundel, hazard-yellow accent on worn steel",
     "seed": 100202,
     "size": [
       512,
       512
     ],
     "source_job": "emblem_union.json",
-    "svg": "data/games/metalstorm/art/gen/emblems/union.svg"
+    "svg": "FALLBACK: potrace not installed \u2014 wrote an embedded-raster .svg fallback (TOOLING GAP)"
   },
   "fx_atlas": {
     "backend": "none",
+    "backend_pinned": true,
+    "backend_reason": "kept on the procedural placeholder: a single SDXL sample of a 'sprite sheet' is not aligned to the 8x8 cell grid effects/library.json's atlas.frames indexes into, so every named frame would land on arbitrary pixels - worse than the placeholder's one-blob-per-cell. Real FX sprites need a per-frame job class (one isolated sprite per sample, composited into the grid), not this job. Deferred.",
     "class": "fx_atlas",
-    "job_hash": "dcf18987e0e76e1a",
+    "job_hash": "6fbc02e316a863d2",
     "job_id": "fx_atlas",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, background scenery, character, text, watermark, photographic",
     "outputs": [
       "data/games/metalstorm/unittextures/fx_atlas.png"
     ],
     "post": [],
-    "prompt": "isolated VFX sprite element, additive particle billboard, centered, black background, no ground plane, no scene, simple silhouette read at small size. Smoke/fire/dust VFX flipbook sprite sheet matching data/games/metalstorm/effects/library.json's atlas frame map.",
+    "prompt": "isolated VFX sprite element, additive particle billboard, centered, black background, no ground plane, no scene, simple silhouette read at small size. Smoke/fire/dust VFX flipbook sprite sheet matching data/games/metalstorm/effects/library.json's atlas frame map",
     "seed": 100601,
     "size": [
       1024,
@@ -246,19 +254,19 @@
     "source_job": "fx_atlas.json"
   },
   "lobby_background": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "lobby_background",
-    "job_hash": "3293729b2b880241",
+    "job_hash": "aae3f2e585e0443b",
     "job_id": "lobby_background",
-    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, characters in foreground, readable text, UI elements, vibrant sunset colors, lush vegetation",
+    "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, characters in foreground, readable text, UI elements, vibrant sunset colors, lush vegetation, photograph, modern main battle tank, military stock photo, vehicles in the foreground, sharp mechanical detail",
     "outputs": [
       "data/games/metalstorm/art/gen/lobby-bg.png"
     ],
     "post": [
       "pow2"
     ],
-    "prompt": "wide establishing shot, post-collapse dust-bowl battlefield horizon at low warm sun, aerial-perspective haze toward a desaturated horizon, olive-drab and dust-khaki terrain, distant silhouettes of scavenged war machines, cool blue-grey sky, cinematic wide composition, moody atmospheric. Dust-bowl frontline horizon at dusk, scavenged war machines in silhouette on the ridgeline, thin smoke columns drifting on a global wind vector.",
-    "seed": 100301,
+    "prompt": "wide establishing shot, post-collapse dust-bowl battlefield horizon at low warm sun, aerial-perspective haze toward a desaturated horizon, olive-drab and dust-khaki terrain, distant silhouettes of scavenged war machines, cool blue-grey sky, cinematic wide composition, moody atmospheric. Painted matte-painting concept art, not a photograph: a dust-bowl frontline horizon at dusk seen from far away, only tiny distant silhouettes of improvised scavenger war machines on the ridgeline, thin smoke columns leaning on the wind, vast empty foreground of cracked dust flats, no recognisable real-world vehicles, no people",
+    "seed": 100311,
     "size": [
       2048,
       1024
@@ -266,9 +274,9 @@
     "source_job": "lobby_background.json"
   },
   "overlay_dust_coat": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "overlay",
-    "job_hash": "ffc1c09f66207f42",
+    "job_hash": "f50eeb153114e5ac",
     "job_id": "overlay_dust_coat",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
@@ -279,7 +287,7 @@
       "seamless",
       "pow2"
     ],
-    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Fine settled dust coat, patchy khaki film thicker in recesses and corners, low-contrast mottling on transparent alpha.",
+    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Fine settled dust coat, patchy khaki film thicker in recesses and corners, low-contrast mottling on transparent alpha",
     "seed": 100502,
     "size": [
       1024,
@@ -288,9 +296,9 @@
     "source_job": "overlay_dust_coat.json"
   },
   "overlay_oil_stains": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "overlay",
-    "job_hash": "6e04d32e9dbeeb7b",
+    "job_hash": "831cc70d2cf6b459",
     "job_id": "overlay_oil_stains",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
@@ -301,7 +309,7 @@
       "seamless",
       "pow2"
     ],
-    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Dark oil stains and drips pooling near joints, glossy-dark irregular blotches on transparent alpha.",
+    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Dark oil stains and drips pooling near joints, glossy-dark irregular blotches on transparent alpha",
     "seed": 100503,
     "size": [
       1024,
@@ -310,9 +318,9 @@
     "source_job": "overlay_oil_stains.json"
   },
   "overlay_rust_streaks": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "overlay",
-    "job_hash": "1ee5f204afdf59be",
+    "job_hash": "dd207501d83a25d8",
     "job_id": "overlay_rust_streaks",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
@@ -323,7 +331,7 @@
       "seamless",
       "pow2"
     ],
-    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Gravity-fed rust streaks running downward from bolt heads and seams, rust-toned on transparent alpha.",
+    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Gravity-fed rust streaks running downward from bolt heads and seams, rust-toned on transparent alpha",
     "seed": 100501,
     "size": [
       1024,
@@ -332,9 +340,9 @@
     "source_job": "overlay_rust_streaks.json"
   },
   "overlay_soot_scorch": {
-    "backend": "none",
+    "backend": "comfy_local",
     "class": "overlay",
-    "job_hash": "88ce58b1bd50fd7e",
+    "job_hash": "b393ec18ccfcc3ea",
     "job_id": "overlay_soot_scorch",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, perspective, horizon, sky, strong directional shadow, vignette, colorful background",
     "outputs": [
@@ -345,7 +353,7 @@
       "seamless",
       "pow2"
     ],
-    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Soot scorch patches around muzzles and exhausts, dark radial smudges fading outward, on transparent alpha.",
+    "prompt": "seamless tileable grime/weathering overlay texture, alpha transparency, subtle stains and streaks on a neutral mid-grey base for blending, physically-based wear pattern, even lighting. Soot scorch patches around muzzles and exhausts, dark radial smudges fading outward, on transparent alpha",
     "seed": 100504,
     "size": [
       1024,
@@ -355,8 +363,10 @@
   },
   "water_normal_calm": {
     "backend": "none",
+    "backend_pinned": true,
+    "backend_reason": "kept on the procedural placeholder: SDXL renders 'greyscale height field, small ripples' as strongly anisotropic horizontal corrugation (calm and choppy came back near-identical, 2026-09-17), which scrolls as streaks rather than ripples once water-surface.ts drives it as a normal map; the isotropic procedural ripple field is the better normal source. Revisit with a ripple-specific prompt or a dedicated height-field model.",
     "class": "water_normal",
-    "job_hash": "f0b977e8d687b494",
+    "job_hash": "0ed9d34c29374e2d",
     "job_id": "water_normal_calm",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, color, sky reflection, foam, perspective, horizon",
     "outputs": [
@@ -367,7 +377,7 @@
       "pow2",
       "pbr_normal_only"
     ],
-    "prompt": "seamless tileable greyscale height field for a water surface normal map, small ripples and wave crests, even value distribution, no color, no lighting bake. Calm water surface, small low-amplitude ripples, gentle wave crests.",
+    "prompt": "seamless tileable greyscale height field for a water surface normal map, small ripples and wave crests, even value distribution, no color, no lighting bake. Calm water surface, small low-amplitude ripples, gentle wave crests",
     "seed": 100701,
     "size": [
       512,
@@ -377,8 +387,10 @@
   },
   "water_normal_choppy": {
     "backend": "none",
+    "backend_pinned": true,
+    "backend_reason": "kept on the procedural placeholder: SDXL renders 'greyscale height field, small ripples' as strongly anisotropic horizontal corrugation (calm and choppy came back near-identical, 2026-09-17), which scrolls as streaks rather than ripples once water-surface.ts drives it as a normal map; the isotropic procedural ripple field is the better normal source. Revisit with a ripple-specific prompt or a dedicated height-field model.",
     "class": "water_normal",
-    "job_hash": "a96ab80a62577f3b",
+    "job_hash": "e73e0f62ced9df8a",
     "job_id": "water_normal_choppy",
     "negative": "text, watermark, signature, logo overlay, UI chrome, photorealistic human face, glossy plastic sheen, saturated neon colors, clean pristine surface, unmotivated glow, lens flare, blur, jpeg artifacts, frame border, color, sky reflection, foam, perspective, horizon",
     "outputs": [
@@ -389,7 +401,7 @@
       "pow2",
       "pbr_normal_only"
     ],
-    "prompt": "seamless tileable greyscale height field for a water surface normal map, small ripples and wave crests, even value distribution, no color, no lighting bake. Choppy water surface, higher-frequency ripples, sharper wave crests.",
+    "prompt": "seamless tileable greyscale height field for a water surface normal map, small ripples and wave crests, even value distribution, no color, no lighting bake. Choppy water surface, higher-frequency ripples, sharper wave crests",
     "seed": 100702,
     "size": [
       512,

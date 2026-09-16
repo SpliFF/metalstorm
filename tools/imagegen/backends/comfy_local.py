@@ -10,12 +10,30 @@ ComfyUI Desktop.
 """
 from __future__ import annotations
 import fnmatch
+import io
 import os
 import time
 
 PORTS = (8188, 8000)
 CLIENT_ID = 'metalstorm-imagegen'
 _PREFERRED_CKPT_GLOBS = ('sd_xl_base_1.0*.safetensors', '*sdxl*base*.safetensors')
+NATIVE_AREA = 1024 * 1024  # SDXL base is trained at ~1 MP; anything else degrades fast
+LATENT_STEP = 64
+JOB_TIMEOUT_S = 900  # a 1 MP / 28-step run is ~2 min on an M2 Pro (Metal); leave headroom
+
+
+def native_size(size: tuple[int, int], target_area: int = NATIVE_AREA,
+                step: int = LATENT_STEP) -> tuple[int, int]:
+    """The size SDXL is actually asked for: the job's aspect ratio scaled to
+    ~1 MP and snapped to the latent grid. A 512² emblem is sampled at 1024²
+    and downscaled (SDXL at 512² is mush); a 2048×1024 lobby background is
+    sampled at 1472×704 and upscaled (native 2 MP repeats the scene and takes
+    ~4× as long)."""
+    w, h = size
+    scale = (target_area / float(w * h)) ** 0.5
+    nw = max(step, int(round(w * scale / step)) * step)
+    nh = max(step, int(round(h * scale / step)) * step)
+    return nw, nh
 
 
 def _get_json(session, url, timeout=5):
@@ -96,12 +114,13 @@ def generate(prompt: str, seed: int, size: tuple[int, int], negative: str, *,
             'ComfyUI Desktop\'s model manager — this tool does not download models '
             '(Flux fp8 does not run on Metal; bf16 Flux is too large for 32 GB unified memory).')
 
-    workflow = _build_workflow(ckpt, prompt, negative, seed, size)
+    sample_size = native_size(size)
+    workflow = _build_workflow(ckpt, prompt, negative, seed, sample_size)
     resp = session.post(f'{base}/prompt', json={'prompt': workflow, 'client_id': CLIENT_ID}, timeout=15)
     resp.raise_for_status()
     prompt_id = resp.json()['prompt_id']
 
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + JOB_TIMEOUT_S
     history = None
     while time.monotonic() < deadline:
         h = _get_json(session, f'{base}/history/{prompt_id}')
@@ -110,14 +129,30 @@ def generate(prompt: str, seed: int, size: tuple[int, int], negative: str, *,
             break
         time.sleep(1.0)
     if history is None:
-        raise RuntimeError(f'ComfyUI job {prompt_id} did not finish within 180s')
+        raise RuntimeError(f'ComfyUI job {prompt_id} did not finish within {JOB_TIMEOUT_S}s')
+
+    status = history.get('status', {})
+    if status.get('status_str') == 'error':
+        detail = ''
+        for msg in status.get('messages', []):
+            if msg[0] == 'execution_error':
+                detail = f"{msg[1].get('node_type')}: {msg[1].get('exception_message')}"
+        raise RuntimeError(f'ComfyUI job {prompt_id} failed inside ComfyUI — {detail or status}')
 
     images = history.get('outputs', {}).get('7', {}).get('images', [])
     if not images:
-        raise RuntimeError(f'ComfyUI job {prompt_id} produced no images: {history}')
+        raise RuntimeError(f'ComfyUI job {prompt_id} produced no images: {status}')
     img = images[0]
     r = session.get(f'{base}/view', params={
         'filename': img['filename'], 'subfolder': img.get('subfolder', ''), 'type': img.get('type', 'output'),
     }, timeout=30)
     r.raise_for_status()
-    return r.content
+    if sample_size == tuple(size):
+        return r.content
+    from PIL import Image
+    im = Image.open(io.BytesIO(r.content))
+    im.load()
+    im = im.resize(tuple(size), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format='PNG')
+    return buf.getvalue()
