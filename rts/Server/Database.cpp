@@ -3,6 +3,7 @@
  */
 
 #include "Database.h"
+#include "Mentorship.h"
 #include "SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
 
@@ -10,6 +11,7 @@
 
 #include <sqlite3.h>
 #include <cstdio>
+#include <string>
 
 
 Database::Database() {}
@@ -190,6 +192,44 @@ void Database::CreateTables() {
                 nullptr, nullptr, nullptr);
         }
     }
+
+    // PLAN-beta-journey.md §(b): the journey columns. Same additive
+    // probe+ALTER as the three above, but probed one column at a time rather
+    // than behind a single newest-column sentinel — they land together today
+    // and the next one will not, and a sentinel probe silently skips every
+    // column added after the one it names.
+    //
+    // The defaults ARE the migration's correctness: every account that
+    // predates these columns is a player at standing 0 who has played no
+    // recorded session and has not seen an intro that did not exist. Callsign
+    // and commander_kind are nullable with no default because "unset" is a
+    // real state the routes fall back from, not a value.
+    {
+        struct Column { const char* name; const char* ddl; };
+        static const Column kJourneyColumns[] = {
+            {"standing",        "ALTER TABLE users ADD COLUMN standing INTEGER NOT NULL DEFAULT 0"},
+            {"sessions_played", "ALTER TABLE users ADD COLUMN sessions_played INTEGER NOT NULL DEFAULT 0"},
+            {"callsign",        "ALTER TABLE users ADD COLUMN callsign TEXT"},
+            {"commander_kind",  "ALTER TABLE users ADD COLUMN commander_kind TEXT"},
+            {"intro_done",      "ALTER TABLE users ADD COLUMN intro_done INTEGER NOT NULL DEFAULT 0"},
+        };
+        for (const auto& col : kJourneyColumns) {
+            sqlite3_stmt* stmt = nullptr;
+            const std::string probe =
+                std::string("SELECT ") + col.name + " FROM users LIMIT 1";
+            const int probeRc =
+                sqlite3_prepare_v2(db, probe.c_str(), -1, &stmt, nullptr);
+            sqlite3_finalize(stmt);
+            if (probeRc != SQLITE_OK)
+                sqlite3_exec(db, col.ddl, nullptr, nullptr, nullptr);
+        }
+    }
+
+    // The mentorship tables travel with the journey columns: `mentorships`
+    // references users(id), and every process that opens this database — the
+    // lobby, the game server, a test — must find them present whether or not
+    // it registers a mentor route.
+    Mentorship::EnsureTables(db);
 }
 
 namespace {
@@ -204,6 +244,32 @@ std::optional<std::string> ColumnOptionalText(sqlite3_stmt* stmt, int col) {
     const unsigned char* text = sqlite3_column_text(stmt, col);
     return text ? std::optional<std::string>(reinterpret_cast<const char*>(text))
                 : std::optional<std::string>(std::string());
+}
+/// The column list every UserRecord read shares, as one macro so a new column
+/// cannot reach one reader and miss the other — the failure mode that makes a
+/// field mysteriously empty on exactly one route.
+#define USER_COLUMNS \
+    "id, username, password_hash, role, is_banned, is_dev, faction_id, " \
+    "is_provisional, standing, sessions_played, callsign, commander_kind, " \
+    "intro_done"
+
+/// Read a stepped row selected with USER_COLUMNS.
+UserRecord ReadUserRow(sqlite3_stmt* stmt) {
+    UserRecord user;
+    user.id = sqlite3_column_int64(stmt, 0);
+    user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+    user.isBanned = sqlite3_column_int(stmt, 4) != 0;
+    user.isDev = sqlite3_column_int(stmt, 5) != 0;
+    user.factionId = ColumnOptionalText(stmt, 6);
+    user.isProvisional = sqlite3_column_int(stmt, 7) != 0;
+    user.standing = sqlite3_column_int(stmt, 8);
+    user.sessionsPlayed = sqlite3_column_int(stmt, 9);
+    user.callsign = ColumnOptionalText(stmt, 10).value_or("");
+    user.commanderKind = ColumnOptionalText(stmt, 11).value_or("");
+    user.introDone = sqlite3_column_int(stmt, 12) != 0;
+    return user;
 }
 } // namespace
 
@@ -262,7 +328,7 @@ bool Database::ConfirmProvisionalUpgrade(int64_t userId, const std::string& user
 }
 
 std::optional<UserRecord> Database::FindUser(const std::string& username) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id, is_provisional FROM users WHERE username = ?";
+    const char* sql = "SELECT " USER_COLUMNS " FROM users WHERE username = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -275,22 +341,13 @@ std::optional<UserRecord> Database::FindUser(const std::string& username) {
         return std::nullopt;
     }
 
-    UserRecord user;
-    user.id = sqlite3_column_int64(stmt, 0);
-    user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-    user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-    user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-    user.isBanned = sqlite3_column_int(stmt, 4) != 0;
-    user.isDev = sqlite3_column_int(stmt, 5) != 0;
-    user.factionId = ColumnOptionalText(stmt, 6);
-    user.isProvisional = sqlite3_column_int(stmt, 7) != 0;
-
+    UserRecord user = ReadUserRow(stmt);
     sqlite3_finalize(stmt);
     return user;
 }
 
 std::optional<UserRecord> Database::FindUserById(int64_t userId) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev, faction_id, is_provisional FROM users WHERE id = ?";
+    const char* sql = "SELECT " USER_COLUMNS " FROM users WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -303,18 +360,65 @@ std::optional<UserRecord> Database::FindUserById(int64_t userId) {
         return std::nullopt;
     }
 
-    UserRecord user;
-    user.id = sqlite3_column_int64(stmt, 0);
-    user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-    user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-    user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-    user.isBanned = sqlite3_column_int(stmt, 4) != 0;
-    user.isDev = sqlite3_column_int(stmt, 5) != 0;
-    user.factionId = ColumnOptionalText(stmt, 6);
-    user.isProvisional = sqlite3_column_int(stmt, 7) != 0;
-
+    UserRecord user = ReadUserRow(stmt);
     sqlite3_finalize(stmt);
     return user;
+}
+
+bool Database::UpdateProfile(int64_t userId,
+                             const std::optional<std::string>& callsign,
+                             const std::optional<std::string>& commanderKind,
+                             std::optional<bool> introDone)
+{
+    // The SET list is built from what was supplied, so an omitted field is
+    // absent from the statement rather than written back as itself — a
+    // read-modify-write would turn two concurrent partial updates into one
+    // that silently reverts the other.
+    std::string sets;
+    auto add = [&](const char* clause) {
+        if (!sets.empty()) sets += ", ";
+        sets += clause;
+    };
+    if (callsign)      add("callsign = ?");
+    if (commanderKind) add("commander_kind = ?");
+    if (introDone)     add("intro_done = ?");
+    if (sets.empty()) return false;
+
+    const std::string sql = "UPDATE users SET " + sets + " WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    int idx = 1;
+    if (callsign)
+        sqlite3_bind_text(stmt, idx++, callsign->c_str(), -1, SQLITE_TRANSIENT);
+    if (commanderKind)
+        sqlite3_bind_text(stmt, idx++, commanderKind->c_str(), -1, SQLITE_TRANSIENT);
+    if (introDone)
+        sqlite3_bind_int(stmt, idx++, *introDone ? 1 : 0);
+    sqlite3_bind_int64(stmt, idx, userId);
+
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+}
+
+bool Database::AddStanding(int64_t userId, int standingDelta, int sessionsDelta)
+{
+    const char* sql =
+        "UPDATE users SET standing = MAX(0, standing + ?), "
+        "sessions_played = MAX(0, sessions_played + ?) WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_int(stmt, 1, standingDelta);
+    sqlite3_bind_int(stmt, 2, sessionsDelta);
+    sqlite3_bind_int64(stmt, 3, userId);
+
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
 }
 
 bool Database::UpdatePasswordHash(int64_t userId, const std::string& passwordHash) {
