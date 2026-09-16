@@ -1,0 +1,11 @@
+{
+  "id": "biome_frostwaste",
+  "class": "biome",
+  "prompt": "Ash-grey frost waste, thin bleached-bone frost crust over worn-steel-toned frozen dirt, scattered ash drifts, no clean pristine snow.",
+  "seed": 100406,
+  "width": 1024,
+  "height": 1024,
+  "colors": ["#8a7f6a", "#5a5f63", "#2b2e31"],
+  "output": "art/gen/biomes/frostwaste_diffuse.png",
+  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+}

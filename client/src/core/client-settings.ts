@@ -235,6 +235,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxLights':       false,
         'gfx.distortion':     false,
         'gfx.nativeFx':       false,
+        'gfx.sky':            false,  // L-ATMOS: dome hidden, fog drops to cheap LINEAR
+        'gfx.ssao':           false,
+        'gfx.grain':          false,
     },
     medium: {
         'gfx.shadowMapSize':  2048,
@@ -248,6 +251,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
         'gfx.nativeFx':       true,
+        'gfx.sky':            true,
+        'gfx.ssao':           false,
+        'gfx.grain':          true,
     },
     high: {
         'gfx.shadowMapSize':  4096,
@@ -261,6 +267,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
         'gfx.nativeFx':       true,
+        'gfx.sky':            true,
+        'gfx.ssao':           true,
+        'gfx.grain':          true,
     },
 };
 
@@ -326,6 +335,16 @@ const REGISTRY: SettingDef[] = [
     // requiresRestart: read once at pass construction, same as particleQuality.
     { key: 'gfx.nativeFx', type: 'bool', default: true, scope: 'client',
       label: 'Native Weapon FX', requiresRestart: true },
+
+    // L-ATMOS (PLAN-beta-presentation.md): sky dome, SSAO2, film grain.
+    // requiresRestart on ssao — it allocates a geometry-buffer + blur RTT
+    // set only worth building when the preset asks for it (scene-lighting.ts).
+    { key: 'gfx.sky', type: 'bool', default: true, scope: 'client',
+      label: 'Sky' },
+    { key: 'gfx.ssao', type: 'bool', default: false, scope: 'client',
+      label: 'Ambient Occlusion', requiresRestart: true },
+    { key: 'gfx.grain', type: 'bool', default: true, scope: 'client',
+      label: 'Film Grain' },
 
     // Engine options a game's menu sets (PLAN-settings.md §4). Defaults
     // match Spring's so an unset key reads as "on/full".

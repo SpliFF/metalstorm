@@ -74,11 +74,16 @@ export class MusicDirector {
         // <state> is one of the STATE_NAMES values. Some games
         // author single-track playlists as `music_<state>` (no
         // trailing index); we accept both.
-        const re = /^music_(peace|tension|battle|victory|defeat)(?:_\d+)?$/i;
+        // `calm` is L-AUDIO's content-authoring name for the Peace state
+        // (PLAN-beta-presentation.md L-AUDIO: "playlist keys
+        // music_calm|tension|battle only") — accepted alongside `peace` so
+        // the 3 landed music cues (music_calm/_tension/_battle) resolve
+        // without renaming the wire-protocol MusicState.
+        const re = /^music_(calm|peace|tension|battle|victory|defeat)(?:_\d+)?$/i;
         for (const [rawKey, item] of items) {
             const m = re.exec(rawKey);
             if (!m) continue;
-            const stateName = m[1].toLowerCase();
+            const stateName = m[1].toLowerCase() === 'calm' ? 'peace' : m[1].toLowerCase();
             const state = this.stateByName(stateName);
             if (state == null || !item.file) continue;
             const url = this.resolveTrackUrl(item.file);

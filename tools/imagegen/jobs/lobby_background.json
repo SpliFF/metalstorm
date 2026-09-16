@@ -1,0 +1,10 @@
+{
+  "id": "lobby_background",
+  "class": "lobby_background",
+  "prompt": "Dust-bowl frontline horizon at dusk, scavenged war machines in silhouette on the ridgeline, thin smoke columns drifting on a global wind vector.",
+  "seed": 100301,
+  "width": 2048,
+  "height": 1024,
+  "output": "art/gen/lobby-bg.png",
+  "post": ["pow2"]
+}

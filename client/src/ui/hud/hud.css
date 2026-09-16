@@ -4,6 +4,11 @@
  * The root #game-hud element is a full-viewport layer that lets clicks
  * through by default (pointer-events: none); individual panels opt back
  * in so their buttons and hover targets stay interactive.
+ *
+ * Skin: the stencilled steel plate (data/games/metalstorm/art/DIRECTION.md).
+ * Every colour and typeface here is a token from ui/native-ui/tokens.css —
+ * the selection readout and the minimap are plates like any panel, so they
+ * must not drift from the rails docked next to them.
  */
 
 /*
@@ -27,15 +32,20 @@
     inset: 0;
     z-index: 10;
     pointer-events: none;
-    font: 13px/1.4 system-ui, sans-serif;
-    color: #e0e0e0;
+    font: var(--nui-font);
+    font-size: 13px;
+    color: var(--nui-text);
 }
 
+/* The same plate as a .nui-panel, minus the header the HUD shells don't
+   have: hairline, inset lip, no drop shadow. */
 .hud-panel {
     pointer-events: auto;
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-hairline);
+    box-shadow: var(--nui-edge);
     padding: 6px 12px;
-    border-radius: 4px;
+    border-radius: var(--nui-radius);
 }
 
 #hud-top-bar {
@@ -51,18 +61,26 @@
 
 #hud-quit-btn {
     pointer-events: auto;
-    padding: 4px 12px;
+    padding: 4px 12px 4px 18px;
     margin-left: auto;
-    background: #552222;
-    color: #f0c0c0;
-    border: 1px solid #882222;
-    border-radius: 4px;
-    font: inherit;
+    background-color: var(--nui-bg-raised);
+    background-image: var(--nui-hazard-stripe);
+    background-repeat: no-repeat;
+    background-position: left center;
+    background-size: 5px 100%;
+    color: var(--nui-bad);
+    border: 1px solid var(--nui-bad-fill);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
+    font: var(--nui-font-display);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
     cursor: pointer;
 }
 #hud-quit-btn:hover {
-    background: #772222;
-    color: #fff;
+    background-color: var(--nui-bad-wash);
+    color: var(--nui-text-bright);
 }
 
 #hud-selection {
@@ -76,6 +94,15 @@
     position: absolute;
     bottom: 48px;
     right: 8px;
+}
+
+/* 1px chalk bezel on the map itself, so the minimap reads as a port cut into
+   the plate rather than a canvas floating on it. */
+#hud-minimap:not(.is-fullscreen) #minimap-container canvas {
+    display: block;
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge-sunken);
 }
 
 #detach-minimap-btn {
@@ -113,7 +140,7 @@
     inset: 0;
     z-index: 40;
     pointer-events: auto;
-    background: rgba(4, 6, 10, 0.78);
+    background: var(--nui-scrim);
     backdrop-filter: blur(2px);
 }
 
@@ -139,18 +166,19 @@
 }
 
 #hud-minimap.is-fullscreen .minimap-canvas--fullscreen {
-    border: 1px solid #4a5a72;
-    border-radius: 6px;
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
 }
 
 #hud-minimap.is-fullscreen::after {
     content: 'Esc to close';
     pointer-events: none;
+    font: var(--nui-font-display);
     font-size: 11px;
-    letter-spacing: 0.08em;
+    letter-spacing: var(--nui-track);
     text-transform: uppercase;
-    color: #8fa3bf;
+    color: var(--nui-text-faint);
 }
 
 #hud-help {
@@ -160,7 +188,7 @@
     right: 8px;
     text-align: center;
     font-size: 11px;
-    color: #888;
+    color: var(--nui-text-faint);
 }
 
 #hud-speed {
@@ -168,10 +196,12 @@
     top: 8px;
     left: 50%;
     transform: translateX(-50%);
-    font: bold 14px/1 system-ui, sans-serif;
-    background: rgba(0, 0, 0, 0.75);
-    color: #ffd07a;
+    font: var(--nui-font-mono-hi);
+    font-size: 14px;
+    background: var(--nui-bg-sunken);
+    box-shadow: var(--nui-edge-sunken);
+    color: var(--nui-gold);
     padding: 4px 12px;
-    border-radius: 4px;
+    border-radius: var(--nui-radius);
     pointer-events: none;
 }

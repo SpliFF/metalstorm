@@ -1,0 +1,38 @@
+{
+  "_comment": "Known-good baseline for `make test-gadget-lua`, per family. A family fails the gate only when its fail or errors count EXCEEDS these numbers (a regression), not merely because they are nonzero. Rewrite with `make test-gadget-lua-baseline` — a deliberate act, not something the test target does itself.",
+  "authority": {
+    "pass": 71,
+    "fail": 0,
+    "errors": 0
+  },
+  "civilians": {
+    "pass": 72,
+    "fail": 0,
+    "errors": 0
+  },
+  "objectives": {
+    "pass": 139,
+    "fail": 0,
+    "errors": 0
+  },
+  "parley": {
+    "pass": 17,
+    "fail": 0,
+    "errors": 0
+  },
+  "regions": {
+    "pass": 70,
+    "fail": 0,
+    "errors": 0
+  },
+  "gadgets-mock": {
+    "pass": 542,
+    "fail": 0,
+    "errors": 149
+  },
+  "scenario": {
+    "pass": 145,
+    "fail": 3,
+    "errors": 1
+  }
+}
