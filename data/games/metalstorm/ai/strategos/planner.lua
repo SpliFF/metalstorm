@@ -876,7 +876,7 @@ function Planner.evaluateProposals(picture, profile, role, plan)
     end
     for _, p in ipairs((picture.parley or {}).proposals or {}) do
         if p.toTeam == teamId and (p.state == 'offered' or p.state == 'countered') then
-            local decision, extra
+            local decision, extra, explicit
             if ctx then
                 -- A faulty handler must not swallow the whole board — and a
                 -- board left unanswered is how a proposal expires. The pure
@@ -886,8 +886,19 @@ function Planner.evaluateProposals(picture, profile, role, plan)
                 local ok, d, e = pcall(profile.evaluateProposal, p, ctx)
                 if ok then decision, extra = d, e end
             end
-            if decision == nil then decision, extra = evaluateOne(p, picture, profile) end
-            out[#out + 1] = { id = p.id, decision = decision, extra = extra }
+            if decision == nil then
+                decision, extra = evaluateOne(p, picture, profile)
+            else
+                -- The profile hook itself spoke for this kind (as opposed to
+                -- falling through to the shared valuation) — that is the
+                -- signal the actuator's deference rule carves an exception
+                -- for (§ "explicit kind"): a co-commander profile that has
+                -- stated an opinion about THIS proposal is answering with
+                -- the human's blessing baked into the profile, not binding
+                -- them behind their back.
+                explicit = true
+            end
+            out[#out + 1] = { id = p.id, decision = decision, extra = extra, explicit = explicit }
         end
     end
     return out
