@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-gadget-lua test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -78,6 +78,17 @@ test-ai-lua:
 	cd data/games/metalstorm/ai && busted lib/tests/
 	cd data/games/metalstorm/ai/garrison && busted tests/
 	cd data/games/metalstorm/ai/strategos && busted tests/
+
+# Every Metalstorm gadget busted spec (docs/debugging-tools.md "gadget lua
+# tests"), each family run from the cwd it needs — mock-driven gadget specs,
+# authority/civilians/objectives/parley/regions type modules, and the
+# scenario family, which needs the game root. One pass/fail/error summary;
+# non-zero exit on any failure or error (two families carry known
+# pre-existing red — see the script's own header, not a bug to chase here).
+# ai/ has the same cwd-per-plugin-root pattern but is covered by test-ai-lua
+# above, not duplicated here.
+test-gadget-lua:
+	tools/scripts/test-gadget-lua.sh
 
 # AI evaluation harness (docs/reviews/2026-09-10/ai-framework.md task 4): every
 # AI plugin against every fixture, scored on what the SIM would have done with
