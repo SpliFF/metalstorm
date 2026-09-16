@@ -53,4 +53,7 @@ If you prefer not to run the setup script:
 - **Change ports**: Edit the `env` section in `.claude/settings.local.json`
 - **Disable MCP**: Remove the `mcpServers` section from `.claude/settings.local.json`
 
-The `.claude/` directory is gitignored — your local changes won't affect other developers.
+Most of `.claude/` is gitignored, so your local settings won't affect other
+developers — but `.claude/skills/` is **tracked** and shared via the repo, and
+`.claude/agents/` is tracked too (force-added past the ignore rule). Changes
+there DO affect everyone, and `tools/claude-config/check-skills.sh` gates them.
