@@ -314,7 +314,10 @@ ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
 | `core/build-activity.ts` | Per-tick build progress wiring; nanoframe state. |
 | `core/build-menu.ts` | In-game build menu UI (unit selection panel). |
 | `core/economy-bar.ts` | Resource bar HUD (metal/energy income/storage). |
-| `core/combat-fx.ts` | Explosion/impact VFX on combat events. |
+| `core/combat-fx.ts` | Explosion/impact VFX on combat events. Native-FX slots first (Metalstorm), then CEG, then a procedural fallback. |
+| `core/weapon-fx-resolver.ts` | Pure weapon def → `effects/weapon-fx.json` slots (exact → `defaults[weapontype]` → `__fallback`, case-insensitive) + the `NativeFxSink` interface the dispatch sites hold. |
+| `core/native-fx/fx-game-loader.ts` | The game's native-FX pass: fetches the authored GLSL + effect JSON over the game VFS and draws `NativeFxRenderer.renderInto` from `scene.onAfterRenderingGroupObservable`. Null for games with no `effects/` library. |
+| `core/native-fx/fx-atlas-placeholder.ts` | Procedural stand-in FX atlas + trail strips, canvas-agnostic (OffscreenCanvas in the worker, DOM canvas on the stage). |
 | `core/perf-overlay.ts` | Frame-rate / draw-call overlay (toggleable, F11; `?perfprobe` adds Babylon SceneInstrumentation). |
 | `core/frame-profiler.ts` | Permanent per-phase frame-time accumulator (camera/entity/fx/decals+lights/render/ui/total) with rolling-window mean/p50/p95/p99/max; zero hot-path allocation. Driven by the game-processor render loop (`beginFrame`/`gpMark`/`endFrame`); dump via `window.test.perfDump()` / `window.__gp('__frameProfiler.dump()')`. PLAN-perf P0 attribution instrumentation. |
 | `core/widget-profiler.ts` | On-demand per-widget LuaUI cost profiler (PLAN-perf N1). Wraps every widget callin in the Fengari runtime with a `performance.now()` timing closure (same hook site as BAR's tracy zones — handler dispatch is dynamic `w:Callin(...)` lookup in both cawidgets and barwidgets), plus per-block timers inside the runFrame chunk and a JS-side fixed-tax split of `gpRunUiPass` (GL-state save / Fengari / restore / wipeCaches). `window.test.uiProfileStart()` / `uiProfileDump()` / `uiProfileStop()`. Off by default; ~3 ms/frame overhead while active. |

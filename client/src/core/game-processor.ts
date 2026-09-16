@@ -105,6 +105,7 @@ import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
+import { createNativeFxGamePass, type NativeFxGamePass } from './native-fx/fx-game-loader.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -516,6 +517,12 @@ function parseDeferredLights(str: string, stride: number): number[][] {
 let gpCegRuntime: CegRuntime | null = null;
 let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;
+/// Metalstorm native-FX pass (native-fx/fx-game-loader.ts). Null on games
+/// that ship no effects/ library — every non-Metalstorm game today.
+let gpNativeFx: NativeFxGamePass | null = null;
+/// How long a native impact's ground scar lives (seconds). The art brief
+/// asks for persistent scarring; the decal overlay fades them out.
+const NATIVE_FX_SCAR_TTL_S = 90;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// PLAN-maps.md M6: distance LOD for map features that ship a baked impostor
@@ -2905,6 +2912,32 @@ export function gpInit(msg: GpInitToWorker): void {
     combatFX.setDistortion(gpDistortion);
     gpCombatFX = combatFX;
 
+    // L-FX steps 1-4: the Metalstorm native-FX pass. Async (it fetches the
+    // authored GLSL + effect JSON over the game VFS) and best-effort — a game
+    // without an effects/ library resolves to null and every dispatch site
+    // keeps the CEG path it has today. Once up, a weapon def that authors NO
+    // CEG and resolves through effects/weapon-fx.json draws natively instead.
+    createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '')
+        .then((pass) => {
+            if (!pass || !gpCombatFX) { pass?.dispose(); return; }
+            gpNativeFx = pass;
+            // Impact scars ride the decal overlay's existing snapshot shape —
+            // no new decal API (PLAN-beta-presentation L-DECALS contract).
+            pass.setScarSink((x, y, z, radius) => {
+                gpDecalOverlay?.onSnapshot([{
+                    x, y, z, radius,
+                    ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
+                    r: 0.5, g: 0.5, b: 0.5, a: 1,
+                }]);
+            });
+            projectileRenderer.setNativeFx(pass);
+            combatFX.setNativeFx(pass);
+            combatFX.setLightPool(gpCtx.fxLightPool);
+            (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
+            postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
+        })
+        .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+
     // Dynamic feature renderer — getRuntime()-spawned features (wrecks, debris,
     // reclaim removals). Map-placed features load once via renderMapFeatures
     // in gpLoadMap.
@@ -3110,6 +3143,7 @@ export function gpInit(msg: GpInitToWorker): void {
             updateLiveProjectiles(gpCtx.projectileRenderer.snapshotForWorker());
         }
         gpCegRuntime?.tick(fxDt);
+        gpNativeFx?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
         gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
@@ -4236,6 +4270,9 @@ export function gpShutdown(): void {
     gpCtx.projectileRenderer = null;
     gpCegRuntime?.dispose();
     gpCegRuntime = null;
+    gpNativeFx?.dispose();
+    gpNativeFx = null;
+    delete (globalThis as Record<string, unknown>).__nativeFx;
     gpBuildBeamRenderer?.dispose();
     gpBuildBeamRenderer = null;
     gpCombatFX?.dispose();
