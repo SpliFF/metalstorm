@@ -234,6 +234,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 0,
         'gfx.fxLights':       false,
         'gfx.distortion':     false,
+        'gfx.sky':            false,  // L-ATMOS: dome hidden, fog drops to cheap LINEAR
+        'gfx.ssao':           false,
+        'gfx.grain':          false,
     },
     medium: {
         'gfx.shadowMapSize':  2048,
@@ -246,6 +249,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 1,
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
+        'gfx.sky':            true,
+        'gfx.ssao':           false,
+        'gfx.grain':          true,
     },
     high: {
         'gfx.shadowMapSize':  4096,
@@ -258,6 +264,9 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 2,
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
+        'gfx.sky':            true,
+        'gfx.ssao':           true,
+        'gfx.grain':          true,
     },
 };
 
@@ -313,6 +322,16 @@ const REGISTRY: SettingDef[] = [
     // pause. Off by default until that's fixed; the toggle stays in the panel.
     { key: 'gfx.distortion', type: 'bool', default: false, scope: 'client',
       label: 'Heat Distortion' },
+
+    // L-ATMOS (PLAN-beta-presentation.md): sky dome, SSAO2, film grain.
+    // requiresRestart on ssao — it allocates a geometry-buffer + blur RTT
+    // set only worth building when the preset asks for it (scene-lighting.ts).
+    { key: 'gfx.sky', type: 'bool', default: true, scope: 'client',
+      label: 'Sky' },
+    { key: 'gfx.ssao', type: 'bool', default: false, scope: 'client',
+      label: 'Ambient Occlusion', requiresRestart: true },
+    { key: 'gfx.grain', type: 'bool', default: true, scope: 'client',
+      label: 'Film Grain' },
 
     // Engine options a game's menu sets (PLAN-settings.md §4). Defaults
     // match Spring's so an unset key reads as "on/full".
