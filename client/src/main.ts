@@ -77,6 +77,7 @@ import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
 } from './ui/lobby/loader.js';
+import { soloBootRoute } from './ui/lobby/hub/entry-flow.js';
 import {
     getDefaultGameTemplates,
     loadGameTemplates,
@@ -2314,11 +2315,26 @@ async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
     // route is idempotent by name), which is why the name is user-scoped.
     console.log(`[play] launching "${manifest.name}" (${manifest.map}) as ${identity.username}`);
 
-    const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${identity.token}` },
-        body: JSON.stringify(manifest),
-    });
+    // Players reach a solo/tutorial scenario through the public
+    // `/api/rooms/solo` (journey-lobby-routes builds the manifest server-side);
+    // the dev direct route stays for the lobby host. Until that route lands,
+    // a 404 falls back to direct so the play link keeps working.
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${identity.token}` };
+    let roomResp: Response | null = null;
+    if (soloBootRoute(window.location.hostname) === 'solo' && (scenario.tutorial || (scenario as any).solo)) {
+        roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/solo`, {
+            method: 'POST', headers, body: JSON.stringify({ scenario: params.scenarioId, game: params.gameId }),
+        });
+        if (roomResp.status === 404) {
+            console.warn('[play] /api/rooms/solo not on this lobby — falling back to /api/rooms/direct');
+            roomResp = null;
+        }
+    }
+    if (!roomResp) {
+        roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
+            method: 'POST', headers, body: JSON.stringify(manifest),
+        });
+    }
     const raw = await roomResp.text();
     let room: any = {};
     try { room = JSON.parse(raw); } catch { /* non-JSON error body */ }
@@ -2340,7 +2356,7 @@ async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
 /// boot time. Order of precedence:
 ///   1. `?game=<id>` URL query parameter (browser link, dev override)
 ///   2. `springrts-game-id` localStorage key (sticky across reloads)
-///   3. none (engine default UI)
+///   3. the beta's one game (`metalstorm`)
 ///
 /// CLI startup of the client (e.g. `npm run dev -- --game papertanks`)
 /// is forwarded into the URL by the host launcher, so the same path
@@ -2354,7 +2370,7 @@ function resolveInitialGameId(): string | null {
         localStorage.setItem('springrts-game-id', fromUrl);
         return fromUrl;
     }
-    return localStorage.getItem('springrts-game-id');
+    return localStorage.getItem('springrts-game-id') || 'metalstorm';
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

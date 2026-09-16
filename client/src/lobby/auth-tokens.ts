@@ -411,8 +411,9 @@ export class AccessTokenRenewer {
         private readonly store: TokenStore,
         private readonly fetchImpl: typeof fetch = fetch,
         private readonly now: () => number = () => Date.now(),
-        private readonly setTimer = setTimeout,
-        private readonly clearTimer = clearTimeout,
+        // Wrapped: a bare `setTimeout` called as `this.setTimer` is an Illegal invocation in browsers.
+        private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = (fn, ms) => setTimeout(fn, ms),
+        private readonly clearTimer: (id: ReturnType<typeof setTimeout>) => void = (id) => clearTimeout(id),
     ) {}
 
     /// Register `fn` and hand it the current value immediately, so a holder

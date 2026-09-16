@@ -65,6 +65,7 @@ SCENARIO_SPECS=(
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_population_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_towns_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_tutorial_spec.lua"
+    "$GADGETS_FROM_GAME_ROOT/tests/tutorial_scenarios_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/meridian_basin_scenario_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/meridian_basin_soak_scenario_spec.lua"
 )

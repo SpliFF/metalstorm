@@ -229,6 +229,10 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     'briefing-panel': () => import('./briefing-panel.js'),
 };
 
+/** Sessions after which the HUD stops growing and arrives whole (PLAN-beta.md
+ *  §(b) — `sessions_played < 3`). */
+export const NEW_PLAYER_SESSIONS = 3;
+
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */
 const GAME_STYLE_TIMEOUT_MS = 5000;
 
@@ -251,9 +255,17 @@ export class WidgetLoader {
     private accountId = 0;
     /** PLAN-metalstorm-onboarding.md §4 — gates `hideForSpectator` widgets. */
     private isSpectator = false;
-    /** PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
-     *  every widget mounts at load. Onboarding gates this on `sessions_played`
-     *  so a veteran account gets the whole HUD immediately. */
+    /**
+     * PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
+     * every widget mounts at load.
+     *
+     * Set from the account's `sessions_played < 3` at each `load()`
+     * (PLAN-beta.md §(b)): the first three missions are the only ones a HUD
+     * that grows is worth the confusion of, and a returning player must never
+     * have to re-earn panels they have already used. An account route that is
+     * missing or unreachable leaves whatever `setProgressiveDisclosure` last
+     * said — a failed fetch must not silently re-hide a veteran's HUD.
+     */
     private progressiveDisclosure = true;
     /** Unsubscribe fns for widgets still waiting on their `revealOn`. */
     private pendingReveals = new Map<string, () => void>();
@@ -282,6 +294,28 @@ export class WidgetLoader {
     }
 
     /**
+     * Gate disclosure on how many missions this account has played.
+     *
+     * `/api/account/me` is the accounts lane's route (PLAN-beta.md §(b)); it
+     * does not exist yet on every build, and a guest has no account at all, so
+     * every failure mode here is "leave the flag as it is" rather than a
+     * default — the HUD must not change shape because a fetch timed out.
+     */
+    private async readSessionsPlayed(httpBase: string): Promise<void> {
+        try {
+            const res = await fetch(`${httpBase}/api/account/me`, { credentials: 'include' });
+            if (!res.ok) return;
+            const me = await res.json() as { sessions_played?: number };
+            if (typeof me?.sessions_played !== 'number') return;
+            this.progressiveDisclosure = me.sessions_played < NEW_PLAYER_SESSIONS;
+            console.log(`[widget-loader] progressiveDisclosure=${this.progressiveDisclosure} ` +
+                `(sessions_played=${me.sessions_played})`);
+        } catch {
+            /* no account route on this build — keep the current setting */
+        }
+    }
+
+    /**
      * Load and mount all widgets for the given game.
      *
      * @param gameId - Game identifier (e.g., "metalstorm")
@@ -307,6 +341,9 @@ export class WidgetLoader {
         this.accountId = accountId;
         const generation = this.generation;
         const stale = () => this.generation !== generation;
+
+        await this.readSessionsPlayed(httpBase);
+        if (stale()) return;
 
         // Fetch the widget manifest
         const manifest = await this.fetchManifest(gameId, httpBase);

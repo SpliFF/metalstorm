@@ -1,0 +1,11 @@
+{
+  "id": "biome_rockfield",
+  "class": "biome",
+  "prompt": "Broken rockfield, angular scuffed-steel-toned shattered rock plates with rust-stained fracture seams, bleached-bone scree between slabs.",
+  "seed": 100404,
+  "width": 1024,
+  "height": 1024,
+  "colors": ["#5a5f63", "#2b2e31", "#7a3b1e"],
+  "output": "art/gen/biomes/rockfield_diffuse.png",
+  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+}

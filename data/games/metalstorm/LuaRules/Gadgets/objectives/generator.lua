@@ -16,11 +16,130 @@
 -- resolves.
 local generator = {}
 
--- Density (modoption objective_density) scales cap and cooldown per rule.
+-- ============================================================
+-- §10.6 — THE REWARD DERIVATION (one derivation, no authored magnitudes)
+--
+-- Every systemic reward used to be a literal (30, 40, 50, 60, 75, 90, 120)
+-- with nothing tying it to what an order costs. §10.6 has always said they
+-- should come from `LuaRules/Configs/authority_cost.lua`'s median directive
+-- cost instead. They now do, and nothing here is picked by hand:
+--
+--   REWARD_UNIT = ceil(base_k × median_directive_basis × medianRegionMod
+--                      × order_class.directive)
+--
+--     * `base_k`, `median_directive_basis` and `order_class.directive` come
+--       straight out of the cost spec. `median_directive_basis` is the
+--       corpus-measured median roster basis of a group-scoped directive (see
+--       its comment there) — the thing game_authority.lua actually charges on.
+--     * `medianRegionMod` = sqrt(region_mod_min × region_mod_max), the
+--       GEOMETRIC centre of the authored region band. The band is
+--       multiplicative (0.5 friendly ↔ 2.0 enemy), so its centre is the
+--       geometric mean — which is exactly 1.0, neutral ground. An arithmetic
+--       mean would silently price every objective as if wars were fought in
+--       enemy territory.
+--     * The shape is `authority/formula.lua`'s, deliberately: a reward is
+--       priced by the same arithmetic as the order it is meant to fund. It is
+--       spelled out rather than required so this file stays a plain library
+--       with no load-order dependency on the authority plugin.
+--
+-- Each rule then states its reward as a COUNT OF MEDIAN DIRECTIVES — "this
+-- objective funds N typical orders" — in `DIRECTIVES` below. Those counts are
+-- ORDINAL: they are the design's existing ranking of the rules against each
+-- other (infra cheapest, extraction dearest), carried over unchanged from the
+-- literals they replace. The MAGNITUDE is entirely REWARD_UNIT's. Move
+-- `median_directive_basis` or the directive class modifier and every reward in
+-- the game moves with it; that is the whole point of the change.
+--
+-- Acceptance is `node tools/economy-validation.js`, not any number in here.
+-- ============================================================
+
+--- The cost spec, from the engine when there is one and from the file system
+--- when there is not (busted, and `authority/economy_sim.lua`). The candidate
+--- list covers every cwd a spec runs this module from: `Gadgets/objectives`
+--- and `Gadgets/authority` are two deep, `Gadgets` is one.
+local function loadCostSpec()
+    if VFS and VFS.Include then
+        local ok, spec = pcall(VFS.Include, 'LuaRules/Configs/authority_cost.lua')
+        if ok and type(spec) == 'table' then return spec end
+    end
+    for _, p in ipairs({ '../../Configs/authority_cost.lua',
+                         '../Configs/authority_cost.lua' }) do
+        local ok, spec = pcall(dofile, p)
+        if ok and type(spec) == 'table' then return spec end
+    end
+    -- No spec reachable (a spec that stubs neither VFS nor the cwd). Falling
+    -- back to the shipped constants keeps this module loadable; it is the one
+    -- place a literal survives, and it is a mirror, not a choice.
+    return { base_k = 1.0, median_directive_basis = 4,
+             order_class = { directive = 1.0 },
+             region_mod_min = 0.5, region_mod_max = 2.0 }
+end
+
+--- The derivation itself. Exported so the harness and the specs read the one
+--- number this file computed rather than recomputing a second copy of it.
+function generator.rewardUnit(spec)
+    spec = spec or loadCostSpec()
+    local classMod = (spec.order_class and spec.order_class.directive) or 1.0
+    local regionMod = math.sqrt((spec.region_mod_min or 1.0) * (spec.region_mod_max or 1.0))
+    return math.ceil((spec.base_k or 1.0) * (spec.median_directive_basis or 1)
+                     * regionMod * classMod)
+end
+
+local REWARD_UNIT = generator.rewardUnit()
+generator.REWARD_UNIT = REWARD_UNIT
+
+--- How many median directives each rule's objective funds — the design's own
+--- ranking of the rules, and the ONLY per-rule input to a reward. Read by the
+--- specs so an expectation is stated in directives too.
+local DIRECTIVES = {
+    infra     = 3,    -- repair one damaged building
+    district  = 4,    -- hold a civilian district through a raid
+    control   = 5,    -- take a region (× its own regionValue multiplier)
+    escort    = 6,    -- see a convoy home, or kill it
+    liveness  = 8,    -- the dead-game backstop, worth more than the rule it apes
+    arrival   = 9,    -- land a wave alive, or shoot it down
+    extract   = 12,   -- get a transport off the map — the dearest decision
+    chainBase = 5,    -- a chain whose parent's reward is unknown
+}
+generator.DIRECTIVES = DIRECTIVES
+
+--- reward(n) — n median directives, in authority.
+local function reward(n) return n * REWARD_UNIT end
+
+-- Density (modoption objective_density) scales cap and cooldown per rule, and
+-- sets the per-team CONCURRENCY CEILING (see `fire`).
+--
+-- RATE CAPS, NOT TASTE. `capMul` keeps its original meaning (how many of one
+-- rule's objectives may be live at once). `cooldownMul` and `teamCap` are the
+-- economy's governor and were swept with `node tools/economy-validation.js`
+-- over 16 seeds; these are the values that hold every `mixed` cell inside the
+-- bands, not a preference:
+--
+--   * `teamCap` is 9 at every density. It is not flat by choice — 8 starves
+--     the early war and 10 ends it at a pool ratio of 18, on either side of a
+--     cliff about one objective wide.
+--   * `sparse`'s `capMul` had to come up from 0.5 to 1.0. At 0.5 a rule is
+--     held to two concurrent objectives, and the harness's single-rule sparse
+--     cells show the two cheapest rules (infra, district) then cannot fund a
+--     team's order rate at all — velocity 1.6–1.8 against a 1.5 ceiling, on
+--     every seed. Shortening the cooldown does not touch it; the per-rule cap
+--     is the binder. Those cells were passing before this change only because
+--     the authored rewards were about 2.5× what the derivation gives.
+--   * `dense` shares `normal`'s cooldown. Anything faster mints past the pool
+--     band, so what "dense" buys is a different MIX (twice as many of any one
+--     rule live at once), not more income.
+--
+-- What the density knob now IS, stated plainly because the numbers no longer
+-- support the old story: once the per-team ceiling binds, TOTAL VOLUME IS
+-- FLAT — every density runs about 970–1000 systemic objectives over a
+-- 40-minute 2v2, and shortening a cooldown redistributes slots between rules
+-- rather than adding any. `objective_density` selects the MIX and the tempo of
+-- re-arming; it is not, and after this change cannot be, an income knob. See
+-- `authority/economy_sim.lua`'s header for the measured grid.
 local DENSITY = {
-    sparse = { capMul = 0.5, cooldownMul = 2.0 },
-    normal = { capMul = 1.0, cooldownMul = 1.0 },
-    dense  = { capMul = 2.0, cooldownMul = 0.5 },
+    sparse = { capMul = 1.0, cooldownMul = 0.90, teamCap = 9 },
+    normal = { capMul = 1.0, cooldownMul = 0.75, teamCap = 9 },
+    dense  = { capMul = 2.0, cooldownMul = 0.75, teamCap = 9 },
 }
 
 function generator.newState()
@@ -34,6 +153,8 @@ function generator.newState()
         seenInfraHealth = {},   -- infra unitID -> last-seen health fraction (edge-trigger damage)
         starvedSince = {},      -- team -> tick first seen with zero completable objectives
         chainQueue = {},        -- pending follow-ups from completed controls (chain rule)
+        teamCounts = {},        -- team -> live systemic objectives ON THAT TEAM'S BOARD
+        systemicTeams = {},     -- dedupKey -> the teams it was counted against
     }
 end
 
@@ -78,6 +199,15 @@ function generator.onResolved(state, ruleKey, dedupKey)
     if ruleKey and state.ruleCounts[ruleKey] then
         state.ruleCounts[ruleKey] = math.max(0, state.ruleCounts[ruleKey] - 1)
     end
+    -- The concurrency ceiling frees on exactly the same guarded path as the
+    -- per-rule cap, so a linked pair releases one slot, not two (F13).
+    local teams = dedupKey and state.systemicTeams[dedupKey]
+    if teams then
+        for _, team in ipairs(teams) do
+            state.teamCounts[team] = math.max(0, (state.teamCounts[team] or 1) - 1)
+        end
+        state.systemicTeams[dedupKey] = nil
+    end
 end
 
 --- Exported so the economy harness (authority/economy_sim.lua) sweeps the REAL
@@ -105,6 +235,17 @@ local function applyComeback(world, def)
     end
 end
 
+--- Which boards an objective lands on, for the concurrency ceiling. A
+--- team-scoped objective is one team's work; an OPEN RACE is on everybody's
+--- board and is counted against every team, because that is who it can pay.
+--- A linked pair is counted once, against the scoped half's team — the pair is
+--- one offer with two ways to answer it.
+local function boardsFor(world, def)
+    local scoped = def.linkedPair and (def.escort and def.escort.forTeam) or def.forTeam
+    if scoped ~= nil then return { scoped } end
+    return world.teams and world.teams() or {}
+end
+
 local function fire(state, world, density, rule, dedupKey, build)
     if state.systemicActive[dedupKey] then return end   -- already live, no-op (idempotent)
     if world.frame < (state.cooldownUntil[dedupKey] or 0) then return end
@@ -114,6 +255,31 @@ local function fire(state, world, density, rule, dedupKey, build)
     if count >= cap then return end
 
     local def = build()
+
+    -- ── The concurrency ceiling (the second §10.6 lever) ──────────────────
+    --
+    -- The per-rule caps above bound each rule in isolation and every one of
+    -- them passes the economy harness alone. Run all seven together and the
+    -- board mints two to fifty times what a team can spend, because nothing
+    -- was ever bounding the TOTAL. This is that bound: at most `teamCap` live
+    -- systemic objectives on any one team's board.
+    --
+    -- Its value is not a balance opinion, it is what
+    -- `node tools/economy-validation.js` accepts — the mixed cells' velocity
+    -- and pool ratio are a near-linear function of it, and 9/9/10 is where all
+    -- three densities sit inside the bands. Density still shapes WHICH
+    -- objectives appear and how fast they refresh (capMul/cooldownMul); the
+    -- ceiling is what keeps the economy solvent while it does.
+    --
+    -- The liveness backstop is exempt by construction: a team is only starved
+    -- when its board is empty, and a ceiling that could refuse the rule whose
+    -- whole job is to unstarve it would be a deadlock, not a cap.
+    if not rule.exemptTeamCap then
+        local boards = boardsFor(world, def)
+        for _, team in ipairs(boards) do
+            if (state.teamCounts[team] or 0) >= density.teamCap then return end
+        end
+    end
 
     -- The comeback valve scales TEAM-SCOPED systemic rewards only. Applied
     -- here rather than in each rule's `build` so a seventh rule cannot quietly
@@ -136,6 +302,17 @@ local function fire(state, world, density, rule, dedupKey, build)
     state.systemicActive[dedupKey] = id
     state.ruleCounts[rule.key] = count + 1
     state.cooldownUntil[dedupKey] = world.frame + math.floor(rule.cooldown * density.cooldownMul)
+
+    -- Booked AFTER a successful create, and booked even for an exempt rule:
+    -- liveness objectives are not refused by the ceiling but they do occupy
+    -- the board, so the rules that are capped must see them.
+    local boards = boardsFor(world, def)
+    if #boards > 0 then
+        state.systemicTeams[dedupKey] = boards
+        for _, team in ipairs(boards) do
+            state.teamCounts[team] = (state.teamCounts[team] or 0) + 1
+        end
+    end
 end
 
 -- ============================================================
@@ -158,7 +335,7 @@ local controlRule = {
                     build = function()
                         return {
                             type = 'control', scope = 'strategic', source = 'systemic',
-                            reward = 50 * (1 + (world.regionValue(key) or 0)),
+                            reward = reward(DIRECTIVES.control) * (1 + (world.regionValue(key) or 0)),
                             params = { regionKey = key, holdFrames = CONTROL_HOLD_FRAMES },
                         }
                     end,
@@ -192,7 +369,7 @@ local districtRule = {
                     return {
                         type = 'protect', scope = 'tactical', source = 'systemic',
                         forTeam = threat.districtTeam,
-                        reward = 40,
+                        reward = reward(DIRECTIVES.district),
                         expiresAtFrame = world.frame + DISTRICT_PROTECT_FRAMES,
                         params = { targetUnitIDs = threat.unitIDs },
                     }
@@ -221,12 +398,12 @@ local escortRule = {
                             linkedPair = true,
                             escort = {
                                 type = 'escort', scope = 'tactical', source = 'systemic',
-                                forTeam = convoy.benefactorTeam, reward = 60,
+                                forTeam = convoy.benefactorTeam, reward = reward(DIRECTIVES.escort),
                                 params = { payloadUnitIDs = convoy.unitIDs, destArea = convoy.destArea },
                             },
                             kill = {
                                 type = 'kill', scope = 'tactical', source = 'systemic',
-                                reward = 60,
+                                reward = reward(DIRECTIVES.escort),
                                 params = { targetUnitID = convoy.unitIDs[1] },
                             },
                         }
@@ -260,7 +437,7 @@ local infraRule = {
                     build = function()
                         return {
                             type = 'infra', scope = 'tactical', source = 'systemic',
-                            forTeam = b.ownerTeam, reward = 30,
+                            forTeam = b.ownerTeam, reward = reward(DIRECTIVES.infra),
                             expiresAtFrame = world.frame + INFRA_HOLD_FRAMES,
                             params = { buildingUnitIDs = { b.unitID } },
                         }
@@ -334,7 +511,7 @@ local transportRule = {
                             linkedPair = true,
                             escort = {
                                 type = 'escort', scope = 'tactical', source = 'systemic',
-                                forTeam = a.team, reward = 90,
+                                forTeam = a.team, reward = reward(DIRECTIVES.arrival),
                                 params = {
                                     transportUnitIDs = { a.transportID },
                                     direction = 'inbound',
@@ -344,7 +521,7 @@ local transportRule = {
                             },
                             kill = {
                                 type = 'kill', scope = 'tactical', source = 'systemic',
-                                reward = 90,
+                                reward = reward(DIRECTIVES.arrival),
                                 params = { targetUnitID = a.transportID },
                             },
                         }
@@ -366,7 +543,7 @@ local transportRule = {
                 build = function()
                     return {
                         type = 'escort', scope = 'strategic', source = 'systemic',
-                        forTeam = t.team, reward = 120,
+                        forTeam = t.team, reward = reward(DIRECTIVES.extract),
                         params = {
                             transportUnitIDs = t.transportUnitIDs,
                             direction = 'outbound',
@@ -444,7 +621,7 @@ end
 local LIVENESS_STARVED_TICKS = 2
 
 local livenessRule = {
-    key = 'liveness', cooldown = 900, cap = 8,
+    key = 'liveness', cooldown = 900, cap = 8, exemptTeamCap = true,
     scan = function(world, state)
         local out = {}
         local stillStarved = {}
@@ -467,7 +644,7 @@ local livenessRule = {
                             build = function()
                                 return {
                                     type = 'control', scope = 'strategic', source = 'systemic',
-                                    forTeam = team, reward = 75,
+                                    forTeam = team, reward = reward(DIRECTIVES.liveness),
                                     params = { regionKey = key, holdFrames = CONTROL_HOLD_FRAMES },
                                 }
                             end,
@@ -509,9 +686,19 @@ local livenessRule = {
 -- controls that share a neighbour do not both get an objective on it, and a
 -- team completing several controls around one region chains once.
 -- ============================================================
-local CHAIN_REWARD_BONUS = 1.25      -- +25 % on the parent objective's reward
+-- +25 % on the parent objective's reward — but never more than +25 % over
+-- what a plain control on the TARGET region would have paid.
+--
+-- The clamp is not decoration. Without it the rule is a geometric series: a
+-- chained control is itself a `control`, so completing it feeds
+-- `generator.onCompleted` again and the next chain is +25 % on the +25 %. The
+-- economy harness found it — in a 40-minute `mixed` normal cell the chain
+-- rule's largest live reward reached 187 against a control's 40, and the late
+-- half of every war was one rule inflating against itself. Momentum was meant
+-- to be a bonus on a region, not compound interest on a streak.
+local CHAIN_REWARD_BONUS = 1.25
 local CHAIN_EXPIRY_FRAMES = 5400     -- 3 min at 30 Hz — press on now, or don't
-local CHAIN_FALLBACK_REWARD = 50     -- parent reward unknown/zero (a scripted parent)
+local CHAIN_FALLBACK_REWARD = reward(DIRECTIVES.chainBase)   -- parent reward unknown/zero (a scripted parent)
 
 local chainRule = {
     key = 'chain', cooldown = 1800, cap = 4,
@@ -526,6 +713,9 @@ local chainRule = {
                 -- tick it was created.
                 if world.regionOwner(key) ~= entry.team then
                     local base = (entry.reward > 0) and entry.reward or CHAIN_FALLBACK_REWARD
+                    local ceiling = reward(DIRECTIVES.control)
+                        * (1 + (world.regionValue(key) or 0))
+                    base = math.min(base, ceiling)
                     out[#out + 1] = {
                         dedupKey = 'chain:' .. key,
                         build = function()
