@@ -56,10 +56,13 @@ describe('mentorCardModel', () => {
 });
 
 describe('mentor-card widget', () => {
-  function mount(store) {
+  function mount(store, { api } = {}) {
     const el = document.createElement('div');
     document.body.append(el);
-    mentorCard.init({ mount: el, store, identity: { playerId: 7, teamId: 1 } });
+    mentorCard.init({
+      mount: el, store, identity: { playerId: 7, teamId: 1 },
+      api: api ?? { lobbyBase: '', fetch: vi.fn().mockResolvedValue({ ok: true, status: 200 }) },
+    });
     return el;
   }
 
@@ -86,5 +89,35 @@ describe('mentor-card widget', () => {
     expect(el.textContent).toBe('');               // declining is a real answer
     mentorCard.dispose();
     vi.useRealTimers();
+  });
+
+  it('accepts an AI mentor through the authenticated api port, carrying the bearer', async () => {
+    // A stand-in for the real `createWidgetApiPort` (widget-loader.test.ts):
+    // it attaches the Authorization header the same way, so this test proves
+    // the widget goes through `ctx.api.fetch` for it rather than a raw,
+    // cookie-based `fetch` — which is exactly what always 401s against the
+    // lobby (journey-lobby-routes fire 2: no cookie auth, bearer only).
+    const netFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const api = {
+      lobbyBase: 'http://lobby.test',
+      fetch: (path, init = {}) => netFetch(`${api.lobbyBase}${path}`, {
+        ...init,
+        headers: { ...init.headers, Authorization: 'Bearer test-access-token' },
+      }),
+    };
+    const el = mount(fakeStore(), { api });
+
+    await mentorCard._acceptAi();
+
+    expect(netFetch).toHaveBeenCalledWith('http://lobby.test/api/mentor/ai', expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer test-access-token',
+      }),
+    }));
+    expect(netFetch.mock.calls[0][1]).not.toHaveProperty('credentials');
+    expect(el.textContent).not.toContain('401');
+    mentorCard.dispose();
   });
 });
