@@ -55,7 +55,7 @@ describe('formatJoinPreview', () => {
         expect(watch('account has no faction'))
             .toBe('You will watch — this account has no faction.');
         expect(watch('war declares no side for this faction'))
-            .toBe('You will watch — your faction fields no side in this war.');
+            .toBe('You will watch — your faction fields no side in this mission.');
         // The population is still quoted on a full side: "8/8" is the useful
         // half of that refusal, and it is the one that changes over time.
         expect(watch("the faction's side is full",

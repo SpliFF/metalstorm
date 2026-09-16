@@ -94,7 +94,7 @@ describe('noticeFor decides whose business the event is', () => {
         expect(n?.roomId).toBe(7);
         // A nameless room still identifies itself.
         const bare = noticeFor(ev(), [row({ enlisted: true, name: '' })]);
-        expect(bare?.title).toBe('War 7');
+        expect(bare?.title).toBe('Mission 7');
     });
 
     it('shows the lobby\'s own sentence, verbatim', () => {
@@ -139,7 +139,7 @@ describe('noticeFor quotes the frozen world where it is a fact', () => {
         const n = noticeFor(ev({ kind: 'hibernated', headline: 'Your war went to sleep.' }), [r]);
         // Sim time, from the card's own formatter — not a frame number, and not
         // a second spelling of the same arithmetic.
-        expect(n?.detail).toBe('Your war went to sleep. 2h 06m of war waiting for you.');
+        expect(n?.detail).toBe('Your war went to sleep. 2h 06m of mission waiting for you.');
     });
 
     it('never quotes a frame next to a loss', () => {

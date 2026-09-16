@@ -180,7 +180,7 @@ export function playRefusal(
     if (!scenario)
         return `?play: scenario "${scenarioId}" is not one this game ships.`;
     if (scenario.retired)
-        return `?play: the war "${scenario.displayName ?? scenario.id}" is retired — ` +
+        return `?play: the mission "${scenario.displayName ?? scenario.id}" is retired — ` +
                `its armies cannot cross its map, so it would end uncontested. ` +
                `Pick another scenario.`;
     return null;
