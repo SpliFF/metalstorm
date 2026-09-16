@@ -207,6 +207,59 @@ describe("linked-pair rule (escort + kill)", function()
         assert.are.equal('convoy:c1', pair.kill.systemicKey)
     end)
 
+    -- F13 (2026-09-10 review). A linked pair is TWO objectives sharing ONE
+    -- systemicKey and ONE `ruleCounts` increment, and resolving either half
+    -- mutually resolves the other — so game_objectives called onResolved twice
+    -- per pair and the escort rule's live count fell by 2 each time a convoy
+    -- finished. Both cases below need SEVERAL pairs open at once: with only
+    -- one live, onResolved's `math.max(0, n - 1)` clamp absorbs the second
+    -- decrement and the defect is invisible, which is how it survived.
+    local function openPairs(n)
+        local state = generator.newState()
+        local convoys = {}
+        local world = fakeWorld({ newConvoys = function() return convoys end })
+        for i = 1, n do
+            convoys = { { id = 'c' .. i, benefactorTeam = 2, unitIDs = { 100 + i },
+                          destArea = { x = 0, z = 0, r = 50 } } }
+            world.frame, world.tick = i * 10000, i
+            generator.tick(world, state)
+        end
+        return state, world
+    end
+
+    it("releases exactly one cap slot per pair, however many halves report in", function()
+        local state = openPairs(3)
+        assert.are.equal(3, state.ruleCounts.escort)
+
+        -- Both halves resolve: the escort completing moots the kill out, and
+        -- the kill's own resolution calls back in with the same dedup key.
+        generator.onResolved(state, 'escort', 'convoy:c2')
+        generator.onResolved(state, 'escort', 'convoy:c2')
+
+        assert.are.equal(2, state.ruleCounts.escort)
+        assert.is_nil(state.systemicActive['convoy:c2'])
+        -- The other two are untouched — this is a per-key release, not a
+        -- blanket decrement.
+        assert.is_not_nil(state.systemicActive['convoy:c1'])
+        assert.is_not_nil(state.systemicActive['convoy:c3'])
+    end)
+
+    it("keeps the rule at its cap as pairs resolve in twos", function()
+        -- The escort rule's cap is 4. Four live pairs, each finishing through
+        -- both halves: the live count must walk 4-3-2-1-0, not 4-2-0-0-0.
+        -- (A refused candidate cannot be retried here — `seenConvoys` is
+        -- edge-triggered per convoy id — so the count itself is the gate, and
+        -- it is what `fire` reads before deciding to refuse.)
+        local state = openPairs(4)
+        assert.are.equal(4, state.ruleCounts.escort)
+
+        for i, expected in ipairs({ 3, 2, 1, 0 }) do
+            generator.onResolved(state, 'escort', 'convoy:c' .. i)
+            generator.onResolved(state, 'escort', 'convoy:c' .. i)
+            assert.are.equal(expected, state.ruleCounts.escort)
+        end
+    end)
+
     it("only creates one pair per convoy id (edge-triggered)", function()
         local state = generator.newState()
         local world = fakeWorld({

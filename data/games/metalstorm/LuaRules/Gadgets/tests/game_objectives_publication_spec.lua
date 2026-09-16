@@ -222,3 +222,80 @@ describe("objectives publication — position and extent", function()
         assert.are.equal(500, p.objective_1_r)
     end)
 end)
+
+-- ============================================================
+-- Assigned tasks (PLAN-beta-journey.md §(d))
+-- ============================================================
+-- `player` is the second label publish() carries, next to `suggested`: a soft
+-- hint anyone may ignore vs. whose task this IS. Neither gates completion, so
+-- the only thing worth pinning is that the label reaches the wire — and that
+-- the rank gate on the verbs that set it actually holds.
+describe("assigned tasks — objective_<id>_player", function()
+    local Wire = require('parley.wire')
+
+    --- The publication world plus a live two-player roster: a Veteran (1) and
+    --- a Recruit (2) on team 7, with authority that always affords the stake.
+    local function taskWorld()
+        local world = newWorld(ggWith(RAVEN))
+        local players = { [1] = 7, [2] = 7 }
+        Spring.GetPlayerInfo = function(playerID)
+            local team = players[playerID]
+            if not team then return nil end
+            return 'player' .. playerID, true, false, team + 0.0
+        end
+        world.gameRulesParams.rank_1 = 2   -- Veteran issuer
+        world.gameRulesParams.rank_2 = 0   -- Recruit target
+        return world, _G.gadget
+    end
+
+    it("publishes forPlayer straight from Create", function()
+        local world = newWorld(ggWith(RAVEN))
+        GG.Objectives.Create({ type = 'control', scope = 'tactical', reward = 100,
+                               forPlayer = 4,
+                               params = { regionKey = 'raven_basin', holdFrames = 900 } })
+        assert.are.equal(4, world.gameRulesParams.objective_1_player)
+    end)
+
+    it("createBounty with player= publishes objective_<id>_player", function()
+        local world, g = taskWorld()
+
+        g:RecvLuaMsg(Wire.encode('objectives.createBounty',
+            { type = 'control', region = 'raven_basin', stake = 50, player = 2 }), 1)
+
+        local p = world.gameRulesParams
+        assert.are.equal('control', p.objective_1_type)
+        assert.are.equal('bounty', p.objective_1_source)
+        assert.are.equal(2, p.objective_1_player)
+    end)
+
+    it("refuses createBounty from a player below Veteran who is not the mentor", function()
+        local world, g = taskWorld()
+        world.gameRulesParams.rank_1 = 1
+
+        g:RecvLuaMsg(Wire.encode('objectives.createBounty',
+            { type = 'control', region = 'raven_basin', stake = 50, player = 2 }), 1)
+
+        assert.is_nil(world.gameRulesParams.objective_1_type)
+    end)
+
+    it("lets the target's own mentor task them despite equal rank", function()
+        local world, g = taskWorld()
+        world.gameRulesParams.rank_1 = 1
+        world.gameRulesParams.mentor_2 = 1
+
+        g:RecvLuaMsg(Wire.encode('objectives.createBounty',
+            { type = 'control', region = 'raven_basin', stake = 50, player = 2 }), 1)
+
+        assert.are.equal(2, world.gameRulesParams.objective_1_player)
+    end)
+
+    it("routes objectives.suggest to the existing SuggestFor hint", function()
+        local world, g = taskWorld()
+        GG.Objectives.Create({ type = 'control', scope = 'tactical', reward = 100,
+                               params = { regionKey = 'raven_basin', holdFrames = 900 } })
+
+        g:RecvLuaMsg(Wire.encode('objectives.suggest', { id = 1, player = 2 }), 1)
+
+        assert.are.equal(2, world.gameRulesParams.objective_1_suggested)
+    end)
+end)

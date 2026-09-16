@@ -1,0 +1,70 @@
+/* hub.css — Explore · Spectate · First Mission. Builds on welcome.css. */
+.entry-hub { min-height: 100vh; }
+.hub-account { display: flex; align-items: center; gap: 10px; }
+.hub-callsign {
+    font: var(--nui-font-display-hi); font-size: 16px; letter-spacing: var(--nui-track);
+    text-transform: uppercase; color: var(--nui-text-bright);
+}
+.hub-tier, .hub-faction {
+    padding: 3px 8px;
+    border: 1px solid var(--nui-border);
+    font: var(--nui-font-mono-hi); letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--nui-text-dim);
+}
+.hub-tier { color: var(--nui-gold); border-color: var(--nui-gold); }
+.hub-faction:empty { display: none; }
+
+.hub-stage {
+    flex: 1;
+    padding: 40px 64px 48px;
+    max-width: 1400px; width: 100%; margin: 0 auto;
+    display: flex; flex-direction: column; gap: 22px;
+}
+.hub-kicker { font-size: 13px; }
+.hub-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
+.hub-card {
+    position: relative;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 26px 24px 22px;
+    min-height: 320px;
+    background-color: var(--nui-plate-color); background-image: var(--nui-plate);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    box-shadow: var(--nui-edge);
+}
+.hub-card::before, .hub-card::after {
+    content: ''; position: absolute; top: 6px; width: 5px; height: 5px; background: var(--nui-rivet);
+}
+.hub-card::before { left: 6px; }
+.hub-card::after { right: 6px; }
+.hub-num {
+    font: 700 56px/1 var(--nui-family-display);
+    color: var(--nui-border-hi);
+    letter-spacing: 0.02em;
+}
+.hub-card h2 {
+    margin: 0;
+    font: 700 34px/1 var(--nui-family-display);
+    letter-spacing: 0.01em; text-transform: uppercase;
+    color: var(--nui-text-bright);
+}
+.hub-card > p { margin: 0; flex: 1; font-size: 15px; line-height: 1.5; color: var(--nui-text-dim); }
+.hub-card .entry-btn { align-self: flex-start; }
+.hub-card-mission { border-color: var(--nui-gold); }
+.hub-card-mission .hub-num { color: var(--nui-gold); }
+.hub-mission-row { display: grid; grid-template-columns: 112px 1fr; gap: 12px; align-items: center; }
+.hub-mission-row .entry-btn { align-self: stretch; }
+.hub-mission-what { font-size: 13px; line-height: 1.4; color: var(--nui-text-dim); }
+.hub-badge {
+    display: inline-block; margin-top: 4px; padding: 2px 7px;
+    border: 1px solid var(--nui-accent-dim); background: var(--nui-accent-wash);
+    font: var(--nui-font-mono-hi); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--nui-accent);
+}
+.hub-guest-note { margin: 0; font-size: 13px; color: var(--nui-text-dim); }
+
+@media (max-width: 1000px) {
+    .hub-cards { grid-template-columns: 1fr; }
+    .hub-stage { padding: 24px 20px 40px; }
+    .hub-card { min-height: 0; }
+}

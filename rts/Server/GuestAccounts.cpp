@@ -31,6 +31,15 @@ bool Exec(sqlite3* db, const char* sql,
 
 namespace GuestAccounts {
 
+bool ValidNickname(const std::string& name) {
+    if (name.size() < 2 || name.size() > 32) return false;
+    if (name.rfind("guest-", 0) == 0) return false;
+    for (unsigned char c : name) {
+        if (!std::isalnum(c) && c != '_' && c != '-') return false;
+    }
+    return true;
+}
+
 void EnsureTables(sqlite3* db) {
     if (!db) return;
     sqlite3_exec(db,
@@ -197,18 +206,9 @@ UpgradePlan DecideUpgrade(const UpgradeRequest& req, const AccountState& before,
     // the name badly enough to send it should not have the password silently
     // installed under the guest name instead.
     if (!req.username.empty() && req.username != before.username) {
-        if (req.username.size() < 2 || req.username.size() > 32)
-            return fail(UpgradeStatus::BadUsername);
-        // A generated guest name is a reserved shape, not a name anyone can
-        // claim: allowing it would let an account impersonate a guest that
-        // does not exist yet, and — worse — collide with one this lobby is
-        // about to mint.
-        if (req.username.rfind("guest-", 0) == 0)
-            return fail(UpgradeStatus::BadUsername);
-        for (unsigned char c : req.username) {
-            if (!std::isalnum(c) && c != '_' && c != '-')
-                return fail(UpgradeStatus::BadUsername);
-        }
+        // Length, charset and the reserved `guest-` shape, all in the one
+        // predicate the guest mint checks a chosen nickname against.
+        if (!ValidNickname(req.username)) return fail(UpgradeStatus::BadUsername);
         if (nameIsTaken) return fail(UpgradeStatus::NameTaken);
         if (nameIsInUse) return fail(UpgradeStatus::NameInUse);
         plan.username = req.username;

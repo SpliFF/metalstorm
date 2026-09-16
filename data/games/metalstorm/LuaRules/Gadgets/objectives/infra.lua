@@ -12,6 +12,17 @@ local infra = {}
 local PARTICIPATION_RADIUS = 700
 local FRAMES_PER_MINUTE = 1800   -- GAME_SPEED 30 * 60
 
+--- F14: `quorum` is a count of things, so it must be a whole number in
+--- 1..roster. 0 or negative makes a "keep N alive" objective unfailable; more
+--- than the roster makes it unwinnable. Neither was rejected, and neither is
+--- visible at the board — the objective simply never resolves the way its
+--- author meant.
+local function validQuorum(q, n)
+    if q == nil then return true end
+    if type(q) ~= 'number' or q ~= math.floor(q) then return false end
+    return q >= 1 and q <= n
+end
+
 function infra.validateParams(params)
     if type(params) ~= 'table' then return false, 'params required' end
     if type(params.buildingUnitIDs) ~= 'table' or #params.buildingUnitIDs == 0 then
@@ -19,6 +30,9 @@ function infra.validateParams(params)
     end
     if params.rewardPerMinute ~= nil and (type(params.rewardPerMinute) ~= 'number' or params.rewardPerMinute < 0) then
         return false, 'rewardPerMinute must be a non-negative number'
+    end
+    if not validQuorum(params.quorum, #params.buildingUnitIDs) then
+        return false, 'quorum must be a whole number in 1..' .. #params.buildingUnitIDs
     end
     return true
 end

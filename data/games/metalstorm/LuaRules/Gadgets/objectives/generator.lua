@@ -33,7 +33,25 @@ function generator.newState()
         seenArrivals = {},      -- arrival id -> true (edge-trigger "a wave is on the map")
         seenInfraHealth = {},   -- infra unitID -> last-seen health fraction (edge-trigger damage)
         starvedSince = {},      -- team -> tick first seen with zero completable objectives
+        chainQueue = {},        -- pending follow-ups from completed controls (chain rule)
     }
+end
+
+--- Called by game_objectives.lua when a systemic objective COMPLETES (never
+--- for failed/expired). Feeds the chain rule below; everything else ignores it.
+---
+--- Queued rather than acted on directly because resolution happens mid-walk of
+--- the active list: creating an objective from inside `resolveObjective` would
+--- mutate `activeList` under an iteration that a snapshot was taken precisely
+--- to protect. The next generator tick is milliseconds away and is where every
+--- other rule creates from.
+function generator.onCompleted(state, objective)
+    if not objective or objective.type ~= 'control' then return end
+    local team = objective.completedBy or objective.forTeam
+    local key = objective.params and objective.params.regionKey
+    if not team or not key then return end
+    state.chainQueue[#state.chainQueue + 1] =
+        { team = team, fromKey = key, reward = objective.reward or 0 }
 end
 
 --- Called by game_objectives.lua whenever the objective tagged with
@@ -46,15 +64,45 @@ end
 
 --- Called alongside clearActive to keep ruleCounts accurate (cap enforcement
 --- counts CURRENTLY-active systemic objectives per rule, not lifetime total).
+---
+--- F13: idempotent per dedupKey. A linked pair (E4 — the escort+kill race) is
+--- TWO objectives sharing ONE systemicKey and one `ruleCounts` increment, and
+--- resolving either half mutually resolves the other — so both halves call in
+--- here and the cap fell by 2 per pair. Over a war that drives the rule's
+--- count negative-by-clamp to 0 and lifts its cap entirely. The live-entry
+--- lookup is the natural guard: the first call clears it, the second finds
+--- nothing to release and does nothing.
 function generator.onResolved(state, ruleKey, dedupKey)
+    if dedupKey and state.systemicActive[dedupKey] == nil then return end
     generator.clearActive(state, dedupKey)
     if ruleKey and state.ruleCounts[ruleKey] then
         state.ruleCounts[ruleKey] = math.max(0, state.ruleCounts[ruleKey] - 1)
     end
 end
 
+--- Exported so the economy harness (authority/economy_sim.lua) sweeps the REAL
+--- density multipliers rather than a second copy of them that can drift.
+generator.DENSITY = DENSITY
+
 local function densityFor(mo)
     return DENSITY[mo] or DENSITY.normal
+end
+
+--- Scale a def's reward by its team's comeback multiplier, in place. Handles
+--- the linked-pair shape: the escort half is team-scoped and scales, the kill
+--- half is the open race against it and does not.
+local function applyComeback(world, def)
+    local function scaleOne(d)
+        if not d or not d.forTeam or not d.reward or d.reward <= 0 then return end
+        local scale = generator.comebackScale(world, d.forTeam)
+        if scale > 1 then d.reward = math.floor(d.reward * scale) end
+    end
+    if def.linkedPair then
+        scaleOne(def.escort)
+        scaleOne(def.kill)
+    else
+        scaleOne(def)
+    end
 end
 
 local function fire(state, world, density, rule, dedupKey, build)
@@ -66,6 +114,13 @@ local function fire(state, world, density, rule, dedupKey, build)
     if count >= cap then return end
 
     local def = build()
+
+    -- The comeback valve scales TEAM-SCOPED systemic rewards only. Applied
+    -- here rather than in each rule's `build` so a seventh rule cannot quietly
+    -- opt out of it, and so an open race (`forTeam` nil) is skipped by
+    -- construction rather than by every rule author remembering to.
+    applyComeback(world, def)
+
     def.systemicKey, def.systemicRule = dedupKey, rule.key
 
     local id
@@ -326,6 +381,61 @@ local transportRule = {
     end,
 }
 
+
+-- ============================================================
+-- The comeback valve (gameplay rule (b), 2026-09-10 review task 4).
+--
+-- The problem it solves: objectives are the only primary authority income, so
+-- a side that loses ground loses INCOME, which buys fewer orders, which loses
+-- more ground. The economy has a positive feedback loop running straight down,
+-- and nothing in it pushes back. That is the shape of match that is decided
+-- twenty minutes before it ends and dull for both sides.
+--
+-- The valve is deliberately small and deliberately not a handout. It does two
+-- things for a team that is behind on territory:
+--
+--   * scales TEAM-SCOPED systemic rewards by (1 + deficit), capped at x1.5 —
+--     the same objective pays more to the side that needs it. Open-race
+--     objectives (no `forTeam`) are untouched: there is no "behind team" to
+--     price them for, and scaling a race would pay the leader extra for
+--     winning one.
+--   * drops the liveness backstop's starvation threshold from two ticks to
+--     one, so a losing side gets a fresh objective on the board in half the
+--     time rather than sitting with nothing to earn from.
+--
+-- What it explicitly does NOT do: mint authority directly, reduce the leader's
+-- rewards, or change what anything costs. A team still has to go and complete
+-- the objective. The valve makes the attempt worth more, not automatic.
+--
+-- `deficit` is measured in owned REGIONS rather than pools, because pools are
+-- the thing being corrected and a valve keyed on its own output oscillates.
+-- Region count is the upstream cause and moves slowly.
+-- ============================================================
+local COMEBACK_MAX = 1.5             -- hard cap on the multiplier
+
+--- Deficit in [0, 0.5]: how far behind the leader this team is, as a share of
+--- the whole map. Capped at 0.5 so `1 + deficit` cannot exceed COMEBACK_MAX
+--- even if the multiplier's clamp were ever removed.
+local function deficitOf(world, team)
+    if not world.ownedRegionCount then return 0 end
+    local mine, best, total = 0, 0, 0
+    for _, t in ipairs(world.teams()) do
+        local n = world.ownedRegionCount(t) or 0
+        total = total + n
+        if t == team then mine = n end
+        if n > best then best = n end
+    end
+    if total <= 0 then return 0 end
+    local gap = (best - mine) / total
+    return math.max(0, math.min(0.5, gap))
+end
+
+--- The reward multiplier for one team this tick, and the number published as
+--- `objective_comeback_<team>`.
+function generator.comebackScale(world, team)
+    return math.min(COMEBACK_MAX, 1 + deficitOf(world, team))
+end
+
 -- ============================================================
 -- Liveness guarantee: a team with zero completable active objectives for 2
 -- ticks gets a forced control objective on the nearest neutral/contested
@@ -344,7 +454,12 @@ local livenessRule = {
             else
                 stillStarved[team] = true
                 state.starvedSince[team] = state.starvedSince[team] or world.tick
-                if (world.tick - state.starvedSince[team]) >= (LIVENESS_STARVED_TICKS - 1) then
+                -- The valve's second half: a team that is behind waits one
+                -- tick for the backstop, not two. Half the dead air at exactly
+                -- the moment dead air compounds.
+                local threshold = (generator.comebackScale(world, team) > 1)
+                    and 1 or LIVENESS_STARVED_TICKS
+                if (world.tick - state.starvedSince[team]) >= (threshold - 1) then
                     local key = world.nearestNeutralOrContestedRegion(team)
                     if key then
                         out[#out + 1] = {
@@ -368,10 +483,73 @@ local livenessRule = {
     end,
 }
 
+
+-- ============================================================
+-- Rule: a completed `control` chains into the next region (gameplay rule (a),
+-- 2026-09-10 review task 4).
+--
+-- The problem it solves: systemic control objectives are independent events.
+-- Taking a region pays once and then the board goes quiet until some other
+-- region happens to become contested, so a side that has just won a fight has
+-- nothing to do with the momentum it built — and the generator's other rules
+-- are all reactive (something is contested, something is damaged, a convoy
+-- appeared). Nothing rewards pressing an advantage.
+--
+-- The chain is the one PROACTIVE rule: finish a control and the board
+-- immediately offers the adjacent region you do not own, at +25 % and on a
+-- three-minute clock. It is an offer, not a requirement — declining it costs
+-- nothing, and the short expiry is what keeps a declined chain from silting up
+-- the board.
+--
+-- Scoped to the completing team (`forTeam`), not an open race: the point is to
+-- extend one side's push. An open race here would hand the loser of the fight
+-- a paid objective on the ground they just lost.
+--
+-- Deduped per TARGET region (`chain:<region>`), so two teams completing
+-- controls that share a neighbour do not both get an objective on it, and a
+-- team completing several controls around one region chains once.
+-- ============================================================
+local CHAIN_REWARD_BONUS = 1.25      -- +25 % on the parent objective's reward
+local CHAIN_EXPIRY_FRAMES = 5400     -- 3 min at 30 Hz — press on now, or don't
+local CHAIN_FALLBACK_REWARD = 50     -- parent reward unknown/zero (a scripted parent)
+
+local chainRule = {
+    key = 'chain', cooldown = 1800, cap = 4,
+    scan = function(world, state)
+        local out = {}
+        local queue = state.chainQueue
+        state.chainQueue = {}
+        for _, entry in ipairs(queue) do
+            for _, key in ipairs(world.regionNeighbors(entry.fromKey)) do
+                -- "a region it does not own" — a neighbour already held is not
+                -- a push, and a control objective on it would complete on the
+                -- tick it was created.
+                if world.regionOwner(key) ~= entry.team then
+                    local base = (entry.reward > 0) and entry.reward or CHAIN_FALLBACK_REWARD
+                    out[#out + 1] = {
+                        dedupKey = 'chain:' .. key,
+                        build = function()
+                            return {
+                                type = 'control', scope = 'strategic', source = 'systemic',
+                                forTeam = entry.team,
+                                reward = math.floor(base * CHAIN_REWARD_BONUS),
+                                expiresAtFrame = world.frame + CHAIN_EXPIRY_FRAMES,
+                                params = { regionKey = key, holdFrames = CONTROL_HOLD_FRAMES },
+                            }
+                        end,
+                    }
+                    break   -- one chain per completed control, not one per neighbour
+                end
+            end
+        end
+        return out
+    end,
+}
+
 -- transportRule sits before livenessRule deliberately: it is the floor, and
 -- the liveness backstop should be the LAST thing that fires (§10.5).
 generator.rules = { controlRule, districtRule, escortRule, infraRule,
-                    transportRule, livenessRule }
+                    transportRule, chainRule, livenessRule }
 
 --- Periodic scan; posts objectives through `world.create` /
 --- `world.createLinkedPair`. `world.tick` is a monotonic eval-tick counter

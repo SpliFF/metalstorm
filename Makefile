@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-gadget-lua test-gadget-lua-baseline test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -78,6 +78,25 @@ test-ai-lua:
 	cd data/games/metalstorm/ai && busted lib/tests/
 	cd data/games/metalstorm/ai/garrison && busted tests/
 	cd data/games/metalstorm/ai/strategos && busted tests/
+
+# Every Metalstorm gadget busted spec (docs/debugging-tools.md "gadget lua
+# tests"), each family run from the cwd it needs — mock-driven gadget specs,
+# authority/civilians/objectives/parley/regions type modules, and the
+# scenario family, which needs the game root. One pass/fail/error summary;
+# exit is non-zero only when a family regresses past its recorded baseline
+# in tools/scripts/gadget-baseline.json (two families carry known
+# pre-existing red there — see the script's own header, not a bug to chase
+# here). Run one family only with `make test-gadget-lua FAMILY=<name>`.
+# ai/ has the same cwd-per-plugin-root pattern but is covered by test-ai-lua
+# above, not duplicated here.
+test-gadget-lua:
+	FAMILY=$(FAMILY) tools/scripts/test-gadget-lua.sh
+
+# Rewrite tools/scripts/gadget-baseline.json from the current tree's results.
+# A deliberate act — run it only when a change to the baseline (new known-red,
+# or a genuine fix) is intended, never as part of routine testing.
+test-gadget-lua-baseline:
+	WRITE_BASELINE=1 tools/scripts/test-gadget-lua.sh
 
 # AI evaluation harness (docs/reviews/2026-09-10/ai-framework.md task 4): every
 # AI plugin against every fixture, scored on what the SIM would have done with
