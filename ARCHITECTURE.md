@@ -956,11 +956,13 @@ byte-identical served copy.
 ### Metalstorm game source (`data/games/metalstorm/`)
 
 Metalstorm is the first-party game and the tree everything above serves. Its
-sim logic lives in `LuaRules/Gadgets/` — 18 top-level gadgets (`game_start`,
+sim logic lives in `LuaRules/Gadgets/` — 19 top-level gadgets (`game_start`,
 `game_teams`, `game_scenario`, `game_objectives`, `game_regions`,
 `game_authority`(+`_charge`), `game_parley`, `game_civilians`,
 `game_transports`, `game_train`, `game_warlog`, `game_gameover`,
-`game_tutorial`, `game_ai_caretaker`, `game_ai_guidance`, `squad`, `tick`, …)
+`game_tutorial`, `game_assignment` (responsible player per unit; rank
+precedence on who may issue an order), `game_ai_caretaker`, `game_ai_guidance`,
+`squad`, `tick`, …)
 plus the `objectives/`, `regions/`, `parley/`, `authority/` and `civilians/`
 subtrees each gadget family delegates to (with their own `tests/`).
 
