@@ -1,0 +1,7 @@
+{
+    "name": "Capture AI",
+    "description": "Engine-provided AI that owns a team and never issues a single command — it dumps AIStateSnapshot data (own units, visible enemies, the region graph, the objective board, departure zones) to the server log as JSON, one line per sample. tools/ai-eval/capture.mjs greps that log out of a real `--headless-run` and turns it into a RECORDED tools/ai-eval fixture, so the eval matrix isn't entirely hand-authored synthetic data. Put it on the team you want to observe; put a real AI (garrison/strategos) on the opposing team so there is something worth capturing.",
+    "version": "1",
+    "author": "spring-web",
+    "entry": "main.lua"
+}

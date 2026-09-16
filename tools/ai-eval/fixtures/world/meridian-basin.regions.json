@@ -1,0 +1,839 @@
+{
+    "mapHeight": 16384,
+    "mapWidth": 16384,
+    "provider": "graph",
+    "regions": [
+        {
+            "key": "heron_ait",
+            "name": "Heron Ait",
+            "neighbors": [
+                "still_mere"
+            ],
+            "polygon": [
+                {
+                    "x": 14200,
+                    "z": 7700
+                },
+                {
+                    "x": 15200,
+                    "z": 7700
+                },
+                {
+                    "x": 15200,
+                    "z": 8700
+                },
+                {
+                    "x": 14200,
+                    "z": 8700
+                }
+            ],
+            "tags": [
+                "island",
+                "naval_objective",
+                "buildzone"
+            ],
+            "value": 1.1
+        },
+        {
+            "key": "cinder_forge",
+            "name": "Cinder Forge",
+            "neighbors": [
+                "northgate",
+                "ash_habitat",
+                "granary_vale"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 0
+                },
+                {
+                    "x": 6400,
+                    "z": 0
+                },
+                {
+                    "x": 6400,
+                    "z": 2400
+                },
+                {
+                    "x": 0,
+                    "z": 2400
+                }
+            ],
+            "tags": [
+                "industrial",
+                "buildzone",
+                "underpass",
+                "plain",
+                "home"
+            ],
+            "value": 1.2
+        },
+        {
+            "key": "northgate",
+            "name": "Northgate",
+            "neighbors": [
+                "cinder_forge",
+                "northwatch",
+                "granary_vale"
+            ],
+            "polygon": [
+                {
+                    "x": 6400,
+                    "z": 0
+                },
+                {
+                    "x": 9984,
+                    "z": 0
+                },
+                {
+                    "x": 9984,
+                    "z": 2400
+                },
+                {
+                    "x": 6400,
+                    "z": 2400
+                }
+            ],
+            "tags": [
+                "home",
+                "buildzone",
+                "start"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "northwatch",
+            "name": "Northwatch",
+            "neighbors": [
+                "northgate",
+                "granary_vale",
+                "north_market"
+            ],
+            "polygon": [
+                {
+                    "x": 9984,
+                    "z": 0
+                },
+                {
+                    "x": 16384,
+                    "z": 0
+                },
+                {
+                    "x": 16384,
+                    "z": 2400
+                },
+                {
+                    "x": 9984,
+                    "z": 2400
+                }
+            ],
+            "tags": [
+                "home",
+                "radar_high"
+            ],
+            "value": 0.7
+        },
+        {
+            "key": "ash_habitat",
+            "name": "Ash Habitat",
+            "neighbors": [
+                "granary_vale",
+                "cinder_forge",
+                "west_scarp_n"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 2400
+                },
+                {
+                    "x": 5400,
+                    "z": 2400
+                },
+                {
+                    "x": 5400,
+                    "z": 5400
+                },
+                {
+                    "x": 0,
+                    "z": 5400
+                }
+            ],
+            "tags": [
+                "civilian",
+                "habitat",
+                "transit"
+            ],
+            "value": 0.6
+        },
+        {
+            "key": "granary_vale",
+            "name": "Granary Vale",
+            "neighbors": [
+                "ash_habitat",
+                "north_market",
+                "cinder_forge",
+                "northgate",
+                "northwatch",
+                "west_scarp_n",
+                "hollow_overlook_n",
+                "east_bluffs_n"
+            ],
+            "polygon": [
+                {
+                    "x": 5400,
+                    "z": 2400
+                },
+                {
+                    "x": 10600,
+                    "z": 2400
+                },
+                {
+                    "x": 10600,
+                    "z": 5400
+                },
+                {
+                    "x": 5400,
+                    "z": 5400
+                }
+            ],
+            "tags": [
+                "open",
+                "valley",
+                "transit"
+            ],
+            "value": 0.9
+        },
+        {
+            "key": "north_market",
+            "name": "North Market",
+            "neighbors": [
+                "granary_vale",
+                "northwatch",
+                "east_bluffs_n"
+            ],
+            "polygon": [
+                {
+                    "x": 10600,
+                    "z": 2400
+                },
+                {
+                    "x": 16384,
+                    "z": 2400
+                },
+                {
+                    "x": 16384,
+                    "z": 5400
+                },
+                {
+                    "x": 10600,
+                    "z": 5400
+                }
+            ],
+            "tags": [
+                "civilian",
+                "habitat",
+                "transit"
+            ],
+            "value": 0.7
+        },
+        {
+            "key": "west_scarp_n",
+            "name": "West Scarp (North)",
+            "neighbors": [
+                "hollow_overlook_n",
+                "ash_habitat",
+                "granary_vale",
+                "west_narrows",
+                "west_pass"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 5400
+                },
+                {
+                    "x": 5400,
+                    "z": 5400
+                },
+                {
+                    "x": 5400,
+                    "z": 7200
+                },
+                {
+                    "x": 0,
+                    "z": 7200
+                }
+            ],
+            "tags": [
+                "ridge",
+                "infantry_only",
+                "overlook"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "hollow_overlook_n",
+            "name": "Hollow Overlook (North)",
+            "neighbors": [
+                "west_scarp_n",
+                "east_bluffs_n",
+                "granary_vale",
+                "west_pass",
+                "meridian_basin",
+                "east_pass"
+            ],
+            "polygon": [
+                {
+                    "x": 5400,
+                    "z": 5400
+                },
+                {
+                    "x": 10600,
+                    "z": 5400
+                },
+                {
+                    "x": 10600,
+                    "z": 7200
+                },
+                {
+                    "x": 5400,
+                    "z": 7200
+                }
+            ],
+            "tags": [
+                "valley",
+                "veh_open",
+                "overlook",
+                "heavy_restricted"
+            ],
+            "value": 0.7
+        },
+        {
+            "key": "east_bluffs_n",
+            "name": "East Bluffs (North)",
+            "neighbors": [
+                "hollow_overlook_n",
+                "north_market",
+                "granary_vale",
+                "east_pass",
+                "still_mere"
+            ],
+            "polygon": [
+                {
+                    "x": 10600,
+                    "z": 5400
+                },
+                {
+                    "x": 16384,
+                    "z": 5400
+                },
+                {
+                    "x": 16384,
+                    "z": 7200
+                },
+                {
+                    "x": 10600,
+                    "z": 7200
+                }
+            ],
+            "tags": [
+                "pass",
+                "heavy_restricted",
+                "overlook"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "west_narrows",
+            "name": "West Narrows",
+            "neighbors": [
+                "west_pass",
+                "west_scarp_n",
+                "west_scarp_s"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 7200
+                },
+                {
+                    "x": 3200,
+                    "z": 7200
+                },
+                {
+                    "x": 3200,
+                    "z": 9184
+                },
+                {
+                    "x": 0,
+                    "z": 9184
+                }
+            ],
+            "tags": [
+                "water",
+                "deep",
+                "naval",
+                "flank"
+            ],
+            "value": 1
+        },
+        {
+            "key": "west_pass",
+            "name": "West Pass",
+            "neighbors": [
+                "west_narrows",
+                "meridian_basin",
+                "west_scarp_n",
+                "west_scarp_s",
+                "hollow_overlook_n",
+                "gulch_overlook_s"
+            ],
+            "polygon": [
+                {
+                    "x": 3200,
+                    "z": 7200
+                },
+                {
+                    "x": 6400,
+                    "z": 7200
+                },
+                {
+                    "x": 6400,
+                    "z": 9184
+                },
+                {
+                    "x": 3200,
+                    "z": 9184
+                }
+            ],
+            "tags": [
+                "corridor",
+                "choke",
+                "ridge",
+                "ford"
+            ],
+            "value": 1.4
+        },
+        {
+            "key": "meridian_basin",
+            "name": "Meridian Basin",
+            "neighbors": [
+                "west_pass",
+                "east_pass",
+                "hollow_overlook_n",
+                "gulch_overlook_s"
+            ],
+            "polygon": [
+                {
+                    "x": 6400,
+                    "z": 7200
+                },
+                {
+                    "x": 9984,
+                    "z": 7200
+                },
+                {
+                    "x": 9984,
+                    "z": 9184
+                },
+                {
+                    "x": 6400,
+                    "z": 9184
+                }
+            ],
+            "tags": [
+                "basin",
+                "contested_core",
+                "ford",
+                "objective"
+            ],
+            "value": 2.5
+        },
+        {
+            "key": "east_pass",
+            "name": "East Pass",
+            "neighbors": [
+                "meridian_basin",
+                "still_mere",
+                "east_bluffs_n",
+                "hollow_overlook_n",
+                "east_bluffs_s",
+                "gulch_overlook_s"
+            ],
+            "polygon": [
+                {
+                    "x": 9984,
+                    "z": 7200
+                },
+                {
+                    "x": 13184,
+                    "z": 7200
+                },
+                {
+                    "x": 13184,
+                    "z": 9184
+                },
+                {
+                    "x": 9984,
+                    "z": 9184
+                }
+            ],
+            "tags": [
+                "corridor",
+                "choke",
+                "ridge",
+                "ford",
+                "causeway"
+            ],
+            "value": 1.4
+        },
+        {
+            "key": "still_mere",
+            "name": "Still Mere",
+            "neighbors": [
+                "east_pass",
+                "heron_ait",
+                "east_bluffs_n",
+                "east_bluffs_s"
+            ],
+            "polygon": [
+                {
+                    "x": 13184,
+                    "z": 7200
+                },
+                {
+                    "x": 16384,
+                    "z": 7200
+                },
+                {
+                    "x": 16384,
+                    "z": 9184
+                },
+                {
+                    "x": 13184,
+                    "z": 9184
+                }
+            ],
+            "tags": [
+                "water",
+                "lake",
+                "naval",
+                "flank"
+            ],
+            "value": 1
+        },
+        {
+            "key": "west_scarp_s",
+            "name": "West Scarp (South)",
+            "neighbors": [
+                "gulch_overlook_s",
+                "shale_habitat",
+                "sorghum_vale",
+                "west_narrows",
+                "west_pass"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 9184
+                },
+                {
+                    "x": 5400,
+                    "z": 9184
+                },
+                {
+                    "x": 5400,
+                    "z": 10984
+                },
+                {
+                    "x": 0,
+                    "z": 10984
+                }
+            ],
+            "tags": [
+                "ridge",
+                "infantry_only",
+                "overlook"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "gulch_overlook_s",
+            "name": "Gulch Overlook (South)",
+            "neighbors": [
+                "west_scarp_s",
+                "east_bluffs_s",
+                "sorghum_vale",
+                "west_pass",
+                "meridian_basin",
+                "east_pass"
+            ],
+            "polygon": [
+                {
+                    "x": 5400,
+                    "z": 9184
+                },
+                {
+                    "x": 10600,
+                    "z": 9184
+                },
+                {
+                    "x": 10600,
+                    "z": 10984
+                },
+                {
+                    "x": 5400,
+                    "z": 10984
+                }
+            ],
+            "tags": [
+                "valley",
+                "veh_open",
+                "overlook",
+                "heavy_restricted"
+            ],
+            "value": 0.7
+        },
+        {
+            "key": "east_bluffs_s",
+            "name": "East Bluffs (South)",
+            "neighbors": [
+                "gulch_overlook_s",
+                "south_market",
+                "sorghum_vale",
+                "east_pass",
+                "still_mere"
+            ],
+            "polygon": [
+                {
+                    "x": 10600,
+                    "z": 9184
+                },
+                {
+                    "x": 16384,
+                    "z": 9184
+                },
+                {
+                    "x": 16384,
+                    "z": 10984
+                },
+                {
+                    "x": 10600,
+                    "z": 10984
+                }
+            ],
+            "tags": [
+                "pass",
+                "heavy_restricted",
+                "overlook"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "shale_habitat",
+            "name": "Shale Habitat",
+            "neighbors": [
+                "sorghum_vale",
+                "slag_forge",
+                "west_scarp_s"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 10984
+                },
+                {
+                    "x": 5400,
+                    "z": 10984
+                },
+                {
+                    "x": 5400,
+                    "z": 13984
+                },
+                {
+                    "x": 0,
+                    "z": 13984
+                }
+            ],
+            "tags": [
+                "civilian",
+                "habitat",
+                "transit"
+            ],
+            "value": 0.6
+        },
+        {
+            "key": "sorghum_vale",
+            "name": "Sorghum Vale",
+            "neighbors": [
+                "shale_habitat",
+                "south_market",
+                "slag_forge",
+                "southgate",
+                "southwatch",
+                "west_scarp_s",
+                "gulch_overlook_s",
+                "east_bluffs_s"
+            ],
+            "polygon": [
+                {
+                    "x": 5400,
+                    "z": 10984
+                },
+                {
+                    "x": 10600,
+                    "z": 10984
+                },
+                {
+                    "x": 10600,
+                    "z": 13984
+                },
+                {
+                    "x": 5400,
+                    "z": 13984
+                }
+            ],
+            "tags": [
+                "open",
+                "valley",
+                "transit"
+            ],
+            "value": 0.9
+        },
+        {
+            "key": "south_market",
+            "name": "South Market",
+            "neighbors": [
+                "sorghum_vale",
+                "southwatch",
+                "east_bluffs_s"
+            ],
+            "polygon": [
+                {
+                    "x": 10600,
+                    "z": 10984
+                },
+                {
+                    "x": 16384,
+                    "z": 10984
+                },
+                {
+                    "x": 16384,
+                    "z": 13984
+                },
+                {
+                    "x": 10600,
+                    "z": 13984
+                }
+            ],
+            "tags": [
+                "civilian",
+                "habitat",
+                "transit"
+            ],
+            "value": 0.7
+        },
+        {
+            "key": "slag_forge",
+            "name": "Slag Forge",
+            "neighbors": [
+                "southgate",
+                "shale_habitat",
+                "sorghum_vale"
+            ],
+            "polygon": [
+                {
+                    "x": 0,
+                    "z": 13984
+                },
+                {
+                    "x": 6400,
+                    "z": 13984
+                },
+                {
+                    "x": 6400,
+                    "z": 16384
+                },
+                {
+                    "x": 0,
+                    "z": 16384
+                }
+            ],
+            "tags": [
+                "industrial",
+                "buildzone",
+                "underpass",
+                "plain",
+                "home"
+            ],
+            "value": 1.2
+        },
+        {
+            "key": "southgate",
+            "name": "Southgate",
+            "neighbors": [
+                "slag_forge",
+                "southwatch",
+                "sorghum_vale"
+            ],
+            "polygon": [
+                {
+                    "x": 6400,
+                    "z": 13984
+                },
+                {
+                    "x": 9984,
+                    "z": 13984
+                },
+                {
+                    "x": 9984,
+                    "z": 16384
+                },
+                {
+                    "x": 6400,
+                    "z": 16384
+                }
+            ],
+            "tags": [
+                "home",
+                "buildzone",
+                "start"
+            ],
+            "value": 0.8
+        },
+        {
+            "key": "southwatch",
+            "name": "Southwatch",
+            "neighbors": [
+                "southgate",
+                "sorghum_vale",
+                "south_market"
+            ],
+            "polygon": [
+                {
+                    "x": 9984,
+                    "z": 13984
+                },
+                {
+                    "x": 16384,
+                    "z": 13984
+                },
+                {
+                    "x": 16384,
+                    "z": 16384
+                },
+                {
+                    "x": 9984,
+                    "z": 16384
+                }
+            ],
+            "tags": [
+                "home",
+                "radar_high"
+            ],
+            "value": 0.7
+        }
+    ]
+}

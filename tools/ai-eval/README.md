@@ -26,6 +26,7 @@ prerequisites are `lua` and `node`.
 | `run-eval.mjs` | Spawns the matrix, prints the table, writes `build/ai-eval/latest.json`, applies the baseline gate. |
 | `fixtures/*.json` | The situations. `fixtures/world/` holds the shared region graph + power table. |
 | `baseline.json` | Committed. What the AIs did last time anyone looked. |
+| `capture.mjs` | Records a fixture's raw material from a REAL `spring-server --headless-run` (see "Recorded fixtures" below), instead of a human typing positions from imagination. |
 
 **The seam is `ai/lib/testing/fake_engine.lua`** — the same double the `ai/lib`
 and `garrison` suites assert against. It reproduces the sim-thread drain
@@ -83,6 +84,35 @@ fixture must pin it to zero directives (`score.test.mjs` enforces this). If the
 AI that does nothing ever "reacts", the fixture is the signal and every number
 in the table is worthless.
 
+## Recorded fixtures
+
+Every fixture above is synthetic — a human wrote the region graph, the power
+table, and the unit positions. `capture.mjs` records the same shapes from a
+real `spring-server --headless-run` instead:
+
+```sh
+./build/prod/tools/mapconverter/mapconverter --force content/maps/<id>   # data/maps/<id> is a build output — see docs/maps-native.md
+node tools/ai-eval/capture.mjs --manifest tools/ai-eval/capture/manifest.json \
+    --out build/ai-eval/capture-raw.json
+```
+
+The manifest is a plain `--headless-run` config (docs/debugging-tools.md
+"Headless Run Mode") with `content/engine/ai/capture` — the engine's Capture
+AI, which never issues a command — on the team you want to observe, and a
+real AI on the opposing team so there is something for it to see. It samples
+`AI.getOwnUnits()`/`getVisibleEnemies()`/the region + objective + departure
+rulesParams once a game-second and logs each as JSON (`AICAPTURE <tag>
+<json>`, grepped out of the run's stdout); the region graph and power table
+are dumped once, chunked across several log lines (AI.log truncates past
+~8 KB, measured, not documented anywhere the engine side admits to).
+
+`capture.mjs`'s output is raw material, not a fixture — pick a frame window
+and the event(s) worth naming by hand, same as any other fixture (see
+`fixtures/recorded-meridian-contact.json`, captured from a real
+meridian_basin/metalstorm run: its `regions`/`power` point at
+`fixtures/world/meridian-basin.*.json`, the actual `MapProcessor`/def-export
+output, not a hand-typed stand-in).
+
 ## The gate
 
 `run-eval.mjs` exits **0** ok · **1** a fixture expectation failed · **2** a
@@ -116,10 +146,31 @@ Written down because it is the argument for the harness existing:
 2. **The latency metric itself was wrong** for withdrawals (it scored a
    garrison that withdrew on the same frame as 450 frames late). Hence
    `answeredBy`.
-3. **Strategos ignores the objective board and never withdraws.** In
-   `outmatched-withdrawal` it keeps assaulting a region the enemy holds while
-   six heavies sit on its own ground; in `objective-next-door` it pursues its
-   own expansion goal and never looks at the published objective. Neither is
-   fixed here — they are strategos-lane findings, recorded as its current
-   behaviour in the baseline rather than encoded as expectations, so that lane
-   can improve them without fighting a gate that pins mediocrity in place.
+3. **Strategos ignored the objective board and never withdrew — both closed
+   2026-09-17, both in `ai/strategos/`, neither a scoring-weight change (see
+   below for why that would have been the wrong fix):**
+   - **Never withdrew:** `picture.lua` never read
+     `ms_departure_<teamId>_{x,z,r}` at all, so `picture.transports` — the
+     table `slate.lua`'s (real, already-scored) WITHDRAW goal is gated on —
+     never existed. `outmatched-withdrawal` kept assaulting enemy-held ground
+     while six heavies sat on its own, not because withdrawal logic was
+     missing, but because the one signal that arms it was never read. Fixed
+     by reading it (mirrors `ai/lib/picture.lua`'s own `readDeparture`), plus
+     a `Threat.losing` boundary fix (`<=`, not `<` — a side sitting at
+     EXACTLY its own `withdrawRatio`, the textbook "outmatched two to one"
+     case, fell just short of the strict inequality and never left).
+   - **Ignored the objective board:** narrower than it first looks. The
+     planner already generates an `OBJECTIVE` goal from every eligible board
+     entry and scores it honestly — busted specs already pin a full-side AI
+     preferring a genuinely better use of force over a *modest* bounty/
+     suggested objective, on purpose (`planner_spec.lua` "bounty ×3
+     weighting" / "suggested_for ×2 weighting": that asymmetry is the
+     delegation model, not a bug). `objective-next-door`'s specific numbers
+     just happened to put a 120-reward objective on ground an implicit
+     EXPAND already valued at 600 (region value × `STRATEGIC_VALUE_SCALE`) —
+     so the SAME directive fired either way, and nothing distinguished
+     "read the board" from "coincidence". No planner code changed;
+     `objective-empty-ground.json` closes the harness gap instead — ground
+     `value: 0` gates out every implicit goal that could ever anchor there
+     (see its own `why`), so a directive appearing after the objective posts
+     is unambiguous proof the board was read, not a coincidence of scale.

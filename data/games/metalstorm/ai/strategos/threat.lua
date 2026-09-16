@@ -142,17 +142,24 @@ function Threat.build(picture, role, config)
 end
 
 --- Is the war going badly enough to leave? `withdrawRatio` is a profile knob
--- (own/enemy below it = losing). Requires a REAL enemy estimate: at least
--- config.WITHDRAW_MIN_ENEMY of confidence-weighted strength seen, so a single
--- decayed blip never sends an army home. Also refuses while we are banking the
--- terminal objective ourselves (`holdingPrize`): the hold clock is the war and
--- leaving would hand it over.
+-- (own/enemy AT OR below it = losing — `<=`, not `<`: a profile's
+-- withdrawRatio names the point at which it leaves, e.g. the default 0.5
+-- reads as "outmatched two to one", and a side sitting at EXACTLY that ratio
+-- is exactly the outmatched case the knob describes, not a fight it still
+-- holds by a hair. Before this a textbook 2-for-1 overrun (3 own vs 6 enemy,
+-- ratio == 0.5 == the default profile's own withdrawRatio) fell just short of
+-- the strict `<` and the goal never fired — the AI kept assaulting out while
+-- its home ground was lost under it). Requires a REAL enemy estimate: at
+-- least config.WITHDRAW_MIN_ENEMY of confidence-weighted strength seen, so a
+-- single decayed blip never sends an army home. Also refuses while we are
+-- banking the terminal objective ourselves (`holdingPrize`): the hold clock
+-- is the war and leaving would hand it over.
 function Threat.losing(threat, withdrawRatio, config, holdingPrize)
     if holdingPrize then return false end
     if not threat or threat.ratio == nil then return false end
     local minEnemy = (config and config.WITHDRAW_MIN_ENEMY) or 1
     if threat.totals.enemy < minEnemy then return false end
-    return threat.ratio < (withdrawRatio or 0)
+    return threat.ratio <= (withdrawRatio or 0)
 end
 
 --- Local balance for an attack on `key` by a package of `ownStrength`:
