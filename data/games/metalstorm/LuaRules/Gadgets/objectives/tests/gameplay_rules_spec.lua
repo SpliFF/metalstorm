@@ -15,6 +15,13 @@ package.path = './?.lua;' .. package.path
 
 local generator = require('generator')
 
+--- Rewards are DERIVED (§10.6): `n` median directives, priced from
+--- LuaRules/Configs/authority_cost.lua. Expectations below say how many
+--- directives an objective is worth, so moving the cost spec moves the specs
+--- with the game instead of turning them red.
+local function reward(n) return n * generator.REWARD_UNIT end
+local D = generator.DIRECTIVES
+
 local function emptyList() return {} end
 
 --- A world with a region graph and an ownership map. `regions` is
@@ -103,9 +110,23 @@ describe("the control chain", function()
     it("pays 25% over the objective that spawned it", function()
         local state = generator.newState()
         local w = worldWithGraph()
-        generator.onCompleted(state, completedControl(0, 'a', 200))
+        -- A parent worth exactly what a control on this region is worth: the
+        -- ordinary case, and the one the +25 % was designed around.
+        generator.onCompleted(state, completedControl(0, 'a', reward(D.control)))
         generator.tick(w, state)
-        assert.are.equal(250, w._created[1].reward)
+        assert.are.equal(math.floor(reward(D.control) * 1.25), w._created[1].reward)
+    end)
+
+    it("never pays more than 25% over the TARGET region's own worth", function()
+        -- Without this clamp the rule compounds: a chained control is itself a
+        -- `control`, so completing it feeds onCompleted again and the next
+        -- chain is +25 % on the +25 %. The economy harness measured the run —
+        -- a chain reward of 187 against a control's 40 in one 40-minute war.
+        local state = generator.newState()
+        local w = worldWithGraph()
+        generator.onCompleted(state, completedControl(0, 'a', 10000))
+        generator.tick(w, state)
+        assert.are.equal(math.floor(reward(D.control) * 1.25), w._created[1].reward)
     end)
 
     it("carries a three-minute clock", function()
@@ -272,9 +293,9 @@ describe("the comeback valve", function()
             end
             generator.tick(w, state)
             assert.are.equal(1, #w._created)
-            -- districtRule authors reward 40; team 1 is behind.
-            assert.is_true(w._created[1].reward > 40)
-            assert.is_true(w._created[1].reward <= math.floor(40 * 1.5))
+            -- districtRule pays D.district directives; team 1 is behind.
+            assert.is_true(w._created[1].reward > reward(D.district))
+            assert.is_true(w._created[1].reward <= math.floor(reward(D.district) * 1.5))
         end)
 
         it("leaves the leader's reward alone", function()
@@ -284,7 +305,7 @@ describe("the comeback valve", function()
                 return { { districtId = 'd1', districtTeam = 0, unitIDs = { 1 } } }
             end
             generator.tick(w, state)
-            assert.are.equal(40, w._created[1].reward)
+            assert.are.equal(reward(D.district), w._created[1].reward)
         end)
 
         it("leaves an open race alone — there is no behind team to price it for", function()
@@ -298,7 +319,7 @@ describe("the comeback valve", function()
             generator.tick(w, state)
             assert.are.equal(1, #w._created)
             assert.is_nil(w._created[1].forTeam)
-            assert.are.equal(50, w._created[1].reward)   -- 50 × (1 + value 0)
+            assert.are.equal(reward(D.control), w._created[1].reward)   -- × (1 + value 0)
         end)
 
         it("scales the team-scoped half of a linked pair only", function()
@@ -310,8 +331,8 @@ describe("the comeback valve", function()
             end
             generator.tick(w, state)
             local pair = w._created[1]
-            assert.is_true(pair.escort.reward > 60)   -- team 1 is behind
-            assert.are.equal(60, pair.kill.reward)    -- the open race against it
+            assert.is_true(pair.escort.reward > reward(D.escort))   -- team 1 is behind
+            assert.are.equal(reward(D.escort), pair.kill.reward)    -- the open race
         end)
     end)
 
