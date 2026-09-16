@@ -1,53 +1,61 @@
 # mcp-control — review report (lane 7, 2026-09-10)
 
 ## STATUS
-complete (wrapped early — session limit). Landed: all server.js review fixes
-(findings 1–11), the TOOLS split, and the tested building blocks for the new
-tools (guidance wire encoder, SSE parser, fengari-tested Lua snippets for
-ai_list / ai_health / ai_directives / ai_guidance / nl context). NOT landed:
-the tool handlers themselves (world-tools.js / ai-tools.js / nl-tools.js are
-empty stubs wired into tools.js + the dispatcher), self-check.mjs, gen-docs +
-docs/mcp-tools.md, the docs/debugging-tools.md MCP-section refresh.
 
-### Not done (in priority order, everything else is in place for it)
-1. `world-tools.js`: `WORLD_TOOLS` schemas + `worldHandlers` (world_status,
-   world_pause/resume, world_factions, world_stage_commit/cancel, world_claims,
-   world_seasons, world_pois, world_notifications) — thin over the routes in
-   docs/api.md §World layer (`GET /api/world[/pois|/stats|/factions|/claims|
-   /seasons[/n]]`, `POST /api/world/{pause,factions/found|join|leave,
-   staging/commit|cancel,claims/file|withdraw,me}`); notifications = open
-   `POST /api/chat/ticket` → `GET /api/chat/stream?ticket=` for `listenMs`
-   and collect `world-staging` events with `sse.js`. Handlers take
-   `(args, io)`; `io` (`toolIo` in server.js) has lobbyUrl, fetch,
-   authedFetch, resolveServer, getGameServers, execLua, execJsonVerb.
-2. `ai-tools.js`: `ai_list`/`ai_health`/`ai_directives`/`ai_guidance` =
-   `io.execLua('LuaRules', <snippet from lua-snippets.js>, roomId)` then
-   `JSON.parse(output)`; `ai_guidance` builds the wire with
-   `encodeGuidance` (guidance-wire.js) and sends `guidanceSendLua(wire,
-   {playerId, team})`. Test with `fakeExecLua()` from lua-fake-env.js.
-3. `nl-tools.js`: `nl_command({utterance, roomId, team, context?, focus?,
-   history?})` → `POST <game>/api/nl/command` (TokenRequired, on the GAME
-   server, body `{utterance, context, history?}`; 503 `nl-disabled` when
-   `SPRING_NL_API_KEY` is unset, 429 rate-limited). Context from
-   `nlContextLua(team)` when not supplied. Returns the envelope only —
-   execution is client-side (nl-executor.ts); no `window.test` hook exists
-   to execute an utterance in a live client (out-of-lane ask, lane 10).
-4. `self-check.mjs` (`npm run check`): for each tool, diff
-   `inputSchema.properties` against `args.<key>` reads in its `case` block
-   (server.js) or handler (modules), including the capture helper modules.
-5. `gen-docs.mjs` + `tool-meta.js` → `docs/mcp-tools.md`; refresh the MCP
-   table in docs/debugging-tools.md (timeouts, revealTokens, api_request
-   timeoutMs, roomId refusal semantics).
+complete. Landed in the first session: all server.js review fixes (findings
+1–11), the TOOLS split, and the tested building blocks (guidance wire encoder,
+SSE parser, fengari-tested Lua snippets). Landed in the 2026-09-17 session: the
+whole not-done queue below — the `world_*` / `ai_*` / `nl_command` handler
+bodies, `self-check.mjs`, `gen-docs.mjs` + `tool-meta.js` → `docs/mcp-tools.md`,
+and the `docs/debugging-tools.md` MCP-section refresh.
 
-Scope: `tools/debug-mcp/**`, `docs/mcp-tools.md` (new), the MCP section of
-`docs/debugging-tools.md`. Branch `worktree-agent-a342a8e190187a5d5`.
+### Not done (CLOSED 2026-09-17 — kept for the record of what each item was)
 
-Baseline (before any edit): `cd tools/debug-mcp && node --test` → 217 tests,
-210 pass / 7 fail. All 7 failures are environmental in this worktree — they
-need a baked `data/games/metalstorm/cache/defs/*/unitdefs.lua.br` and the
-`green_flat_x34_v3` region graph, neither of which is committed (scenario-
-validate.test.js: "no unitdefs.lua.br — bake defs by running a game once").
-Same 7 fail on `main`'s tip in a fresh worktree; not touched by this lane.
+1. ✅ `world-tools.js`: 9 tools — `world_status` (clock / pois / stats /
+   factions / all), `world_pois`, `world_factions` (list / me / found / join /
+   leave), `world_claims` (list / file / withdraw), **`world_commit`** and
+   `world_commit_cancel` (staging commit/cancel — the out-of-lane ask from
+   world-design, "drive the world loop without curl", is this pair),
+   `world_seasons`, `world_pause`, `world_notifications` (chat ticket → SSE for
+   a bounded `listenMs`, `world-staging`/`world-poi`/`world-season`; the ticket
+   is a credential and is never echoed back). Every documented error code is
+   mapped to a sentence in `WORLD_ERROR_HELP`, including the codes the
+   2026-09-16 build added (`window_closed`, `no_side`, `same_side`,
+   `too_much_force`) and `claims/file`'s now-403 `insufficient_authority`.
+   25 tests against a fake `io`.
+2. ✅ `ai-tools.js`: `ai_list` / `ai_health` / `ai_directives` / `ai_context`
+   (reads, via the fengari-tested snippets) and `ai_guidance` (the one write,
+   encoded with `encodeGuidance` and delivered through
+   `gadgetHandler:RecvLuaMsg`; `applied:false` reports a gadget REJECTION
+   rather than reading as success). 11 tests, driven by `fakeExecLua()` so the
+   snippets really run.
+3. ✅ `nl-tools.js`: `nl_command` → `POST <game>/api/nl/command`, context built
+   from `nlContextLua(team)` when not supplied, the server's own caps (500-char
+   utterance, 4 history entries, 16 KB body) mirrored locally so a refusal names
+   the field, every documented refusal code explained. Envelope only —
+   execution stays client-side. 13 tests. **The out-of-lane ask stands:** there
+   is still no `window.test.nl(utterance)` hook, so an utterance cannot be
+   executed in a live client from here.
+4. ✅ `self-check.mjs` (`npm run check`, and `self-check.test.js` so
+   `make test-debug-mcp` enforces it): diffs each tool's `inputSchema` against
+   the `args.<name>` reads in its `case` block or module handler, plus the
+   helper modules that receive `args` whole. Both directions. Three subtleties
+   it had to grow: a shared `case 'a': case 'b':` body reads the UNION of its
+   labels' schemas; a schema-derived forward (`args[k]`) is unfollowable by a
+   text scan and suppresses the declared-but-unread warning; and the block
+   scanner must skip REGEX LITERALS, because `evaluate_widget_lua` contains a
+   `replace()` whose regex holds a BACKTICK — read naively that opens a
+   template literal and runs the scan on into the next tool, charging it with
+   the neighbour's arguments. 9 tests.
+   Current state: 77 tools, 0 errors, 0 warnings.
+5. ✅ `gen-docs.mjs` + `tool-meta.js` → `docs/mcp-tools.md` (generated, 13
+   sections, banner-marked do-not-edit; `npm run docs`, `--check` verifies
+   freshness and a test asserts it). `tool-meta.js` is asserted to be a TOTAL
+   PARTITION of `TOOLS`, so a new tool cannot be added without deciding where it
+   belongs. `docs/debugging-tools.md`'s MCP section gained the four
+   cross-cutting rules (deadlines, `roomId`-is-not-a-port, token redaction,
+   schema/handler drift) and rows for all 15 new tools; `docs/debugging.md`
+   lists the new page.
 
 ## Findings (ranked)
 
@@ -136,6 +144,22 @@ Same 7 fail on `main`'s tip in a fresh worktree; not touched by this lane.
   Documents the rulesParam names ai_health feature-detects; there is no
   `ai_health` param in the tree.
 
+
+### 2026-09-17 session
+
+- `world-tools.js` (9 tools), `ai-tools.js` (5), `nl-tools.js` (1) — handler
+  bodies, thin over the real routes, `(args, io)` throughout so every one is
+  driven in test by a fake.
+- `tool-io-fake.js` (NEW): the test-side twin of server.js's `toolIo` — routes
+  keyed `METHOD /path`, calls recorded, a fixed bearer so a test can assert the
+  Authorization header, and an SSE-shaped streaming response.
+- `world-tools.test.js` (25), `ai-tools.test.js` (11), `nl-tools.test.js` (13),
+  `self-check.test.js` (9), `gen-docs.test.js` (7).
+- `self-check.mjs` + `tool-meta.js` + `gen-docs.mjs`; `npm run check`,
+  `npm run docs`, `npm test` added to package.json.
+- `docs/mcp-tools.md` (NEW, generated), `docs/debugging-tools.md` MCP section,
+  `docs/debugging.md` sub-page index.
+
 ## Proposed C++ patches (UNCOMPILED)
 
 None.
@@ -159,4 +183,14 @@ None.
 
 ## Next milestones
 
-(filled in at the end)
+None in this lane. Two open threads, both belonging to other lanes:
+
+- **`window.test.nl(utterance)`** — no programmatic entry to run an utterance
+  through the live console (`runUtteranceText` in
+  `client/src/native-widgets/command-console.js` is file-local), so `nl_command`
+  can only ever fetch the envelope. Lane 10 / lane 9.
+- **The 7 baseline-failing tests** (`scenario-validate.test.js`) still depend on
+  uncommitted bake output (`cache/defs/*/unitdefs.lua.br`, the
+  `green_flat_x34_v3` region graph) and should `t.skip` when the artefacts are
+  absent. Unchanged by this lane: 248 tests / 241 pass before, 313 tests / 306
+  pass after — the same 7, for the same reason.
