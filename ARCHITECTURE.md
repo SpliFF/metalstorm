@@ -1008,6 +1008,16 @@ environment at `tools/forge` — see
 corpus was rescaled ×8, 2026-08-27); `tools/scripts/check_model_scale.py`
 gates authored-metre sizes against it.
 
+### Image generation (`tools/imagegen`)
+
+2D art (emblems, biome tileables, grime overlays, the FX atlas, water normal
+tiles) goes through `tools/imagegen/run.py`: one `generate(prompt, seed,
+size, negative)` adapter interface behind `backends/{none,comfy_local,
+hosted}.py` (procedural placeholder / local ComfyUI / a hosted API — see
+`tools/imagegen/README.md`), post-processed (seamless tiling, PBR derive,
+ktx2) into `data/games/metalstorm/art/gen/**`, with per-file provenance in
+`art/gen/manifest.json`.
+
 ## HTTP Routes
 
 > **Handler gotcha:** `NetworkServer` strips query strings before matching/handing

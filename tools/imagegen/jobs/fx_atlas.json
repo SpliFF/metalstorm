@@ -1,0 +1,25 @@
+{
+  "id": "fx_atlas",
+  "class": "fx_atlas",
+  "prompt": "Smoke/fire/dust VFX flipbook sprite sheet matching data/games/metalstorm/effects/library.json's atlas frame map.",
+  "seed": 100601,
+  "width": 1024,
+  "height": 1024,
+  "cols": 8,
+  "rows": 8,
+  "frames": {
+    "dot": 0,
+    "spark": 1,
+    "fireball": 2,
+    "smoke": 3,
+    "dust": 4,
+    "flash": 5,
+    "ring": 6,
+    "foam": 7,
+    "smoketrail": 16,
+    "bubbletrail": 17,
+    "scorch": 24
+  },
+  "output": "unittextures/fx_atlas.png",
+  "post": []
+}
