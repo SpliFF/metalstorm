@@ -135,6 +135,10 @@ local pollGate = Tick.new(POLL_PERIOD)
 
 local function echo(msg) Spring.Echo(LOG .. msg) end
 
+-- The engine returns NO value (not nil) for an absent param; the parentheses
+-- adjust that to nil so tonumber()/comparisons never see an empty call.
+local function rp(key) return (Spring.GetGameRulesParam(key)) end
+
 local function playerTeam(playerID)
     if playerID == nil then return nil end
     local _, _, _, teamID = Spring.GetPlayerInfo(playerID, false)
@@ -233,8 +237,8 @@ local function resolveShow(show)
             local x, z = GG.Regions.Area(show.region)
             if x then return x, z, nil end
         end
-        local x = Spring.GetGameRulesParam('region_' .. show.region .. '_x')
-        local z = Spring.GetGameRulesParam('region_' .. show.region .. '_z')
+        local x = rp('region_' .. show.region .. '_x')
+        local z = rp('region_' .. show.region .. '_z')
         if x and z then return x, z, nil end
     end
     return nil, nil, nil
@@ -327,7 +331,7 @@ local function startBeat(i, frame)
     beatStartFrame = frame
     hint = nil
     counters.charge, counters.award, counters.parley = 0, 0, 0
-    parleyCountAtStart = tonumber(Spring.GetGameRulesParam('parley_count')) or 0
+    parleyCountAtStart = tonumber(rp('parley_count')) or 0
     -- A fresh gate so the first poll of a new beat lands one period in, not
     -- on whatever phase the previous beat left behind.
     pollGate = Tick.new(POLL_PERIOD)
@@ -388,14 +392,14 @@ end
 --- An accepted pact involving the learning team, published since the beat
 --- started (game_parley.lua's `parley_<id>_*` params), of `kind` if given.
 local function pactAccepted(kind)
-    local n = tonumber(Spring.GetGameRulesParam('parley_count')) or 0
+    local n = tonumber(rp('parley_count')) or 0
     for id = parleyCountAtStart + 1, n do
         local p = 'parley_' .. id .. '_'
-        local state = Spring.GetGameRulesParam(p .. 'state')
+        local state = rp(p .. 'state')
         if (state == 'active' or state == 'fulfilled')
-            and (kind == nil or Spring.GetGameRulesParam(p .. 'kind') == kind) then
-            local from = tonumber(Spring.GetGameRulesParam(p .. 'from'))
-            local to = tonumber(Spring.GetGameRulesParam(p .. 'to'))
+            and (kind == nil or rp(p .. 'kind') == kind) then
+            local from = tonumber(rp(p .. 'from'))
+            local to = tonumber(rp(p .. 'to'))
             if from == team or to == team then return true end
         end
     end

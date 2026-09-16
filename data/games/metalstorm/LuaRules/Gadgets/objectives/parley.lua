@@ -28,9 +28,12 @@ function parley.validateParams(params)
     return true
 end
 
+--- One value always (the engine returns none for an absent param).
+local function rp(ctx, key) return (ctx.gameRulesParam(key)) end
+
 function parley.init(o, ctx)
     if type(ctx.gameRulesParam) ~= 'function' then return false, 'ctx.gameRulesParam missing' end
-    o.data = { sinceProposal = tonumber(ctx.gameRulesParam('parley_count')) or 0 }
+    o.data = { sinceProposal = tonumber(rp(ctx, 'parley_count')) or 0 }
     return true
 end
 
@@ -48,14 +51,14 @@ end
 --- Walk the published proposals newer than the objective. Returns the first
 --- matching proposal in `state` (a set), or nil.
 local function find(o, ctx, states)
-    local n = tonumber(ctx.gameRulesParam('parley_count')) or 0
+    local n = tonumber(rp(ctx, 'parley_count')) or 0
     local kind = o.params.kind
     for id = (o.data and o.data.sinceProposal or 0) + 1, n do
         local p = 'parley_' .. id .. '_'
-        local state = ctx.gameRulesParam(p .. 'state')
-        if state and states[state] and (kind == nil or ctx.gameRulesParam(p .. 'kind') == kind) then
-            local from = tonumber(ctx.gameRulesParam(p .. 'from'))
-            local to = tonumber(ctx.gameRulesParam(p .. 'to'))
+        local state = rp(ctx, p .. 'state')
+        if state and states[state] and (kind == nil or rp(ctx, p .. 'kind') == kind) then
+            local from = tonumber(rp(ctx, p .. 'from'))
+            local to = tonumber(rp(ctx, p .. 'to'))
             if eligible(o, from, to) then return { id = id, from = from, to = to } end
         end
     end
