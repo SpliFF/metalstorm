@@ -1,6 +1,6 @@
 <div class="lobby-panel">
     <div class="lobby-header">
-        <h2>Game Rooms</h2>
+        <h2>Missions</h2>
         <button id="create-room-btn">+ New Game</button>
         <!-- Replay browser (PLAN-replay.md task 4c). Hidden entirely on a
              lobby that is not recording — /api/replays/list 404s there, and an
@@ -54,7 +54,7 @@
          `guest-cost` says, before the button rather than after. -->
     <div id="guest-panel" class="guest-panel" style="display:none">
         <h3>Claim your account</h3>
-        <p class="hint">Your account, your war seats and everything you have earned stay exactly as they are — you are adding a password, not making a new account.</p>
+        <p class="hint">Your account, your Mission seats and everything you have earned stay exactly as they are — you are adding a password, not making a new account.</p>
         <div class="guest-form">
             <input type="text" id="guest-username" placeholder="Choose a username (optional)">
             <input type="password" id="guest-password" placeholder="Password (8 characters or more)">
@@ -119,7 +119,7 @@
          otherwise advertise a mode this lobby is not running. -->
     <div id="war-section" class="war-section" style="display:none">
         <div class="war-section-head">
-            <h3>Wars</h3>
+            <h3>Missions</h3>
             <div id="war-filters" class="war-filters"></div>
             <!-- Deploy (§6, task 7): the one-click answer for a player who
                  does not want to read the table. Hidden for an account with
@@ -190,7 +190,7 @@
     </div>
     <div id="create-form" class="create-form" style="display:none">
         <h3>Create Game</h3>
-        <input type="text" id="new-room-name" placeholder="Room name" value="My Game">
+        <input type="text" id="new-room-name" placeholder="Mission name" value="My Game">
         <div class="map-select-label">Game:</div>
         <select id="game-select" class="game-select" disabled>
             <option value="">Loading games…</option>
@@ -204,7 +204,7 @@
              create form is unchanged. Repopulated whenever the game or map
              selection changes; the default is the map's own war. -->
         <div id="scenario-row" style="display:none">
-            <div class="map-select-label">War:</div>
+            <div class="map-select-label">Mission:</div>
             <select id="scenario-select" class="game-select"></select>
             <div id="scenario-note" class="scenario-note"></div>
         </div>

@@ -151,7 +151,8 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    background: var(--nui-bg);
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
     border: 1px solid var(--nui-hairline);
     border-radius: var(--nui-radius);
     /* No drop shadow — the metaphor's depth is a 1px inset lip. */
@@ -757,7 +758,8 @@
     flex-direction: column;
     gap: 6px;
     padding: 7px 10px;
-    background: var(--nui-bg);
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
     border: 1px solid var(--nui-accent-dim);
     border-radius: var(--nui-radius);
     box-shadow: var(--nui-edge);
@@ -1050,7 +1052,8 @@
     max-height: 74vh;
     display: flex;
     flex-direction: column;
-    background: var(--nui-bg);
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
     border: 1px solid var(--nui-hairline);
     border-radius: var(--nui-radius);
     box-shadow: var(--nui-edge);
