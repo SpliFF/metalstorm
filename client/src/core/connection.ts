@@ -1097,6 +1097,18 @@ export interface ReplayStateInfo {
     /** This client's own POV: -1 = global view, else the team whose fog it is
      *  watching. Per-client, unlike every field above. */
     povTeam: number;
+    /** True when this feed is a `.msb` broadcast relayed behind a delay,
+     *  rather than a finished `.msr` recording (PLAN-beta-broadcast.md lane
+     *  S2). Absent ⇒ false on a server that predates the field. */
+    broadcast: boolean;
+    /** How far behind the live mission this watcher is, in seconds. The
+     *  server's enforced delay is the floor of this — the bar shows it, it
+     *  does not set it. */
+    behindSeconds: number;
+    /** Last frame the delay lets anyone see. `endFrame` is what the log
+     *  HOLDS, `liveEdgeFrame` is what the watcher is ALLOWED; on a live
+     *  mission those differ by the whole delay window. */
+    liveEdgeFrame: number;
 }
 
 export interface ConnectionEvents {
@@ -2584,6 +2596,9 @@ export class Connection {
                     gameId: rs.gameId() ?? '',
                     mapId: rs.mapId() ?? '',
                     povTeam: rs.povTeam(),
+                    broadcast: rs.broadcast(),
+                    behindSeconds: rs.behindSeconds(),
+                    liveEdgeFrame: rs.liveEdgeFrame(),
                 });
                 break;
             }

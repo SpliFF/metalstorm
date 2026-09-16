@@ -123,8 +123,37 @@ povTeam():number {
   return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
 }
 
+/**
+ * True when the feed is a `.msb` broadcast relayed behind a delay.
+ */
+broadcast():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
+/**
+ * How far behind the live mission this watcher is, in seconds. The
+ * server's enforced delay is the floor of this, never the client's
+ * choice — the bar shows it, it does not set it.
+ */
+behindSeconds():number {
+  const offset = this.bb!.__offset(this.bb_pos, 32);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Last frame the delay lets anyone see. Beyond it the cursor idles;
+ * a seek past it is clamped. `end_frame` is what the log HOLDS,
+ * `live_edge_frame` is what the watcher is ALLOWED, and on a live
+ * mission those differ by the whole delay window.
+ */
+liveEdgeFrame():number {
+  const offset = this.bb!.__offset(this.bb_pos, 34);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : 0;
+}
+
 static startReplayState(builder:flatbuffers.Builder) {
-  builder.startObject(13);
+  builder.startObject(16);
 }
 
 static addStartFrame(builder:flatbuffers.Builder, startFrame:number) {
@@ -196,12 +225,24 @@ static addPovTeam(builder:flatbuffers.Builder, povTeam:number) {
   builder.addFieldInt32(12, povTeam, 0);
 }
 
+static addBroadcast(builder:flatbuffers.Builder, broadcast:boolean) {
+  builder.addFieldInt8(13, +broadcast, +false);
+}
+
+static addBehindSeconds(builder:flatbuffers.Builder, behindSeconds:number) {
+  builder.addFieldInt32(14, behindSeconds, 0);
+}
+
+static addLiveEdgeFrame(builder:flatbuffers.Builder, liveEdgeFrame:number) {
+  builder.addFieldInt32(15, liveEdgeFrame, 0);
+}
+
 static endReplayState(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createReplayState(builder:flatbuffers.Builder, startFrame:number, endFrame:number, currentFrame:number, paused:boolean, speed:number, seeking:boolean, seekTarget:number, controllerPlayerNum:number, checkpointFramesOffset:flatbuffers.Offset, truncated:boolean, gameIdOffset:flatbuffers.Offset, mapIdOffset:flatbuffers.Offset, povTeam:number):flatbuffers.Offset {
+static createReplayState(builder:flatbuffers.Builder, startFrame:number, endFrame:number, currentFrame:number, paused:boolean, speed:number, seeking:boolean, seekTarget:number, controllerPlayerNum:number, checkpointFramesOffset:flatbuffers.Offset, truncated:boolean, gameIdOffset:flatbuffers.Offset, mapIdOffset:flatbuffers.Offset, povTeam:number, broadcast:boolean, behindSeconds:number, liveEdgeFrame:number):flatbuffers.Offset {
   ReplayState.startReplayState(builder);
   ReplayState.addStartFrame(builder, startFrame);
   ReplayState.addEndFrame(builder, endFrame);
@@ -216,6 +257,9 @@ static createReplayState(builder:flatbuffers.Builder, startFrame:number, endFram
   ReplayState.addGameId(builder, gameIdOffset);
   ReplayState.addMapId(builder, mapIdOffset);
   ReplayState.addPovTeam(builder, povTeam);
+  ReplayState.addBroadcast(builder, broadcast);
+  ReplayState.addBehindSeconds(builder, behindSeconds);
+  ReplayState.addLiveEdgeFrame(builder, liveEdgeFrame);
   return ReplayState.endReplayState(builder);
 }
 
@@ -233,7 +277,10 @@ unpack(): ReplayStateT {
     this.truncated(),
     this.gameId(),
     this.mapId(),
-    this.povTeam()
+    this.povTeam(),
+    this.broadcast(),
+    this.behindSeconds(),
+    this.liveEdgeFrame()
   );
 }
 
@@ -252,6 +299,9 @@ unpackTo(_o: ReplayStateT): void {
   _o.gameId = this.gameId();
   _o.mapId = this.mapId();
   _o.povTeam = this.povTeam();
+  _o.broadcast = this.broadcast();
+  _o.behindSeconds = this.behindSeconds();
+  _o.liveEdgeFrame = this.liveEdgeFrame();
 }
 }
 
@@ -269,7 +319,10 @@ constructor(
   public truncated: boolean = false,
   public gameId: string|Uint8Array|null = null,
   public mapId: string|Uint8Array|null = null,
-  public povTeam: number = 0
+  public povTeam: number = 0,
+  public broadcast: boolean = false,
+  public behindSeconds: number = 0,
+  public liveEdgeFrame: number = 0
 ){}
 
 
@@ -291,7 +344,10 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.truncated,
     gameId,
     mapId,
-    this.povTeam
+    this.povTeam,
+    this.broadcast,
+    this.behindSeconds,
+    this.liveEdgeFrame
   );
 }
 }

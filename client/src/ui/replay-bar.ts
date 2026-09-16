@@ -55,6 +55,23 @@ export interface ReplayBarModel {
     /** Checkpoint tick positions, 0..1. Empty until PLAN-persistence's sim
      *  serializer lands and recordings start carrying checkpoints. */
     tickPositions: number[];
+    /** True for a Mission Broadcast (delayed relay, not a finished
+     *  recording) — hides POV (the log is global-view only) and allows
+     *  backward seek even with zero legacy checkpoints. */
+    isBroadcast: boolean;
+    /** 0..1 position of the live edge on the track, or null outside a
+     *  broadcast (a finished recording has no edge to mark). */
+    liveEdgePosition: number | null;
+}
+
+/** "1h behind" / "45m behind" — the server's floor is 1h but a dev override
+ *  can lower it for the live-verification recipe, so this formats whatever
+ *  arrives rather than assuming an hour. */
+function behindLabel(seconds: number): string {
+    const s = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(s / 3600);
+    if (h >= 1) return `${h}h behind`;
+    return `${Math.max(1, Math.round(s / 60))}m behind`;
 }
 
 const SIM_HZ = 30;
@@ -81,13 +98,20 @@ export function describeReplayBar(
     }
 
     const bits: string[] = [];
+    // A broadcast leads with what makes it a broadcast: the delay. POV never
+    // shows (the tap is a Global-visibility spectator — there is no other
+    // POV to switch to) and the "no checkpoints" line is wrong here — a
+    // broadcast seeks backward via keyframes, checkpoints or not.
+    if (st.broadcast) bits.push(`Broadcast · ${behindLabel(st.behindSeconds)}`);
     if (st.seeking) bits.push(`seeking to ${clock(st.seekTarget)}…`);
     // E1: a recording whose server died mid-game. Said out loud, because the
     // alternative is a bar that just stops and reads as a bug.
     if (st.truncated) bits.push('recording ends early (segment truncated)');
-    bits.push(st.povTeam >= 0 ? `POV: team ${st.povTeam}` : 'POV: global view');
-    if (st.checkpointFrames.length === 0)
-        bits.push('no checkpoints — playback runs forwards only');
+    if (!st.broadcast) {
+        bits.push(st.povTeam >= 0 ? `POV: team ${st.povTeam}` : 'POV: global view');
+        if (st.checkpointFrames.length === 0)
+            bits.push('no checkpoints — playback runs forwards only');
+    }
 
     return {
         positionLabel: `${clock(elapsed)} / ${clock(span)}`,
@@ -101,6 +125,10 @@ export function describeReplayBar(
         tickPositions: st.checkpointFrames
             .map((f) => (f - st.startFrame) / span)
             .filter((p) => p >= 0 && p <= 1),
+        isBroadcast: st.broadcast,
+        liveEdgePosition: st.broadcast
+            ? Math.min(1, Math.max(0, (st.liveEdgeFrame - st.startFrame) / span))
+            : null,
     };
 }
 
@@ -251,6 +279,12 @@ function buildBar(): HTMLElement {
         'border-radius:4px;background:#3b82f6;');
     fill.id = 'replay-fill';
     track.appendChild(fill);
+    // Broadcast only: where the delay currently allows playback up to.
+    // Absolute-positioned so it sits over the fill rather than in flow.
+    const liveEdge = el('div', 'position:absolute;top:-2px;bottom:-2px;width:2px;' +
+        'background:#f59e0b;display:none;');
+    liveEdge.id = 'replay-live-edge';
+    track.appendChild(liveEdge);
     track.onclick = (ev: MouseEvent) => {
         if (!lastState) return;
         const r = track.getBoundingClientRect();
@@ -291,6 +325,8 @@ function render(): void {
     const speed = root.querySelector<HTMLButtonElement>('#replay-speed');
     const pos   = root.querySelector<HTMLElement>('#replay-position');
     const fill  = root.querySelector<HTMLElement>('#replay-fill');
+    const liveEdge = root.querySelector<HTMLElement>('#replay-live-edge');
+    const pov   = root.querySelector<HTMLButtonElement>('#replay-pov');
     const status = root.querySelector<HTMLElement>('#replay-status');
     if (play) {
         play.textContent = m.playLabel;
@@ -304,6 +340,14 @@ function render(): void {
     }
     if (pos) pos.textContent = m.positionLabel;
     if (fill) fill.style.width = `${(m.progress * 100).toFixed(2)}%`;
+    // Broadcast: no POV to switch (Global-visibility only), live-edge marker
+    // shown instead.
+    if (pov) pov.style.display = m.isBroadcast ? 'none' : '';
+    if (liveEdge) {
+        liveEdge.style.display = m.liveEdgePosition === null ? 'none' : '';
+        if (m.liveEdgePosition !== null)
+            liveEdge.style.left = `${(m.liveEdgePosition * 100).toFixed(2)}%`;
+    }
     if (status) {
         status.textContent = m.refusal
             ? m.refusal
