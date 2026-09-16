@@ -41,6 +41,26 @@ struct UserRecord {
     /// the upgrade — the row, and therefore every binding, preset and war
     /// seat keyed on its id, is the same one afterwards.
     bool isProvisional = false;
+
+    // ── Journey fields (PLAN-beta-journey.md §(b)) ─────────────────────────
+    /// The one progression number. Tier is NEVER stored — derive it with
+    /// Standing::TierFor so a threshold change is a recompile, not a backfill.
+    int standing = 0;
+    /// Completed sessions. Drives standing accrual and the client's
+    /// progressive-disclosure flag (`sessions_played < 3`).
+    int sessionsPlayed = 0;
+    /// Display name. Empty means unset, and every reader falls back to
+    /// `username` — stored separately rather than defaulted into the column at
+    /// migration time because the fallback has to keep working for an account
+    /// that is later renamed, which a backfilled copy would not.
+    std::string callsign;
+    /// Cosmetic commander archetype: "surveyor" | "foundry" | "line" |
+    /// "signals". Empty means the player skipped the choice, which the intro
+    /// makes explicit is allowed — nothing anywhere gates on this.
+    std::string commanderKind;
+    /// The intro slides have been seen (or skipped). One bit, so the intro is
+    /// shown once per ACCOUNT rather than once per browser.
+    bool introDone = false;
 };
 
 class Database {
@@ -95,6 +115,31 @@ public:
     /// and needs the username back to check the lobby-supplied
     /// roster.
     std::optional<UserRecord> FindUserById(int64_t userId);
+
+    /// Write the cosmetic profile fields, each independently optional
+    /// (PLAN-beta-journey.md §(b), `POST /api/account/profile`).
+    ///
+    /// nullopt means "not supplied" and leaves the column alone — distinct
+    /// from an empty string, which is a deliberate clear. The three fields
+    /// move independently because the intro sends them independently: Skip
+    /// sets `intro_done` and nothing else, and it must not blank a callsign
+    /// the player typed on the previous slide.
+    ///
+    /// Returns true if a row was updated. Nothing here gates anything.
+    bool UpdateProfile(int64_t userId,
+                       const std::optional<std::string>& callsign,
+                       const std::optional<std::string>& commanderKind,
+                       std::optional<bool> introDone);
+
+    /// Accrue standing and completed sessions in one statement
+    /// (PLAN-beta-journey.md §0: +10 a session, +5 an objective, +15 an
+    /// endorsement). Relative rather than absolute so two accruals landing for
+    /// the same account — a room end and an endorsement — cannot lose one
+    /// another by writing a value each read before the other.
+    ///
+    /// Clamped at 0: standing has no negative meaning and Standing::TierFor
+    /// would clamp it on every read anyway.
+    bool AddStanding(int64_t userId, int standingDelta, int sessionsDelta);
 
     /// Replace a user's stored password hash. Used by the login path to
     /// transparently upgrade legacy plaintext / weaker-parameter hashes
