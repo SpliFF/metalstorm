@@ -62,7 +62,10 @@ return mk{
                 -- WZ2100 `wz_wheeled` placeholder this def borrowed while
                 -- no `ms_tanks_s1.gltf` existed; the builder's default
                 -- objectname (= def name) now resolves, so no override.
-                override = { transportbyenemy = false } },
+                -- trackType: this scale alone is the wheeled tankette
+                -- (spinnable axle_f/axle_r above) inside an otherwise
+                -- tracked class — overrides _builder.lua's StdTank default.
+                override = { transportbyenemy = false, trackType = 'StdWheel' } },
         [2] = { weapons = { [1] = { name = 'MS_AC_S3' } },
                 description = 'Main battle tank troop',
                 -- Line tier: 4 × 1800hp members (BAR stumpy anchor),
