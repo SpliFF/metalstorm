@@ -667,7 +667,7 @@ export class WorldMap {
             ['edges', 'Transit routes'],
             ['labels', 'Names'],
             ['claims', 'Claims'],
-            ['pulses', 'War pulses'],
+            ['pulses', 'Mission pulses'],
             ['safeColours', 'Colour-blind-safe faction colours'],
         ];
         const html: string[] = [];
@@ -675,7 +675,7 @@ export class WorldMap {
         for (const k of kinds) html.push(`<li>${glyphSvg(k, '#ffd479')} ${esc(GLYPH_LABELS[k])}</li>`);
         html.push('</ul><h5>State</h5><ul>');
         html.push(`<li>${stateRingSvg('quiet', '')} Quiet</li>`);
-        html.push(`<li>${stateRingSvg('staging', '#ffd479')} War staging — force in transit</li>`);
+        html.push(`<li>${stateRingSvg('staging', '#ffd479')} Mission staging — force in transit</li>`);
         html.push(`<li>${stateRingSvg('active', '#ff5c5c')} Battle in progress</li>`);
         html.push(`<li>${claimFlagSvg('#e69f00')} Open claim (earliest claimant's colour)</li>`);
         html.push(`<li>${commanderStarSvg('#ffffff')} Your commander</li>`);

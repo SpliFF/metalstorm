@@ -706,7 +706,7 @@ export function poiSummary(
     } : null;
     let stat: PoiSummary['stat'];
     if (poi.battleStatus === 'active') {
-        stat = { label: 'Battle room', value: poi.warRoomId !== null ? `#${poi.warRoomId}` : '—' };
+        stat = { label: 'Battle mission', value: poi.warRoomId !== null ? `#${poi.warRoomId}` : '—' };
     } else if (poi.battleStatus === 'staging') {
         // The soonest window, in WORLD time: the number the defender is
         // counting down and the attacker is racing.
@@ -725,7 +725,7 @@ export function poiSummary(
         owner,
         state: poi.battleStatus,
         stateLabel: poi.battleStatus === 'active' ? 'Battle in progress'
-            : poi.battleStatus === 'staging' ? 'War staging'
+            : poi.battleStatus === 'staging' ? 'Mission staging'
             : poi.mapId ? 'Quiet' : 'World only',
         stat,
         mine: !!viewer?.factionId && poi.owner === viewer.factionId,

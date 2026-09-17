@@ -170,9 +170,9 @@ export type WarFilter = 'my-faction' | 'my-wars' | 'friends-here' | 'all';
 
 export const WAR_FILTER_LABELS: Record<WarFilter, string> = {
     'my-faction': 'My faction',
-    'my-wars': 'My wars',
+    'my-wars': 'My missions',
     'friends-here': 'Friends here',
-    'all': 'All wars',
+    'all': 'All missions',
 };
 
 /// The side of `war` this faction fields, or undefined when the war declares
@@ -430,10 +430,10 @@ export function formatAgo(unixSec: number, nowSec: number): string {
 /// the same fact in the units they played it in. GAME_SPEED is 30.
 export function formatFrozenFrame(frame: number): string {
     const sec = Math.max(0, Math.floor(frame / 30));
-    if (sec < 60) return `${sec}s of war`;
+    if (sec < 60) return `${sec}s of mission`;
     const mins = Math.floor(sec / 60);
-    if (mins < 60) return `${mins}m of war`;
-    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m of war`;
+    if (mins < 60) return `${mins}m of mission`;
+    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m of mission`;
 }
 
 /// The badge in the card's header. One word per `WarState`, plus the CSS class
@@ -485,11 +485,11 @@ export function formatWarStatus(war: WarInfo, nowSec: number): string {
         case 'seeding':
             return 'being seeded — the server is being prepared, and a seat is not yet on offer';
         case 'winding_down':
-            return 'the war is ending — no new fighters are seated, but it can still be watched';
+            return 'the mission is ending — no new fighters are seated, but it can still be watched';
         case 'resolving':
             return 'combat is over — the settlement is being written';
         case 'archived':
-            return 'archived — its settlement is in the war digest';
+            return 'archived — its settlement is in the mission digest';
         default: break;
     }
     switch (war.state) {
@@ -512,7 +512,7 @@ export function formatWarStatus(war: WarInfo, nowSec: number): string {
             return frozen
                 ? `the server stopped without saving — a join resumes from ` +
                   `${frozen}${when}, and anything after it is lost`
-                : 'the server stopped without saving — a join restarts the war';
+                : 'the server stopped without saving — a join restarts the mission';
         case 'unresumable':
             return frozen
                 ? `${frozen}${when} is frozen in the store, but ${formatResumeRefusal(war)}`
@@ -523,7 +523,7 @@ export function formatWarStatus(war: WarInfo, nowSec: number): string {
             // The war ended. Not "the server stopped without saving", which is
             // what this card said for every correctly-finished war before D4 —
             // the server stopped because there was nothing left to serve.
-            return 'this war is over — its result is in your war digest';
+            return 'this mission is over — its result is in your mission digest';
         default:
             // A lobby with no `state` field, or a room that is not a war.
             return war.live ? '' : 'no server running — a join restarts it';
@@ -541,11 +541,11 @@ export function formatWarStatus(war: WarInfo, nowSec: number): string {
 export function formatResumeRefusal(war: WarInfo): string {
     switch (war.resume_eligibility) {
         case 'engine_changed':
-            return 'the game has been updated since — this war restarts at the beginning';
+            return 'the game has been updated since — this mission restarts at the beginning';
         case 'map_changed':
-            return 'the map has changed since — this war restarts at the beginning';
+            return 'the map has changed since — this mission restarts at the beginning';
         default:
-            return 'it cannot be loaded — this war restarts at the beginning';
+            return 'it cannot be loaded — this mission restarts at the beginning';
     }
 }
 
@@ -618,7 +618,7 @@ export function deployIsEnterable(d: DeployResult): boolean {
 /// a random one — especially when it declines to send them to the busiest war
 /// on the list because their side there is outnumbered by nobody.
 export function formatDeploy(d: DeployResult): string {
-    const where = d.room_name ? `“${d.room_name}”` : 'a war';
+    const where = d.room_name ? `“${d.room_name}”` : 'a mission';
     // The seat, said when it is NOT held: a player sent to a war without one
     // arrives as a watcher, and the sentence that sent them must say so.
     const unheld = d.room_id && !deployIsEnterable(d)
@@ -634,7 +634,7 @@ export function formatDeploy(d: DeployResult): string {
             // The fall-through comes first: to the veteran it happens to, being
             // sent past their own front reads as a bug unless it is named.
             const why = d.rejoin_fell_through
-                ? 'Your own war could not seat you back, so: '
+                ? 'Your own mission could not seat you back, so: '
                 : '';
             const base = d.underdog_by > 0
                 ? `deploying to ${where}: your side is outnumbered there by ` +
@@ -651,17 +651,17 @@ export function formatDeploy(d: DeployResult): string {
             // said why; or an older lobby that never seeded, where the honest
             // answer is the Create Game form.
             if (d.room_id)
-                return `Every war fielding your faction was full, so a new one ` +
+                return `Every mission fielding your faction was full, so a new one ` +
                        `was seeded for you: ${where}.${held}${unheld}`;
             if (d.seed_error)
-                return `Every war fielding your faction is full, and a new one ` +
-                       `could not be seeded (${d.seed_error}). Pick a war to ` +
+                return `Every mission fielding your faction is full, and a new one ` +
+                       `could not be seeded (${d.seed_error}). Pick a mission to ` +
                        `watch, or create one.`;
-            return 'Every war fielding your faction is full — create a new ' +
-                   'war and its sides will be sized for you.';
+            return 'Every mission fielding your faction is full — create a new ' +
+                   'mission and its sides will be sized for you.';
         case 'no_faction':
             return 'Your account has no faction, so no side can be chosen ' +
-                   'for it. You can still watch any war.';
+                   'for it. You can still watch any mission.';
     }
 }
 
@@ -690,8 +690,8 @@ export function primaryAction(row: WarRow, faction: string): WarPrimaryAction {
         return {
             kind: 'watch', label: 'Watch', enabled: true,
             why: row.war.phase === 'seeding'
-                ? 'This war is still being seeded.'
-                : 'This war is over — it can be watched, not joined.',
+                ? 'This mission is still being seeded.'
+                : 'This mission is over — it can be watched, not joined.',
         };
     }
     if (row.returning)
@@ -702,7 +702,7 @@ export function primaryAction(row: WarRow, faction: string): WarPrimaryAction {
     const side = sideForFaction(row.war, faction);
     if (!side)
         return { kind: 'fight', label: 'Fight', enabled: false,
-                 why: `${factionLabel(faction)} fields no side in this war.` };
+                 why: `${factionLabel(faction)} fields no side in this mission.` };
     if (!(side.unlimited === true || side.open > 0))
         return { kind: 'fight', label: 'Fight', enabled: false,
                  why: `Your side is full (${side.bound}/${side.capacity ?? row.war.capacity_per_side}).` };
@@ -798,7 +798,7 @@ export function warCardModel(
 ): WarCardModel {
     return {
         id: row.id,
-        title: row.name || `War ${row.id}`,
+        title: row.name || `Mission ${row.id}`,
         mapId: row.mapId,
         badge: warStateBadge(row.war),
         sides: formatSidesLine(row.war),
@@ -856,7 +856,7 @@ export function warDrawerModel(
         .map(c => `${factionLabel(c.faction)} has filed a claim`);
     return {
         id: row.id,
-        title: row.name || `War ${row.id}`,
+        title: row.name || `Mission ${row.id}`,
         mapId: row.mapId,
         badge: warStateBadge(war),
         sideLines: war.sides.map(s => formatSide(s, war.capacity_per_side, war.live)),

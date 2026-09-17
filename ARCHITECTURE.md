@@ -2,6 +2,21 @@
 
 Quick-reference for navigating the codebase. Read this before searching.
 
+## Vocabulary
+
+Player-facing text (UI copy, `docs/player-guide.md`) says **World / Mission / Faction /
+Standing**; the code underneath keeps its own names and is not renamed to match (PLAN-beta.md
+"Vocabulary", 2026-09-17 ruling). **World** is the one persistent game on the mega map (the
+world layer, `world_*` tables, `/api/world/*`). **Mission** is a bounded task on one map in one
+room — not always a battle — and is the player word for what the code calls a **war**/**room**
+(the `wars` table, `/api/wars/*`, `war_outcome`, `SessionKind::PersistentWar`, and every
+`war-*.ts`/`Room*` identifier in `client/src/lobby/`). **Faction** is the player's organisation
+in the World; a Mission's sides are which Faction each team fights for (world factions ↔ battle
+sides Compact/Union via `side_key`). **Standing** is the per-account rank the UI reads. Routes,
+DB tables/columns, enum values, test ids, log lines and every C++/Lua identifier keep saying
+`war`/`room`; only rendered strings and a handful of contained TS-only identifiers (e.g.
+`LobbyTemplates.browserMissionEntry` in `client/src/ui/lobby/loader.ts`) use the player words.
+
 ## Build Commands
 
 ```

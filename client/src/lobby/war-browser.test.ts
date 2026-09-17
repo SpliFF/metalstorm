@@ -207,7 +207,7 @@ describe('formatWarDetail', () => {
         }) });
         expect(formatWarDetail(hib, NOW)).toBe(
             'meridian_basin · Compact 2/8 · Union 1/8 · ' +
-            'hibernated with 2h 06m of war (2h ago) — a join brings it back');
+            'hibernated with 2h 06m of mission (2h ago) — a join brings it back');
     });
 });
 
@@ -253,9 +253,9 @@ describe('warStateBadge', () => {
 
 describe('formatFrozenFrame', () => {
     it('states a frame as the time a player played, not as a frame number', () => {
-        expect(formatFrozenFrame(226_800)).toBe('2h 06m of war');
-        expect(formatFrozenFrame(1800)).toBe('1m of war');
-        expect(formatFrozenFrame(300)).toBe('10s of war');
+        expect(formatFrozenFrame(226_800)).toBe('2h 06m of mission');
+        expect(formatFrozenFrame(1800)).toBe('1m of mission');
+        expect(formatFrozenFrame(300)).toBe('10s of mission');
     });
 });
 
@@ -275,13 +275,13 @@ describe('formatWarStatus', () => {
     const frozen = { frozen_frame: 226_800, frozen_at: NOW - 7200 };
     it('promises the world back when it was checkpointed', () => {
         expect(formatWarStatus(war({ live: false, state: 'hibernated', ...frozen }), NOW))
-            .toBe('hibernated with 2h 06m of war (2h ago) — a join brings it back');
+            .toBe('hibernated with 2h 06m of mission (2h ago) — a join brings it back');
     });
     it('says what a crash costs instead of claiming hibernation', () => {
         const s = formatWarStatus(
             war({ live: false, state: 'crashed', ...frozen }), NOW);
         expect(s).toContain('without saving');
-        expect(s).toContain('2h 06m of war');
+        expect(s).toContain('2h 06m of mission');
         expect(s).toContain('anything after it is lost');
         expect(s).not.toContain('hibernated');
     });
@@ -292,8 +292,8 @@ describe('formatWarStatus', () => {
             resume_blocked_reason: 'E1: the frozen world at frame 226800 was taken ' +
                 'by engine aaaa… and this server binary is bbbb…',
         }), NOW);
-        expect(s).toBe('2h 06m of war (2h ago) is frozen in the store, but the game ' +
-            'has been updated since — this war restarts at the beginning');
+        expect(s).toBe('2h 06m of mission (2h ago) is frozen in the store, but the game ' +
+            'has been updated since — this mission restarts at the beginning');
         // The operator's hashes never reach the card's own sentence.
         expect(s).not.toContain('E1');
         expect(s).not.toContain('engine aaaa');
@@ -308,7 +308,7 @@ describe('formatWarStatus', () => {
     });
     it('names a resume in flight so a joiner does not read it as "down"', () => {
         expect(formatWarStatus(war({ live: false, state: 'resuming', ...frozen }), NOW))
-            .toBe('resuming — bringing back 2h 06m of war (2h ago)');
+            .toBe('resuming — bringing back 2h 06m of mission (2h ago)');
     });
     it('says nothing extra about a live war, and says "never run" about a fresh one', () => {
         expect(formatWarStatus(war({ state: 'live' }), NOW)).toBe('');
@@ -324,7 +324,7 @@ describe('formatWarStatus', () => {
         expect(formatWarStatus(war({ live: false, state: 'hibernated' }), NOW))
             .toBe('hibernated — a join brings it back');
         expect(formatWarStatus(war({ live: false, state: 'crashed' }), NOW))
-            .toBe('the server stopped without saving — a join restarts the war');
+            .toBe('the server stopped without saving — a join restarts the mission');
     });
 });
 
@@ -405,11 +405,11 @@ describe('formatDeploy', () => {
         // §6 offers "queue or seed"; this builds the second, so the wording
         // has to end somewhere rather than leave the player waiting.
         expect(formatDeploy({ outcome: 'seed', faction: 'compact', underdog_by: 0 }))
-            .toContain('create a new war');
+            .toContain('create a new mission');
     });
     it('tells a factionless account it can still watch', () => {
         expect(formatDeploy({ outcome: 'no_faction', faction: '', underdog_by: 0 }))
-            .toContain('watch any war');
+            .toContain('watch any mission');
     });
 });
 
@@ -491,7 +491,7 @@ describe('formatYourWar', () => {
         }));
         expect(s).toContain('your side: Union');
         expect(s).toContain('away 3 days');
-        expect(s).toContain('2h 06m of war waiting for you');
+        expect(s).toContain('2h 06m of mission waiting for you');
     });
     it('names a superseded seat instead of a side it no longer holds', () => {
         const s = formatYourWar(row({

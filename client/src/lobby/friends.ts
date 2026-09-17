@@ -115,8 +115,8 @@ export function friendStatusLine(f: FriendRow): string {
         case 'fighting':
             return f.war_name
                 ? `fighting in ${f.war_name}`
-                : 'fighting in a war';
-        case 'staging': return 'in a room';
+                : 'fighting in a mission';
+        case 'staging': return 'in a mission';
         case 'online':  return 'in the lobby';
         case 'offline': return 'offline';
         default:
@@ -156,7 +156,7 @@ export function friendActions(f: FriendRow): FriendAction[] {
         case 'mutual':
             return [
                 ...(f.presence === 'fighting'
-                    ? [{ kind: 'join' as const, label: 'Join war', primary: true }]
+                    ? [{ kind: 'join' as const, label: 'Join mission', primary: true }]
                     : []),
                 { kind: 'remove', label: 'Remove', primary: false },
             ];
@@ -225,7 +225,7 @@ export function friendJoinNeedsConfirm(outcome: FriendJoinResult['outcome']): bo
 /// is on the other side of it.
 export function formatFriendJoin(r: FriendJoinResult): { text: string; seats: boolean } {
     const who = r.friend;
-    const war = r.room_name ? `“${r.room_name}”` : 'their war';
+    const war = r.room_name ? `“${r.room_name}”` : 'their mission';
     switch (r.outcome) {
         case 'same_side':
             return { text: `Joining ${war} — you fight beside ${who}.`, seats: true };
@@ -236,19 +236,19 @@ export function formatFriendJoin(r: FriendJoinResult): { text: string; seats: bo
                 seats: true,
             };
         case 'not_in_a_war':
-            return { text: `${who} is not in a war right now.`, seats: false };
+            return { text: `${who} is not in a mission right now.`, seats: false };
         case 'faction_absent':
             return {
-                text: `${who}'s war fields no side for your faction, so there ` +
+                text: `${who}'s mission fields no side for your faction, so there ` +
                       `is no seat in it for you — you can still watch.`,
                 seats: false,
             };
         case 'side_full':
-            return { text: `Your side of ${who}'s war is full.`, seats: false };
+            return { text: `Your side of ${who}'s mission is full.`, seats: false };
         case 'no_faction':
             return {
                 text: `Your account has no faction, so it has no side to be ` +
-                      `seated on — you can watch ${who}'s war.`,
+                      `seated on — you can watch ${who}'s mission.`,
                 seats: false,
             };
         default:
