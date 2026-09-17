@@ -24,7 +24,7 @@ import { classifyEndResponse } from './room-end.js';
 import { validateToolArgs } from './tool-args.js';
 import { TOOLS } from './tools.js';
 import { pickServer, listCandidates } from './room-target.js';
-import { buildVerb } from './verb-args.js';
+import { buildVerb, buildOrderLua } from './verb-args.js';
 import { redactSessions } from './redact.js';
 import { worldHandlers } from './world-tools.js';
 import { aiHandlers } from './ai-tools.js';
@@ -36,7 +36,7 @@ import {
     DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
     parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
 } from './capture-subject.js';
-import { generateWaypoints, PATTERNS } from './drive-pattern.js';
+import { generateWaypoints, createProgressTracker, patternSpan, passiveStateLua, queueReportLua, PATTERNS } from './drive-pattern.js';
 import { buildTrancheLua, trancheUnitCount } from './tranche.js';
 import {
     GAME_SPEED, MAX_STEP_FRAMES,
@@ -2445,12 +2445,10 @@ async function executeTool(name, args) {
         case 'give_order': {
             const params = Array.isArray(args.params) ? args.params : [];
             if (params.length > 4) return 'Error: give_order takes at most 4 params.';
-            const cmd = buildVerb('order', [
-                [args.unitId, 'unitId', 'num'], [args.cmdId, 'cmdId', 'num'],
-                ...params.map((p, i) => [p, `params[${i}]`, 'num']),
-                [args.opts ?? 0, 'opts', 'num'],
-            ]);
-            const r = await execOnGameServer('server', cmd, args.roomId);
+            // Issued as a literal GiveOrderToUnit on LuaRules, not the `order`
+            // verb: that verb drops opts unless exactly 4 params precede it,
+            // so a 3-param MOVE with SHIFT (32) never queued (see buildOrderLua).
+            const r = await execOnGameServer('LuaRules', buildOrderLua(args.unitId, args.cmdId, params, args.opts ?? 0), args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
@@ -3189,50 +3187,79 @@ async function executeTool(name, args) {
                     pattern: args.pattern, center: { x: origin.pos.x, z: origin.pos.z },
                     radius: args.radius, length: args.length,
                     laps: args.laps, segmentsPerLap: args.segmentsPerLap,
+                    clearance: args.clearance,
                 });
             } catch (e) { return `Error: ${e.message}`; }
             if (waypoints.length > 200) {
                 return `Error: drive_pattern would issue ${waypoints.length} waypoints (max 200) — reduce laps or segmentsPerLap.`;
             }
+            const arriveRadius = Number.isFinite(args.arriveRadius) && args.arriveRadius > 0 ? args.arriveRadius : 64;
+            const span = patternSpan({ pattern: args.pattern, radius: args.radius, length: args.length });
+            if (span <= arriveRadius) {
+                return `Error: drive_pattern's ${args.pattern} spans only ${span} elmos from the start, inside arriveRadius ${arriveRadius} — the unit could never be seen to leave. Enlarge radius/length or shrink arriveRadius.`;
+            }
 
-            // Queued MOVE orders: reuses give_order's own verb-building (cmdId
-            // 10 = MOVE), first waypoint opts 0 (replace), the rest opts 32
-            // (SHIFT/queue) — the exact "opts 0 then 32" pattern the
-            // hand-built pres-decals figure-8 used.
+            // Hold fire + hold position first (default): an idling unit that
+            // sees an enemy is given an INTERNAL attack order by the engine,
+            // which replaces the move queue mid-loop.
+            const passive = args.passive !== false;
+            if (passive) {
+                const r = await execOnGameServer('LuaRules', passiveStateLua(unitId), args.roomId);
+                if (!r.success) notes.push(`could not set hold-fire/hold-position: ${r.output}`);
+                else notes.push('unit set to hold fire + hold position for the drive (passive:false to skip)');
+            }
+
+            // Queued MOVE orders (cmdId 10), first waypoint opts 0 (replace),
+            // the rest opts 32 (SHIFT/queue) — the "opts 0 then 32" pattern the
+            // hand-built pres-decals figure-8 used, issued through give_order's
+            // literal-Lua path (buildOrderLua) so opts actually reach the engine.
             const startFrame = await readSimFrame(args.roomId);
             for (let i = 0; i < waypoints.length; i++) {
                 const wp = waypoints[i];
-                const cmd = buildVerb('order', [
-                    [unitId, 'unitId', 'num'], [10, 'cmdId', 'num'],
-                    [wp.x, 'params[0]', 'num'], [0, 'params[1]', 'num'], [wp.z, 'params[2]', 'num'],
-                    [i === 0 ? 0 : 32, 'opts', 'num'],
-                ]);
-                const r = await execOnGameServer('server', cmd, args.roomId);
+                const r = await execOnGameServer('LuaRules', buildOrderLua(unitId, 10, [wp.x, 0, wp.z], i === 0 ? 0 : 32), args.roomId);
                 if (!r.success) return `Error: waypoint ${i} order refused: ${r.output}`;
             }
 
-            // Wait for the LAST waypoint (order_and_film's own polling
-            // pattern, aimed at position-arrival rather than motion onset).
-            const last = waypoints[waypoints.length - 1];
-            const arriveRadius = Number.isFinite(args.arriveRadius) ? args.arriveRadius : 64;
-            const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 60000;
+            // Wait for the unit to visit every waypoint IN ORDER (order_and_film's
+            // polling cadence, but tracked sequentially): a closed loop ends where
+            // it began, so "near the last waypoint" is true before the unit has
+            // moved at all — the tracker refuses to call that arrival until the
+            // unit has first left its origin.
+            // Default 180 s: a tank averaged ~20 elmos/s through a loop's turns
+            // live, and the default 300-radius 12-point figure-8 is ~1900 elmos.
+            const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 180000;
             const pollMs = Math.max(50, Number.isFinite(args.pollMs) ? args.pollMs : 500);
+            const tracker = createProgressTracker({ waypoints, arriveRadius, origin: origin.pos });
             const started = Date.now();
             let finalState = origin;
-            let arrived = false;
+            let progress = tracker.snapshot();
             while (Date.now() - started < timeoutMs) {
                 const cur = await sampleUnitMotion(unitId, args.roomId);
                 if (!cur) { notes.push(`unit ${unitId} vanished while waiting to arrive`); break; }
                 finalState = cur;
-                if (Math.hypot(cur.pos.x - last.x, cur.pos.z - last.z) <= arriveRadius) { arrived = true; break; }
+                progress = tracker.update(cur.pos);
+                if (progress.arrived) break;
                 await new Promise((r) => setTimeout(r, pollMs));
             }
-            if (!arrived) notes.push(`did not confirm arrival within ${timeoutMs}ms — returning last known position`);
+            if (!progress.arrived) {
+                notes.push(`did not confirm arrival within ${timeoutMs}ms — reached ${progress.waypointsReached}/${waypoints.length} waypoints`
+                    + (progress.departed ? '' : ` and never moved more than ${arriveRadius} elmos from the start (first order dropped?)`)
+                    + ' — returning last known position');
+                // Quote the queue head so a replaced queue (engine auto-engage
+                // is `20[<enemy>]#8`, a gadget, a human) is visible right here.
+                try {
+                    const q = await execOnGameServer('LuaRules', queueReportLua(unitId), args.roomId);
+                    if (q.success) notes.push(`command queue now: ${q.output} (expected MOVE=10 entries; anything else replaced the drive)`);
+                } catch { /* diagnostic only */ }
+            }
             const endFrame = await readSimFrame(args.roomId);
 
             const result = {
                 unitId, pattern: args.pattern, waypoints,
-                arrived, framesElapsed: (endFrame ?? startFrame ?? 0) - (startFrame ?? 0),
+                arrived: progress.arrived,
+                waypointsReached: progress.waypointsReached,
+                departed: progress.departed,
+                framesElapsed: (endFrame ?? startFrame ?? 0) - (startFrame ?? 0),
                 finalPosition: finalState.pos,
                 notes,
             };

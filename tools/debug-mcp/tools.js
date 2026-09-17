@@ -845,8 +845,10 @@ export const TOOLS = [
             + 'Closes a TOOLING GAP found while chasing the missing-tread-decals defect (docs/reviews/beta/README.md): '
             + 'there was no dedicated figure-8/waypoint-loop routine, so that fire hand-built one from 7-8 individual `give_order` MOVE calls. '
             + `Computes a waypoint loop (pattern: ${PATTERNS.join('|')}) around the unit's CURRENT position, issues it as queued MOVE orders `
-            + '(cmdId 10, first waypoint opts 0, the rest opts 32 to queue — same `give_order` plumbing), waits until the unit reaches the last '
-            + 'waypoint (or `timeoutMs`), and reports the waypoints, sim frames elapsed, and final position. '
+            + '(cmdId 10, first waypoint opts 0, the rest opts 32 to queue — same `give_order` plumbing), waits until the unit has visited every '
+            + 'waypoint IN ORDER (or `timeoutMs`), and reports the waypoints, how many were reached, sim frames elapsed, and final position. '
+            + 'A closed loop ends where it began, so arrival is never declared until the unit has first moved more than `arriveRadius` from its '
+            + 'start (`departed`) — a figure-8 that "arrives" in 11 frames was the first live call\'s defect. '
             + 'Give `unitId` for an existing unit, or `spawn:{defName,x,z,team?}` to create one first — spawning waits a short settle before the '
             + 'first order goes in, because a unit ordered immediately after `spawn_unit` can silently drop that first order (empty queue, never moves). '
             + 'With `capture:true`, shoots `capture_subject` top + low at the final position once the loop finishes (or times out).',
@@ -862,8 +864,10 @@ export const TOOLS = [
                 laps:    { type: 'number', default: 1, description: 'Repeats of the loop (line/zigzag: round trips). Default 1.' },
                 segmentsPerLap: { type: 'number', description: 'Waypoints per lap for figure8/circle/zigzag. Default 12, minimum 3.' },
 
-                arriveRadius: { type: 'number', default: 64, description: 'Distance (elmos) from the final waypoint that counts as "arrived". Default 64.' },
-                timeoutMs:    { type: 'number', default: 60000, description: 'Give up waiting for arrival after this long (still returns the last known position). Default 60000.' },
+                arriveRadius: { type: 'number', default: 64, description: 'Distance (elmos) within which a waypoint counts as visited; waypoints are credited in order. Default 64. Must be smaller than the pattern\'s radius (line/zigzag: half its length).' },
+                passive:      { type: 'boolean', default: true, description: 'Put the unit on hold-fire + hold-position before driving it (default true). An idling unit that sees an enemy is given an internal attack order by the engine, which replaces the move queue mid-loop. false leaves its states alone.' },
+                clearance:    { type: 'number', default: 48, description: 'No waypoint is left closer than this (elmos) to the unit\'s start: the engine drops a MOVE targeting within ~16-32 elmos of where the unit already is, so a figure-8\'s centre crossings would otherwise vanish from the queue. Default 48; 0 disables.' },
+                timeoutMs:    { type: 'number', default: 180000, description: 'Give up waiting for arrival after this long (still returns the last known position). Default 180000 — a tank averages ~20 elmos/s through a loop\'s turns, and the default figure-8 is ~1900 elmos.' },
                 pollMs:       { type: 'number', default: 500, description: 'Wait between arrival polls. Default 500.' },
 
                 capture:  { type: 'boolean', default: false, description: 'Shoot capture_subject top + low at the final position once the loop ends.' },
