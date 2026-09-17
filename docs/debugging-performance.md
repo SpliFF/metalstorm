@@ -338,6 +338,33 @@ Feed the printed snippet into `mcp__chrome-devtools__evaluate_script`. Requires 
 
 ---
 
+## Reproducing PLAN-perf.md's XL900 population — `populate_tranche`
+
+`perfDump()` and `profile` need something under load to measure; until now nothing in the repo actually built PLAN-perf.md §M19's ~900-unit XL-battle population, so every "measure p95 at XL900" instruction meant hand-typing a grid-spawn Lua snippet from scratch. `mcp__spring-debug__populate_tranche` closes that gap — it runs the S-battle `grid()` Lua helper (bulk `Spring.CreateUnit` + `Spring.SetUnitArmored` in ONE `exec_lua` LuaRules call, PLAN-perf.md's own recipe, confirmed crash-free at this scale across M6/M9/M19–M26) rather than 900 individual `spawn_unit` round trips.
+
+```
+populate_tranche({ rung: "XL900", roomId })
+```
+
+**The tranche shape, reproduced from PLAN-perf.md §M19's table** (not redefined — see `tools/debug-mcp/tranche.js`): map `meridian_basin`, grid centred on the map's own contested-core ford (8192, 8192), teams 0 (north bank) / 4 (south bank) by default. Each rung is **cumulative** — S, then S+M, then S+M+L, and so on:
+
+| rung | +soldiers (`ms_soldiers_s1`) per side | +tanks (`ms_tanks_s2`) per side | running total (both teams) |
+|---|---|---|---|
+| S | 20 @ perRow 5 | 10 @ perRow 5 | 60 |
+| M | 80 @ perRow 20 | 40 @ perRow 20 | 300 |
+| L | 100 @ perRow 25 | 50 @ perRow 25 | 600 |
+| XL750 | 50 @ perRow 25 | 25 @ perRow 25 | 750 |
+| **XL900** | 50 @ perRow 25 | 25 @ perRow 25 | **900** |
+| XL1200 | 100 @ perRow 25 | 50 @ perRow 25 | 1 200 |
+
+Every rung's `z` offsets are the exact absolute values PLAN-perf.md §M19 recorded (see `TRANCHE_ROWS` in `tranche.js`); `tools/debug-mcp/tranche.test.js` checks the per-rung sums against the plan's own recorded running totals (900 at XL900, etc.) so the two files cannot silently drift apart.
+
+Units default to `Spring.SetUnitArmored(u, true, 0.00003)` (`armored: true`) so the population **sustains** rather than dying to stray fire mid-measurement — PLAN-perf.md's own "which measurement is this" caveat applies: an unarmored population resolves its fight in seconds, an armored one holds for the length of a profiling window. `suppressGameOver: true` patches `Spring.GameOver` to a no-op first, because meridian_basin's ford **is** scenario objective 1 (`control`) — capturing it ends the game and freezes the sim mid-measurement (PLAN-perf.md M10's trap) unless suppressed.
+
+This tool does **not** issue FIGHT orders or otherwise engage the two sides — PLAN-perf.md's own "engaged" measurement position also had each tranche's units ordered to close on the opposite bank, but the exact FIGHT target coordinates are only fully specified for the S-battle recipe, not re-derived per XL rung in the source. Reproducing a *static* population of the right size and shape was the tooling gap that actually blocked `perfDump`/`profile`; add `give_order`/`order_and_film` calls against the returned `GG.perfTranche[team]` ids (read back via `exec_lua`) if an engaged, moving population is also needed.
+
+---
+
 ## Recipes
 
 ### Baseline a scenario, then measure a change
