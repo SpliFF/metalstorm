@@ -66,4 +66,17 @@ inline constexpr Accrual SessionAccrual(int objectivesCredited) {
     return a;
 }
 
+/// Does a finished room's exit represent a Mission at all?
+///
+/// A replay or broadcast "room" has no game behind it — its process is a
+/// recording played back or a relay tapped, not a sim anyone fought — so
+/// whoever was first to call `/api/replays/watch` or `/api/broadcasts/watch`
+/// must not be paid a session for watching it end. This is the gate the
+/// health loop checks BEFORE calling SessionAccrual, not after: the two are
+/// independent decisions (is this room a Mission; what is a Mission worth),
+/// and folding them together is exactly how a watcher previously got paid.
+inline constexpr bool RoomEarnsAccrual(bool isReplayRoom, bool isBroadcastRoom) {
+    return !isReplayRoom && !isBroadcastRoom;
+}
+
 }  // namespace Journey
