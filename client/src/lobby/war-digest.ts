@@ -98,9 +98,9 @@ export function formatDigestLine(
             // event carries a team.
             switch (e.detail) {
                 case 'removed':
-                    return `${e.subject} was withdrawn from the war`;
+                    return `${e.subject} was withdrawn from the mission`;
                 case 'summary':
-                    return `A balance patch reached this war: ${e.subject}`;
+                    return `A balance patch reached this mission: ${e.subject}`;
                 default:
                     return '';
             }

@@ -6,6 +6,7 @@
  *   0x01 = FlatBuffers message     0x02/0x03 = entity state (full/delta)
  *   0x05 = piece state  0x06 = build activity  0x07 = LOS bitmap
  *   0x08 = decals       0x09 = heightmap patch
+ *   0x0A = terrain knowledge mask
  */
 #pragma once
 
@@ -74,6 +75,21 @@ constexpr uint8_t ENVELOPE_DECALS = 0x08;
 /// int16 heights[(x2-x1+1)*(z2-z1+1)] row-major (z outer, x inner).
 /// See BuildHeightmapUpdate below.
 constexpr uint8_t ENVELOPE_HEIGHTMAP = 0x09;
+/// Terrain knowledge mask (the terrain-knowledge-is-LOS arc, K0). The set of
+/// terrain CHUNKS the viewer's ally team has ever had LOS over — chunk built =
+/// known, chunk absent = unknown, fog curtain at the frontier. See
+/// client/src/core/DESIGN-TERRAIN-KNOWLEDGE.md.
+///
+/// The message carries the ENTIRE mask every time, not a delta. The entity
+/// lane is newest-wins and cannot carry a one-shot signal, so a reveal is a
+/// STATE, not an event: idempotent, reorder-tolerant (the mask is monotone and
+/// the client ORs), replay-tolerant, and self-healing after a drop. It is <= 16
+/// bytes, so there is nothing to save by being cleverer.
+///
+/// Layout: u8 envelope + u8 allyTeam + u8 chunksX + u8 chunksZ + u32 frame (LE)
+/// + bits[ceil(chunksX*chunksZ/8)], MSB-first, row-major (z outer, x inner).
+/// See BuildTerrainKnowledge below.
+constexpr uint8_t ENVELOPE_TERRAIN_KNOWLEDGE = 0x0A;
 
 /// Build a framed ServerMessage (envelope byte + FlatBuffers payload).
 inline std::vector<uint8_t> BuildServerMessage(
@@ -1795,6 +1811,32 @@ inline std::vector<uint8_t> BuildHeightmapUpdate(
             putI16(int16_t(q >= 0.0f ? q + 0.5f : q - 0.5f));
         }
     }
+    return out;
+}
+
+
+// Terrain knowledge mask (envelope 0x0A). `packed` is one ally team's plane as
+// produced by TerrainKnowledge::Mask::Pack — MSB-first, row-major. The caller
+// owns the gate: this is only built when the `terrainknowledge` modoption is
+// on. Stock games never see this envelope, which is what keeps the client's
+// default (full map) byte-identical to today.
+inline std::vector<uint8_t> BuildTerrainKnowledge(
+    uint32_t frameNo, int allyTeam, int chunksX, int chunksZ,
+    const std::vector<uint8_t>& packed)
+{
+    std::vector<uint8_t> out;
+    if (allyTeam < 0 || allyTeam > 255) return out;
+    if (chunksX <= 0 || chunksX > 255 || chunksZ <= 0 || chunksZ > 255) return out;
+    const size_t need = (size_t(chunksX) * size_t(chunksZ) + 7) / 8;
+    if (packed.size() < need) return out;
+
+    out.reserve(8 + need);
+    out.push_back(ENVELOPE_TERRAIN_KNOWLEDGE);
+    out.push_back(uint8_t(allyTeam));
+    out.push_back(uint8_t(chunksX));
+    out.push_back(uint8_t(chunksZ));
+    for (int i = 0; i < 4; ++i) out.push_back(uint8_t(frameNo >> (8 * i)));
+    out.insert(out.end(), packed.begin(), packed.begin() + need);
     return out;
 }
 

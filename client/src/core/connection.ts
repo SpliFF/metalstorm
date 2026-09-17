@@ -126,6 +126,10 @@ import { parseMapData, type ParsedMapData } from './map-data.js';
 import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
+import {
+    parseTerrainKnowledge, ENVELOPE_TERRAIN_KNOWLEDGE,
+    type TerrainKnowledgeMask,
+} from './terrain-knowledge.js';
 import { recordInbound, recordOutbound } from './net-inspector.js';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
 import { SCHEMA_HASH } from '../protocol/schema-hash.js';
@@ -138,6 +142,9 @@ const ENVELOPE_BUILD_ACTIVITY = 0x06;
 const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
 const ENVELOPE_HEIGHTMAP = 0x09;
+// 0x0A = terrain knowledge mask. Its constant lives in terrain-knowledge.ts
+// (imported above) rather than being re-declared here, so the parser and the
+// dispatcher arm cannot drift apart.
 
 // PROTOCOL_VERSION + ENVELOPE_FLATBUFFERS live in protocol-version.ts so the
 // scripted wire client shares them rather than copying them (see that file).
@@ -1097,6 +1104,18 @@ export interface ReplayStateInfo {
     /** This client's own POV: -1 = global view, else the team whose fog it is
      *  watching. Per-client, unlike every field above. */
     povTeam: number;
+    /** True when this feed is a `.msb` broadcast relayed behind a delay,
+     *  rather than a finished `.msr` recording (PLAN-beta-broadcast.md lane
+     *  S2). Absent ⇒ false on a server that predates the field. */
+    broadcast: boolean;
+    /** How far behind the live mission this watcher is, in seconds. The
+     *  server's enforced delay is the floor of this — the bar shows it, it
+     *  does not set it. */
+    behindSeconds: number;
+    /** Last frame the delay lets anyone see. `endFrame` is what the log
+     *  HOLDS, `liveEdgeFrame` is what the watcher is ALLOWED; on a live
+     *  mission those differ by the whole delay window. */
+    liveEdgeFrame: number;
 }
 
 export interface ConnectionEvents {
@@ -1251,6 +1270,10 @@ export interface ConnectionEvents {
      *  consumed by `DecalRenderer`. */
     onDecals?: (snapshot: DecalSnapshot) => void;
     onHeightmapPatch?: (patch: HeightmapPatch) => void;
+    /// terrain-knowledge-is-LOS (envelope 0x0A): the set of terrain chunks
+    /// the viewer's ally team has ever seen. Never fires in a stock game —
+    /// the server only emits it under the `terrainknowledge` modoption.
+    onTerrainKnowledge?: (mask: TerrainKnowledgeMask) => void;
     onResourceUpdate?: (info: ResourceUpdateInfo) => void;
     onGameInfo?: (frame: number, speed: number, paused: boolean,
                   wind?: { x: number; y: number; z: number; strength: number; tidal: number },
@@ -2286,6 +2309,13 @@ export class Connection {
             }
             return;
         }
+        if (envelope === ENVELOPE_TERRAIN_KNOWLEDGE) {
+            const mask = parseTerrainKnowledge(data.subarray(1));
+            if (mask) {
+                this.events.onTerrainKnowledge?.(mask);
+            }
+            return;
+        }
         if (envelope !== ENVELOPE_FLATBUFFERS) return;
 
         const buf = new flatbuffers.ByteBuffer(data.slice(1));
@@ -2584,6 +2614,9 @@ export class Connection {
                     gameId: rs.gameId() ?? '',
                     mapId: rs.mapId() ?? '',
                     povTeam: rs.povTeam(),
+                    broadcast: rs.broadcast(),
+                    behindSeconds: rs.behindSeconds(),
+                    liveEdgeFrame: rs.liveEdgeFrame(),
                 });
                 break;
             }

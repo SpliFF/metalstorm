@@ -1,0 +1,21 @@
+{
+  "id": "biome_rockfield",
+  "class": "biome",
+  "prompt": "Broken rockfield: angular shattered rock slabs and gravel scree, rust-stained fracture seams, no soil.",
+  "seed": 100404,
+  "width": 1024,
+  "height": 1024,
+  "colors": [
+    "#5a5f63",
+    "#2b2e31",
+    "#7a3b1e"
+  ],
+  "output": "art/gen/biomes/rockfield_diffuse.png",
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
+}

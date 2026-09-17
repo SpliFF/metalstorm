@@ -1,0 +1,21 @@
+{
+  "id": "biome_frostwaste",
+  "class": "biome",
+  "prompt": "Ash-grey frost waste: frozen gravel and grit under a dirty rime-ice glaze, sooty ash drifts, frost-heave lumps, uniform coverage, no clean pristine snow.",
+  "seed": 100416,
+  "width": 1024,
+  "height": 1024,
+  "colors": [
+    "#8a7f6a",
+    "#5a5f63",
+    "#2b2e31"
+  ],
+  "output": "art/gen/biomes/frostwaste_diffuse.png",
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
+}

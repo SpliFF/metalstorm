@@ -158,6 +158,11 @@ struct ScenarioInfo {
     /// silently hand a player.
     bool tutorial = false;
 
+    /// `solo` field — authored for one human (PLAN-beta-journey.md §(c)).
+    /// Read only by the solo boot allow-list (Journey::SoloAllowed); like
+    /// `tutorial` it never makes a scenario a Create Game default.
+    bool solo = false;
+
     /// `retired` field. A retired war is never defaulted to and never
     /// offered — the lobby treats it as content that exists for fixtures and
     /// for its objective coverage, not as a war a player may pick.

@@ -39,6 +39,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // DynamicTexture allocates an OffscreenCanvas in a worker; the dev-hook
 // `window.__*` injections in scene-lighting/client-settings were switched to
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
+import { TerrainKnowledgeGate, type TerrainKnowledgeMask } from './terrain-knowledge.js';
 import {
     buildTerrainMesh, loadTerrainTextures, attachTerrainDetailFromDecals,
     setTerrainDetailPluginEnabled,
@@ -107,7 +108,10 @@ import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 import { ProjectileRenderer } from './projectile-renderer.js';
 import { ProjectileTextureResolver } from './projectile-texture-resolver.js';
 import { CegRuntime } from './ceg-runtime.js';
-import { createNativeFxGamePass, type NativeFxGamePass } from './native-fx/fx-game-loader.js';
+import {
+    createNativeFxGamePass, NATIVE_FX_QUALITY_TIERS, type NativeFxGamePass,
+} from './native-fx/fx-game-loader.js';
+import { UnitFxDispatch } from './unit-fx-dispatch.js';
 import { setParticleBudget } from './ceg-translator.js';
 import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
@@ -286,6 +290,13 @@ let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
 /// to a replay server (PLAN-replay task 4b: a live game never sends one).
 /// Gates forwarding 403s to the playback bar.
 let gpSawReplayState = false;
+/// This client's role from AuthResponse ('player' | 'spectator' | ...).
+/// Set in onAuthenticated; PLAN-beta-broadcast.md lane C reads it alongside
+/// gpIsBroadcast to gate outgoing commands.
+let gpRole = '';
+/// True once the most recent ReplayState said `broadcast: true` — a Mission
+/// Broadcast (delayed relay), not a live game or a finished recording.
+let gpIsBroadcast = false;
 let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
@@ -482,6 +493,15 @@ let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// PLAN-maps M4: the terrain is a chunk grid sharing one material, not a
 /// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
 let gpTerrain: TerrainMeshGroup | null = null;
+/// terrain-knowledge-is-LOS (K0): projects the server's per-ally ever-seen
+/// chunk mask onto `gpTerrain` — unknown chunks not drawn, fog curtain at the
+/// frontier. Created with the terrain but INERT until a 0x0A mask arrives, so
+/// a stock game (no `terrainknowledge` modoption → no 0x0A ever emitted) takes
+/// the identical path it does today. See DESIGN-TERRAIN-KNOWLEDGE.md.
+let gpTerrainKnowledge: TerrainKnowledgeGate | null = null;
+/// A mask that lands before `gpLoadMap` builds the terrain — same shape as the
+/// LOS bitmap store below, and for the same reason.
+let gpPendingTerrainKnowledge: TerrainKnowledgeMask | null = null;
 /// PLAN-maps.md §1.2.1 streaming v2 vertical slice. Opt-in via the
 /// `__terrainPages` debug handle only — `enable()` streams the map's real
 /// ground pages when it ships them (format v19), `enable({synthetic:true})`
@@ -525,6 +545,30 @@ let gpCombatFX: CombatFX | null = null;
 /// Metalstorm native-FX pass (native-fx/fx-game-loader.ts). Null on games
 /// that ship no effects/ library — every non-Metalstorm game today.
 let gpNativeFx: NativeFxGamePass | null = null;
+/// Unit-side FX dispatch (death/damage-smoke/move-dust, unit-fx-dispatch.ts,
+/// PLAN-beta-presentation L-FX step 6). Built alongside gpNativeFx — needs
+/// its resolved unit-fx.json and its NativeFxSink.
+let gpUnitFx: UnitFxDispatch | null = null;
+
+/// Empty entity iterator — the FX construction block's default before/if
+/// gpCtx.entityRenderer isn't up yet, so UnitFxDispatch.tick()'s sweep has
+/// something to iterate.
+function* EMPTY_ENTITIES(): IterableIterator<[number, { defId: number; healthScale: number }]> {}
+
+/// L-FX step 6: play a plain named SoundItem (gamedata/sounds.lua) at a
+/// world position — the same synthesised-event path onUiSound's "named"
+/// branch uses (below), reused here for unit-fx-dispatch.ts's death sound.
+/// A name gamedata/sounds.lua doesn't define yet (e.g. before pres-audio's
+/// death_* rows land) just resolves to nothing on main — no error, per
+/// SoundEventPlayer.playResolved's empty-path fallthrough.
+function gpPlayNamedSound(name: string, x: number, y: number, z: number): void {
+    const ref: SoundRefInfo = { id: -1, path: '', category: -1, volume: 1, pitch: 1, name };
+    const e: SoundEventInfo = {
+        soundId: -1, sourceDefId: 0, sourceKind: 3,
+        x, y, z, volume: 1, pitch: 1, priority: 128, team: 255, channel: AudioChannel.Battle,
+    };
+    postToMain({ type: 'gp:audioSoundEvents', events: [{ e, ref }] });
+}
 /// How long a native impact's ground scar lives (seconds). The art brief
 /// asks for persistent scarring; the decal overlay fades them out.
 const NATIVE_FX_SCAR_TTL_S = 90;
@@ -640,6 +684,12 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
         weaponDefIds: (id) => {
             const defId = r.getEntityDefId(id);
             return defId === undefined ? null : gpDefCache?.getUnitDef(defId)?.weaponDefIds ?? null;
+        },
+        // recoil-driver.ts's kick input: aoe/projectileSpeed straight off the
+        // fired weapon's def, so RecoilDriver.kick() fires on every shot.
+        weaponAoeVelocity: (weaponDefId) => {
+            const wd = gpDefCache?.getWeaponDef(weaponDefId);
+            return wd ? { aoe: wd.aoe, projectileSpeed: wd.projectileSpeed } : undefined;
         },
     }, r);
     gpClipPolicy = new ClipAutoPolicy({
@@ -840,6 +890,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
 
+    // L-AUDIO: hand mapinfo.lua's sound.preset to main, which owns the
+    // AudioContext and picks the master reverb IR (setReverbPreset).
+    postToMain({ type: 'gp:soundPreset', preset: map.soundPreset });
+
     // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
     // mex snap. Spring's metalmap is half the heightmap resolution: each cell
     // covers 2 heightmap squares = 2 × squareSize elmos. Ports input-manager
@@ -909,6 +963,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     terrain.setReceiveShadows(true);
     gpTerrain = terrain;
     gpDeformTerrain = new DeformableTerrain(terrain);
+    // terrain-knowledge-is-LOS (K0). Inert until a 0x0A mask arrives; a mask
+    // that beat the terrain here is applied now.
+    gpTerrainKnowledge = new TerrainKnowledgeGate(scene, terrain);
+    if (gpPendingTerrainKnowledge) {
+        gpTerrainKnowledge.apply(gpPendingTerrainKnowledge);
+        gpPendingTerrainKnowledge = null;
+    }
     postLog(1, '[gp] terrain mesh built from MapData heightmap');
 
     // GW4-c4: hand the heightmap to the entity renderer so units clamp to the
@@ -1301,6 +1362,7 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
+            gpRole = role;
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
             // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
             // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
@@ -1374,6 +1436,7 @@ function gpConnect(msg: GpInitToWorker): void {
         // never receives one simply never shows a bar.
         onReplayState: (state) => {
             gpSawReplayState = true;
+            gpIsBroadcast = state.broadcast;
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
@@ -1463,6 +1526,9 @@ function gpConnect(msg: GpInitToWorker): void {
                 // PRESENTATION frame, so the notice lands with the explosion
                 // rather than ~D frames before the body arrives.
                 gpBattleEvents.noteDeath(entityId, x, z, frame);
+                // PLAN-decal-tracks §8 E2: close the track trail so a recycled
+                // id doesn't bridge a ribbon from the dead unit's last position.
+                gpDecalOverlay?.onEntityDestroy(entityId);
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 // PLAN-metalstorm-squads.md §6 (H2): cascade the squad's members
                 // + clear buffered state so a recycled id can't resurrect it.
@@ -1484,6 +1550,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     attackerId: 0, targetId: entityId, weaponDefId: 0,
                     result: 3, damage: 500, x, y, z,
                 }]);
+                // L-FX step 6: unit-class death burst + sound. defId comes
+                // from `meta`, read above BEFORE removeEntity() drops it.
+                if (meta) gpUnitFx?.onDeath(entityId, meta.defId, x, y, z);
+                gpUnitFx?.remove(entityId);
                 // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
                 removeUnitFromLiveState(entityId);
             });
@@ -1661,6 +1731,19 @@ function gpConnect(msg: GpInitToWorker): void {
                 gpSchedule(frame, 'combatFx', () => {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
+                    // L-FX step 6 / pres-anim contract: hit-flinch nudges the
+                    // target away from the attacker via MotionLeanRegistry.
+                    // impulse(). result===0 is Hit (see CombatFX.onCombatEvents).
+                    if (ev.result === 0 && ev.attackerId) {
+                        const atk = gpCtx.entityRenderer?.getEntityPosition(ev.attackerId);
+                        const tgt = gpCtx.entityRenderer?.getEntityPosition(ev.targetId);
+                        if (atk && tgt) {
+                            const dx = tgt.x - atk.x, dz = tgt.z - atk.z;
+                            const len = Math.hypot(dx, dz) || 1;
+                            gpUnitFx?.onHit(ev.targetId, dx / len, dz / len,
+                                Math.min(ev.damage / 50, 3));
+                        }
+                    }
                 });
                 // PLAN-metalstorm-squad-casualties §4/§5: a hit on a squad unit
                 // is a victim-selection hint (impact position) and — if the
@@ -2047,6 +2130,21 @@ function gpConnect(msg: GpInitToWorker): void {
             }
             dispatchRecvLuaUIMsg(data, playerId);
         },
+        // terrain-knowledge-is-LOS (envelope 0x0A) → the chunk visibility gate.
+        // The message is the WHOLE mask every time, so this needs no ordering,
+        // no ACK and no join-time special case: applying it twice is applying
+        // it once, and an out-of-order older mask cannot un-reveal a chunk.
+        // Costs nothing unless the bits actually changed.
+        onTerrainKnowledge: (mask) => {
+            if (gpTerrainKnowledge === null) {
+                gpPendingTerrainKnowledge = mask;
+                return;
+            }
+            if (gpTerrainKnowledge.apply(mask)) {
+                const st = gpTerrainKnowledge.stats();
+                postLog(1, `[gp] terrain knowledge: ${st.knownChunks}/${st.totalChunks} chunks known`);
+            }
+        },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
         // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.
@@ -2103,6 +2201,24 @@ function gpConnect(msg: GpInitToWorker): void {
         schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
+    // PLAN-beta-broadcast.md lane C: belt-and-braces client-side gate — the
+    // relay drops PlayerCommand from a broadcast spectator anyway, but there
+    // is no reason to send a doomed order and wait out the refusal. Wrapping
+    // here (rather than touching every call site — command-buffer.ts,
+    // worker-command-modes.ts, worker-build-placement.ts, and the three in
+    // this file) catches all of them, since they all hold this same `conn`.
+    {
+        const rawSendPlayerCommand = conn.sendPlayerCommand.bind(conn);
+        const rawSendPlayerCommandBatch = conn.sendPlayerCommandBatch.bind(conn);
+        conn.sendPlayerCommand = (...args: Parameters<Connection['sendPlayerCommand']>) => {
+            if (gpRole === 'spectator' && gpIsBroadcast) return;
+            rawSendPlayerCommand(...args);
+        };
+        conn.sendPlayerCommandBatch = (...args: Parameters<Connection['sendPlayerCommandBatch']>) => {
+            if (gpRole === 'spectator' && gpIsBroadcast) return;
+            rawSendPlayerCommandBatch(...args);
+        };
+    }
     // PLAN-latency L4.1: register every command that goes on the wire, in the
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).
@@ -2756,6 +2872,65 @@ export function gpInit(msg: GpInitToWorker): void {
         combatFxPooled: (on: boolean): boolean =>
             gpCombatFX?.setPooled(on) ?? false,
     };
+    // terrain-knowledge-is-LOS (K0) debug handle. The REAL gate is driven by
+    // the server's 0x0A mask under the `terrainknowledge` modoption; this is
+    // the local override for capture work and A/B, so a frontier screenshot
+    // does not need a specially-launched room. From the main DevTools console:
+    //   window.__gp('__terrainKnowledge.stats()')
+    //   window.__gp('__terrainKnowledge.only([[0,0],[1,0]])')  // known chunks
+    //   window.__gp('__terrainKnowledge.reveal(2,0)')          // add one
+    //   window.__gp('__terrainKnowledge.all()')                // reveal all
+    (globalThis as Record<string, unknown>).__terrainKnowledge = {
+        stats: (): unknown => gpTerrainKnowledge?.stats() ?? 'no terrain',
+        /** Force the mask to exactly this chunk list (everything else
+         *  unknown). Synthesises a 0x0A message rather than reaching into the
+         *  gate, so it exercises the same code path the wire does — except for
+         *  the OR, which cannot un-reveal: `only` resets the gate first. */
+        only: (chunks: [number, number][]): unknown => {
+            if (!gpScene || !gpTerrain) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            const known = new Uint8Array(plan.chunksX * plan.chunksZ);
+            for (const [cx, cz] of chunks) {
+                if (cx < 0 || cx >= plan.chunksX || cz < 0 || cz >= plan.chunksZ)
+                    continue;
+                known[cz * plan.chunksX + cx] = 1;
+            }
+            gpTerrainKnowledge?.dispose();
+            gpTerrainKnowledge = new TerrainKnowledgeGate(gpScene, gpTerrain);
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0, known,
+            });
+            return gpTerrainKnowledge.stats();
+        },
+        /** Add one chunk to the held mask (the live-reveal path). */
+        reveal: (cx: number, cz: number): unknown => {
+            if (!gpTerrain || !gpTerrainKnowledge) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            const known = new Uint8Array(plan.chunksX * plan.chunksZ);
+            for (let z = 0; z < plan.chunksZ; z++)
+                for (let x = 0; x < plan.chunksX; x++)
+                    known[z * plan.chunksX + x] =
+                        gpTerrainKnowledge.isChunkKnown(x, z) ? 1 : 0;
+            if (cx >= 0 && cx < plan.chunksX && cz >= 0 && cz < plan.chunksZ)
+                known[cz * plan.chunksX + cx] = 1;
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0, known,
+            });
+            return gpTerrainKnowledge.stats();
+        },
+        all: (): unknown => {
+            if (!gpTerrain || !gpTerrainKnowledge) return 'no map loaded';
+            const plan = gpTerrain.plan;
+            gpTerrainKnowledge.apply({
+                allyTeam: 0, chunksX: plan.chunksX, chunksZ: plan.chunksZ,
+                frame: 0,
+                known: new Uint8Array(plan.chunksX * plan.chunksZ).fill(1),
+            });
+            return gpTerrainKnowledge.stats();
+        },
+    };
     // PLAN-maps.md §1.2.1: streaming v2. `enable()` prefers the REAL page
     // source when the map ships one (`<mapDataUrl>/ground_pages.json`,
     // format v19 — the ground albedo cut into the 520² BC1 pyramid, fetched
@@ -2937,26 +3112,55 @@ export function gpInit(msg: GpInitToWorker): void {
     // without an effects/ library resolves to null and every dispatch site
     // keeps the CEG path it has today. Once up, a weapon def that authors NO
     // CEG and resolves through effects/weapon-fx.json draws natively instead.
-    createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '')
-        .then((pass) => {
-            if (!pass || !gpCombatFX) { pass?.dispose(); return; }
-            gpNativeFx = pass;
-            // Impact scars ride the decal overlay's existing snapshot shape —
-            // no new decal API (PLAN-beta-presentation L-DECALS contract).
-            pass.setScarSink((x, y, z, radius) => {
-                gpDecalOverlay?.onSnapshot([{
-                    x, y, z, radius,
-                    ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
-                    r: 0.5, g: 0.5, b: 0.5, a: 1,
-                }]);
-            });
-            projectileRenderer.setNativeFx(pass);
-            combatFX.setNativeFx(pass);
-            combatFX.setLightPool(gpCtx.fxLightPool);
-            (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
-            postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
-        })
-        .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+    // L-FX step 5: `gfx.nativeFx` is the kill switch (Low preset off) — skip
+    // building the pass at all rather than build-then-disable, same
+    // restart-only semantics as `gfx.particleQuality` (both read once here).
+    if (clientSettings.getBool('gfx.nativeFx', true)) {
+        const qualityTier = clientSettings.getInt('gfx.particleQuality', NATIVE_FX_QUALITY_TIERS.length - 1);
+        createNativeFxGamePass(scene, engine, msg.gameId ?? '', msg.lobbyUrl ?? '', qualityTier)
+            .then((pass) => {
+                if (!pass || !gpCombatFX) { pass?.dispose(); return; }
+                gpNativeFx = pass;
+                // Impact scars ride the decal overlay's existing snapshot shape —
+                // no new decal API (PLAN-beta-presentation L-DECALS contract).
+                pass.setScarSink((x, y, z, radius) => {
+                    gpDecalOverlay?.onSnapshot([{
+                        x, y, z, radius,
+                        ttl: NATIVE_FX_SCAR_TTL_S, alpha: 0.85, glow: 0, glowTtl: 0,
+                        r: 0.5, g: 0.5, b: 0.5, a: 1,
+                    }]);
+                });
+                projectileRenderer.setNativeFx(pass);
+                combatFX.setNativeFx(pass);
+                combatFX.setLightPool(gpCtx.fxLightPool);
+                // L-FX step 5: live count-scale re-tune on later particleQuality
+                // changes (the pool-capacity half stays restart-only).
+                clientSettings.subscribe('gfx.particleQuality',
+                    (v) => pass.setQuality(Number(v)));
+                // L-FX step 6: unit-side death/damage-smoke/move-dust dispatch.
+                // Hit-flinch (getMotionLean) and the move-dust rate
+                // (getUnitSpeed) ride pres-anim's MotionLeanRegistry.impulse /
+                // WheelSpinDriver.spinning.
+                gpUnitFx = new UnitFxDispatch({
+                    unitFx: pass.unitFx,
+                    sink: pass,
+                    getUnitDefName: (defId) => unitDefMap.get(defId)?.name,
+                    getEntities: () => gpCtx.entityRenderer?.getEntities() ?? EMPTY_ENTITIES(),
+                    getEntityPosition: (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null,
+                    playNamedSound: (name, x, y, z) => gpPlayNamedSound(name, x, y, z),
+                    getMotionLean: () => gpMotionLean,
+                    getUnitSpeed: (id) => gpWheelSpin?.spinning(id) ?? 0,
+                    // Share the LOD/budget fence with the legacy per-frame
+                    // entity-script path (entity-fx-fence.ts) rather than a
+                    // second independent budget — one combined 3-5ms/frame
+                    // ceiling, one entityFxFenceDump() debug surface.
+                    fence: getEntityFxFence(),
+                });
+                (globalThis as Record<string, unknown>).__nativeFx = pass;   // bench/debug hook
+                postLog(1, '[gp] native FX pass up (Metalstorm effects/ library)');
+            })
+            .catch((e) => postLog(2, `[gp] native FX pass failed: ${e}`));
+    }
 
     // Dynamic feature renderer — getRuntime()-spawned features (wrecks, debris,
     // reclaim removals). Map-placed features load once via renderMapFeatures
@@ -3165,6 +3369,7 @@ export function gpInit(msg: GpInitToWorker): void {
         gpCegRuntime?.tick(fxDt);
         gpNativeFx?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
+        gpUnitFx?.tick(fxDt, camera.position.x, camera.position.y, camera.position.z);
         gpMark(2);  // fx
         // Decal clipmap fine window tracks the camera focus + height.
         {
@@ -4292,6 +4497,7 @@ export function gpShutdown(): void {
     gpCegRuntime = null;
     gpNativeFx?.dispose();
     gpNativeFx = null;
+    gpUnitFx = null;
     delete (globalThis as Record<string, unknown>).__nativeFx;
     gpBuildBeamRenderer?.dispose();
     gpBuildBeamRenderer = null;

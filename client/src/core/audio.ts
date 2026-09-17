@@ -203,6 +203,16 @@ export function rewriteAudioExtensionToWebm(p: string): string {
     return p + '.webm';
 }
 
+/// L-AUDIO wiring: `mapinfo.lua → sound.preset` defaults to `'open'` when a
+/// map sets none (`ParsedMapData.soundPreset` is `''` in that case) — an
+/// outdoor scene reads better with SOME reverb than with setReverbPreset's
+/// own dry-passthrough default, which is reserved for an explicit `'default'`
+/// / unknown preset name instead. Pure so the default is unit-testable
+/// without an AudioContext.
+export function resolveReverbPreset(preset: string): string {
+    return preset || 'open';
+}
+
 export class AudioManager {
     private ctx: AudioContext;
     get context(): AudioContext { return this.ctx; }
@@ -446,6 +456,14 @@ export class AudioManager {
             listener.upY.value = 1;
             listener.upZ.value = 0;
         }
+    }
+
+    /// Current listener (camera) world position. Lets a caller outside the
+    /// PannerNode graph (SoundEventPlayer's close/`_far` distance switch)
+    /// compute emitter-to-listener distance without duplicating the tracked
+    /// position.
+    getListenerPosition(): { x: number; y: number; z: number } {
+        return { x: this.listenerX, y: this.listenerY, z: this.listenerZ };
     }
 
     // ============================================================

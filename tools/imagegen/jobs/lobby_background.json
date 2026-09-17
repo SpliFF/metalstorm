@@ -1,0 +1,13 @@
+{
+  "id": "lobby_background",
+  "class": "lobby_background",
+  "prompt": "Painted matte-painting concept art, not a photograph: a dust-bowl frontline horizon at dusk seen from far away, only tiny distant silhouettes of improvised scavenger war machines on the ridgeline, thin smoke columns leaning on the wind, vast empty foreground of cracked dust flats, no recognisable real-world vehicles, no people.",
+  "seed": 100311,
+  "width": 2048,
+  "height": 1024,
+  "output": "art/gen/lobby-bg.png",
+  "post": [
+    "pow2"
+  ],
+  "negative": "photograph, modern main battle tank, military stock photo, vehicles in the foreground, sharp mechanical detail"
+}

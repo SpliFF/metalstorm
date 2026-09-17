@@ -103,7 +103,7 @@ export function formatJoinPreview(p: WarJoinPreview): string {
     // would tell a player their faction has no side in a war they are
     // watching by choice, which is both wrong and unfixable-looking.
     if (p.watching)
-        return 'You asked to watch this war — Fight to take your side.';
+        return 'You asked to watch this mission — Fight to take your side.';
     if (!p.will_fight) {
         // A refusal has to say what would fix it, and the three causes have
         // three different fixes: register a faction, find a war that fields
@@ -113,7 +113,7 @@ export function formatJoinPreview(p: WarJoinPreview): string {
             case 'account has no faction':
                 return 'You will watch — this account has no faction.';
             case 'war declares no side for this faction':
-                return 'You will watch — your faction fields no side in this war.';
+                return 'You will watch — your faction fields no side in this mission.';
             case 'the faction\'s side is full':
                 return `You will watch — your side is full (${p.humans_on_side}/${p.capacity_per_side}).`;
             default:

@@ -1,0 +1,15 @@
+{
+  "id": "emblem_compact",
+  "class": "emblem",
+  "prompt": "The Meridian Compact — engineers and orbital surveyors. Bold flat vector badge: a thick-stroked drafting compass opened over a plain fabricator gear silhouette, two colours only, phosphor-cyan shapes on worn steel, heavy simple geometry readable as a tiny icon, no fine lines, no lettering, no blueprint grid.",
+  "seed": 100211,
+  "width": 512,
+  "height": 512,
+  "tint": "#7fd0c8",
+  "output": "art/gen/emblems/compact.png",
+  "post": [
+    "bg_key",
+    "pow2",
+    "svg_trace"
+  ]
+}

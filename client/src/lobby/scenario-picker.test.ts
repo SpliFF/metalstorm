@@ -211,7 +211,7 @@ describe('scenariosForMap', () => {
         const offerable = scenariosForMap(list, 'meridian_basin');
         expect(defaultScenarioFor(offerable)).toBeNull();
         expect(scenarioNote(defaultScenarioFor(offerable)).text)
-            .toContain('No war will be staged');
+            .toContain('No mission will be staged');
     });
 
     it('offers nothing when no map is selected', () => {
@@ -234,7 +234,7 @@ describe('noWarReason / noWarNote', () => {
 
     it('calls a map nothing was authored for "none"', () => {
         expect(noWarReason(list, 'green_flat_x34_v3')).toBe('none');
-        expect(noWarNote('none').text).toContain('No war is authored');
+        expect(noWarNote('none').text).toContain('No mission is authored');
     });
 
     it('does not let a tutorial make a map look authored-for', () => {
@@ -324,7 +324,7 @@ describe('scenarioNote', () => {
     it('warns when no war will be staged at all', () => {
         const n = scenarioNote(null);
         expect(n.className).toBe('scenario-note endless');
-        expect(n.text).toMatch(/No war will be staged/);
+        expect(n.text).toMatch(/No mission will be staged/);
     });
 });
 

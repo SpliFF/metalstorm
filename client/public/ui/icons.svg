@@ -1,0 +1,188 @@
+<!--
+  icons.svg — the stencilled-steel-plate icon sprite (docs/ui-style.md).
+
+  24 line glyphs, one <symbol> each, 24x24 viewBox, stroke-only (no fills) so
+  every icon inherits "color" from its usage site: set it to the nui-text
+  token for the resting state, or the nui-gold token for the hazard/selected
+  variant. That is the "two-weight" system: the base stroke-width (1.75, set
+  on each symbol) is the resting weight; a consumer stylesheet can override it
+  with a heavier stroke-width for an emphasised weight (an active tab, a
+  selected stance) since a CSS rule always outranks an SVG presentation
+  attribute. There is no second hazard-only glyph set: hazard is a colour,
+  not a different drawing, so one path serves both. See docs/ui-style.md for
+  the full usage pattern.
+
+  Groups (PLAN-beta-presentation.md L-UI-DS step 5):
+    unit classes  — the 12 families class-vocabulary.json actually spawns as
+                    distinct combat roles (the 12 lightweight variant/support
+                    classes — technical, scout, supply, tanker, courier,
+                    expedition, command, landing_ship, balloon, sites,
+                    civilians, civvehicles — read as re-skinned tanks/ships/
+                    buildings on a glyph sprite and are left to the unit's
+                    own portrait, not this set)
+    objectives    — the 4 visually distinct marker TYPES a player sees on the
+                    map (LuaRules/Gadgets/objectives/*.lua has 8 gadgets;
+                    attribution/warend/generator/infra are bookkeeping, not
+                    a marker a player looks at)
+    stances       — the 4-state simplified stance a unit's stance control
+                    shows (Spring's separate moveState x fireState bitfield,
+                    lua-spring-api.ts:353-354, collapsed to one control the
+                    way most RTS HUDs present it)
+    menu tabs     — the 4 top-level lobby destinations
+-->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+
+<!-- ══ unit classes ══════════════════════════════════════════════════ -->
+
+<symbol id="icon-infantry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="6" r="2.4"/>
+  <path d="M12 9v6"/>
+  <path d="M8.5 12.5 12 11l3.5 1.5"/>
+  <path d="M12 15 9 21M12 15l3 6"/>
+</symbol>
+
+<symbol id="icon-engineer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M14.2 5.8a3 3 0 0 0-4.1 3.9L4 16.8V19h2.2l7.1-7.1a3 3 0 0 0 3.9-4.1l-2.1 2.1-1.9-.5-.5-1.9 2.1-2.1Z"/>
+</symbol>
+
+<symbol id="icon-mech" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9 4h6l1 4H8l1-4Z"/>
+  <rect x="7" y="8" width="10" height="7" rx="1"/>
+  <path d="M9 15 7 21M15 15l2 6M7 10H4M17 10h3"/>
+</symbol>
+
+<symbol id="icon-tank" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4 15a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2Z"/>
+  <path d="M6 14V11h9l3 3"/>
+  <path d="M11 11V8h6"/>
+  <path d="M3 17.5h18M6 11l-1 3M18 11l1 3"/>
+</symbol>
+
+<symbol id="icon-artillery" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 19h9l4-11"/>
+  <path d="M14 8l4 1.5"/>
+  <circle cx="7" cy="19" r="2"/>
+  <circle cx="14" cy="19" r="2"/>
+  <path d="M9 15h4"/>
+</symbol>
+
+<symbol id="icon-fighter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3v13"/>
+  <path d="M12 8 3 15l2 1 7-3 7 3 2-1-9-7Z"/>
+  <path d="M10 16h4l1 5-3-1.5L9 21l1-5Z"/>
+</symbol>
+
+<symbol id="icon-bomber" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 4v12"/>
+  <path d="M2 11h20l-3 3H5l-3-3Z"/>
+  <path d="M9 16h6l1 5h-8l1-5Z"/>
+</symbol>
+
+<symbol id="icon-ship" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3v8"/>
+  <path d="M12 5h4"/>
+  <path d="M4 14h16l-2.5 6h-11L4 14Z"/>
+  <path d="M4 14l8-3 8 3"/>
+</symbol>
+
+<symbol id="icon-sub" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M3 13c2-3 6-4 9-4s7 1 9 4c-2 3-6 4-9 4s-7-1-9-4Z"/>
+  <path d="M11 9V6h3v3"/>
+  <circle cx="16" cy="13" r=".6" fill="currentColor" stroke="none"/>
+  <circle cx="13" cy="13" r=".6" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="icon-radar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 21v-9"/>
+  <path d="M6 21h12"/>
+  <path d="M5 12a7 7 0 0 1 14 0"/>
+  <path d="M8.2 12a3.8 3.8 0 0 1 7.6 0"/>
+  <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="icon-staticdefense" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 19V12l7-6 7 6v7"/>
+  <path d="M9 19v-5h6v5"/>
+  <path d="M12 6V2m0 0-2 2m2-2 2 2"/>
+</symbol>
+
+<symbol id="icon-building" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4 20V10l8-6 8 6v10"/>
+  <path d="M4 20h16"/>
+  <path d="M9 20v-6h6v6"/>
+</symbol>
+
+<!-- ══ objectives ═══════════════════════════════════════════════════ -->
+
+<symbol id="icon-obj-control" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7 21V4"/>
+  <path d="M7 4l11 3-11 4"/>
+</symbol>
+
+<symbol id="icon-obj-escort" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3c3 1 5 1 7 1v8c0 5-3 7.5-7 9-4-1.5-7-4-7-9V4c2 0 4 0 7-1Z"/>
+  <path d="M9 12l2 2 4-4"/>
+</symbol>
+
+<symbol id="icon-obj-extract" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4 9l8-5 8 5-8 5-8-5Z"/>
+  <path d="M4 9v7l8 5 8-5V9"/>
+  <path d="M12 14V6"/>
+</symbol>
+
+<symbol id="icon-obj-protect" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3c3 1 5 1 7 1v8c0 5-3 7.5-7 9-4-1.5-7-4-7-9V4c2 0 4 0 7-1Z"/>
+</symbol>
+
+<!-- ══ stances ═══════════════════════════════════════════════════════
+     Collapses Spring's moveState x fireState bitfield to the single
+     4-value dial most RTS HUDs show (lua-spring-api.ts:353-354). -->
+
+<symbol id="icon-stance-hold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3l4 2v5l-4 2-4-2V5l4-2Z"/>
+  <path d="M12 12l4 2v5l-4 2-4-2v-5l4-2Z"/>
+</symbol>
+
+<symbol id="icon-stance-defensive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3c3 1 5 1 7 1v8c0 5-3 7.5-7 9-4-1.5-7-4-7-9V4c2 0 4 0 7-1Z"/>
+  <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="icon-stance-aggressive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3v14"/>
+  <path d="M5 12 12 5l7 7"/>
+  <path d="M8 21h8"/>
+</symbol>
+
+<symbol id="icon-stance-hold-fire" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 15h9l4-8"/>
+  <path d="M14 7l4 1.5"/>
+  <circle cx="7" cy="18" r="2"/>
+  <path d="M4 4l16 16"/>
+</symbol>
+
+<!-- ══ menu tabs ═════════════════════════════════════════════════════ -->
+
+<symbol id="icon-tab-missions" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="8"/>
+  <circle cx="12" cy="12" r="4"/>
+  <circle cx="12" cy="12" r=".6" fill="currentColor" stroke="none"/>
+</symbol>
+
+<symbol id="icon-tab-world" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="8"/>
+  <path d="M4 12h16"/>
+  <path d="M12 4c2.6 2.2 4 5 4 8s-1.4 5.8-4 8c-2.6-2.2-4-5-4-8s1.4-5.8 4-8Z"/>
+</symbol>
+
+<symbol id="icon-tab-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4 5h16v11H9l-4 4v-4H4V5Z"/>
+  <path d="M8 9h8M8 12h5"/>
+</symbol>
+
+<symbol id="icon-tab-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="2.6"/>
+  <path d="M12 4v2.4M12 17.6V20M4 12h2.4M17.6 12H20M6.6 6.6l1.7 1.7M15.7 15.7l1.7 1.7M17.4 6.6l-1.7 1.7M8.3 15.7l-1.7 1.7"/>
+</symbol>
+
+</svg>

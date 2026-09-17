@@ -1,0 +1,21 @@
+{
+  "id": "biome_wetland",
+  "class": "biome",
+  "prompt": "Stagnant bog mudflat: wet dark mud with dull algae streaks, shallow standing puddles, cracked dry-edge polygons at the margins.",
+  "seed": 100405,
+  "width": 1024,
+  "height": 1024,
+  "colors": [
+    "#3d3a2e",
+    "#6b5a3e",
+    "#7a3b1e"
+  ],
+  "output": "art/gen/biomes/wetland_diffuse.png",
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
+}

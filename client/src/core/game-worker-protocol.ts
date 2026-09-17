@@ -670,6 +670,11 @@ export type GpMessageToMain =
     | { type: 'gp:audioSoundEvents'; events: unknown }
     /** Music state transition routed to the main-thread MusicDirector. */
     | { type: 'gp:audioMusic'; state: unknown; fadeMs: number }
+    /** `mapinfo.lua → sound.preset`, parsed by the worker's MapData fetch and
+     *  posted once so main (which owns the AudioContext) can pick the master
+     *  reverb IR. `preset` is the raw parsed value — '' when the map sets
+     *  none; main defaults that to 'open'. */
+    | { type: 'gp:soundPreset'; preset: string }
     | GpSceneStateToMain
     /**
      * Minimap data (main keeps its own Engine + DOM container until a later

@@ -2,6 +2,21 @@
 
 Quick-reference for navigating the codebase. Read this before searching.
 
+## Vocabulary
+
+Player-facing text (UI copy, `docs/player-guide.md`) says **World / Mission / Faction /
+Standing**; the code underneath keeps its own names and is not renamed to match (PLAN-beta.md
+"Vocabulary", 2026-09-17 ruling). **World** is the one persistent game on the mega map (the
+world layer, `world_*` tables, `/api/world/*`). **Mission** is a bounded task on one map in one
+room — not always a battle — and is the player word for what the code calls a **war**/**room**
+(the `wars` table, `/api/wars/*`, `war_outcome`, `SessionKind::PersistentWar`, and every
+`war-*.ts`/`Room*` identifier in `client/src/lobby/`). **Faction** is the player's organisation
+in the World; a Mission's sides are which Faction each team fights for (world factions ↔ battle
+sides Compact/Union via `side_key`). **Standing** is the per-account rank the UI reads. Routes,
+DB tables/columns, enum values, test ids, log lines and every C++/Lua identifier keep saying
+`war`/`room`; only rendered strings and a handful of contained TS-only identifiers (e.g.
+`LobbyTemplates.browserMissionEntry` in `client/src/ui/lobby/loader.ts`) use the player words.
+
 ## Build Commands
 
 ```
@@ -196,6 +211,7 @@ Common CLI flags (from `rts/server_main.cpp`):
 | `Server/WarTheatrePool.h` | **PLAN-metalstorm-wars.md §3, task 7**: the "pool pick" one of §3's three ways a war gets its map (the other two — scenario-defined and operator-pick — were already wired). Its absence was invisible because the seeder *looked* like it was choosing: it broke ties on live-war count then on map id, so a box with two idle theatres seeded the alphabetically-first one every time. **LRU, not round-robin, and that removes state rather than adding it**: `wars.theatre` + `wars.created_at` already record every war ever seeded, so "when was this map last used" is a GROUP BY over a table the Director owns — where a stored cursor would point past a theatre that shipped after it was written. A never-seeded theatre sorts FIRST (`0` means NEVER, treated as a distinct winning case, not as a very old timestamp), which is how newly shipped content gets its turn. Also holds `PlanWarFromRoom` — the Director's adoption of an operator-created war, which previously had no `wars` row at all. |
 | `Server/PlayerSlotReservation.h` | **PLAN-metalstorm-wars.md §8.1 task 5**: Σ slotCap, and the side each pre-allocated slot belongs to. Pure functions of values — no sim, no db — because the *lobby* computes the number at spawn (`--player-slots`, recorded as `wars.spawned_slot_cap`) and the *game server* lays the block out at boot, and those two agreeing is the whole contract. It exists because `CPlayerHandler::players` is capacity-pinned and never erased, and spectators, AIs and roster players all draw from the same monotone counter: a war advertising eight seats could otherwise find no player number left for its eighth fighter because two hundred people came to watch. The pre-allocated rows are **nameless, inactive, spectator-flagged and per-side**, which is what the `Spring.GetPlayerList(-1, true)` filter in `game_authority.lua`/`game_teams.lua`'s `GameStart` seed loops exists for — seeding an empty chair mints a join grant into a pool nobody can spend and ages a tenure nobody served. `0` is UNKNOWN (a legacy room, or an unlimited side), read everywhere as *do not pre-allocate*. |
 | `Server/Standing.h` + `Server/Mentorship.h` | **PLAN-beta-journey.md §(b)/§(d)**: the player-journey pair. Standing is ONE persisted integer (`users.standing`) and **tier is never stored, only derived** (`TierFor`/`TierName` over `kTierThresholds` {0,20,60,150,400}) — the thresholds are expected to move during beta, and a stored tier would need a backfill every time. `Mentorship.h` is the `mentorships` + `mentor_endorsements` store: **one live mentorship per mentee** (offered counts as live), because two active mentors are two people issuing orders at mentor precedence and the rank rule cannot arbitrate between them; declining ENDS the row rather than parking it, so the next offer can still be made; the AI fallback lands `active` on arrival (the mentee asking is the acceptance); endorsement is `INSERT OR IGNORE` on `(mentor, mentee, day)`, which is the whole rate limit on `+15` standing. `tests/test_account_journey.cpp`. |
+| `Server/Journey.h` | **PLAN-beta-journey.md §0/§(c)**: the two pure decisions the journey lobby routes make — `SoloAllowed(tutorial, solo, retired)` (the allow-list that keeps `POST /api/rooms/solo` from becoming a public boot-anything verb) and `SessionAccrual(objectivesCredited)` (+10 a finished session, +5 an objective; an ABSENT per-player credit is the same path as "credited with none", so a missing field can never cost the session). `tests/test_journey_routes.cpp`. |
 | `Server/Friends.h/.cpp` + `Server/FriendPresence.h` | **PLAN-metalstorm-lobby task 9a**: the friends graph and the two pure policies over it. `friend_edges` is **LOBBY-ONLY** — unlike `war_player_bindings` the game server neither reads nor writes it — and holds **two directed rows, with no `state` column**: mutuality is derived from "both rows exist", so "pending here, accepted there" is not representable and **accept IS add, from the other end** (one route, not two). Removal deletes both directions for the mirror reason — dropping only the caller's edge would park the remover in the other player's list as a friend request generated by declining one. `ListFor` INNER JOINs `users`, so a deleted account leaves the list immediately and its rows wait for the hourly orphan sweep (ordered *after* the abandoned-guest prune, or that prune's own deletions dangle for an hour). `FriendPresence.h` is pure: `DecidePresence` ranks the three observable sources — a fresh `war_player_bindings.last_seen_at` (`fighting`, the strongest fact in the system: a sim currently holds this account on a side), room membership, then HTTP activity through the one route-auth dispatch funnel (`PresenceTracker`) — and **publishes nothing for a non-mutual edge** (`unknown`, not `offline`, which would be a claim about somebody who never answered the request). A **stale binding is a held seat, not a present player**: task 4's week-long seat hold would otherwise show every veteran as permanently in the war they last fought in. `DecideFriendJoin` names `same_side` and `opposing_side` as **separate outcomes** because §1b makes the faction permanent and §2.3 makes the side follow it — for a cross-faction friend the only join that exists seats you *against* them, and folding that into one `ok` would ship a "play with Bob" button that puts you on Bob's enemy's side. Capacity is checked before the same/opposing question, and a caller who already holds a binding in that war is never refused the seat they are sitting in. `/api/friends/join` **answers, it does not seat** — it names the war and the side and the client then calls the ordinary `/api/rooms/join`, so the fork brakes, the resume decision and the audit row are not bypassed by a second spawn path. `tests/test_friends.cpp`. Costs stated rather than hidden: no client presence ping and no `sessions.last_seen` column, so **a lobby restart shows every friend as offline until they next touch the API**. |
 | `Server/Chat.h/.cpp` + `Server/SSETickets.h` | **PLAN-lobby §3, task 9b**: the one chat service. Six scopes (`main` / named `channel` / `room` / `ally` / `spectator` / `pm`) over one `chat_messages` table, and **the target string is always built by the server** — `PmTarget(a,b)` is order-independent so both ends are provably in one conversation, and an ally target takes its team off the ROSTER (`<roomId>/ally/<team>`), never off the request, because a client that could name its own team could name the enemy's. **Ignore is enforced on delivery AND on backfill** (`FilterIgnored` for the live fan-out, the same rule inside `History`) — a client-side filter is one the sender can measure and it puts the text on the ignorer's machine anyway; system lines (`from_id = 0`) are never ignorable. `from_name` is **denormalised deliberately**, against the rule `Friends` states for the graph: a chat line is a record of something somebody said, so task 8c's guest rename must not re-label five thousand old lines. Retention (§3.3): `#main` is a **500-line ring buffer by id** (a quiet week must not empty it), named channels keep 30 days, PMs are kept (no delete verb exists yet), and **room channels die with the room** in `RoomManager::DeleteRoomFromDb` — room ids are reused, so an inherited log is the previous war's conversation appearing in the next one's scrollback, not a stale row. `ChatFlood` is a **told-the-time** token bucket (1/s, burst 4; five consecutive drops = a 60 s mute, and the mute hands the bucket back FULL so the first thing said afterwards is not dropped for being too soon); a *refused* message costs no token, or a flooder would push their own recovery away with every retry. `ChatChannels` membership is **process-local on purpose**: being in `#help` is a property of a connected client. `SSETickets` is the short-lived sliding-window credential the SSE stream carries in its URL — see `NetworkServer` above for why it must not be the session token. `tests/test_chat.cpp`, `tests/test_sse_identity.cpp`. **Moderation (task 9c)** is the `chat_mutes` table plus `ChatCanModerate`, and it turns on two distinctions. **There are two mutes:** `ChatFlood`'s is rate-limiter state and answers **429**, a moderator's is a durable row and answers **403** — a 429 means *slow down* and every client retries it. **Speaking and hearing are different questions:** `ActiveMute` (may I talk here) reads the account-level row first and then the conversation's, while `ScopedMute` (may I come back in) reads only the conversation's, because a channel mute must refuse the re-join — membership is one POST away, so a kick that only ejected you is undone by the next reconnect — and an account mute must not, since it silences rather than blinds. `until = 0` means **until lifted** (the row IS the mute, so its absence is the only not-muted), and an expired row is inert before `Prune` sees it. Ops: admins everywhere, a room host in that room's three channels only, nobody on an admin, nobody on themselves — and the routes add the rule the pure policy cannot hold, that **you moderate a conversation you are standing in**, the account-level mute being the one verb that belongs to no conversation and so needs no membership. **Not built yet, filed:** the moderation client surface (slash commands, a distinct render for `system` lines and the `moderation` SSE event) and every §3.5 QoL item. |
 | `Server/WarResume.h/.cpp` | **PLAN-persistence task 3b**: the LOBBY's half of the hibernation lifecycle whose server half is `Hibernation.h`. `Classify` turns (a live pid, `game_status.ready`, the room's state, the newest `game_snapshots` row) into the word the room card shows — `live` / `resuming` / `hibernated` / `crashed` / `fresh` — and `PlanJoin` turns the same facts into what a join DOES: connect, or spawn, and whether that spawn carries `--resume`. Two facts make it its own file rather than three more parameters on `WarLifecycle.h`. (1) **`--resume` is only ever passed when a snapshot row was SEEN**: `DoResume` treats a missing snapshot as fatal by design, so an unconditional flag would abort every war's first launch. (2) **hibernated and crashed are told apart by the store's newest LABEL** (`hibernate:*` = an exit checkpoint), never by the exit code — the `~DynDamageArray` assert used to make every debug-build exit report 134 (fixed 2026-08-27, `f10db92c0a` — clean exits now report 0), and even with honest exit codes the label stays right across old snapshots and any future abort, where a code-based verdict would call a dirtied exit a crash. The one DB access is a read-only `SELECT ... ORDER BY id DESC` (`sqlite3` only, no sim) and is deliberately tolerant of a missing table: `game_snapshots` belongs to `GameStateStore`, so on a database no game server has ever opened, "no history" is the answer and not an error. Supersedes `DecideWarResume`, which was deleted from `WarLifecycle.h` rather than left beside it; `tests/test_war_resume.cpp`. **Task 3c added the E1 pre-flight** — `DecideResumeEligibility` (`no_history` / `resumable` / `engine_changed` / `map_changed` / `unknown_binary`), the `unresumable` state it makes reachable, and the `blockedReason`/`lostFrame` a refused join carries. It reads `engine_hash` + `map_hash` off the same row and compares them against the spawn's `BinaryIdentity`; an empty hash on either side ABSTAINS rather than refusing (see "Game-server lifetime"). |
@@ -319,6 +335,7 @@ ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
 | `core/weapon-fx-resolver.ts` | Pure weapon def → `effects/weapon-fx.json` slots (exact → `defaults[weapontype]` → `__fallback`, case-insensitive) + the `NativeFxSink` interface the dispatch sites hold. |
 | `core/native-fx/fx-game-loader.ts` | The game's native-FX pass: fetches the authored GLSL + effect JSON over the game VFS and draws `NativeFxRenderer.renderInto` from `scene.onAfterRenderingGroupObservable`. Null for games with no `effects/` library. |
 | `core/native-fx/fx-atlas-placeholder.ts` | Procedural stand-in FX atlas + trail strips, canvas-agnostic (OffscreenCanvas in the worker, DOM canvas on the stage). |
+| `core/decal-trails.ts` | Per-unit track **trail polylines** + centripetal Catmull-Rom ribbon tessellation (PLAN-decal-tracks §2), the geometry source for `decal-overlay.ts`'s continuous (tread/wheel) track bake — one joint-free triangle strip per trail with world-space arc length `s` as the pattern parameter, per-point age fade and a global point budget. Pure TS, no Babylon. |
 | `core/perf-overlay.ts` | Frame-rate / draw-call overlay (toggleable, F11; `?perfprobe` adds Babylon SceneInstrumentation). |
 | `core/frame-profiler.ts` | Permanent per-phase frame-time accumulator (camera/entity/fx/decals+lights/render/ui/total) with rolling-window mean/p50/p95/p99/max; zero hot-path allocation. Driven by the game-processor render loop (`beginFrame`/`gpMark`/`endFrame`); dump via `window.test.perfDump()` / `window.__gp('__frameProfiler.dump()')`. PLAN-perf P0 attribution instrumentation. |
 | `core/widget-profiler.ts` | On-demand per-widget LuaUI cost profiler (PLAN-perf N1). Wraps every widget callin in the Fengari runtime with a `performance.now()` timing closure (same hook site as BAR's tracy zones — handler dispatch is dynamic `w:Callin(...)` lookup in both cawidgets and barwidgets), plus per-block timers inside the runFrame chunk and a JS-side fixed-tax split of `gpRunUiPass` (GL-state save / Fengari / restore / wipeCaches). `window.test.uiProfileStart()` / `uiProfileDump()` / `uiProfileStop()`. Off by default; ~3 ms/frame overhead while active. |
@@ -377,6 +394,9 @@ ledger / alerts) over `world-map.ts` (layered canvas, `WorldMap` controller).
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
 | `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
+| `ui/lobby/{welcome,intro,hub}/` | Entry flow templates + own CSS (PLAN-beta-journey §(e)): welcome (Watch as <callsign> / Sign up / Log in), 3-slide intro, Recruit hub. Metalstorm overrides under `data/games/metalstorm/ui/lobby/`. |
+| `ui/lobby/hub/entry-flow.ts` | Pure entry decisions: `decideEntry` (intro / hub / browser), `soloBootRoute` (`/api/rooms/solo` vs dev direct), commander kinds. |
+| `ui/help/` | Player help drawer: `openHelp(topic)` renders `docs/player-guide.md` (guide-md.ts subset renderer), "Start the tutorial" → `?play=tutorial_01`. |
 | `ui/hud/hud.html+css` | In-game HUD (entity count, selection, quit button). Owns the `.hud-*` class prefix — **not** the native-UI design system, which is `.nui-*` (see below). |
 | `ui/quit-confirm/` | Quit confirmation overlay. |
 | `ui/game-over/` | Game over results overlay. |
@@ -806,7 +826,7 @@ Eight functions on the worker's Spring table, matching Recoil's `LuaUnsyncedCtrl
 
 #### Map reverb
 
-`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. `main.ts:onMapData` calls `AudioManager.setReverbPreset(preset, mapBaseUrl)`; the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
+`mapinfo.lua → sound = { preset = "..." }` is extracted by `MapProcessor`, persisted in the maps table as a `sound_preset` column, and surfaced in metadata.json. the game-processor worker posts `gp:soundPreset` after MapData lands and `main.ts` answers it with `AudioManager.setReverbPreset(resolveReverbPreset(preset), soundContentBaseUrl)` (`""` → `open`); the manager fetches `sounds/efx/<preset>.webm` and ramps the master ConvolverNode's wet/dry to 50/50. Missing IRs stay in passthrough — map authors can name a preset without shipping the IR and the effect matches `"default"`.
 
 #### Map reachability intent
 
@@ -979,6 +999,7 @@ precedence on who may issue an order), `game_ai_caretaker`, `game_ai_guidance`,
 `squad`, `tick`, …)
 plus the `objectives/`, `regions/`, `parley/`, `authority/` and `civilians/`
 subtrees each gadget family delegates to (with their own `tests/`).
+`objectives/parley.lua` is the agreement objective type: a Mission whose victory is an accepted pact (`scenarios/recon_01.lua`).
 
 | Path | Purpose |
 |------|---------|
@@ -1013,6 +1034,16 @@ environment at `tools/forge` — see
 **world-scale contract is 8 elmos = 1 m**, applied at import (the whole model
 corpus was rescaled ×8, 2026-08-27); `tools/scripts/check_model_scale.py`
 gates authored-metre sizes against it.
+
+### Image generation (`tools/imagegen`)
+
+2D art (emblems, biome tileables, grime overlays, the FX atlas, water normal
+tiles) goes through `tools/imagegen/run.py`: one `generate(prompt, seed,
+size, negative)` adapter interface behind `backends/{none,comfy_local,
+hosted}.py` (procedural placeholder / local ComfyUI / a hosted API — see
+`tools/imagegen/README.md`), post-processed (seamless tiling, PBR derive,
+ktx2) into `data/games/metalstorm/art/gen/**`, with per-file provenance in
+`art/gen/manifest.json`.
 
 ## HTTP Routes
 
@@ -1055,6 +1086,9 @@ gates authored-metre sizes against it.
 | `/api/chat/broadcast` | POST `{text}` — AdminOnly; a `system` line to `#main`, the one channel nobody can leave |
 | `POST /api/wars/join-preview` | TokenRequired. This account's per-war answer (`will_fight`/`enlisted`/`watching`) + the capped while-you-were-away digest — a returning player's "what did I miss". |
 | `POST /api/wars/deploy` | TokenRequired. Where should this account fight? Answers, never refuses: a faction full in every war gets `seed` (a create-game recommendation — the deliberate alternative to a queue; the lobby does not create the war here). |
+| `POST /api/rooms/solo` | TokenRequired. `{scenario}` — the player-facing half of `/api/rooms/direct`: the caller supplies ONE string, the manifest (map, sides, AI, modoptions) is built server-side from the scenario, and only a scenario flagged `tutorial`/`solo` is accepted (`Journey::SoloAllowed`). Boots through the same `runDirectStart`. |
+| `POST /api/factions/<game>/recruits` | TokenRequired, one exact route per discovered game. Tier ≥2 only: the caller's own faction's online Recruits (tier ≤1, no live mentorship) to offer mentorship to. POST rather than GET because a GET handler never receives the Authorization header. |
+| `POST /api/mentor/{offer,respond,ai,end,endorse}` | TokenRequired. The mentorship verbs over `Mentorship.h`; `offer` adds the two lobby gates the store has no opinion on (mentor tier ≥2, same faction), `endorse` pays `+15` standing on a NEW row only. |
 | `GET /api/world` | Public. The world clock + world meta. All world GETs take the same `?world=` selector. |
 | `GET /api/world/pois` | Public. The POI graph (nodes + edges) for one world. |
 | `GET /api/world/seasons` | Public. Season archive index (every season row, newest first); read-only — can never itself cause a rollover. |
@@ -1891,6 +1925,40 @@ and controller are per-client answers) on every landed control and on a 1 s
 wall-clock heartbeat; **a live game never sends one, and that absence is the
 client's entire mode signal** — the playback bar mounts on the first one it
 receives.
+
+### Broadcast tap (`.msb`)
+
+Delayed spectating records **effects**, not causes: `--broadcast-out <file>` seats a
+global-visibility spectator session under a reserved id (`broadcast::kTapClientId`,
+`rts/Server/BroadcastTap.h`) that is never in `playerHandler`, and the single outbound
+funnel (`WebTransportServer::SendStream`/`BroadcastStream`, via `SetTapSink`) writes every
+byte it would have sent to a `.msb` log — so the log can only contain what a spectator was
+entitled to see, by construction rather than by a second filter.
+`rts/Server/BroadcastLog.{h,cpp}` owns that container: magic `MSBCAST\0` + version +
+a reused `replay::Header` JSON + marker-framed `R` records / `K` keyframes / `T` trailer,
+uncompressed, with a **streaming reader over a growing file** (a short tail is the recorder
+mid-write, not corruption) and a keyframe index built by skipping payloads.
+Every 1800 frames the streamer writes a `K` and re-emits the tap's join bundle
+(`StateStreamer::EmitJoinBundle`) so a backward seek lands on a whole world; the
+`GetClientCount() > 0` gates are `GameServerContext::HasStreamConsumers()` instead, because
+a tapped mission must keep streaming with nobody connected. Playback is a memcpy and a
+clock, never a sim — the relay that serves it is PLAN-beta-broadcast.md lane S2.
+
+### Broadcast relay (delayed spectating)
+
+`spring-server --broadcast <log> --broadcast-delay-seconds N` (`rts/Server/BroadcastRelay.{h,cpp}`)
+boots like `--replay` up to map/game load so the content routes answer, then never fires
+GameStart and never ticks the sim: each watcher gets its own `broadcast::Reader` and
+`BroadcastCursor` (byte offset, virtual wall clock, speed, paused) over the same `.msb`, paced
+by wall-clock deltas, and a backward seek jumps to the nearest `K` and catches up with
+Control/Vision/Bulk uncapped plus only the last State record per lane. The delay is enforced
+here and nowhere else — `liveEdgeMs = now - delay`, no record past it is ever emitted, seeks
+clamp to it, and the floor `kMinBroadcastDelaySec = 3600` is compiled in and lowerable only by
+`--dev-broadcast-floor` (never a modoption). Inbound is an **allow-list**
+(`ClientMessageHandler`: Handshake, AuthRequest, Ping, ReplayControl; ViewportUpdate ignored,
+everything else dropped), watchers take the replay spectator seat (team -1, reserved player
+number, absent from `playerHandler`), and `ReplayState` carries
+`broadcast`/`behind_seconds`/`live_edge_frame` with `controller_player_num` = the watcher's own.
 
 ### Replay browsing
 

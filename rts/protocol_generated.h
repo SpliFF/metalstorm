@@ -8339,6 +8339,9 @@ struct ReplayStateT : public ::flatbuffers::NativeTable {
   std::string game_id{};
   std::string map_id{};
   int32_t pov_team = 0;
+  bool broadcast = false;
+  int32_t behind_seconds = 0;
+  int32_t live_edge_frame = 0;
 };
 
 /// Replay server → every attached spectator, on change and on a slow
@@ -8360,7 +8363,10 @@ struct ReplayState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TRUNCATED = 22,
     VT_GAME_ID = 24,
     VT_MAP_ID = 26,
-    VT_POV_TEAM = 28
+    VT_POV_TEAM = 28,
+    VT_BROADCAST = 30,
+    VT_BEHIND_SECONDS = 32,
+    VT_LIVE_EDGE_FRAME = 34
   };
   int32_t start_frame() const {
     return GetField<int32_t>(VT_START_FRAME, 0);
@@ -8410,6 +8416,23 @@ struct ReplayState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int32_t pov_team() const {
     return GetField<int32_t>(VT_POV_TEAM, 0);
   }
+  /// True when the feed is a `.msb` broadcast relayed behind a delay.
+  bool broadcast() const {
+    return GetField<uint8_t>(VT_BROADCAST, 0) != 0;
+  }
+  /// How far behind the live mission this watcher is, in seconds. The
+  /// server's enforced delay is the floor of this, never the client's
+  /// choice — the bar shows it, it does not set it.
+  int32_t behind_seconds() const {
+    return GetField<int32_t>(VT_BEHIND_SECONDS, 0);
+  }
+  /// Last frame the delay lets anyone see. Beyond it the cursor idles;
+  /// a seek past it is clamped. `end_frame` is what the log HOLDS,
+  /// `live_edge_frame` is what the watcher is ALLOWED, and on a live
+  /// mission those differ by the whole delay window.
+  int32_t live_edge_frame() const {
+    return GetField<int32_t>(VT_LIVE_EDGE_FRAME, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int32_t>(verifier, VT_START_FRAME, 4) &&
@@ -8428,6 +8451,9 @@ struct ReplayState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_MAP_ID) &&
            verifier.VerifyString(map_id()) &&
            VerifyField<int32_t>(verifier, VT_POV_TEAM, 4) &&
+           VerifyField<uint8_t>(verifier, VT_BROADCAST, 1) &&
+           VerifyField<int32_t>(verifier, VT_BEHIND_SECONDS, 4) &&
+           VerifyField<int32_t>(verifier, VT_LIVE_EDGE_FRAME, 4) &&
            verifier.EndTable();
   }
   ReplayStateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8478,6 +8504,15 @@ struct ReplayStateBuilder {
   void add_pov_team(int32_t pov_team) {
     fbb_.AddElement<int32_t>(ReplayState::VT_POV_TEAM, pov_team, 0);
   }
+  void add_broadcast(bool broadcast) {
+    fbb_.AddElement<uint8_t>(ReplayState::VT_BROADCAST, static_cast<uint8_t>(broadcast), 0);
+  }
+  void add_behind_seconds(int32_t behind_seconds) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_BEHIND_SECONDS, behind_seconds, 0);
+  }
+  void add_live_edge_frame(int32_t live_edge_frame) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_LIVE_EDGE_FRAME, live_edge_frame, 0);
+  }
   explicit ReplayStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8503,8 +8538,13 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayState(
     bool truncated = false,
     ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
-    int32_t pov_team = 0) {
+    int32_t pov_team = 0,
+    bool broadcast = false,
+    int32_t behind_seconds = 0,
+    int32_t live_edge_frame = 0) {
   ReplayStateBuilder builder_(_fbb);
+  builder_.add_live_edge_frame(live_edge_frame);
+  builder_.add_behind_seconds(behind_seconds);
   builder_.add_pov_team(pov_team);
   builder_.add_map_id(map_id);
   builder_.add_game_id(game_id);
@@ -8515,6 +8555,7 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayState(
   builder_.add_current_frame(current_frame);
   builder_.add_end_frame(end_frame);
   builder_.add_start_frame(start_frame);
+  builder_.add_broadcast(broadcast);
   builder_.add_truncated(truncated);
   builder_.add_seeking(seeking);
   builder_.add_paused(paused);
@@ -8535,7 +8576,10 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayStateDirect(
     bool truncated = false,
     const char *game_id = nullptr,
     const char *map_id = nullptr,
-    int32_t pov_team = 0) {
+    int32_t pov_team = 0,
+    bool broadcast = false,
+    int32_t behind_seconds = 0,
+    int32_t live_edge_frame = 0) {
   auto checkpoint_frames__ = checkpoint_frames ? _fbb.CreateVector<int32_t>(*checkpoint_frames) : 0;
   auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
   auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
@@ -8553,7 +8597,10 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayStateDirect(
       truncated,
       game_id__,
       map_id__,
-      pov_team);
+      pov_team,
+      broadcast,
+      behind_seconds,
+      live_edge_frame);
 }
 
 ::flatbuffers::Offset<ReplayState> CreateReplayState(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -21718,6 +21765,9 @@ inline void ReplayState::UnPackTo(ReplayStateT *_o, const ::flatbuffers::resolve
   { auto _e = game_id(); if (_e) _o->game_id = _e->str(); }
   { auto _e = map_id(); if (_e) _o->map_id = _e->str(); }
   { auto _e = pov_team(); _o->pov_team = _e; }
+  { auto _e = broadcast(); _o->broadcast = _e; }
+  { auto _e = behind_seconds(); _o->behind_seconds = _e; }
+  { auto _e = live_edge_frame(); _o->live_edge_frame = _e; }
 }
 
 inline ::flatbuffers::Offset<ReplayState> ReplayState::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -21741,6 +21791,9 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayState(::flatbuffers::FlatB
   auto _game_id = _o->game_id.empty() ? 0 : _fbb.CreateString(_o->game_id);
   auto _map_id = _o->map_id.empty() ? 0 : _fbb.CreateString(_o->map_id);
   auto _pov_team = _o->pov_team;
+  auto _broadcast = _o->broadcast;
+  auto _behind_seconds = _o->behind_seconds;
+  auto _live_edge_frame = _o->live_edge_frame;
   return SpringWeb::CreateReplayState(
       _fbb,
       _start_frame,
@@ -21755,7 +21808,10 @@ inline ::flatbuffers::Offset<ReplayState> CreateReplayState(::flatbuffers::FlatB
       _truncated,
       _game_id,
       _map_id,
-      _pov_team);
+      _pov_team,
+      _broadcast,
+      _behind_seconds,
+      _live_edge_frame);
 }
 
 inline ClientMessageT *ClientMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

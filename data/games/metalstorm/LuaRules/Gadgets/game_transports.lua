@@ -125,6 +125,31 @@ local SEA_ARRIVE_RADIUS = 450
 local DEFAULT_DEPARTURE_RADIUS = 700  -- elmos, when a side declares no radius
 local UNLOAD_RETRY_FRAMES = 300       -- re-issue unload if cargo is still aboard
 
+-- THE BEACHING FALLBACK (2026-09-17). Widening the unload radius to
+-- SEA_ARRIVE_RADIUS was necessary and NOT sufficient: measured on a live run of
+-- scenarios/pelagic_landing.lua, a landing ship sails its lane, reaches its
+-- drop zone, is issued CMD_UNLOAD_UNITS, and the engine DOES decompose it into
+-- a concrete CMD_UNLOAD_UNIT at a dry square — and then nothing happens, for
+-- the rest of the war. CTransportCAI wants the hull close enough to the drop
+-- square to set a passenger down, and a SHIP cannot get closer than the
+-- shoreline; so the ship oscillates at 0.2 elmo/frame between the drop zone
+-- and the beach, holding its cargo, forever. Three sea waves in one match, all
+-- three stuck, 12000 frames in: the reinforcements never arrive and nothing in
+-- the log says why.
+--
+-- So after this many retries the GADGET puts the cargo ashore itself, with the
+-- same Spring.UnitDetach + Spring.SetUnitPosition pair game_train.lua uses for
+-- its own scriptless drop. It is a fallback, not the primary path: the engine
+-- gets its chances first, and an air or train wave (both of which do unload
+-- correctly — the same live run's airship emptied itself on the first try)
+-- never reaches this code.
+local BEACH_AFTER_RETRIES = 3
+
+-- How far from the stalled hull to look for somewhere to put people down, and
+-- how finely. Bounded by the arrival's own `dropRadius`.
+local BEACH_SCAN_STEP = 40
+local BEACH_SPREAD = 48               -- elmos between beached passengers
+
 -- Departures and guards do not run before this frame. Two reasons, one gate:
 -- the frame-60 guards read the STAGED board (game_scenario stages at GameStart
 -- and resolves deferred objectives at frame 30), and a scenario that parks its
@@ -338,7 +363,20 @@ local function terrainProblem(kind, carrier, entry, dropZone, cargoDefs)
             return 'air dropZone is on dry ground but every cargo def needs water'
         end
     end
-    if Spring.TestMoveOrder and carrier.id then
+    -- The engine's own passability answer for the entry square, which also
+    -- covers steepness and depth curves this file does not model.
+    --
+    -- NOT FOR AIR (2026-09-17, found on the first live run of
+    -- scenarios/pelagic_landing.lua). `Spring.TestMoveOrder` asks whether the
+    -- def's GROUND MoveDef could stand somewhere. An aircraft has no
+    -- movementclass at all — fable_airship is `canfly = true`, category
+    -- 'AIR MOBILE', no movedef — so the engine answers false for every square
+    -- on the map that is not incidentally walkable, and an air wave entering
+    -- over open sea (which is where aircraft enter from, on an archipelago)
+    -- was refused at load with a reason that reads like a content bug. An
+    -- air arrival's geometry constraint is the DROP ZONE suiting its cargo,
+    -- which is checked above; its entry point has none.
+    if kind ~= 'air' and Spring.TestMoveOrder and carrier.id then
         local ex, ez = tonumber(entry.x), tonumber(entry.z)
         local ok = Spring.TestMoveOrder(carrier.id, ex, he, ez, 0, 0, 0, true, false, true)
         if ok == false then
@@ -588,6 +626,74 @@ local function spawnArrival(a)
     return transportID
 end
 
+--- Nearest dry, passable square to (x, z) within `radius`, or nil.
+--- `Spring.TestMoveOrder` is consulted for the passenger's own def when the
+--- engine offers it, so an infantry squad is not beached on a cliff that only
+--- looks like land in the heightmap.
+local function findBeach(x, z, radius, passengerDefID)
+    for r = BEACH_SCAN_STEP, radius, BEACH_SCAN_STEP do
+        local steps = math.max(8, math.floor(2 * math.pi * r / BEACH_SCAN_STEP))
+        for i = 0, steps - 1 do
+            local a = (i / steps) * 2 * math.pi
+            local px, pz = x + r * math.cos(a), z + r * math.sin(a)
+            if px > 0 and pz > 0 and px < Game.mapSizeX and pz < Game.mapSizeZ then
+                local h = Spring.GetGroundHeight(px, pz)
+                if h and h > 1 then
+                    local ok = true
+                    if Spring.TestMoveOrder and passengerDefID then
+                        ok = Spring.TestMoveOrder(passengerDefID, px, h, pz,
+                                                  0, 0, 0, true, false, true) ~= false
+                    end
+                    if ok then return px, pz, h end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Put a stalled sea wave's cargo on the beach. See BEACH_AFTER_RETRIES.
+--- Returns the number of passengers actually set down.
+local function beachCargo(transportID, aboard, radius)
+    local tx, _, tz = Spring.GetUnitPosition(transportID)
+    if tx == nil then return 0 end
+    local placed = 0
+    for i, cid in ipairs(aboard) do
+        if Spring.ValidUnitID(cid) and Spring.GetUnitHealth(cid) then
+            local bx, bz = findBeach(tx, tz, radius, Spring.GetUnitDefID(cid))
+            if bx then
+                -- Fan the squad out rather than stacking it on one square: a
+                -- unit spawned inside another unit's footprint is refused or
+                -- trapped, and a beachhead that lands in a single pile is a
+                -- beachhead one artillery shell deletes.
+                --
+                -- The fan is PULLED BACK until it is still on land. A beach is
+                -- a line, not a disc: the first draft of this spread put a
+                -- passenger 48 elmos seaward of the only dry square it had
+                -- found and drowned it, which is the bug this whole fallback
+                -- exists to stop happening by other means.
+                local a = (i / math.max(1, #aboard)) * 2 * math.pi
+                local sx, sz = bx, bz
+                local spread = BEACH_SPREAD
+                while spread >= 8 do
+                    local px = bx + spread * math.cos(a)
+                    local pz = bz + spread * math.sin(a)
+                    local ph = Spring.GetGroundHeight(px, pz)
+                    if ph and ph > 1 then sx, sz = px, pz; break end
+                    spread = spread / 2
+                end
+                Spring.UnitDetach(cid)
+                Spring.SetUnitPosition(cid, sx, sz)
+                placed = placed + 1
+            end
+        else
+            -- Died in transit; detach anyway so the wave can finish.
+            pcall(Spring.UnitDetach, cid)
+        end
+    end
+    return placed
+end
+
 --- The transport reached its dropZone: unload, then apply the arrival's
 --- `order` to the cargo. Both halves are D20's finding — a unit nobody ordered
 --- never moves, so an arrival that unloads and stops is theatre.
@@ -643,9 +749,23 @@ local function serviceInFlight(frame)
                    and (f.unloadOrderedAt == nil
                         or frame - f.unloadOrderedAt >= UNLOAD_RETRY_FRAMES) then
                     f.unloadOrderedAt = frame
-                    Spring.GiveOrderToUnit(transportID, CMD.UNLOAD_UNITS,
-                        { a.dropZone.x, Spring.GetGroundHeight(a.dropZone.x, a.dropZone.z),
-                          a.dropZone.z, radius }, 0)
+                    f.unloadTries = (f.unloadTries or 0) + 1
+                    if a.kind == 'sea' and f.unloadTries > BEACH_AFTER_RETRIES then
+                        -- The engine has had BEACH_AFTER_RETRIES goes at it and
+                        -- the hull is still full. Put them ashore ourselves.
+                        local placed = beachCargo(transportID, aboard, radius)
+                        Spring.Echo(string.format(
+                            '[game_transports] arrival "%s": the engine would not unload it ' ..
+                            'after %d attempts — beached %d of %d passenger(s) by hand',
+                            a.id, f.unloadTries - 1, placed, #aboard))
+                        if placed == 0 then
+                            logEvent(a.id, 'stranded', a.team)
+                        end
+                    else
+                        Spring.GiveOrderToUnit(transportID, CMD.UNLOAD_UNITS,
+                            { a.dropZone.x, Spring.GetGroundHeight(a.dropZone.x, a.dropZone.z),
+                              a.dropZone.z, radius }, 0)
+                    end
                 end
             end
         end

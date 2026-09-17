@@ -21,11 +21,17 @@ import reconnectingHtml from './reconnecting.html?raw';
 import loginHtml from './login/login.html?raw';
 import browserHtml from './browser/browser.html?raw';
 import roomEntryHtml from './browser/room-entry.html?raw';
-import warEntryHtml from './browser/war-entry.html?raw';
+import missionEntryHtml from './browser/war-entry.html?raw';
 import replayEntryHtml from './browser/replay-entry.html?raw';
 import mapCardHtml from './browser/map-card.html?raw';
 import roomHtml from './room/room.html?raw';
 import playerRowHtml from './room/player-row.html?raw';
+import welcomeHtml from './welcome/welcome.html?raw';
+import welcomeCss from './welcome/welcome.css?raw';
+import introHtml from './intro/intro.html?raw';
+import introCss from './intro/intro.css?raw';
+import hubHtml from './hub/hub.html?raw';
+import hubCss from './hub/hub.css?raw';
 
 /// Bundle of templates the lobby renders. Each entry is a raw string —
 /// CSS for `styles`, HTML for everything else. `renderTemplate` from
@@ -36,17 +42,25 @@ export interface LobbyTemplates {
     login: string;
     browser: string;
     browserRoomEntry: string;
-    /// One row of the WAR browser (PLAN-metalstorm-lobby.md §4, task 6). A
+    /// One row of the Mission browser (PLAN-metalstorm-lobby.md §4, task 6). A
     /// separate template from `browserRoomEntry` because it answers a
     /// different question — which side, how many seats, how the front stands
     /// — and a game that restyles one has no reason to be forced to restyle
     /// the other.
-    browserWarEntry: string;
+    browserMissionEntry: string;
     /// One row of the replay browser (PLAN-replay task 4c).
     browserReplayEntry: string;
     browserMapCard: string;
     room: string;
     roomPlayerRow: string;
+    /// Entry flow (PLAN-beta-journey.md §(e)): welcome → intro → hub, each
+    /// with its own stylesheet so a game can restyle one without the rest.
+    welcome: string;
+    welcomeStyles: string;
+    intro: string;
+    introStyles: string;
+    hub: string;
+    hubStyles: string;
 }
 
 /// Each template's relative path under `<game>/ui/lobby/`. The same
@@ -58,11 +72,17 @@ const TEMPLATE_PATHS: Record<keyof LobbyTemplates, string> = {
     login:           'login/login.html',
     browser:         'browser/browser.html',
     browserRoomEntry: 'browser/room-entry.html',
-    browserWarEntry: 'browser/war-entry.html',
+    browserMissionEntry: 'browser/war-entry.html',
     browserReplayEntry: 'browser/replay-entry.html',
     browserMapCard:  'browser/map-card.html',
     room:            'room/room.html',
     roomPlayerRow:   'room/player-row.html',
+    welcome:         'welcome/welcome.html',
+    welcomeStyles:   'welcome/welcome.css',
+    intro:           'intro/intro.html',
+    introStyles:     'intro/intro.css',
+    hub:             'hub/hub.html',
+    hubStyles:       'hub/hub.css',
 };
 
 const DEFAULT_TEMPLATES: LobbyTemplates = {
@@ -71,11 +91,17 @@ const DEFAULT_TEMPLATES: LobbyTemplates = {
     login:           loginHtml,
     browser:         browserHtml,
     browserRoomEntry: roomEntryHtml,
-    browserWarEntry: warEntryHtml,
+    browserMissionEntry: missionEntryHtml,
     browserReplayEntry: replayEntryHtml,
     browserMapCard:  mapCardHtml,
     room:            roomHtml,
     roomPlayerRow:   playerRowHtml,
+    welcome:         welcomeHtml,
+    welcomeStyles:   welcomeCss,
+    intro:           introHtml,
+    introStyles:     introCss,
+    hub:             hubHtml,
+    hubStyles:       hubCss,
 };
 
 /// Return a copy of the bundled engine-default templates. Use this for

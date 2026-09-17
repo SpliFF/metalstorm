@@ -17,13 +17,10 @@
 -- report, low-passed and attenuated by tools/audiogen's derive_far, for
 -- distance playback. maxdist=900 on the close variant is deliberate: it is
 -- the switch point PLAN-beta-presentation.md's L-AUDIO section specifies
--- ("distance switch at 900 elmos"). Nothing in this repo currently PICKS
--- the _far variant at runtime — that dispatch belongs in
--- client/src/core/sound-events.ts (owns listener/emitter distance, which
--- this lane does not own) and is an open TOOLING GAP noted in this fire's
--- handoff. Until it lands, `maxdist` alone still gates the close variant
--- (silence beyond 900 instead of falling back to `_far`), so nothing is
--- broken — the switch is just not automatic yet.
+-- ("distance switch at 900 elmos"). client/src/core/sound-events.ts's
+-- chooseSoundKey() reads this maxdist at play() time and hands off to the
+-- `_far` sibling once the listener is past it (falling back to the close
+-- clip — silent beyond its own maxdist — if a key has no `_far` entry).
 local SoundItems = {
 
     -- ── Weapon fire (keyed by weapons.lua soundstart) — close/_far pairs ──
