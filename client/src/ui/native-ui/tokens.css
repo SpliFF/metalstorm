@@ -121,6 +121,9 @@
     --nui-border: rgba(216, 220, 214, 0.13);
     --nui-border-hi: rgba(216, 220, 214, 0.30);
     --nui-border-sunken: var(--ms-void);
+    /* A ring on an arbitrary-hued swatch (team/faction colour chips): plain
+       black is the only border that reads over every hue on the plate. */
+    --nui-border-swatch: rgba(0, 0, 0, 0.6);
 
     /* No drop shadows anywhere. Depth is a 1px inset edge: light on the top
        lip, dark under the bottom one. --nui-edge raises, --nui-edge-sunken

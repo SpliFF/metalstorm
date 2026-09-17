@@ -3,7 +3,7 @@
    world-map-controller.ts as a <style> the first time a WorldMap mounts, so
    the map carries its look wherever the canvas is — the lobby's browser
    screen, the preview harness, a future panel. Colours track lobby.css's
-   world section (var(--nui-accent-dim) / var(--nui-bg-raised) / var(--nui-accent) / var(--nui-gold)) by eye. */
+   world section (var(--nui-bg-float) / var(--nui-accent-dim) / var(--nui-bg-raised) / var(--nui-accent) / var(--nui-gold)) by eye. */
 
 .wm-chip {
     position: absolute;
@@ -12,7 +12,7 @@
     min-width: 150px;
     max-width: 260px;
     padding: 7px 10px;
-    background: rgba(10, 16, 28, 0.94);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-left: 3px solid var(--wm-accent, var(--nui-accent));
     border-radius: var(--nui-radius);
@@ -26,7 +26,7 @@
 .wm-chip-owner { display: flex; align-items: center; gap: 6px; color: var(--nui-text); }
 .wm-chip-swatch {
     display: inline-block; width: 10px; height: 10px; border-radius: 2px;
-    border: 1px solid rgba(0, 0, 0, 0.6); flex: none;
+    border: 1px solid var(--nui-border-swatch); flex: none;
 }
 .wm-chip-state { color: var(--nui-text-dim); }
 .wm-chip-state.wm-state-staging { color: var(--nui-gold); }
@@ -49,7 +49,7 @@
 .wm-tools button {
     font: 12px/1 system-ui, sans-serif;
     color: var(--nui-accent);
-    background: rgba(10, 16, 28, 0.88);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     padding: 6px 9px;
@@ -62,7 +62,7 @@
 .wm-legend {
     width: 230px;
     padding: 9px 11px;
-    background: rgba(10, 16, 28, 0.94);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     font: 12px/1.5 system-ui, sans-serif;

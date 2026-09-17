@@ -33,11 +33,14 @@ function stripComments(css: string): string {
     return css.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
-const HEX = /#[0-9a-fA-F]{3,8}\b/g;
+// A hex literal, or an rgb()/rgba()/hsl()/hsla() function call — all of them
+// name a colour in place instead of spending a --nui-* token. tokens.css is
+// the one file allowed to name colours (it is not in GUARDED).
+const COLOR_LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\(/g;
 
 describe('design tokens', () => {
     it.each(GUARDED)('names no colour of its own: %s', (file) => {
-        const found = stripComments(readFileSync(file, 'utf8')).match(HEX) ?? [];
+        const found = stripComments(readFileSync(file, 'utf8')).match(COLOR_LITERAL) ?? [];
         expect(found).toEqual([]);
     });
 

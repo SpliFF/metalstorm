@@ -118,7 +118,7 @@ button.world-chip[aria-pressed="true"] { border-color: var(--nui-accent); backgr
     position: absolute;
     pointer-events: none;
     padding: 6px 9px;
-    background: rgba(10, 16, 28, 0.92);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     font-size: 12px;
@@ -137,7 +137,7 @@ button.world-chip[aria-pressed="true"] { border-color: var(--nui-accent); backgr
     max-width: 70%;
     padding: 10px 14px;
     text-align: center;
-    background: rgba(10, 16, 28, 0.85);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     color: var(--nui-text-dim);
@@ -189,7 +189,7 @@ button.world-chip[aria-pressed="true"] { border-color: var(--nui-accent); backgr
     width: 10px;
     height: 10px;
     border-radius: var(--nui-radius);
-    border: 1px solid rgba(255, 255, 255, 0.25);
+    border: 1px solid var(--nui-border-hi);
     flex: none;
     vertical-align: middle;
 }
