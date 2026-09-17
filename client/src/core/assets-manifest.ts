@@ -143,24 +143,27 @@ function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Re
         // VFS.Include resolves relative to the game root (units/_builder.lua),
         // matching real Spring VFS semantics — not relative to the caller's
         // own directory. gamedata/units are siblings under the same root.
-        rt.setGlobal('VFS', {
-            Include: (includePath: LuaValue): LuaValue => {
-                if (typeof includePath !== 'string') return null;
-                const includeSource = reader.readFile(joinPath(gameRoot, includePath));
-                const inc = rt.evalStringEx(includeSource, includePath);
-                if (inc.error !== null) {
-                    // Thrown as a JS error inside the Lua-callable wrapper —
-                    // it re-enters Lua as a Lua error and surfaces through
-                    // the outer evalStringEx with this message attached.
-                    throw new Error(`VFS.Include("${includePath}"): ${inc.error}`);
-                }
-                // VFS.Include returns the chunk's SINGLE return value. A
-                // pure-sequence table reads back as a JS array; left bare it
-                // would be spread into N Lua return values (empty → zero →
-                // nil), so re-wrap as one table.
-                return Array.isArray(inc.value) ? luaTable(...inc.value) : inc.value;
-            },
+        // The include runs INSIDE the Lua state (load + call), exactly as the
+        // engine's VFS.Include does. Round-tripping the chunk's return value
+        // through JS would copy a table's contents but drop its metatable —
+        // `_builder.lua` returns a callable table (`__call`), and a plain copy
+        // of it fails every def file with "attempt to call a table value".
+        rt.setGlobal('__vfsReadSource', (includePath: LuaValue): LuaValue => {
+            if (typeof includePath !== 'string') return null;
+            return reader.readFile(joinPath(gameRoot, includePath));
         });
+        const prelude = rt.evalStringEx(
+            'VFS = VFS or {}\n' +
+            'function VFS.Include(p)\n' +
+            '    local src = __vfsReadSource(p)\n' +
+            '    if type(src) ~= "string" then error("VFS.Include(" .. tostring(p) .. "): not found", 2) end\n' +
+            '    local chunk, err = load(src, "@" .. p)\n' +
+            '    if not chunk then error("VFS.Include(" .. p .. "): " .. tostring(err), 2) end\n' +
+            '    return chunk()\n' +
+            'end\n', 'vfs-prelude');
+        if (prelude.error !== null) {
+            throw new Error(`units/${filename}: VFS prelude failed: ${prelude.error}`);
+        }
         const { value, error } = rt.evalStringEx(source, filename);
         if (error !== null) {
             throw new Error(`units/${filename}: ${error}`);
