@@ -232,7 +232,14 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
                       + (texture(splatNormalTex3, _snWorld * splatTexScales.w) * 2.0 - 1.0) * _snCofac.w;
                     _snN.y = max(_snN.y, 0.01);
                     #ifdef TERRAIN_SPLAT_NORMAL_DIFFUSE_ALPHA
-                        baseColor.rgb += vec3(clamp(_snN.a, -1.0, 1.0));
+                        // Bounded, not the raw ±1.0 Recoil formula: a detail-normal
+                        // texture with a degenerate (near-constant) alpha channel —
+                        // confirmed on scorched_crossing_v2.4's splat_normal_*.ktx2,
+                        // AT2 "black wedge" — pushes this to a flat -1 over the whole
+                        // distribution region it dominates, crushing baseColor to pure
+                        // black. Same "never pure black" rule terrain.ts's FOW darkening
+                        // and DecalOverlayPlugin's darken cap already apply here.
+                        baseColor.rgb += vec3(clamp(_snN.a, -0.4, 0.4));
                     #endif
                     // STN frame from the fragment normal alone, exactly as
                     // SMFFragProg.glsl:276 builds it. For a flat normal this

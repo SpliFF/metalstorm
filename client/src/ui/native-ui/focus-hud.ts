@@ -135,7 +135,16 @@ function mount(ctx: WidgetContext): void {
     };
 
     const render = (state: FocusState): void => {
-        const subjects = state.subjects.slice(0, MAX_SUMMARIES);
+        // Command scope (PLAN-beta.md): the player's OWN squads read first and
+        // whole; anything else they can see is dimmed, so responsibility is
+        // legible without a second panel. No assignments ⇒ no ordering change
+        // at all, which is every tier ≥1 player and every solo mission.
+        const assigned = new Set(uiStore.getMyAssignments());
+        const ordered = assigned.size === 0
+            ? state.subjects
+            : [...state.subjects].sort(
+                (a, b) => Number(isAssignedToMe(b, assigned)) - Number(isAssignedToMe(a, assigned)));
+        const subjects = ordered.slice(0, MAX_SUMMARIES);
         const wanted = new Set(subjects.map(focusRefKey));
 
         for (const [key, handle] of handles) {
@@ -159,6 +168,8 @@ function mount(ctx: WidgetContext): void {
             handles.set(key, handle);
             root.append(handle.el);
         }
+
+        applyScope(root, subjects, handles, assigned);
 
         const hidden = state.subjects.length - subjects.length;
         if (hidden > 0) {
@@ -212,6 +223,44 @@ function mount(ctx: WidgetContext): void {
             actions: (): DrilldownAction[] => actionsFor(ctx, ref),
         };
     }
+}
+
+
+/** Does this force include a unit the local player is responsible for? */
+export function isAssignedToMe(ref: FocusRef, assigned: ReadonlySet<number>): boolean {
+    if (assigned.size === 0) return false;
+    return (ref.unitIds ?? []).some((id) => assigned.has(id));
+}
+
+/**
+ * Label the player's own squads and dim the rest.
+ *
+ * The heading is a single row above the first chip rather than a section
+ * container: the chips are drilldown handles the framework owns, and wrapping
+ * them in a second element would break the refresh-in-place that keeps a
+ * countdown ticking without a rebuild. Dimming is an inline opacity for the
+ * same reason the widget carries no other style — `native-ui.css` belongs to
+ * the design system, not to this lane.
+ */
+function applyScope(
+    root: HTMLElement,
+    subjects: readonly FocusRef[],
+    handles: Map<string, DrilldownHandle>,
+    assigned: ReadonlySet<number>,
+): void {
+    root.querySelector('.nui-focus__scope')?.remove();
+    for (const subject of subjects) {
+        const el = handles.get(focusRefKey(subject))?.el;
+        if (!el) continue;
+        const mine = isAssignedToMe(subject, assigned);
+        el.style.opacity = assigned.size > 0 && !mine ? '0.55' : '';
+        el.dataset.scope = assigned.size === 0 ? '' : mine ? 'mine' : 'other';
+    }
+    if (assigned.size === 0 || !subjects.some((s) => isAssignedToMe(s, assigned))) return;
+    const heading = document.createElement('div');
+    heading.className = 'nui-focus__scope';
+    heading.textContent = 'Your squads';
+    root.prepend(heading);
 }
 
 // ────────────────────────────── rung 1 ──────────────────────────────────
@@ -305,6 +354,14 @@ function renderDetail(host: HTMLElement, ref: FocusRef): void {
     }
 
     if (ref.kind === 'enemy-force') host.append(detailRow('Side', 'enemy — takes no orders from you'));
+
+    // A superior's order on a squad this player is responsible for
+    // (`assign_<unitID>_by`). Shown because the player is about to wonder why
+    // their squad is moving without them: the relationship is the answer.
+    for (const unitId of ref.unitIds ?? []) {
+        const by = uiStore.assignedBy(unitId);
+        if (by) { host.append(detailRow('Orders', by.line)); break; }
+    }
 
     if (facts.strength === null) {
         // Say which of the three it is. "Unknown", "not visible" and "0%" must

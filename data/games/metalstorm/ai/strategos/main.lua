@@ -264,7 +264,7 @@ end
 -- that every pending proposal addressed to us is answered exactly once, or
 -- deferred to our humans exactly once, inside game_parley.lua's window.
 --=============================================================================
-local function handleParley(frame, picture, role)
+local function handleParley(frame, picture, role, plan)
     local ledger = self.parley
     local live = {}
     for _, p in ipairs((picture.parley or {}).proposals or {}) do live[p.id] = p end
@@ -273,10 +273,10 @@ local function handleParley(frame, picture, role)
     for id in pairs(ledger.answered) do if not live[id] then ledger.answered[id] = nil end end
     for id in pairs(ledger.deferred) do if not live[id] then ledger.deferred[id] = nil end end
 
-    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
+    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role, plan)) do
         if not ledger.answered[r.id] and not ledger.deferred[r.id] then
             local p = live[r.id]
-            local ok, why = self.actuators:respondProposal(p or r.id, r.decision, r.extra)
+            local ok, why = self.actuators:respondProposal(p or r.id, r.decision, r.extra, r.explicit)
             if ok then
                 ledger.answered[r.id] = frame
                 self.actuators:chat(string.format(
@@ -489,7 +489,7 @@ local function strategicTick(frame)
     -- (interaction §6.2). In its own pcall: a parley fault must never undo
     -- the directives this tick already issued, and a directive fault must
     -- never leave a proposal unanswered.
-    local pok, perr = pcall(handleParley, frame, picture, role)
+    local pok, perr = pcall(handleParley, frame, picture, role, plan)
     if not pok then self.actuators:noteError(frame, perr) end
 end
 

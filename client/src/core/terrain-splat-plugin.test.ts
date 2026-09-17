@@ -240,9 +240,11 @@ describe('TerrainSplatPlugin', () => {
         expect(body).toContain('min(1.0, dot(_snCofac, vec4(1.0)))');
         // ...the up-bias guard for all-zero weights is kept...
         expect(body).toContain('_snN.y = max(_snN.y, 0.01);');
-        // ...the albedo detail is the CLAMPED alpha, behind its own define...
+        // ...the albedo detail is the CLAMPED alpha, behind its own define, bounded
+        // well short of ±1.0 so a degenerate (near-constant) detail-normal alpha
+        // channel can never crush baseColor to pure black (AT2 "black wedge")...
         expect(body).toContain('#ifdef TERRAIN_SPLAT_NORMAL_DIFFUSE_ALPHA');
-        expect(body).toContain('baseColor.rgb += vec3(clamp(_snN.a, -1.0, 1.0));');
+        expect(body).toContain('baseColor.rgb += vec3(clamp(_snN.a, -0.4, 0.4));');
         // ...and the perturbed normal actually reaches the light loop.
         expect(body).toContain('normalW = normalize(mix(normalW,');
     });

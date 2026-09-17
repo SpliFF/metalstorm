@@ -97,13 +97,13 @@ export function decideBoot(accessToken: string | null,
 export function describeUpgradeCost(current: string, chosen: string): string {
     if (!chosen || chosen === current) {
         return current
-            ? 'You keep your faction, your war seats and everything you have earned.'
+            ? 'You keep your faction, your mission seats and everything you have earned.'
             : 'Choose the faction you will fight for.';
     }
     if (!current) {
         return 'You have not fought for anyone yet, so nothing is given up.';
     }
-    return `Switching from ${current} to ${chosen} gives up every war seat `
+    return `Switching from ${current} to ${chosen} gives up every mission seat `
         + `you hold — they are seats on ${current}'s side. Your account, name `
         + `and history stay.`;
 }

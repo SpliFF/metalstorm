@@ -1,0 +1,11 @@
+{
+  "id": "overlay_soot_scorch",
+  "class": "overlay",
+  "prompt": "Soot scorch patches around muzzles and exhausts, dark radial smudges fading outward, on transparent alpha.",
+  "seed": 100504,
+  "width": 1024,
+  "height": 1024,
+  "tint": "#000000",
+  "output": "art/gen/overlays/soot_scorch.png",
+  "post": ["overlay_alpha", "seamless", "pow2"]
+}

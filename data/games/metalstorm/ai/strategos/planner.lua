@@ -769,7 +769,11 @@ local function evaluateOne(p, picture, profile)
         return 'accept'   -- free information, no downside (§1 table)
     end
 
-    if p.kind == 'ceasefire' or p.kind == 'safe_passage' then
+    -- 'pact' is the tutorial director's umbrella word rather than a kind the
+    -- gadget issues, but it reaches the board from hand-written scenarios and
+    -- it plainly means "stop shooting" — price it as a ceasefire instead of
+    -- letting it fall off the end into "unrecognised kind → reject".
+    if p.kind == 'ceasefire' or p.kind == 'safe_passage' or p.kind == 'pact' then
         -- Relative strength first, trust second (ai-actuation, lane 4 ask):
         -- standing down is cheap when you are losing and expensive when you
         -- are winning, and no amount of goodwill makes it otherwise. Both
@@ -824,18 +828,77 @@ local function evaluateOne(p, picture, profile)
     return 'reject'   -- unrecognised kind: never silently accept an unknown pact
 end
 
+--- Which teams does THIS tick's plan mean to take ground from? Read off the
+-- plan's own intent lines (planner output, §3.1) rather than guessed at: an
+-- ATTACK or DENY line names a region, and the picture names that region's
+-- owner. "Currently fighting" in the profile sense is not "we are at war on
+-- paper" — it is "our own orders this tick are pointed at them", which is the
+-- only claim a pure core can make honestly.
+-- No plan (an older caller, or a tick whose plan never got built) → an empty
+-- set, i.e. we are not attacking anyone, which is the permissive reading. The
+-- profile handler is the one place that matters and it is only ever consulted
+-- from main.lua's handleParley, which does hand the plan over.
+function Planner.attackIntentTeams(picture, plan, teamId)
+    local out = {}
+    local regions = picture and picture.regions or {}
+    for _, line in ipairs((plan or {}).intent or {}) do
+        if line.kind == 'ATTACK' or line.kind == 'DENY' then
+            local r = line.region and regions[line.region]
+            local owner = r and r.owner
+            if owner and owner ~= -1 and owner ~= teamId then out[owner] = true end
+        end
+    end
+    return out
+end
+
 --- Evaluate every pending (offered/countered) proposal addressed to our own
 -- team. Returns { {id=, decision='accept'|'reject'|'counter', extra=?}, ... }
 -- — main.lua feeds each straight into
 -- Actuators:respondProposal(id, decision, extra); `extra` is
 -- { kind?, terms? } for a counter and nil otherwise.
-function Planner.evaluateProposals(picture, profile, role)
+--
+-- A PROFILE may override the valuation: `profile.evaluateProposal(p, ctx)`
+-- (ai-eval, the recon_01 Diplomacy Mission). It returns a decision + optional
+-- extra to speak for this proposal, or nil to say nothing and fall through to
+-- the shared valuation below — so a profile states only the cases it has an
+-- opinion about. `ctx` is { picture, profile, role, plan, teamId, attacking }
+-- where `attacking[team]` is true iff this tick's plan points at that team.
+-- The hook is pure (no actuator, no engine): main.lua still owns the
+-- answered/deferred ledger and the actuator still owns the authority to speak.
+function Planner.evaluateProposals(picture, profile, role, plan)
     local teamId = role and role.teamId
     local out = {}
+    local ctx = nil
+    if type(profile.evaluateProposal) == 'function' then
+        ctx = { picture = picture, profile = profile, role = role, plan = plan,
+                teamId = teamId,
+                attacking = Planner.attackIntentTeams(picture, plan, teamId) }
+    end
     for _, p in ipairs((picture.parley or {}).proposals or {}) do
         if p.toTeam == teamId and (p.state == 'offered' or p.state == 'countered') then
-            local decision, extra = evaluateOne(p, picture, profile)
-            out[#out + 1] = { id = p.id, decision = decision, extra = extra }
+            local decision, extra, explicit
+            if ctx then
+                -- A faulty handler must not swallow the whole board — and a
+                -- board left unanswered is how a proposal expires. The pure
+                -- core has no logger, so the fault is not narrated here; the
+                -- proposal simply falls through to the shared valuation and
+                -- still gets an answer inside the gadget's 60 s window.
+                local ok, d, e = pcall(profile.evaluateProposal, p, ctx)
+                if ok then decision, extra = d, e end
+            end
+            if decision == nil then
+                decision, extra = evaluateOne(p, picture, profile)
+            else
+                -- The profile hook itself spoke for this kind (as opposed to
+                -- falling through to the shared valuation) — that is the
+                -- signal the actuator's deference rule carves an exception
+                -- for (§ "explicit kind"): a co-commander profile that has
+                -- stated an opinion about THIS proposal is answering with
+                -- the human's blessing baked into the profile, not binding
+                -- them behind their back.
+                explicit = true
+            end
+            out[#out + 1] = { id = p.id, decision = decision, extra = extra, explicit = explicit }
         end
     end
     return out

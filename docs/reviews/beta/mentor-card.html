@@ -1,0 +1,123 @@
+<!doctype html>
+<!--
+  mentor-card.html — pres-verify screenshot harness for the mentor card
+  (data/games/metalstorm/ui/widgets/mentor-card.js). Loads the real widget
+  module and freezes its rendered output as static markup, so what gets
+  screenshotted is what the card actually emits, not a hand-typed guess.
+
+  native-ui.css is loaded alongside tokens.css + metalstorm.ui.css:
+  metalstorm.ui.css only OVERRIDES the design system (see its own header
+  comment) and defines none of .nui-panel / .nui-btn / .nui-stat itself, so
+  without native-ui.css the panel chrome and buttons render unstyled.
+
+  Serve it, don't open it from file:// — the widget is an ES module import
+  and tokens.css asks for /fonts/*.woff2, both of which need a real origin:
+
+      python3 -m http.server 8099    # from the repo root, then
+      # http://localhost:8099/docs/reviews/beta/mentor-card.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mentor-card — stencilled steel plate</title>
+<link rel="stylesheet" href="../../../client/src/ui/native-ui/tokens.css">
+<link rel="stylesheet" href="../../../client/src/ui/native-ui/native-ui.css">
+<link rel="stylesheet" href="../../../data/games/metalstorm/ui/metalstorm.ui.css">
+<style>
+  body {
+    background: radial-gradient(120% 80% at 50% 0%, #6b5a3e 0%, #3d3a2e 55%, #22231d 100%);
+    margin: 0;
+    padding: 24px;
+  }
+  .rig { display: flex; gap: 16px; align-items: flex-start; }
+  .col { width: 236px; }
+  .ui-mount { position: static; }
+  h2 {
+    font: var(--nui-font-mono);
+    font-size: 10px;
+    color: var(--nui-text-dim);
+    margin: 0 0 4px;
+    text-transform: uppercase;
+    letter-spacing: var(--nui-track);
+  }
+</style>
+</head>
+<body>
+<div class="rig">
+  <div class="col">
+    <h2>mentored by a human, with an order pending</h2>
+    <div class="ui-mount ui-mount-left">
+      <section class="nui-panel">
+        <button class="nui-panel__head"><span class="nui-panel__title">Mentor</span></button>
+        <div class="nui-panel__body"><div id="mount-mentored"></div></div>
+      </section>
+    </div>
+  </div>
+  <div class="col">
+    <h2>no mentor yet — ai offer, fetch failed</h2>
+    <div class="ui-mount ui-mount-left">
+      <section class="nui-panel">
+        <button class="nui-panel__head"><span class="nui-panel__title">Mentor</span></button>
+        <div class="nui-panel__body"><div id="mount-note"></div></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import mentorCard from '../../../data/games/metalstorm/ui/widgets/mentor-card.js';
+
+const tierName = (t) => ['Recruit', 'Regular', 'Veteran', 'Officer', 'Commander'][t] ?? 'Recruit';
+
+// Same fixture shape as mentor-card.test.js's fakeStore.
+function fakeStore({ game = {}, team = {}, me = 7, showEverything = false } = {}) {
+  return {
+    mentorOf: (pid) => (game[`mentor_${pid}`] === undefined ? undefined : Number(game[`mentor_${pid}`])),
+    callsignOf: (pid) => String(game[`callsign_${pid}`] ?? `player ${pid}`),
+    rankOf: (pid) => Number(game[`rank_${pid}`] ?? 0),
+    getMyAssignments: () => Object.entries(team)
+      .filter(([k, v]) => /^assign_\d+$/.test(k) && Number(v) === me)
+      .map(([k]) => Number(k.slice('assign_'.length))).sort((a, b) => a - b),
+    assignedBy(unitId) {
+      const raw = team[`assign_${unitId}_by`];
+      if (raw === undefined) return null;
+      const pid = Number(raw);
+      return { playerId: pid, callsign: this.callsignOf(pid), tier: this.rankOf(pid),
+        line: `order from ${this.callsignOf(pid)} (${tierName(this.rankOf(pid))})` };
+    },
+    getShowEverything: () => showEverything,
+    setShowEverything: () => {},
+    subscribe: () => () => {},
+  };
+}
+
+const api = { lobbyBase: '', fetch: () => Promise.resolve({ ok: true, status: 200 }) };
+
+// Render the real widget into a detached scratch node, then freeze its
+// output as plain markup in the visible mount — a screenshot needs a static
+// page, not a live widget instance with a pending 30s timer.
+function freeze(container, run) {
+  const scratch = document.createElement('div');
+  run(scratch);
+  container.innerHTML = scratch.innerHTML;
+  mentorCard.dispose();
+}
+
+freeze(document.getElementById('mount-mentored'), (mount) => {
+  const store = fakeStore({
+    game: { mentor_7: 2, callsign_2: 'Vega', rank_2: 3 },
+    team: { assign_11: 7, assign_12: 7, assign_13: 4, assign_11_by: 2 },
+  });
+  mentorCard.init({ mount, store, identity: { playerId: 7, teamId: 1 }, api });
+});
+
+freeze(document.getElementById('mount-note'), (mount) => {
+  mentorCard.init({ mount, store: fakeStore(), identity: { playerId: 7, teamId: 1 }, api });
+  clearTimeout(mentorCard.timer);
+  mentorCard.offerAi = true;
+  mentorCard.error = 'Could not reach the server.';
+  mentorCard._render();
+});
+</script>
+</body>
+</html>

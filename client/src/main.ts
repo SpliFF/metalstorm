@@ -9,7 +9,7 @@
 // GPU texture (unit + feature + terrain + minimap) is `.ktx2`.
 import './core/ktx2-config.js';
 import { DefCache } from './core/def-cache.js';
-import { AudioManager } from './core/audio.js';
+import { AudioManager, resolveReverbPreset } from './core/audio.js';
 import { SoundEventPlayer } from './core/sound-events.js';
 import { MusicDirector } from './core/music-director.js';
 import { AnimatedCursor } from './core/animated-cursor.js';
@@ -1462,6 +1462,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (musicDirector && !musicArmed) { musicDirector.arm(); musicArmed = true; }
                 musicDirector?.handleMusicEvent(m.state, m.fadeMs);
                 break;
+            // L-AUDIO: mapinfo.lua's sound.preset, parsed worker-side —
+            // picks the master reverb IR. Empty/unset defaults to 'open'.
+            case 'gp:soundPreset':
+                void audioManager?.setReverbPreset(resolveReverbPreset(m.preset), soundContentBaseUrl);
+                break;
             // The worker parsed gamedata/sounds.lua and posted its SoundItems
             // map. Ingest it so the AudioManager can resolve a SoundEvent's
             // logical name to the authored file path. WITHOUT this, every
@@ -2351,7 +2356,7 @@ async function bootPlay(params: PlayParams, lobby: LobbyUI): Promise<void> {
 /// boot time. Order of precedence:
 ///   1. `?game=<id>` URL query parameter (browser link, dev override)
 ///   2. `springrts-game-id` localStorage key (sticky across reloads)
-///   3. none (engine default UI)
+///   3. the beta's one game (`metalstorm`)
 ///
 /// CLI startup of the client (e.g. `npm run dev -- --game papertanks`)
 /// is forwarded into the URL by the host launcher, so the same path
@@ -2365,7 +2370,7 @@ function resolveInitialGameId(): string | null {
         localStorage.setItem('springrts-game-id', fromUrl);
         return fromUrl;
     }
-    return localStorage.getItem('springrts-game-id');
+    return localStorage.getItem('springrts-game-id') || 'metalstorm';
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

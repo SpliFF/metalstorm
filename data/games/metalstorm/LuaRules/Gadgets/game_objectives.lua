@@ -52,6 +52,7 @@ local Escort       = VFS.Include("LuaRules/Gadgets/objectives/escort.lua")
 local Protect      = VFS.Include("LuaRules/Gadgets/objectives/protect.lua")
 local Extract      = VFS.Include("LuaRules/Gadgets/objectives/extract.lua")
 local Infra        = VFS.Include("LuaRules/Gadgets/objectives/infra.lua")
+local Parley       = VFS.Include("LuaRules/Gadgets/objectives/parley.lua")
 local Generator    = VFS.Include("LuaRules/Gadgets/objectives/generator.lua")
 local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
 -- PLAN-metalstorm-wars.md §7 task 4: the per-objective war-end disposition
@@ -63,7 +64,7 @@ local Wire         = VFS.Include("LuaRules/Gadgets/parley/wire.lua")
 
 local TYPES = {
     control = Control, kill = Kill, escort = Escort,
-    protect = Protect, extract = Extract, infra = Infra,
+    protect = Protect, extract = Extract, infra = Infra, parley = Parley,
 }
 
 GG.Objectives = GG.Objectives or {}
@@ -258,6 +259,7 @@ local function buildCtx(frame, dyingUnitID)
     return {
         frame = frame,
         evalPeriodFrames = EVAL_PERIOD,
+        gameRulesParam = function(key) return Spring.GetGameRulesParam(key) end,   -- objectives/parley.lua
         regionOwner = function(key)
             return GG.Regions and GG.Regions.ControllingTeam(key) or nil
         end,
@@ -1013,6 +1015,12 @@ end
 local function buildWorld(frame, tick, ctx)
     return {
         frame = frame, tick = tick,
+        -- The scenario table, the way game_scenario/game_tutorial read it
+        -- (`GG.Scenario.data`) — the generator's own gate against a scripted
+        -- tutorial/solo Mission (F-tutorial-gen).
+        scenario = function()
+            return GG.Scenario and GG.Scenario.data
+        end,
         contestedRegions = function()
             return GG.Regions and GG.Regions.GetContested() or {}
         end,

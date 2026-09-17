@@ -96,9 +96,14 @@ import {
 import {
     describeReplayEntry, parseWatchFrame, type ReplayListing,
 } from './replay-browser.js';
+import {
+    describeBroadcastEntry, type BroadcastListing,
+} from './broadcast-browser.js';
 import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
 import { WorldScreen } from './world-screen.js';
 
+/// The beta ships one game; every entry screen is styled and titled for it.
+const DEFAULT_GAME_ID = 'metalstorm';
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
 export type LobbyScreen = 'welcome' | 'login' | 'intro' | 'hub' | 'browser' | 'room' | 'game';
@@ -944,16 +949,15 @@ export class LobbyUI {
         else if (this.container.style.display === 'block') this.container.style.display = 'flex';
     }
 
-    /// The game the lobby is styling itself for — `?game=` or the sticky
-    /// key main.ts writes — or none (engine default).
+    /// The game the lobby is styling itself for — `?game=`, the sticky
+    /// key main.ts writes, else the beta's one game.
     private entryGameId(): string {
         const fromUrl = new URLSearchParams(window.location.search).get('game');
-        return fromUrl || localStorage.getItem('springrts-game-id') || '';
+        return fromUrl || localStorage.getItem('springrts-game-id') || DEFAULT_GAME_ID;
     }
 
     private gameTitle(): string {
         const id = this.entryGameId();
-        if (!id) return 'Spring RTS Web';
         const known = this.availableGames.find(g => g.id === id)?.displayName;
         return known || id.charAt(0).toUpperCase() + id.slice(1);
     }
@@ -1192,7 +1196,10 @@ export class LobbyUI {
         on('hub-browser-btn', () => { this.watchMode = false; this.showBrowser(); });
         on('hub-help-btn', () => openHelp('getting-started'));
         on('hub-explore-btn', () => { this.watchMode = false; this.pendingOpenWorld = true; this.showBrowser(); });
-        on('hub-spectate-btn', () => { this.watchMode = true; this.showBrowser(); });
+        // Spectate is Mission Broadcast (PLAN-beta.md directive #6: delayed,
+        // never live) — the hub card opens the broadcasts panel directly
+        // rather than the mission browser's live-watch flow.
+        on('hub-spectate-btn', () => this.showBroadcastsPanel());
         on('hub-solo-btn', () => { window.location.href = tutorialUrl(window.location.search); });
         const msg = document.getElementById('hub-msg');
         on('hub-support-btn', () => {
@@ -1530,7 +1537,7 @@ export class LobbyUI {
         const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement | null;
         if (logoutBtn) {
             logoutBtn.title = 'Logging out ends this guest account — claim it '
-                + 'first to keep your war seats and everything you have earned.';
+                + 'first to keep your mission seats and everything you have earned.';
         }
 
         // A guest must not be offered 2FA, and the reason is a one-way door
@@ -3001,6 +3008,118 @@ export class LobbyUI {
         this.updateCurrentRoomFromJson(resp);
     }
 
+    // =================== BROADCASTS (PLAN-beta-broadcast.md lane C) =======
+    //
+    // A self-built DOM overlay rather than a `templates.*` panel: it opens
+    // from the hub, which is a different screen from the mission browser
+    // that owns `replay-panel`'s markup, and `client/src/ui/lobby/**` /
+    // `lobby.css` belong to other lanes (journey-lobby-entry, pres-ui-ds) —
+    // building it here keeps this lane inside the files it owns. Inline
+    // styles for the same reason; a follow-up can move them to a stylesheet
+    // once this panel has an owner in `ui/lobby/`.
+
+    /// Cached rows from the last `/api/broadcasts/list`. Null until the
+    /// first fetch resolves or the lobby has no broadcast-lobby routes yet.
+    private broadcasts: BroadcastListing[] | null = null;
+    private broadcastPanelEl: HTMLElement | null = null;
+
+    /// Wired from the hub's Spectate card.
+    private showBroadcastsPanel(): void {
+        if (!this.broadcastPanelEl) this.broadcastPanelEl = this.buildBroadcastsPanel();
+        this.broadcastPanelEl.style.display = 'flex';
+        void this.refreshBroadcasts();
+    }
+
+    private buildBroadcastsPanel(): HTMLElement {
+        const overlay = document.createElement('div');
+        overlay.id = 'broadcasts-panel';
+        overlay.style.cssText = 'display:none;position:fixed;inset:0;z-index:300;' +
+            'align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+        overlay.onclick = (ev: MouseEvent) => { if (ev.target === overlay) overlay.style.display = 'none'; };
+
+        const card = document.createElement('div');
+        card.style.cssText = 'background:#16181c;color:#fff;border-radius:8px;padding:16px 18px;' +
+            'width:min(560px,92vw);max-height:80vh;overflow:auto;font:13px system-ui,sans-serif;';
+
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
+        const title = document.createElement('h3');
+        title.textContent = 'Mission Broadcasts';
+        title.style.margin = '0';
+        const close = document.createElement('button');
+        close.textContent = 'Close';
+        close.className = 'secondary';
+        close.onclick = () => { overlay.style.display = 'none'; };
+        head.append(title, close);
+
+        const list = document.createElement('div');
+        list.id = 'broadcast-list';
+        card.append(head, list);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
+    private async refreshBroadcasts(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/broadcasts/list');
+            this.broadcasts = (resp && Array.isArray(resp.broadcasts))
+                ? (resp.broadcasts as BroadcastListing[]) : null;
+        } catch {
+            this.broadcasts = null;
+        }
+        this.renderBroadcastList();
+    }
+
+    private renderBroadcastList(): void {
+        const el = document.getElementById('broadcast-list');
+        if (!el) return;
+        const list = this.broadcasts;
+        if (list === null) {
+            el.innerHTML = '<div class="empty-state">Mission Broadcasts are not available on this lobby yet.</div>';
+            return;
+        }
+        if (list.length === 0) {
+            el.innerHTML = '<div class="empty-state">No Missions being broadcast right now.</div>';
+            return;
+        }
+        el.innerHTML = list.map(r => {
+            const m = describeBroadcastEntry(r);
+            return '<div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;' +
+                'border-bottom:1px solid rgba(255,255,255,0.12);">' +
+                `<div style="display:flex;justify-content:space-between;gap:8px;">` +
+                `<span>${this.esc(m.title)}</span><span style="opacity:0.75;white-space:nowrap;">${this.esc(m.chip)}</span></div>` +
+                (m.detail ? `<div style="font-size:11px;opacity:0.6;">${this.esc(m.detail)}</div>` : '') +
+                `<button class="broadcast-watch-btn" data-file="${this.esc(r.file)}">${this.esc(m.watchLabel)}</button>` +
+                '</div>';
+        }).join('');
+        el.querySelectorAll<HTMLButtonElement>('.broadcast-watch-btn').forEach(btn => {
+            btn.onclick = () => { void this.watchBroadcast(btn.getAttribute('data-file')!); };
+        });
+    }
+
+    /// Ask the lobby to join (or spawn) the relay room for a broadcast file,
+    /// and adopt the room it returns — same shape and reasoning as
+    /// `watchReplay` above; the response is an ordinary room JSON with
+    /// `is_broadcast: true`.
+    async watchBroadcast(file: string): Promise<void> {
+        const resp = await this.lobbyPost('/api/broadcasts/watch', { file });
+        if (!resp || resp.error) {
+            const msg = resp?.error ?? 'could not start a broadcast relay';
+            console.error(`[lobby] watch broadcast '${file}' failed: ${msg}`);
+            const el = document.getElementById('broadcast-list');
+            if (el) {
+                const note = document.createElement('div');
+                note.className = 'replay-error';
+                note.textContent = `Could not watch ${file}: ${msg}`;
+                el.prepend(note);
+            }
+            return;
+        }
+        if (this.broadcastPanelEl) this.broadcastPanelEl.style.display = 'none';
+        this.updateCurrentRoomFromJson(resp);
+    }
+
     /// Repopulate the `<select id="game-select">` inside the
     /// create-room form with the cached game list. Safe to call
     /// before the list arrives — renders nothing and waits for
@@ -3123,7 +3242,7 @@ export class LobbyUI {
         const options = [
             serverDefault
                 ? `<option value="">${this.esc(serverDefault.displayName)} (default for this map)</option>`
-                : `<option value="">No war (default) — a free-form battle with no ending</option>`,
+                : `<option value="">No mission (default) — a free-form battle with no ending</option>`,
             ...offerable.map(s => {
                 const selAttr = s.id === this.selectedScenarioId ? ' selected' : '';
                 return `<option value="${this.esc(s.id)}"${selAttr}>`
@@ -3247,10 +3366,10 @@ export class LobbyUI {
             // is endless.
             const warn = known && !terminal
                 ? ` <span class="scenario-note endless">(no ending)</span>` : '';
-            parts.push(`War: <strong>${this.esc(label)}</strong>${warn}`);
+            parts.push(`Mission: <strong>${this.esc(label)}</strong>${warn}`);
         } else if (gameHasScenarios) {
             parts.push(
-                `War: <span class="scenario-note endless">none — this war `
+                `Mission: <span class="scenario-note endless">none — this mission `
                 + `cannot end</span>`);
         }
         return parts.length > 0 ? parts.join(' &middot; ') : '';
@@ -3334,15 +3453,15 @@ export class LobbyUI {
             // player to two different places, and the second one is the whole
             // reason the default filter exists.
             const why = this.warFilter === 'my-faction'
-                ? 'No war is fielding your faction right now.'
+                ? 'No mission is fielding your faction right now.'
                 : this.warFilter === 'my-wars'
-                    ? 'You hold no seat in any war yet.'
+                    ? 'You hold no seat in any mission yet.'
                     : this.warFilter === 'friends-here'
                         // Says which fact is missing: presence, not friendship.
                         // "You have no friends" would be wrong for a player
                         // whose friends are simply not fighting right now.
-                        ? 'None of your friends are in a war right now.'
-                        : 'No wars are running.';
+                        ? 'None of your friends are in a mission right now.'
+                        : 'No missions are running.';
             list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
@@ -3421,7 +3540,7 @@ export class LobbyUI {
             // naive "is it full" test gets wrong.
             const canFight = row.returning ||
                 (!!this.myFaction && hasRoomForFaction(row.war, this.myFaction));
-            return renderTemplate(this.templates.browserWarEntry, {
+            return renderTemplate(this.templates.browserMissionEntry, {
                 id: row.id,
                 name: this.esc(row.name),
                 // The ROOM state is dropped once the WAR state is known: a

@@ -11,6 +11,7 @@ local function fakeWorld(overrides)
     local nextId = 1
     local w = {
         frame = 0, tick = 0,
+        scenario = function() return nil end,
         contestedRegions = function() return {} end,
         regionValue = function() return 0 end,
         civilianDistrictsUnderThreat = function() return {} end,
@@ -107,17 +108,33 @@ describe("control rule (contested region)", function()
     end)
 
     it("scales cap and cooldown by objective_density", function()
-        local state = generator.newState()
-        local regions = {}
-        for i = 1, 10 do regions[i] = 'r' .. i end
-        local world = fakeWorld({
-            contestedRegions = function() return regions end,
-            modOptions = function() return { objective_density = 'sparse' } end,
-        })
-        generator.tick(world, state)   -- tick 0: seeds the debounce clock
-        world.tick = 1
-        generator.tick(world, state)   -- tick 1: fires, capped at sparse density
-        assert.are.equal(3, #world._created)   -- 6 * 0.5 capMul, floored
+        -- Stated against the REAL multiplier table rather than a copy of it:
+        -- the density ladder is tuned by the economy harness
+        -- (`node tools/economy-validation.js`), so a spec that pinned the
+        -- numbers here would go red every time the economy was retuned and say
+        -- nothing about whether density still scales anything.
+        local function firedAt(density)
+            local state = generator.newState()
+            local regions = {}
+            for i = 1, 10 do regions[i] = 'r' .. i end
+            local world = fakeWorld({
+                contestedRegions = function() return regions end,
+                modOptions = function() return { objective_density = density } end,
+            })
+            generator.tick(world, state)   -- tick 0: seeds the debounce clock
+            world.tick = 1
+            generator.tick(world, state)   -- tick 1: fires, capped
+            return #world._created
+        end
+        for _, density in ipairs({ 'sparse', 'normal', 'dense' }) do
+            local capMul = generator.DENSITY[density].capMul
+            -- 10 candidates on offer, so the cap binds until capMul lifts it
+            -- past 10 and the candidate list becomes the limit instead.
+            local expected = math.min(10, math.max(1, math.floor(6 * capMul)))
+            assert.are.equal(expected, firedAt(density),
+                'control rule fired the wrong count at ' .. density)
+        end
+        assert.is_true(generator.DENSITY.dense.capMul > generator.DENSITY.sparse.capMul)
     end)
 
     it("does not book a candidate the sim rejected (Create returned nil, E1)", function()
@@ -130,6 +147,40 @@ describe("control rule (contested region)", function()
         world.tick = 1
         generator.tick(world, state)   -- tick 1: would fire, but Create rejects it
         assert.is_nil(state.systemicActive['control:r1'])
+    end)
+end)
+
+-- ============================================================
+-- Scenario gating: the systemic generator must stay out of a scripted
+-- tutorial/solo Mission (journey-tutorial found objective_count=2 at frame 0
+-- in scenarios/tutorial_01.lua — the generator posting into a Mission whose
+-- whole point is a scripted beat list).
+-- ============================================================
+describe("scenario gating (tutorial/solo)", function()
+    it("suppresses every rule when the scenario declares tutorial or solo", function()
+        for _, scn in ipairs({ { tutorial = true }, { solo = true } }) do
+            local state = generator.newState()
+            local world = fakeWorld({
+                scenario = function() return scn end,
+                contestedRegions = function() return { 'r1' } end,
+            })
+            generator.tick(world, state)   -- tick 0: would seed the debounce clock
+            world.tick = 1
+            generator.tick(world, state)   -- tick 1: would fire, but the scenario blocks it
+            assert.are.equal(0, #world._created)
+        end
+    end)
+
+    it("still runs normally when the scenario has no tutorial/solo flag", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            scenario = function() return { tutorial = false } end,
+            contestedRegions = function() return { 'r1' } end,
+        })
+        generator.tick(world, state)   -- tick 0: seeds the debounce clock
+        world.tick = 1
+        generator.tick(world, state)   -- tick 1: debounce satisfied, fires
+        assert.are.equal(1, #world._created)
     end)
 end)
 
@@ -403,5 +454,146 @@ describe("transport rule (the universal generator floor)", function()
         generator.tick(world, state)
         assert.are.equal(1, #world._created)
         assert.are.equal('escort', world._created[1].type)
+    end)
+end)
+
+-- ============================================================
+-- §10.6: the reward derivation and the per-team concurrency ceiling.
+-- ============================================================
+describe("the reward derivation (§10.6)", function()
+    it("prices a reward off the cost spec's median directive, not a literal", function()
+        local spec = {
+            base_k = 2.0, median_directive_basis = 7,
+            order_class = { directive = 1.5 },
+            region_mod_min = 0.5, region_mod_max = 2.0,
+        }
+        -- geometric centre of [0.5, 2.0] is 1.0: ceil(2 × 7 × 1 × 1.5) = 21
+        assert.are.equal(21, generator.rewardUnit(spec))
+    end)
+
+    it("takes the GEOMETRIC centre of the region band, not the arithmetic one", function()
+        -- The band is multiplicative (halved in friendly ground, doubled in
+        -- enemy). Its arithmetic mean is 1.25 and would price every objective
+        -- as if every war were fought on the enemy's side of the map.
+        local spec = {
+            base_k = 1.0, median_directive_basis = 100,
+            order_class = { directive = 1.0 },
+            region_mod_min = 0.5, region_mod_max = 2.0,
+        }
+        assert.are.equal(100, generator.rewardUnit(spec))
+    end)
+
+    it("pays every rule a whole number of median directives", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            civilianDistrictsUnderThreat = function()
+                return { { districtId = 'd1', districtTeam = 0, unitIDs = { 1 } } }
+            end,
+        })
+        generator.tick(world, state)
+        assert.are.equal(generator.DIRECTIVES.district * generator.REWARD_UNIT,
+                         world._created[1].reward)
+    end)
+
+    it("keeps the design's ranking of the rules", function()
+        local D = generator.DIRECTIVES
+        assert.is_true(D.infra < D.district)
+        assert.is_true(D.district < D.control)
+        assert.is_true(D.control < D.escort)
+        assert.is_true(D.escort < D.liveness)
+        assert.is_true(D.liveness < D.arrival)
+        assert.is_true(D.arrival < D.extract)
+    end)
+end)
+
+describe("the per-team concurrency ceiling", function()
+    --- `n` districts, all owned by team 0, all under threat at once: one
+    --- team-scoped candidate per district, deduped per district id.
+    local function districtWorld(n)
+        return fakeWorld({
+            teams = function() return { 0, 1 } end,
+            civilianDistrictsUnderThreat = function()
+                local out = {}
+                for i = 1, n do
+                    out[i] = { districtId = 'd' .. i, districtTeam = 0, unitIDs = { i } }
+                end
+                return out
+            end,
+        })
+    end
+
+    it("refuses a rule once the team's board is full", function()
+        local state = generator.newState()
+        local cap = generator.DENSITY.normal.teamCap
+        -- districtRule's own cap is 4, so lift it out of the way: the point of
+        -- this test is the TOTAL, which no per-rule cap bounds.
+        local ruleCap
+        for _, rule in ipairs(generator.rules) do
+            if rule.key == 'district' then ruleCap = rule.cap; rule.cap = 1000 end
+        end
+        local world = districtWorld(cap + 5)
+        generator.tick(world, state)
+        for _, rule in ipairs(generator.rules) do
+            if rule.key == 'district' then rule.cap = ruleCap end
+        end
+        assert.are.equal(cap, #world._created)
+        assert.are.equal(cap, state.teamCounts[0])
+        assert.is_nil(state.teamCounts[1])   -- team 1's board is untouched
+    end)
+
+    it("frees a slot when the objective resolves", function()
+        local state = generator.newState()
+        local world = districtWorld(1)
+        generator.tick(world, state)
+        assert.are.equal(1, state.teamCounts[0])
+        generator.onResolved(state, 'district', 'district:d1')
+        assert.are.equal(0, state.teamCounts[0])
+    end)
+
+    it("frees ONE slot for a linked pair, not two (F13)", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            teams = function() return { 0, 1 } end,
+            newConvoys = function()
+                return { { id = 'c1', benefactorTeam = 0, unitIDs = { 101 },
+                           destArea = { x = 0, z = 0, r = 50 } } }
+            end,
+        })
+        generator.tick(world, state)
+        assert.are.equal(1, state.teamCounts[0])
+        generator.onResolved(state, 'escort', 'convoy:c1')   -- the escort half
+        generator.onResolved(state, 'escort', 'convoy:c1')   -- the kill half
+        assert.are.equal(0, state.teamCounts[0])
+    end)
+
+    it("counts an open race against every team — it is on everyone's board", function()
+        local state = generator.newState()
+        local world = fakeWorld({
+            teams = function() return { 0, 1 } end,
+            contestedRegions = function() return { 'r1' } end,
+        })
+        generator.tick(world, state)
+        world.tick = 1
+        generator.tick(world, state)
+        assert.are.equal(1, state.teamCounts[0])
+        assert.are.equal(1, state.teamCounts[1])
+    end)
+
+    it("never refuses the liveness backstop — a full board is not a starved one", function()
+        -- The backstop only fires for a team with NOTHING completable. A
+        -- ceiling that could refuse it would deadlock exactly the team it
+        -- exists to rescue.
+        local state = generator.newState()
+        state.teamCounts[0] = 1000
+        local world = fakeWorld({
+            teams = function() return { 0 } end,
+            completableObjectiveCount = function() return 0 end,
+            nearestNeutralOrContestedRegion = function() return 'r9' end,
+        })
+        generator.tick(world, state)   -- tick 0: starts the starvation clock
+        world.tick = 1
+        generator.tick(world, state)   -- tick 1: two ticks starved, backstop fires
+        assert.are.equal(1, #world._created)
+        assert.are.equal('r9', world._created[1].params.regionKey)
     end)
 end)

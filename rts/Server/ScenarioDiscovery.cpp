@@ -311,6 +311,7 @@ bool LoadOne(const fs::path& file, ScenarioDiscovery::ScenarioInfo& out) {
         if (out.displayName.empty())
             out.displayName = out.id;
         out.tutorial = GetBoolField(L, scn, "tutorial", false);
+        out.solo     = GetBoolField(L, scn, "solo", false);
         out.retired = GetBoolField(L, scn, "retired", false);
         out.terminal = HasVictoryObjective(L, scn);
         out.sides = ReadSides(L, scn);

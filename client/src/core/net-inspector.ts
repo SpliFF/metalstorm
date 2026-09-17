@@ -48,6 +48,7 @@ const ENVELOPE_NAMES: Record<number, string> = {
     0x06: 'BuildActivity',
     0x07: 'LosBitmap',
     0x08: 'Decals',
+    0x0a: 'TerrainKnowledge',
 };
 
 // Map enum values to type names

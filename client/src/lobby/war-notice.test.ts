@@ -27,7 +27,7 @@ function ev(over: Partial<WarStateEvent> = {}): WarStateEvent {
         room: 7,
         kind: 'back',
         state: 'live',
-        headline: 'Your war is running again.',
+        headline: 'Your Mission is running again.',
         ...over,
     };
 }
@@ -36,11 +36,11 @@ describe('parseWarStateEvent', () => {
     it('reads the lobby\'s payload', () => {
         const p = parseWarStateEvent(JSON.stringify({
             room: 3, kind: 'hibernated', state: 'hibernated',
-            headline: 'Your war went to sleep.',
+            headline: 'Your Mission went to sleep.',
         }));
         expect(p).toEqual({
             room: 3, kind: 'hibernated', state: 'hibernated',
-            headline: 'Your war went to sleep.',
+            headline: 'Your Mission went to sleep.',
         });
     });
 
@@ -94,13 +94,13 @@ describe('noticeFor decides whose business the event is', () => {
         expect(n?.roomId).toBe(7);
         // A nameless room still identifies itself.
         const bare = noticeFor(ev(), [row({ enlisted: true, name: '' })]);
-        expect(bare?.title).toBe('War 7');
+        expect(bare?.title).toBe('Mission 7');
     });
 
     it('shows the lobby\'s own sentence, verbatim', () => {
-        const n = noticeFor(ev({ headline: 'Your war is running again.' }),
+        const n = noticeFor(ev({ headline: 'Your Mission is running again.' }),
                             [row({ enlisted: true })]);
-        expect(n?.detail).toBe('Your war is running again.');
+        expect(n?.detail).toBe('Your Mission is running again.');
     });
 });
 
@@ -136,10 +136,10 @@ describe('noticeFor quotes the frozen world where it is a fact', () => {
             war: { live: false, capacity_per_side: 4, sides: [], state: 'hibernated',
                    frozen_frame: 226800 },
         });
-        const n = noticeFor(ev({ kind: 'hibernated', headline: 'Your war went to sleep.' }), [r]);
+        const n = noticeFor(ev({ kind: 'hibernated', headline: 'Your Mission went to sleep.' }), [r]);
         // Sim time, from the card's own formatter — not a frame number, and not
         // a second spelling of the same arithmetic.
-        expect(n?.detail).toBe('Your war went to sleep. 2h 06m of war waiting for you.');
+        expect(n?.detail).toBe('Your Mission went to sleep. 2h 06m of mission waiting for you.');
     });
 
     it('never quotes a frame next to a loss', () => {
@@ -151,8 +151,8 @@ describe('noticeFor quotes the frozen world where it is a fact', () => {
             war: { live: false, capacity_per_side: 4, sides: [], state: 'crashed',
                    frozen_frame: 226800 },
         });
-        const n = noticeFor(ev({ kind: 'lost', headline: 'Your war stopped without saving.' }), [r]);
-        expect(n?.detail).toBe('Your war stopped without saving.');
+        const n = noticeFor(ev({ kind: 'lost', headline: 'Your Mission stopped without saving.' }), [r]);
+        expect(n?.detail).toBe('Your Mission stopped without saving.');
         expect(n?.detail).not.toContain('waiting for you');
     });
 
@@ -162,7 +162,7 @@ describe('noticeFor quotes the frozen world where it is a fact', () => {
             war: { live: false, capacity_per_side: 4, sides: [], state: 'hibernated',
                    frozen_frame: 0 },
         });
-        const n = noticeFor(ev({ kind: 'hibernated', headline: 'Your war went to sleep.' }), [r]);
-        expect(n?.detail).toBe('Your war went to sleep.');
+        const n = noticeFor(ev({ kind: 'hibernated', headline: 'Your Mission went to sleep.' }), [r]);
+        expect(n?.detail).toBe('Your Mission went to sleep.');
     });
 });

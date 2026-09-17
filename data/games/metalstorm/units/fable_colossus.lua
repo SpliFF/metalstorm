@@ -17,7 +17,9 @@
 -- SPRINGRTS_geometry v8, team mask on materials[0].
 -- Licensing: see the Generated rows in ../ASSETS.md.
 
-return {
+local mk = VFS.Include('units/_builder.lua')
+
+local defs = {
     fable_colossus = {
         name = 'FW-15 Fenrir',
         description = 'Fable assault titan — generated-model showcase',
@@ -46,3 +48,8 @@ return {
         },
     },
 }
+
+-- Bipedal titan (category LAND MOBILE MECH): units/_builder.lua's
+-- trackDefaults fills the FOOT-pattern StdBipedFoot, not tank tread.
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs

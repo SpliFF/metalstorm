@@ -230,6 +230,19 @@ describe('parsing GET /api/world/pois', () => {
         expect(g.pois).toEqual([]);
         expect(g.edges).toEqual([]);
     });
+
+    it('collapses a bidirectional edge seeded as one row per direction', () => {
+        const g = parseWorldGraph({
+            pois: [{ id: 'a', lat: 0, lon: 0 }, { id: 'b', lat: 1, lon: 1 }],
+            edges: [
+                { from: 'a', to: 'b', kind: 'transit', bidirectional: true, transitWorldMs: 100 },
+                { from: 'b', to: 'a', kind: 'transit', bidirectional: true, transitWorldMs: 100 },
+            ],
+        })!;
+        expect(g.edges).toHaveLength(1);
+        expect(edgesFor(g.edges, 'a')).toHaveLength(1);
+        expect(edgesFor(g.edges, 'b')).toHaveLength(1);
+    });
 });
 
 describe('hit test', () => {
@@ -904,12 +917,12 @@ describe('the hover chip summary', () => {
         expect(b.kind).toBe('outpost');
 
         const c = poiSummary(g.pois[2], g);
-        expect(c.stateLabel).toBe('War staging');
+        expect(c.stateLabel).toBe('Mission staging');
         expect(c.stat).toEqual({ label: 'Lands in', value: '6h' });   // the SOONEST window
 
         const d = poiSummary(g.pois[3], g);
         expect(d.stateLabel).toBe('Battle in progress');
-        expect(d.stat).toEqual({ label: 'Battle room', value: '#7' });
+        expect(d.stat).toEqual({ label: 'Battle mission', value: '#7' });
     });
 
     it('knows what is yours', () => {

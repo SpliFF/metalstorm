@@ -12,14 +12,19 @@
 -- (turret-aim-controller.ts) and the axles spin off wire speed
 -- (wheel-spin-driver.ts) — no sim-side unit script, natives are script-less.
 -- Licensing/provenance: the Generated rows in ../ASSETS.md.
+--
+-- Wheeled (axle_f/axle_r above); trackType is set explicitly ahead of
+-- units/_builder.lua's tracked default (see its trackDefaults).
+local mk = VFS.Include('units/_builder.lua')
 
-return {
+local defs = {
     ms_technical = {
         name = 'Technical',
         description = 'Anarchic gun truck — bed-mounted scrap autocannon',
         objectname = 'ms_technical',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         -- 480 hp: still thin-skinned for an armed vehicle (a BAR T1 scout car
         -- is ~600 at this speed), but 320 died to a single MS_AC_S1 cycle plus
         -- change — a raider needs to survive first contact long enough to run.
@@ -47,3 +52,6 @@ return {
         },
     },
 }
+
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs

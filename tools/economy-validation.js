@@ -132,7 +132,8 @@ function printTable(rows) {
       pad(num(r.poolRatio, 2), 8), pad(r.escrowFloat, 7),
       pad(num(r.timeToBrokeMinutes, 1), 7), pad(num(r.deadMinutes, 1), 7),
       pad(r.created, 6), pad(r.completed, 6),
-      r.verdict === 'PASS' ? 'PASS' : `FAIL  ${r.failures}`,
+      r.verdict === 'PASS' || r.verdict === 'INFO'
+        ? r.verdict : `FAIL  ${r.failures}`,
     ].join(' '));
   }
 }
@@ -154,10 +155,19 @@ function main() {
     printTable(rows);
   }
 
-  const failed = rows.filter(r => r.verdict !== 'PASS');
+  // INFO rows (the `mixednorm` reward-normalisation probe) are measured and
+  // printed, never graded — see economy_sim.lua's M.INFO_TYPES.
+  const failed = rows.filter(r => r.verdict !== 'PASS' && r.verdict !== 'INFO');
 
   console.log('');
-  console.log(`Cells: ${rows.length}  passed: ${rows.length - failed.length}  failed: ${failed.length}`);
+  const info = rows.filter(r => r.verdict === 'INFO');
+  console.log(`Cells: ${rows.length}  passed: ${rows.length - failed.length - info.length}`
+    + `  failed: ${failed.length}  informational: ${info.length}`);
+  if (info.length > 0) {
+    console.log('\n`mixednorm` is the reward-normalisation probe (economy §3.2 lever 2):');
+    console.log('the `mixed` war with the lever ON. Measured, never graded — the shipped');
+    console.log('spec has `reward_normalisation_enabled = false`. Compare it to `mixed`.');
+  }
 
   if (failed.length === 0) {
     console.log('✅ Every cell is inside its acceptance band.');

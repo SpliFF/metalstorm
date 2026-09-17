@@ -1,0 +1,11 @@
+{
+  "id": "overlay_oil_stains",
+  "class": "overlay",
+  "prompt": "Dark oil stains and drips pooling near joints, glossy-dark irregular blotches on transparent alpha.",
+  "seed": 100503,
+  "width": 1024,
+  "height": 1024,
+  "tint": "#2b2e31",
+  "output": "art/gen/overlays/oil_stains.png",
+  "post": ["overlay_alpha", "seamless", "pow2"]
+}

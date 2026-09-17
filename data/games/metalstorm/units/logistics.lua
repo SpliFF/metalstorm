@@ -11,8 +11,12 @@
 -- client-side off wire speed by wheel-spin-driver.ts. Natives are script-less
 -- — do NOT add a sim-side unit script to spin them.
 -- Provenance: the Generated rows in ../ASSETS.md.
+--
+-- All four are wheeled (axle_* above); trackType is set explicitly ahead of
+-- units/_builder.lua's tracked default (see its trackDefaults).
+local mk = VFS.Include('units/_builder.lua')
 
-return {
+local defs = {
     -- 6x6 cab-over, plated cargo box. Pieces body + axle_f/axle_m/axle_r.
     ms_supply_truck = {
         name = 'Supply Truck',
@@ -20,6 +24,7 @@ return {
         objectname = 'ms_supply_truck',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 420, mass = 320,
         maxvelocity = 2.6, acceleration = 0.18, brakerate = 0.2, turnrate = 520,
         footprintx = 2, footprintz = 3,
@@ -41,6 +46,7 @@ return {
         objectname = 'ms_fuel_tanker',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 380, mass = 340,
         maxvelocity = 2.4, acceleration = 0.16, brakerate = 0.2, turnrate = 480,
         footprintx = 2, footprintz = 3,
@@ -63,6 +69,7 @@ return {
         objectname = 'ms_courier_car',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 260, mass = 150,
         -- 4.0 (was 4.6, props review 2026-08-20): fast, but a courier truck
         -- should not outrun the dedicated recon scout (4.2, recon_vehicles.lua).
@@ -91,6 +98,7 @@ return {
         objectname = 'ms_expedition_rig',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 520, mass = 420,
         maxvelocity = 2.4, acceleration = 0.16, brakerate = 0.2, turnrate = 460,
         footprintx = 3, footprintz = 3,
@@ -105,3 +113,6 @@ return {
         },
     },
 }
+
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs

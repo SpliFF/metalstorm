@@ -597,6 +597,12 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/ReplayFile.cpp
     rts/Server/SyncedInputJournal.cpp
     rts/Server/FactionData.cpp
+    # PLAN-beta-broadcast.md lane L (cross-lane hunk, outside this lane's
+    # owned files): the lobby reads `.msb` headers the same way it reads
+    # `.msr` ones above, to list broadcasts and refuse an unreadable one
+    # before spawning a relay for it. spring-server links it via the
+    # rts/Server glob already; the lobby's own source list is explicit.
+    rts/Server/BroadcastLog.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
@@ -763,6 +769,11 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
+        # PLAN-beta-broadcast.md S1: the `.msb` container. Reuses replay::Header
+        # and links nothing else, so test_broadcast_log.cpp is a plain doctest.
+        ${CMAKE_SOURCE_DIR}/rts/Server/BroadcastLog.cpp
+        # S2: the relay cursor. Pure policy over BroadcastLog, no sim.
+        ${CMAKE_SOURCE_DIR}/rts/Server/BroadcastRelay.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         # M4 NL proxy: the token bucket, the request gate and the prompt
@@ -829,6 +840,10 @@ if(TEST_SOURCES)
         # and is deliberately NOT here; it is verified on the running stack.
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AISpawn.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIDiscovery.cpp
+        # AI1/F11: BuildAISnapshot needs a live sim, but the rulesParam
+        # visibility rule beside it is pure — test_ai_snapshot_params.cpp
+        # drives AISnapshotGameParamVisible directly.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIStateSnapshot.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

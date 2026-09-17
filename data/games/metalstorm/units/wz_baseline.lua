@@ -16,11 +16,17 @@
 --   wz_cyborg   cybd_std (body) + cy_can (gun)
 --   wz_building blhq (command HQ)
 
+local mk = VFS.Include('units/_builder.lua')
+
 local function baseline(t)
     t.customparams = t.customparams or {}
     t.customparams.ms_class = 'wz_baseline'
     t.customparams.squad_size = '1'          -- single model, no fan-out
     t.customparams.wz_source = 'Warzone 2100 (GPL-2.0-or-later)'
+    -- wz_tank is tracked (prh?trk3); wz_wheeled has its trackType forced to
+    -- the wheeled pattern below before this default runs, so it wins.
+    -- wz_cyborg (INFANTRY) and wz_building (canmove=false) both no-op here.
+    mk.trackDefaults(t)
     return t
 end
 
@@ -47,6 +53,7 @@ return {
         objectname = 'wz_wheeled',
         category = 'LAND MOBILE VEHICLE',   -- type token, matches recon/civ vehicles
         movementclass = 'VEH',
+        trackType = 'StdWheel',   -- Viper hull, wheeled (prl?whl1)
         -- Scout-car ballpark (BAR flash: 730hp / 101 e/s) — already sane.
         maxdamage = 700, mass = 250,
         maxvelocity = 3.2, acceleration = 0.35, brakerate = 0.3, turnrate = 1000,

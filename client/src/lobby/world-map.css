@@ -3,7 +3,7 @@
    world-map-controller.ts as a <style> the first time a WorldMap mounts, so
    the map carries its look wherever the canvas is — the lobby's browser
    screen, the preview harness, a future panel. Colours track lobby.css's
-   world section (#0b1220 / #2a3a55 / #8ad2ff / #ffd479) by eye. */
+   world section (var(--nui-bg-float) / var(--nui-accent-dim) / var(--nui-bg-raised) / var(--nui-accent) / var(--nui-gold)) by eye. */
 
 .wm-chip {
     position: absolute;
@@ -12,29 +12,29 @@
     min-width: 150px;
     max-width: 260px;
     padding: 7px 10px;
-    background: rgba(10, 16, 28, 0.94);
-    border: 1px solid #2a3a55;
-    border-left: 3px solid var(--wm-accent, #8ad2ff);
-    border-radius: 6px;
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-bg-raised);
+    border-left: 3px solid var(--wm-accent, var(--nui-accent));
+    border-radius: var(--nui-radius);
     font: 12px/1.4 system-ui, sans-serif;
-    color: #e9f2fa;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    color: var(--nui-accent);
+    box-shadow: var(--nui-edge);
 }
 .wm-chip[hidden] { display: none !important; }
 .wm-chip-name { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .wm-chip-name .wm-glyph { flex: none; }
-.wm-chip-owner { display: flex; align-items: center; gap: 6px; color: #b9c8d8; }
+.wm-chip-owner { display: flex; align-items: center; gap: 6px; color: var(--nui-text); }
 .wm-chip-swatch {
     display: inline-block; width: 10px; height: 10px; border-radius: 2px;
-    border: 1px solid rgba(0, 0, 0, 0.6); flex: none;
+    border: 1px solid var(--nui-border-swatch); flex: none;
 }
-.wm-chip-state { color: #9fb3c8; }
-.wm-chip-state.wm-state-staging { color: #ffd479; }
-.wm-chip-state.wm-state-active { color: #ff5c5c; }
+.wm-chip-state { color: var(--nui-text-dim); }
+.wm-chip-state.wm-state-staging { color: var(--nui-gold); }
+.wm-chip-state.wm-state-active { color: var(--nui-bad-fill); }
 .wm-chip-stat { display: flex; justify-content: space-between; gap: 12px; margin-top: 3px; }
-.wm-chip-stat b { color: #ffd479; font-variant-numeric: tabular-nums; }
-.wm-chip-you { color: #ffffff; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-.wm-chip-hint { color: #6f8299; font-size: 11px; margin-top: 3px; }
+.wm-chip-stat b { color: var(--nui-gold); font-variant-numeric: tabular-nums; }
+.wm-chip-you { color: var(--nui-text-bright); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.wm-chip-hint { color: var(--nui-text-faint); font-size: 11px; margin-top: 3px; }
 
 .wm-tools {
     position: absolute;
@@ -48,38 +48,38 @@
 }
 .wm-tools button {
     font: 12px/1 system-ui, sans-serif;
-    color: #cfe0f0;
-    background: rgba(10, 16, 28, 0.88);
-    border: 1px solid #2a3a55;
-    border-radius: 5px;
+    color: var(--nui-accent);
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-bg-raised);
+    border-radius: var(--nui-radius);
     padding: 6px 9px;
     cursor: pointer;
 }
-.wm-tools button:hover { background: #1b2a44; color: #ffffff; }
-.wm-tools button:focus-visible { outline: 2px solid #8ad2ff; outline-offset: 1px; }
-.wm-tools button[aria-expanded="true"] { background: #1b2a44; color: #ffffff; }
+.wm-tools button:hover { background: var(--nui-plate-color); color: var(--nui-text-bright); }
+.wm-tools button:focus-visible { outline: 2px solid var(--nui-accent); outline-offset: 1px; }
+.wm-tools button[aria-expanded="true"] { background: var(--nui-plate-color); color: var(--nui-text-bright); }
 
 .wm-legend {
     width: 230px;
     padding: 9px 11px;
-    background: rgba(10, 16, 28, 0.94);
-    border: 1px solid #2a3a55;
-    border-radius: 6px;
+    background: var(--nui-bg-float);
+    border: 1px solid var(--nui-bg-raised);
+    border-radius: var(--nui-radius);
     font: 12px/1.5 system-ui, sans-serif;
-    color: #cfe0f0;
+    color: var(--nui-accent);
 }
 .wm-legend[hidden] { display: none !important; }
-.wm-legend h5 { margin: 0 0 4px; font-size: 11px; color: #8ad2ff; text-transform: uppercase; letter-spacing: 0.05em; }
+.wm-legend h5 { margin: 0 0 4px; font-size: 11px; color: var(--nui-accent); text-transform: uppercase; letter-spacing: 0.05em; }
 .wm-legend h5 + ul { margin-bottom: 8px; }
 .wm-legend ul { list-style: none; margin: 0; padding: 0; }
 .wm-legend li { display: flex; align-items: center; gap: 8px; }
 .wm-legend li .wm-glyph { flex: none; }
 .wm-legend-layers label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .wm-legend-layers input { margin: 0; }
-.wm-legend-keys { color: #6f8299; font-size: 11px; margin-top: 6px; }
+.wm-legend-keys { color: var(--nui-text-faint); font-size: 11px; margin-top: 6px; }
 .wm-legend-keys kbd {
     font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-    padding: 1px 4px; border: 1px solid #2a3a55; border-radius: 3px; color: #cfe0f0;
+    padding: 1px 4px; border: 1px solid var(--nui-bg-raised); border-radius: var(--nui-radius); color: var(--nui-accent);
 }
 
 .wm-announce {
@@ -92,6 +92,6 @@
 
 /* The canvas itself, when the controller mounts it: focusable, touch-safe. */
 .wm-canvas { touch-action: none; outline: none; }
-.wm-canvas:focus-visible { box-shadow: inset 0 0 0 2px #8ad2ff; }
+.wm-canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--nui-accent); }
 .wm-canvas.wm-dragging { cursor: grabbing; }
 .wm-canvas.wm-over-poi { cursor: pointer; }
