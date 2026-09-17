@@ -13,6 +13,7 @@ in the tree spends `--nui-*` tokens and names no colour of its own —
 | `--nui-bg-head` / `-sunken` / `-raised` / `-hover` | Surfaces a step darker (readout glass) or lighter (hover, raised control) than the plate. |
 | `--nui-bg-float` | Floating panels over the 3D scene (menus, chips) — dimmed plate, world reads through. |
 | `--nui-hairline` / `-border` / `-border-hi` / `-border-sunken` | Chalk lines, three weights. A hairline is always chalk-on-steel, never a lighter steel. |
+| `--nui-border-swatch` | Plain black ring on a team/faction colour swatch — the only border that reads over an arbitrary hue. |
 | `--nui-edge` / `-edge-sunken` | The ONLY depth cue. Raises or recesses via a 1px inset shadow — never a drop shadow. |
 | `--nui-text` / `-dim` / `-faint` / `-bright` / `-on-accent` | Chalk text, four weights, plus the dark tint for text on an accent/gold fill. |
 | `--nui-accent` / `-accent-dim` / `-accent-wash` | Phosphor cyan — reserved for anything powered and reporting: readouts, the affirmative action. |

@@ -550,7 +550,7 @@ button.link-button:hover { background: none; color: var(--nui-accent); }
    installed" for a whole session. */
 .empty-state.error-state {
     color: var(--nui-bad);
-    background: rgba(120, 30, 30, 0.18);
+    background: var(--nui-bad-wash);
     border: 1px solid var(--nui-bad-fill);
     border-radius: var(--nui-radius);
     line-height: 1.5;
@@ -1230,7 +1230,7 @@ button.link-button:hover { background: none; color: var(--nui-accent); }
     position: absolute;
     pointer-events: none;
     padding: 6px 9px;
-    background: rgba(10, 16, 28, 0.92);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     font-size: 12px;
@@ -1249,7 +1249,7 @@ button.link-button:hover { background: none; color: var(--nui-accent); }
     max-width: 70%;
     padding: 10px 14px;
     text-align: center;
-    background: rgba(10, 16, 28, 0.85);
+    background: var(--nui-bg-float);
     border: 1px solid var(--nui-bg-raised);
     border-radius: var(--nui-radius);
     color: var(--nui-text-dim);
@@ -1363,7 +1363,7 @@ button.link-button:hover { background: none; color: var(--nui-accent); }
     width: 10px;
     height: 10px;
     border-radius: var(--nui-radius);
-    border: 1px solid rgba(255, 255, 255, 0.25);
+    border: 1px solid var(--nui-border-hi);
     flex: none;
 }
 #world-join-war-btn {
