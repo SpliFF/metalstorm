@@ -36,6 +36,8 @@ import {
     DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
     parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
 } from './capture-subject.js';
+import { generateWaypoints, PATTERNS } from './drive-pattern.js';
+import { buildTrancheLua, trancheUnitCount } from './tranche.js';
 import {
     GAME_SPEED, MAX_STEP_FRAMES,
     buildSequenceHarnessCall, describeSequencePlan, extForMime, formatSequenceMeta,
@@ -3128,6 +3130,197 @@ async function executeTool(name, args) {
                 clientId: relayed?.clientId,
             }) });
             return { content };
+        }
+
+        case 'drive_pattern': {
+            if (!PATTERNS.includes(args.pattern)) {
+                return `Error: drive_pattern needs \`pattern\` — one of ${PATTERNS.join(', ')}.`;
+            }
+            if (!Number.isFinite(args.unitId) && !args.spawn) {
+                return 'Error: drive_pattern needs `unitId` (drive an existing unit) or `spawn` (create one first).';
+            }
+
+            const notes = [];
+            let unitId = args.unitId;
+            if (!Number.isFinite(unitId)) {
+                const s = args.spawn;
+                if (!s || !s.defName || !Number.isFinite(s.x) || !Number.isFinite(s.z)) {
+                    return 'Error: `spawn` needs {defName, x, z}.';
+                }
+                const cmd = buildVerb('spawn', [
+                    [s.defName, 'defName'], [s.x, 'x', 'num'], [s.z, 'z', 'num'],
+                    [s.team ?? 0, 'team', 'num'], [1, 'count', 'num'],
+                ]);
+                const j = await execJsonVerb(cmd, args.roomId);
+                let spawnReply;
+                if (j.json) {
+                    if (j.json.error) return `Error: spawn failed: ${j.json.error}`;
+                    spawnReply = j.json;
+                } else if (j.legacy) {
+                    return `Error: spawn failed: ${j.legacy}`;
+                } else {
+                    const r = await execOnGameServer('server', cmd, args.roomId);
+                    if (!r.success) return `Error: spawn failed: ${r.output}`;
+                    spawnReply = r.output;
+                }
+                const ids = parseSpawnIds(spawnReply);
+                if (!ids.length) return `Error: spawn did not return a unit id (${String(spawnReply).slice(0, 200)}).`;
+                unitId = ids[0];
+                notes.push(`spawned unit id: ${unitId}`);
+                // A unit ordered IMMEDIATELY after spawn_unit can silently
+                // drop its first order (empty queue, never moves) — a
+                // TOOLING GAP note from the pres-decals fire (docs/reviews/
+                // beta/README.md). A short settle before the first order,
+                // confirmed by polling unit_state, fixes it.
+                let exists = false;
+                for (let i = 0; i < 5 && !exists; i++) {
+                    await new Promise((r) => setTimeout(r, 200));
+                    exists = !!(await sampleUnitMotion(unitId, args.roomId));
+                }
+                if (!exists) notes.push(`unit ${unitId} did not confirm via unit_state while settling — ordering anyway`);
+            }
+
+            const origin = await sampleUnitMotion(unitId, args.roomId);
+            if (!origin) return `Error: unit ${unitId} not found (unit_state came back empty).`;
+
+            let waypoints;
+            try {
+                waypoints = generateWaypoints({
+                    pattern: args.pattern, center: { x: origin.pos.x, z: origin.pos.z },
+                    radius: args.radius, length: args.length,
+                    laps: args.laps, segmentsPerLap: args.segmentsPerLap,
+                });
+            } catch (e) { return `Error: ${e.message}`; }
+            if (waypoints.length > 200) {
+                return `Error: drive_pattern would issue ${waypoints.length} waypoints (max 200) — reduce laps or segmentsPerLap.`;
+            }
+
+            // Queued MOVE orders: reuses give_order's own verb-building (cmdId
+            // 10 = MOVE), first waypoint opts 0 (replace), the rest opts 32
+            // (SHIFT/queue) — the exact "opts 0 then 32" pattern the
+            // hand-built pres-decals figure-8 used.
+            const startFrame = await readSimFrame(args.roomId);
+            for (let i = 0; i < waypoints.length; i++) {
+                const wp = waypoints[i];
+                const cmd = buildVerb('order', [
+                    [unitId, 'unitId', 'num'], [10, 'cmdId', 'num'],
+                    [wp.x, 'params[0]', 'num'], [0, 'params[1]', 'num'], [wp.z, 'params[2]', 'num'],
+                    [i === 0 ? 0 : 32, 'opts', 'num'],
+                ]);
+                const r = await execOnGameServer('server', cmd, args.roomId);
+                if (!r.success) return `Error: waypoint ${i} order refused: ${r.output}`;
+            }
+
+            // Wait for the LAST waypoint (order_and_film's own polling
+            // pattern, aimed at position-arrival rather than motion onset).
+            const last = waypoints[waypoints.length - 1];
+            const arriveRadius = Number.isFinite(args.arriveRadius) ? args.arriveRadius : 64;
+            const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 60000;
+            const pollMs = Math.max(50, Number.isFinite(args.pollMs) ? args.pollMs : 500);
+            const started = Date.now();
+            let finalState = origin;
+            let arrived = false;
+            while (Date.now() - started < timeoutMs) {
+                const cur = await sampleUnitMotion(unitId, args.roomId);
+                if (!cur) { notes.push(`unit ${unitId} vanished while waiting to arrive`); break; }
+                finalState = cur;
+                if (Math.hypot(cur.pos.x - last.x, cur.pos.z - last.z) <= arriveRadius) { arrived = true; break; }
+                await new Promise((r) => setTimeout(r, pollMs));
+            }
+            if (!arrived) notes.push(`did not confirm arrival within ${timeoutMs}ms — returning last known position`);
+            const endFrame = await readSimFrame(args.roomId);
+
+            const result = {
+                unitId, pattern: args.pattern, waypoints,
+                arrived, framesElapsed: (endFrame ?? startFrame ?? 0) - (startFrame ?? 0),
+                finalPosition: finalState.pos,
+                notes,
+            };
+            if (!args.capture) return result;
+
+            // Optional capture: reuse the same capture_subject plumbing
+            // (imported above) for a top + low pair at the final position,
+            // rather than re-deriving the pause/reveal/restore dance.
+            const content = [{ type: 'text', text: JSON.stringify(result, null, 2) }];
+            for (const angle of ['top', 'low']) {
+                try {
+                    const capArgs = { unitId, angle, maxDim: args.maxDim, roomId: args.roomId, clientId: args.clientId };
+                    const state = await observeSimState(args.roomId, false);
+                    const plan = planCapture(capArgs, state);
+                    const cctx = { spawnedIds: [], revealed: state.los.allOn === true, notes: [] };
+                    const runStep = (step) => runPlanStep(step, args.roomId, cctx);
+                    let relayed;
+                    try {
+                        for (const s of plan.pre) await runStep(s);
+                        relayed = await clientEval('test', buildHarnessCall({
+                            ...capArgs,
+                            __revealed: cctx.revealed,
+                            syncPresentation: plan.pre.some((st) => st.op === 'pause'),
+                        }), args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+                    } finally {
+                        for (const s of plan.post) {
+                            try { await runStep(s); } catch { /* best-effort restore */ }
+                        }
+                    }
+                    if (relayed.fallback) {
+                        content.push({ type: 'text', text: `capture (${angle}) unavailable: relay ${relayed.fallback}` });
+                        continue;
+                    }
+                    if (!relayed.success) {
+                        content.push({ type: 'text', text: `capture (${angle}) error: ${relayed.output}` });
+                        continue;
+                    }
+                    const shot = clientEvalValue(relayed.output);
+                    const m = shot?.dataUrl && /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+                    if (!m) {
+                        content.push({ type: 'text', text: `capture (${angle}): unexpected reply` });
+                        continue;
+                    }
+                    content.push({ type: 'image', data: m[2], mimeType: m[1] });
+                    content.push({ type: 'text', text: `capture (${angle}): ${formatCaptureMeta(shot, {
+                        notes: cctx.notes, plan: describePlan(plan), clientId: relayed.clientId,
+                    })}` });
+                } catch (e) {
+                    content.push({ type: 'text', text: `capture (${angle}) threw: ${e.message}` });
+                }
+            }
+            return { content };
+        }
+
+        case 'populate_tranche': {
+            const rung = args.rung ?? 'XL900';
+            let lua;
+            try {
+                lua = buildTrancheLua(rung, {
+                    center: args.center,
+                    teamNorth: args.teamNorth,
+                    teamSouth: args.teamSouth,
+                    armored: args.armored,
+                    soldierDef: args.soldierDef,
+                    tankDef: args.tankDef,
+                    suppressGameOver: args.suppressGameOver,
+                });
+            } catch (e) { return `Error: ${e.message}`; }
+
+            if (args.clearFirst) {
+                const teamNorth = Number.isFinite(args.teamNorth) ? args.teamNorth : 0;
+                const teamSouth = Number.isFinite(args.teamSouth) ? args.teamSouth : 4;
+                for (const team of [teamNorth, teamSouth]) {
+                    await execOnGameServer('server', buildVerb('clear', [[team, 'team', 'num']]), args.roomId);
+                }
+            }
+
+            const result = await execOnGameServer('LuaRules', lua, args.roomId);
+            if (!result.success) return `Error: ${result.output || 'exec failed'}`;
+            let parsed;
+            try { parsed = JSON.parse(result.output); }
+            catch { return `Error: unexpected populate_tranche reply: ${String(result.output).slice(0, 400)}`; }
+            return {
+                rung,
+                expectedUnits: trancheUnitCount(rung),
+                ...parsed,
+                note: 'ids kept server-side in GG.perfTranche[team] — read them back with exec_lua if needed.',
+            };
         }
 
         // --- Scenario authoring (S3) -----------------------------------

@@ -11,6 +11,8 @@ import { MAX_STEP_FRAMES } from './capture-sequence.js';
 import { WORLD_TOOLS } from './world-tools.js';
 import { AI_TOOLS } from './ai-tools.js';
 import { NL_TOOLS } from './nl-tools.js';
+import { PATTERNS } from './drive-pattern.js';
+import { RUNGS } from './tranche.js';
 
 // --- Tool definitions ---
 // Shared tail for every tool that goes over the P7 browser-eval relay —
@@ -835,6 +837,75 @@ export const TOOLS = [
                 clientId: { type: 'number' },
             },
             required: ['unitId'],
+        },
+    },
+    {
+        name: 'drive_pattern',
+        description: '**Drive a unit through a scripted waypoint loop and (optionally) film it — one call.** '
+            + 'Closes a TOOLING GAP found while chasing the missing-tread-decals defect (docs/reviews/beta/README.md): '
+            + 'there was no dedicated figure-8/waypoint-loop routine, so that fire hand-built one from 7-8 individual `give_order` MOVE calls. '
+            + `Computes a waypoint loop (pattern: ${PATTERNS.join('|')}) around the unit's CURRENT position, issues it as queued MOVE orders `
+            + '(cmdId 10, first waypoint opts 0, the rest opts 32 to queue — same `give_order` plumbing), waits until the unit reaches the last '
+            + 'waypoint (or `timeoutMs`), and reports the waypoints, sim frames elapsed, and final position. '
+            + 'Give `unitId` for an existing unit, or `spawn:{defName,x,z,team?}` to create one first — spawning waits a short settle before the '
+            + 'first order goes in, because a unit ordered immediately after `spawn_unit` can silently drop that first order (empty queue, never moves). '
+            + 'With `capture:true`, shoots `capture_subject` top + low at the final position once the loop finishes (or times out).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                unitId: { type: 'number', description: 'Drive this existing unit. Required unless `spawn` is given.' },
+                spawn:  { type: 'object', description: 'Spawn a unit first, then drive it: {defName, x, z, team?}. Ignored if `unitId` is given.' },
+
+                pattern: { type: 'string', enum: PATTERNS, description: 'Waypoint loop shape.' },
+                radius:  { type: 'number', description: 'Loop radius in elmos, for figure8/circle/zigzag. Default 300.' },
+                length:  { type: 'number', description: 'End-to-end span in elmos, for line/zigzag. Default 300.' },
+                laps:    { type: 'number', default: 1, description: 'Repeats of the loop (line/zigzag: round trips). Default 1.' },
+                segmentsPerLap: { type: 'number', description: 'Waypoints per lap for figure8/circle/zigzag. Default 12, minimum 3.' },
+
+                arriveRadius: { type: 'number', default: 64, description: 'Distance (elmos) from the final waypoint that counts as "arrived". Default 64.' },
+                timeoutMs:    { type: 'number', default: 60000, description: 'Give up waiting for arrival after this long (still returns the last known position). Default 60000.' },
+                pollMs:       { type: 'number', default: 500, description: 'Wait between arrival polls. Default 500.' },
+
+                capture:  { type: 'boolean', default: false, description: 'Shoot capture_subject top + low at the final position once the loop ends.' },
+                maxDim:   { type: 'number', description: 'Passed through to the capture (longest edge in pixels). Only used when capture:true.' },
+
+                roomId:   { type: 'number' },
+                clientId: { type: 'number', description: 'Admin client id to use for the optional capture. Only used when capture:true.' },
+            },
+            required: ['pattern'],
+        },
+    },
+    {
+        name: 'populate_tranche',
+        description: '**Spawn PLAN-perf.md §M19\'s XL-battle population in one batch.** '
+            + 'Closes a TOOLING GAP (docs/reviews/beta/README.md / PLAN-perf.md "Not done"): no committed script reproduced the ~900-unit XL900 '
+            + `population \`profile\`/\`browser_test perfDump\` need to measure p95 reproducibly. Rungs (cumulative): ${RUNGS.join(' → ')} — `
+            + 'each rung is S plus every increment up to it, exactly as PLAN-perf.md §M19\'s tranche table records it (same map centre, same grid '
+            + 'shape, `perRow` widening with the tranche). Runs the S-battle `grid()` Lua helper (bulk `Spring.CreateUnit` + `Spring.SetUnitArmored` '
+            + 'in ONE `exec_lua` LuaRules call — confirmed crash-free at this scale across M6/M9/M19-M26) rather than one `spawn_unit` round trip '
+            + 'per unit. Map is meridian_basin\'s contested-core ford, centre (8192, 8192); teams default to 0 (north) and 4 (south) per '
+            + '`modOptions.war_sides = "compact:0,union:4"` — pass `teamNorth`/`teamSouth` if a room\'s side mapping differs. '
+            + 'Spawned ids are kept server-side in `GG.perfTranche[team]`, not returned inline (900 ids is a lot of tokens for no benefit) — '
+            + 'read them back with `exec_lua` if needed. Does NOT clear any existing population first unless `clearFirst:true`.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                rung: { type: 'string', enum: RUNGS, default: 'XL900', description: 'Cumulative population size to reach.' },
+
+                teamNorth: { type: 'number', default: 0, description: 'North-bank team id.' },
+                teamSouth: { type: 'number', default: 4, description: 'South-bank team id.' },
+                center:    { type: 'object', description: 'Override the grid centre: {x, z}. Default the meridian_basin ford (8192, 8192).' },
+
+                soldierDef: { type: 'string', description: 'Override the infantry def (default "ms_soldiers_s1"). Must be a bare token — no spaces or quotes.' },
+                tankDef:    { type: 'string', description: 'Override the armour def (default "ms_tanks_s2"). Must be a bare token — no spaces or quotes.' },
+                armored:    { type: 'boolean', default: true, description: 'Apply Spring.SetUnitArmored(u, true, 0.00003) so the population sustains rather than dying to stray fire.' },
+
+                clearFirst:       { type: 'boolean', default: false, description: 'Clear teamNorth and teamSouth (`clear_units` per team) before spawning, for a clean population.' },
+                suppressGameOver: { type: 'boolean', default: false, description: 'Patch Spring.GameOver to a no-op first — meridian_basin\'s ford is scenario objective 1 ("control"); capturing it ends the game and freezes the sim mid-measurement (PLAN-perf.md M10).' },
+
+                roomId: { type: 'number' },
+            },
+            required: [],
         },
     },
 

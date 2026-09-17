@@ -38,7 +38,7 @@ export const SECTIONS = [
         tools: [
             'spawn_unit', 'kill_unit', 'damage_unit', 'give_order', 'clear_units', 'revive_team',
             'set_stockpile', 'set_debug_logging', 'pause_sim', 'set_sim_speed', 'step_sim',
-            'set_los', 'set_cheats', 'set_unit_invulnerable',
+            'set_los', 'set_cheats', 'set_unit_invulnerable', 'drive_pattern', 'populate_tranche',
         ],
     },
     {

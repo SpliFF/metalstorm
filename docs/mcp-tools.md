@@ -9,7 +9,7 @@ the schemas themselves so the names, types, defaults and required fields cannot 
 a caller actually gets. For setup, the SQLite/`SPRING_DB` rules and the hand-written narrative
 sections, see [debugging-tools.md § Claude / MCP Integration](debugging-tools.md#claude--mcp-integration).
 
-77 tools in 13 groups.
+79 tools in 13 groups.
 
 ## Rules that apply to everything
 
@@ -30,7 +30,7 @@ sections, see [debugging-tools.md § Claude / MCP Integration](debugging-tools.m
 - **Logs** — `get_logs`, `search_logs`
 - **Reading the sim** — `get_game_state`, `list_units`, `get_unit_state`, `get_frame`, `get_combat_summary`, `list_gadgets`, `profile`
 - **Executing code** — `exec_lua`, `api_request`
-- **Driving the sim** — `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `revive_team`, `set_stockpile`, `set_debug_logging`, `pause_sim`, `set_sim_speed`, `step_sim`, `set_los`, `set_cheats`, `set_unit_invulnerable`
+- **Driving the sim** — `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `revive_team`, `set_stockpile`, `set_debug_logging`, `pause_sim`, `set_sim_speed`, `step_sim`, `set_los`, `set_cheats`, `set_unit_invulnerable`, `drive_pattern`, `populate_tranche`
 - **Unit and weapon defs** — `get_unit_def`, `list_unit_defs`, `get_weapon_def`, `clear_defs_cache`, `get_lua_source`
 - **Processes, rooms and readiness** — `list_processes`, `list_stack`, `cleanup_stack`, `probe_game`, `wait_for_game`, `query_db`, `list_sessions`
 - **Starting and stopping** — `launch_scenario`, `launch_direct`, `launch_game`, `end_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client`
@@ -317,6 +317,44 @@ Make a specific unit immune to damage (toggles a CUnit::invulnerable flag that s
 |---|---|
 | `unitId` (number, **required**) |  |
 | `invulnerable` (boolean) | true → immune; false → restore normal damage; omit → return current state. |
+| `roomId` (number) |  |
+
+#### `drive_pattern`
+
+**Drive a unit through a scripted waypoint loop and (optionally) film it — one call.** Closes a TOOLING GAP found while chasing the missing-tread-decals defect (docs/reviews/beta/README.md): there was no dedicated figure-8/waypoint-loop routine, so that fire hand-built one from 7-8 individual `give_order` MOVE calls. Computes a waypoint loop (pattern: figure8\|circle\|line\|zigzag) around the unit's CURRENT position, issues it as queued MOVE orders (cmdId 10, first waypoint opts 0, the rest opts 32 to queue — same `give_order` plumbing), waits until the unit reaches the last waypoint (or `timeoutMs`), and reports the waypoints, sim frames elapsed, and final position. Give `unitId` for an existing unit, or `spawn:{defName,x,z,team?}` to create one first — spawning waits a short settle before the first order goes in, because a unit ordered immediately after `spawn_unit` can silently drop that first order (empty queue, never moves). With `capture:true`, shoots `capture_subject` top + low at the final position once the loop finishes (or times out).
+
+| Argument | Meaning |
+|---|---|
+| `unitId` (number) | Drive this existing unit. Required unless `spawn` is given. |
+| `spawn` (object) | Spawn a unit first, then drive it: {defName, x, z, team?}. Ignored if `unitId` is given. |
+| `pattern` (string, `figure8`\|`circle`\|`line`\|`zigzag`, **required**) | Waypoint loop shape. |
+| `radius` (number) | Loop radius in elmos, for figure8/circle/zigzag. Default 300. |
+| `length` (number) | End-to-end span in elmos, for line/zigzag. Default 300. |
+| `laps` (number, default `1`) | Repeats of the loop (line/zigzag: round trips). Default 1. |
+| `segmentsPerLap` (number) | Waypoints per lap for figure8/circle/zigzag. Default 12, minimum 3. |
+| `arriveRadius` (number, default `64`) | Distance (elmos) from the final waypoint that counts as "arrived". Default 64. |
+| `timeoutMs` (number, default `60000`) | Give up waiting for arrival after this long (still returns the last known position). Default 60000. |
+| `pollMs` (number, default `500`) | Wait between arrival polls. Default 500. |
+| `capture` (boolean, default `false`) | Shoot capture_subject top + low at the final position once the loop ends. |
+| `maxDim` (number) | Passed through to the capture (longest edge in pixels). Only used when capture:true. |
+| `roomId` (number) |  |
+| `clientId` (number) | Admin client id to use for the optional capture. Only used when capture:true. |
+
+#### `populate_tranche`
+
+**Spawn PLAN-perf.md §M19's XL-battle population in one batch.** Closes a TOOLING GAP (docs/reviews/beta/README.md / PLAN-perf.md "Not done"): no committed script reproduced the ~900-unit XL900 population `profile`/`browser_test perfDump` need to measure p95 reproducibly. Rungs (cumulative): S → M → L → XL750 → XL900 → XL1200 — each rung is S plus every increment up to it, exactly as PLAN-perf.md §M19's tranche table records it (same map centre, same grid shape, `perRow` widening with the tranche). Runs the S-battle `grid()` Lua helper (bulk `Spring.CreateUnit` + `Spring.SetUnitArmored` in ONE `exec_lua` LuaRules call — confirmed crash-free at this scale across M6/M9/M19-M26) rather than one `spawn_unit` round trip per unit. Map is meridian_basin's contested-core ford, centre (8192, 8192); teams default to 0 (north) and 4 (south) per `modOptions.war_sides = "compact:0,union:4"` — pass `teamNorth`/`teamSouth` if a room's side mapping differs. Spawned ids are kept server-side in `GG.perfTranche[team]`, not returned inline (900 ids is a lot of tokens for no benefit) — read them back with `exec_lua` if needed. Does NOT clear any existing population first unless `clearFirst:true`.
+
+| Argument | Meaning |
+|---|---|
+| `rung` (string, `S`\|`M`\|`L`\|`XL750`\|`XL900`\|`XL1200`, default `"XL900"`) | Cumulative population size to reach. |
+| `teamNorth` (number, default `0`) | North-bank team id. |
+| `teamSouth` (number, default `4`) | South-bank team id. |
+| `center` (object) | Override the grid centre: {x, z}. Default the meridian_basin ford (8192, 8192). |
+| `soldierDef` (string) | Override the infantry def (default "ms_soldiers_s1"). Must be a bare token — no spaces or quotes. |
+| `tankDef` (string) | Override the armour def (default "ms_tanks_s2"). Must be a bare token — no spaces or quotes. |
+| `armored` (boolean, default `true`) | Apply Spring.SetUnitArmored(u, true, 0.00003) so the population sustains rather than dying to stray fire. |
+| `clearFirst` (boolean, default `false`) | Clear teamNorth and teamSouth (`clear_units` per team) before spawning, for a clean population. |
+| `suppressGameOver` (boolean, default `false`) | Patch Spring.GameOver to a no-op first — meridian_basin's ford is scenario objective 1 ("control"); capturing it ends the game and freezes the sim mid-measurement (PLAN-perf.md M10). |
 | `roomId` (number) |  |
 
 ## Unit and weapon defs
