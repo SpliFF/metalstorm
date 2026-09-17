@@ -347,16 +347,22 @@ COMPOUND_LOTS = 16
 #                 than an "allowing for towers" — a spec with an exception in it
 #                 is a spec nobody reads.
 #
-# THERE IS NO WALL IN THIS GAME TODAY, AND THERE IS NO STAND-IN EITHER.
-# `ms_barricade_set` is model-integration M2 content that has not landed in
-# this clone (verified 2026-08-06, same check as this file's header). Unlike a
-# dwelling, a wall has no honest substitute in the shipped roster: the only
-# things that would tile a line are the staticdefense turrets, and a stockade
-# built out of gun turrets does not read as a stockade, it reads as the
-# fortified tier — which would destroy the exact distinction this table exists
-# to draw. So `wall`, `corner` and `gate` resolve to NOTHING today and say so
-# by name (`StagedTown.gaps`), on the same principle as PROPS below, while
-# `tower` and `gun` resolve to shipped staticdefense and are visible now.
+# THE LINE PARTS NOW HAVE ONE DEF EACH (2026-09-17). They did not until the
+# units-assets lane split the `ms_barricade_set` kit sheet into three models
+# with their root offsets zeroed — `ms_barricade_wall` (8.0 m),
+# `ms_barricade_corner` (5.2 m, two arms) and `ms_barricade_gate` (8.2 m, with
+# the swinging leaf) — which is exactly what §T3 was gated on: the kit rendered
+# all three elements at once, so "a corner at a corner" was unstampable.
+# Each part therefore lists the split def FIRST and the kit sheet after it, so
+# a clone that has only the kit still stages SOMETHING rather than nothing, on
+# the same ladder principle as ROLES. `anchor` (a post at a run's end) has no
+# def of its own and falls to the wall segment.
+#
+# There is still no stand-in outside that kit, and there must not be: the only
+# other things that would tile a line are the staticdefense turrets, and a
+# stockade built out of gun turrets reads as the fortified tier, destroying the
+# exact distinction this table draws. A clone with neither def reports the line
+# parts by name (`StagedTown.gaps`), as before.
 
 PERIMETER = {
     "span": 110,              # elmos of wall one kit piece covers
@@ -425,10 +431,10 @@ PERIMETER = {
     "min_run": 200,
 
     "defs": {
-        "wall": ["ms_barricade_set"],
-        "corner": ["ms_barricade_set"],
-        "gate": ["ms_barricade_set"],
-        "anchor": ["ms_barricade_set"],
+        "wall": ["ms_barricade_wall", "ms_barricade_set"],
+        "corner": ["ms_barricade_corner", "ms_barricade_set"],
+        "gate": ["ms_barricade_gate", "ms_barricade_set"],
+        "anchor": ["ms_barricade_wall", "ms_barricade_set"],
         "tower": ["ms_watchtower", "ms_staticdefense_s1"],
         # "existing staticdefense at gates" — the brief's own words, so this
         # one names shipped defs on purpose and has no briefed head. s2 over s1
@@ -475,7 +481,8 @@ DECOR = {
 # tarp and no cart in this game, and none is coming from the lanes that have
 # landed. model-integration §M3 shipped the game's first eight featuredefs and
 # they are three wrecks, two bridges and three ancient-tech relics — nothing
-# street-scale. So four of the five kinds resolve to NOTHING, on purpose and
+# street-scale (the 2026-09-17 wave added sixteen more, and every one of
+# those is a relic, a span or a lighthouse — still nothing street-scale). So four of the five kinds resolve to NOTHING, on purpose and
 # visibly (`StagedTown.prop_gaps` reports them by name), and the fifth uses
 # the brief's own escape hatch: "supply-dump-style dressing". `ms_supply_dump`
 # is a real M2 building that reads as stacked goods, which is what a crate
@@ -536,6 +543,15 @@ LANDMARKS = [
     {"def": "ms_dig_site",       "where": "edge", "weight": 1.5, "metres": (12, 12)},
     {"def": "ms_monolith_spire", "where": "edge", "weight": 0.8, "metres": (9, 9)},
     {"def": "ms_vault_door",     "where": "edge", "weight": 0.4, "metres": (20, 16)},
+    # The batch-04 RUINS (features/ancient.lua, 2026-09-17): the relics that
+    # read as landscape rather than as a prize. A pylon or a line of obelisks
+    # on the outskirts is the same story the spire tells — the town is built
+    # on old ground — at a scale a town edge can hold. The caches and war
+    # machines are deliberately NOT here; they are scenario_templates'
+    # ANCIENT_SITES prizes, one placer block per def.
+    {"def": "ms_anc_shield_pylon",  "where": "edge", "weight": 0.8, "metres": (11, 11)},
+    {"def": "ms_anc_obelisk_field", "where": "edge", "weight": 0.8, "metres": (26, 6)},
+    {"def": "ms_anc_aqueduct",      "where": "edge", "weight": 0.5, "metres": (10, 30)},
 ]
 
 # Chance a town has ANY landmark, then how many it may have. Tuned so that

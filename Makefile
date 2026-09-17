@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-gadget-lua test-gadget-lua-baseline test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
+.PHONY: check-skills setup build build-release test test-cpp test-client test-debug-mcp test-all dev-client generate-protocol export-metalstorm-specs clean test-ai-lua test-ai-eval test-gadget-lua test-gadget-lua-baseline test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn determinism-gate
 
 # First-time setup
 setup:
@@ -57,8 +57,16 @@ test-all: test-cpp test-client
 # caches (`data/games/<id>/cache/defs`) and a map's region graph, so they need
 # a game to have been run once in this tree and fail loudly otherwise. Running
 # them from a gate that has never booted a server would be a permanent red.
-test-debug-mcp:
+test-debug-mcp: check-skills
 	cd tools/debug-mcp && npm install --silent && node --test
+
+# Skill/agent drift check: every MCP tool, tool argument, exec verb, HTTP
+# route, window.test method and file path named in .claude/{skills,agents}
+# must exist in the code. Hung off test-debug-mcp because the tool catalogue
+# it checks against is that suite's subject — a tool renamed there without the
+# skills following is precisely what this catches. No build, no servers.
+check-skills:
+	tools/claude-config/check-skills.sh
 
 # headless-batch pure unit tests (no server build needed): matrix expansion
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity

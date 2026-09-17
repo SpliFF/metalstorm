@@ -46,6 +46,12 @@ local heavy = {
     },
 }
 
+-- Tracked (tracks_l/tracks_r above): units/_builder.lua's trackDefaults
+-- fills StdTank. Applied before dressed_variant() so every faction skin
+-- copies the same track fields.
+local mk = VFS.Include('units/_builder.lua')
+mk.trackDefaults(heavy)
+
 -- Dressing-kit showcase defs: each faction's kit on the heavy hull.
 local function dressed_variant(faction, display_name)
     local def = {}

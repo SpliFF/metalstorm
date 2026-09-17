@@ -234,6 +234,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 0,
         'gfx.fxLights':       false,
         'gfx.distortion':     false,
+        'gfx.nativeFx':       false,
         'gfx.sky':            false,  // L-ATMOS: dome hidden, fog drops to cheap LINEAR
         'gfx.ssao':           false,
         'gfx.grain':          false,
@@ -249,6 +250,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 1,
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
+        'gfx.nativeFx':       true,
         'gfx.sky':            true,
         'gfx.ssao':           false,
         'gfx.grain':          true,
@@ -264,6 +266,7 @@ export const PRESETS: Record<string, Record<string, SettingValue>> = {
         'gfx.particleQuality': 2,
         'gfx.fxLights':       true,
         'gfx.distortion':     false,
+        'gfx.nativeFx':       true,
         'gfx.sky':            true,
         'gfx.ssao':           true,
         'gfx.grain':          true,
@@ -306,9 +309,13 @@ const REGISTRY: SettingDef[] = [
     { key: 'gfx.bloom', type: 'bool', default: true, scope: 'client',
       label: 'Bloom' },
     // Particle density tier: 0=low, 1=medium, 2=high. Drives the CEG
-    // per-spawn particle-count + lifetime budget (setParticleBudget).
-    // requiresRestart because translation runs once per session at CEG
-    // ingest — see ceg-translator.ts setParticleBudget.
+    // per-spawn particle-count + lifetime budget (setParticleBudget) AND
+    // (PLAN-beta-presentation L-FX step 5) the Metalstorm native-FX pool
+    // capacity (8k/24k/50k particles) + per-effect spawn-count scale
+    // (0.5/0.75/1.0, native-fx/fx-game-loader.ts NATIVE_FX_QUALITY_TIERS).
+    // requiresRestart for the pool-capacity half (a WebGL buffer can't
+    // resize live — see NativeFxRenderer's capacities doc); the count-scale
+    // half applies live via NativeFxGamePass.setQuality.
     { key: 'gfx.particleQuality', type: 'int', default: 2, scope: 'client',
       min: 0, max: 2, label: 'Particle Density', requiresRestart: true },
     // Dynamic FX lighting (muzzle/explosion/projectile lights). Live-
@@ -322,6 +329,12 @@ const REGISTRY: SettingDef[] = [
     // pause. Off by default until that's fixed; the toggle stays in the panel.
     { key: 'gfx.distortion', type: 'bool', default: false, scope: 'client',
       label: 'Heat Distortion' },
+    // Kill switch for the Metalstorm native-FX pass (PLAN-beta-presentation
+    // L-FX step 5) — game-processor.ts skips creating it entirely when
+    // false, falling back to the CEG/procedural path unconditionally.
+    // requiresRestart: read once at pass construction, same as particleQuality.
+    { key: 'gfx.nativeFx', type: 'bool', default: true, scope: 'client',
+      label: 'Native Weapon FX', requiresRestart: true },
 
     // L-ATMOS (PLAN-beta-presentation.md): sky dome, SSAO2, film grain.
     // requiresRestart on ssao — it allocates a geometry-buffer + blur RTT

@@ -235,3 +235,67 @@
     font-size: 9px;
     opacity: 0.75;
 }
+
+/* ── Mentor card ────────────────────────────────────────────────────── */
+
+/* The relationship, made visible (PLAN-beta.md "Mentorship") — its own plate
+   inside the panel body: a mentored player, an AI offer and an error note
+   are three distinct states, not rows in a list. Not a top-level panel, so
+   no rivets (native-ui.css metaphor rule 3) and no edge shadow of its own —
+   the frame around it already carries one. */
+.ms-mentor-card {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px;
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+}
+
+/* Who: an identity chip, not a sentence — the mentor is a fact to spot at a
+   glance, the same affordance as a rank/ID token elsewhere in the system. */
+.ms-mentor-card__who {
+    align-self: flex-start;
+    padding: 2px 7px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    color: var(--nui-text);
+    font: var(--nui-font-display);
+    font-size: 11px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+}
+
+/* Scope: a muted readout — present, but quieter than the order line below
+   it, which is the thing that actually needs the player's attention. */
+.ms-mentor-card__scope {
+    color: var(--nui-text-faint);
+    font: var(--nui-font-mono);
+    font-size: 10px;
+}
+
+/* Order: phosphor-on-glass, the same recessed treatment as any other
+   powered readout, with a hazard-yellow rule on the left — an order issued
+   over the player's head is mission-critical, not routine chatter (the
+   colour reused from DIRECTION.md's table, not the destructive stripe
+   texture, which stays reserved for destructive actions only). */
+.ms-mentor-card__order {
+    padding: 3px 6px;
+    background: var(--nui-bg-sunken);
+    border-left: 2px solid var(--nui-gold);
+    border-radius: var(--nui-radius);
+    color: var(--nui-accent);
+    font: var(--nui-font-mono);
+    font-size: 10px;
+}
+
+/* Note: small chalk prose — an aside (a fetch error, a status line), not a
+   readout, so it stays in the text family rather than mono. */
+.ms-mentor-card__note {
+    color: var(--nui-text-dim);
+    font: var(--nui-font);
+    font-size: 10.5px;
+}

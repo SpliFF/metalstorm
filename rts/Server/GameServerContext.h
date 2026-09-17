@@ -14,16 +14,17 @@
 // always has.
 
 #include "NetworkServer.h"          // ClientID
+#include "WebTransport/WebTransportServer.h"  // GetClientCount, for HasStreamConsumers
 #include "DynamicJoin.h"            // SessionKind, WAR_SIDE_CAPACITY_DEFAULT
 #include "PlayerSlotReservation.h"  // ReservedPlayerSlots (§8.1)
 #include "AI/AISpawn.h"             // AISpawnEnv
+#include "BroadcastTap.h"           // broadcast::Tap
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 
-class WebTransportServer;
 class CSimulation;
 class Database;
 class SessionManager;
@@ -138,6 +139,19 @@ struct GameServerContext {
     /// those are only parsed once the game data is up. No client can be
     /// connected before then, so nothing reads it half-built.
     const playerslots::ReservedPlayerSlots&   reservedSlots;
+
+    /// The broadcast tap, or nullptr when `--broadcast-out` was not given
+    /// (PLAN-beta-broadcast.md S1). Owned by main(); read on the sim thread.
+    broadcast::Tap* broadcastTap = nullptr;
+
+    /// Anything that consumes this tick's outbound stream: a connected client,
+    /// or the tap. Replaces the bare `GetClientCount() > 0` gates — a tapped
+    /// mission must keep streaming with nobody watching, because the log IS
+    /// the audience. Cost stated: an empty tapped mission still serialises.
+    /// Acceptable — idle missions hibernate and the writer closes cleanly.
+    bool HasStreamConsumers() const {
+        return broadcast::HasStreamConsumers(rtcServer.GetClientCount(), broadcastTap);
+    }
 
     /// Roots a mid-game AI spawn resolves against (PLAN-metalstorm-ai.md §10
     /// task 4(b), AISpawn.h). Filled in server_main from the same values the

@@ -17,7 +17,7 @@ import {
 function notice(over: Partial<WarNotice> = {}): WarNotice {
     return {
         roomId: 7, kind: 'hibernated', title: 'Meridian',
-        detail: 'Your war went to sleep.', cls: 'war-notice-wait', canJoin: true,
+        detail: 'Your Mission went to sleep.', cls: 'war-notice-wait', canJoin: true,
         ...over,
     };
 }

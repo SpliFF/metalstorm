@@ -29,6 +29,9 @@ function state(over: Partial<ReplayStateInfo> = {}): ReplayStateInfo {
         gameId: 'metalstorm',
         mapId: 'meridian_basin',
         povTeam: -1,
+        broadcast: false,
+        behindSeconds: 0,
+        liveEdgeFrame: 0,
         ...over,
     };
 }
@@ -109,6 +112,37 @@ describe('describeReplayBar', () => {
         const m = describeReplayBar(state(), 200, 'cannot seek backwards yet');
         expect(m.refusal).toBe('cannot seek backwards yet');
         expect(describeReplayBar(state(), 200).refusal).toBe('');
+    });
+
+    it('leads with the delay chip and hides POV for a broadcast', () => {
+        // PLAN-beta-broadcast.md lane C: the tap is Global-visibility only —
+        // there is no other POV to switch to, and saying so would be a lie.
+        const m = describeReplayBar(
+            state({ broadcast: true, behindSeconds: 3600, povTeam: -1 }), 200);
+        expect(m.status).toContain('Broadcast · 1h behind');
+        expect(m.status).not.toContain('POV');
+    });
+
+    it('formats the delay in minutes under an hour (dev-floor override)', () => {
+        const m = describeReplayBar(state({ broadcast: true, behindSeconds: 90 }), 200);
+        expect(m.status).toContain('Broadcast · 2m behind');
+    });
+
+    it('drops the no-checkpoints line for a broadcast — backward seek works via keyframes', () => {
+        const m = describeReplayBar(
+            state({ broadcast: true, behindSeconds: 3600, checkpointFrames: [] }), 200);
+        expect(m.status).not.toContain('forwards only');
+    });
+
+    it('marks the live edge on the track for a broadcast', () => {
+        const m = describeReplayBar(
+            state({ broadcast: true, behindSeconds: 3600, liveEdgeFrame: 3075 }), 200);
+        expect(m.liveEdgePosition).toBeCloseTo(0.5, 3);
+    });
+
+    it('reports no live edge outside a broadcast', () => {
+        expect(describeReplayBar(state(), 200).liveEdgePosition).toBeNull();
+        expect(describeReplayBar(state(), 200).isBroadcast).toBe(false);
     });
 
     it('places checkpoint ticks along the track when a recording has them', () => {

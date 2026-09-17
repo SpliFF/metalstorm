@@ -143,6 +143,16 @@ struct AuthIdentity {
     int32_t     team      = -1;   ///< roster-derived; replay re-derives and compares
     int32_t     playerNum = -1;   ///< allocation order; replay re-derives and compares
     bool        spectator = false;
+
+    // ── Journey identity (PLAN-beta-journey.md §0) ────────────────────────
+    // DB-derived like `username`/`role`, and mirrored onto the sim player as
+    // custom options, so a re-execution must read them from the record rather
+    // than from an accounts database it does not have. As required as every
+    // other field — a recording is same-binary bound (ReplayFile.h), so a
+    // payload without them is a truncation, not an older format.
+    int32_t     tier      = 0;    ///< Standing::TierFor(users.standing)
+    std::string mentor;           ///< mentor username, "ai", or empty
+    std::string callsign;         ///< display name; falls back to username
 };
 
 /// Encode/decode for AuthIdentity's record payload. Little-endian, fixed-width

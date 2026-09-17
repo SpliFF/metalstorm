@@ -102,6 +102,9 @@ export interface Board {
     placeById: Map<number, ObjectivePlace | null>;
     frame: number;
     teamId?: number;
+    /** Local sim playerNum — `objective_<id>_player == me` is a task ASSIGNED
+     *  to this player (PLAN-beta.md "Mentorship"). */
+    playerId?: number;
     delegated: ReadonlySet<number>;
     /** id → wall-clock ms at which its announcement highlight expires. */
     announcedUntil: Map<number, number>;
@@ -176,7 +179,8 @@ function mount(ctx: WidgetContext): void {
 
     const board: Board = {
         byId: new Map(), placeById: new Map(), frame: 0,
-        teamId: ctx.identity?.teamId, delegated: new Set(), announcedUntil: new Map(),
+        teamId: ctx.identity?.teamId, playerId: ctx.identity?.playerId,
+        delegated: new Set(), announcedUntil: new Map(),
     };
     const handles = new Map<number, { handle: DrilldownHandle; travellable: boolean }>();
     const announcer = createObjectiveAnnouncer();
@@ -375,6 +379,24 @@ function delegatedSet(ctx: WidgetContext): ReadonlySet<number> {
 // ────────────────────────────── rung 1 ──────────────────────────────────
 
 /**
+ * "from <callsign>" when this objective was handed to the local player.
+ *
+ * The sim publishes WHO it is for (`objective_<id>_player`) and not who set
+ * it — the only source for that is the mentorship the player is in, which is
+ * the relationship the task actually came out of. No mentor and it reads as a
+ * bare task rather than inventing an author.
+ */
+function taskFrom(board: Board, o: ObjectiveRecord): string | null {
+    const me = board.playerId;
+    if (me === undefined || me < 0) return null;
+    const forPlayer = (o as { player?: number | string }).player;
+    if (forPlayer === undefined || Number(forPlayer) !== me) return null;
+    const mentor = uiStore.mentorOf(me);
+    if (mentor === undefined) return 'yours';
+    return `from ${mentor < 0 ? 'your AI mentor' : uiStore.callsignOf(mentor)}`;
+}
+
+/**
  * A name, a state word and at most three numbers — the ladder's rung-1 budget,
  * spent on the three an objective is actually acted on by.
  *
@@ -406,6 +428,9 @@ export function summaryFor(board: Board, id: number): DrilldownSummary {
         stats.push({ label: '⬡', value: String(Math.round(o.reward)), tone: 'gold' });
     }
 
+    const task = taskFrom(board, o);
+    if (task) stats.push({ label: 'Task', value: task, tone: 'accent' });
+
     return {
         title: chipTitle(board, o, place),
         state: stateWord(o, { frame: board.frame, teamId: board.teamId }),
@@ -423,6 +448,11 @@ function renderDetail(host: HTMLElement, board: Board, id: number): void {
     // The sentence the player clicked, first — a context panel that opens on
     // different words than the chip it came from reads as a different thing.
     host.append(detailRow('Task', taskLine(o, place)));
+
+    // Who it is for. Only rendered when it is for THIS player: an objective
+    // assigned to someone else is the team's board as usual.
+    const from = taskFrom(board, o);
+    if (from) host.append(detailRow('Assigned', from === 'yours' ? 'to you' : `to you, ${from}`));
 
     const prose = document.createElement('p');
     prose.className = 'nui-dd__prose';

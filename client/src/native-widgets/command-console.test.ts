@@ -75,6 +75,42 @@ describe('command-console widget', () => {
         expect(loader).toContain('registerSummonActions');
     });
 
+    it('registers window.test.nl on init and removes it on dispose', async () => {
+        // The spring-debug `nl_command` tool PARSES an utterance into an
+        // envelope but cannot run one; this hook is the execute half, and it
+        // must be the console's own path (same envelope, same executor) rather
+        // than a second entry point that could drift from it.
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        const harness: Record<string, unknown> = {};
+        (window as unknown as { test?: unknown }).test = harness;
+        const mount = document.createElement('div');
+        document.body.append(mount);
+        const widget = (await import('./command-console.js')).default as {
+            init: (ctx: unknown) => void; dispose: () => void;
+        };
+        try {
+            widget.init({
+                store: {
+                    getSelection: () => ({ unitIds: [] }), getOrgGroups: () => [],
+                    getDirectives: () => [], subscribe: () => () => {},
+                },
+                mount, identity: { playerId: 0, teamId: 0, accountId: 0 },
+                sendCommand: () => {},
+            });
+            expect(typeof harness.nl).toBe('function');
+            // The hook is a plain forward: it hands back `runUtteranceText`'s
+            // own promise (which the console path resolves with nothing), so
+            // awaiting the hook awaits the sentence.
+            await expect((harness.nl as (u: string) => Promise<unknown>)('scout north'))
+                .resolves.toBeUndefined();
+        } finally {
+            widget.dispose();
+            mount.remove();
+            delete (window as unknown as { test?: unknown }).test;
+        }
+        expect(harness.nl).toBeUndefined();
+    });
+
     it('RETIRES the command composer — the last resident bottom-centre panel', () => {
         // DESIGN-DRILLDOWN §7 files `[VERB][SUBJECT][TARGET][WHEN]` + a
         // priority slider under RETIRE: it is the spreadsheet the directive

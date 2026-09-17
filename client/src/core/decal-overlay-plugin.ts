@@ -13,10 +13,17 @@
  * VRAM regardless of map size.
  *
  * The overlay stores a DEPTH FIELD (R = depression depth, G = albedo
- * darkening). We derive the surface normal from the depth field's GRADIENT
+ * darkening, B = raise — PLAN-decal-tracks §3, float RTTs only). We derive
+ * the surface normal from the RELIEF field's (depth − raise) GRADIENT
  * (central difference), normalised to world-space slope so coarse + fine
- * produce matching normals despite their different texel→world spacing.
+ * produce matching normals despite their different texel→world spacing —
+ * pit walls and raised ridges both fall out of the one signed field.
  * Lighting runs after, so sun movement re-shades the relief live.
+ *
+ * `DECAL_RAISE` (set from the overlay's `fineState.hasRaise`) toggles between
+ * that float path and the RGBA8 fallback, where there is no B channel and
+ * depth is instead reconstructed from R (coarse byte) + A (residual) — see
+ * decal-overlay.ts's format-selection doc comment.
  */
 
 import { MaterialPluginBase, Material, Texture, Color3 } from '@babylonjs/core';
@@ -50,7 +57,7 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
 
     constructor(material: Material) {
         // priority 200: run after the stock texture/normal setup.
-        super(material, 'DecalOverlay', 200, { DECAL_OVERLAY: false });
+        super(material, 'DecalOverlay', 200, { DECAL_OVERLAY: false, DECAL_RAISE: false });
     }
 
     get isEnabled(): boolean { return this._enabled; }
@@ -64,6 +71,7 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     prepareDefines(defines: any): void {
         defines.DECAL_OVERLAY = this._enabled;
+        defines.DECAL_RAISE = this._enabled && this.fineState?.hasRaise === 1;
     }
 
     getClassName(): string { return 'DecalOverlayPlugin'; }
@@ -125,18 +133,39 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                 CUSTOM_FRAGMENT_DEFINITIONS: `#ifdef DECAL_OVERLAY
                     uniform sampler2D decalCoarse;
                     uniform sampler2D decalFine;
-                    // Sample the depth field at uv + its 4-tap central-difference
-                    // gradient. Returns (depth, darkening, dDepth_x, dDepth_z) —
-                    // the raw per-texel differences; the caller divides by the
-                    // world-per-texel spacing to get a resolution-independent
-                    // world-space slope.
+                    // Sample the depth+darkening field and its 4-tap central-
+                    // difference gradient. Returns (depth, darkening, dRelief_x,
+                    // dRelief_z) — the raw per-texel differences; the caller
+                    // divides by the world-per-texel spacing to get a
+                    // resolution-independent world-space slope.
+                    //
+                    // "Relief" is depth minus raise (PLAN-decal-tracks §3): a
+                    // signed field whose gradient gives pit walls AND ridges from
+                    // one tilt computation, matching the sign convention this
+                    // shader already used for depth alone (so raise=0 reproduces
+                    // today's behaviour exactly — DECAL_RAISE is off in the RGBA8
+                    // fallback, which packs depth across R+A instead of a B
+                    // raise channel and has no raise to subtract).
                     vec4 dDecSample(sampler2D tex, vec2 uv, float texel) {
-                        vec2 base = texture2D(tex, uv).rg;
-                        float dxp = texture2D(tex, uv + vec2(texel, 0.0)).r;
-                        float dxm = texture2D(tex, uv - vec2(texel, 0.0)).r;
-                        float dzp = texture2D(tex, uv + vec2(0.0, texel)).r;
-                        float dzm = texture2D(tex, uv - vec2(0.0, texel)).r;
-                        return vec4(base.x, base.y, dxp - dxm, dzp - dzm);
+                        vec4 c = texture2D(tex, uv);
+                        #ifdef DECAL_RAISE
+                            float depth = c.r;
+                            float relXp = texture2D(tex, uv + vec2(texel, 0.0)).r - texture2D(tex, uv + vec2(texel, 0.0)).b;
+                            float relXm = texture2D(tex, uv - vec2(texel, 0.0)).r - texture2D(tex, uv - vec2(texel, 0.0)).b;
+                            float relZp = texture2D(tex, uv + vec2(0.0, texel)).r - texture2D(tex, uv + vec2(0.0, texel)).b;
+                            float relZm = texture2D(tex, uv - vec2(0.0, texel)).r - texture2D(tex, uv - vec2(0.0, texel)).b;
+                        #else
+                            // §3 fallback: depth packed R (coarse byte) + A
+                            // (residual); gradient taps use the coarse byte only
+                            // — the residual is sub-texel noise, immaterial to
+                            // the normal tilt.
+                            float depth = c.r + c.a;
+                            float relXp = texture2D(tex, uv + vec2(texel, 0.0)).r;
+                            float relXm = texture2D(tex, uv - vec2(texel, 0.0)).r;
+                            float relZp = texture2D(tex, uv + vec2(0.0, texel)).r;
+                            float relZm = texture2D(tex, uv - vec2(0.0, texel)).r;
+                        #endif
+                        return vec4(depth, c.g, relXp - relXm, relZp - relZm);
                     }
                     // --- world-space procedural detail (crisp, resolution-independent) ---
                     float dDecHash(vec2 p) {
@@ -174,9 +203,14 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                     vec2 _cuv = vPositionW.xz / decalWorldSize;
                     vec4 _cs = dDecSample(decalCoarse, _cuv, decalCoarseTexel);
                     vec2 _coarseWPT = decalWorldSize * decalCoarseTexel;   // elmos/texel (x,z)
-                    vec2 _grad = _cs.zw / (2.0 * _coarseWPT);              // d(depth)/d(world)
+                    vec2 _grad = _cs.zw / (2.0 * _coarseWPT);              // d(relief)/d(world)
                     float _depth = _cs.x;
                     float _dark  = _cs.y;
+                    #ifdef DECAL_RAISE
+                        float _raise = texture2D(decalCoarse, _cuv).b;
+                    #else
+                        float _raise = 0.0;
+                    #endif
 
                     // --- FINE window (sharp near camera), feathered to coarse ---
                     if (decalFineEnabled > 0.5) {
@@ -193,20 +227,30 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                             _depth = mix(_depth, _fs.x, _fw);
                             _dark  = mix(_dark,  _fs.y, _fw);
                             _grad  = mix(_grad,  _fgrad, _fw);
+                            #ifdef DECAL_RAISE
+                                float _fraise = texture2D(decalFine, _fuv).b;
+                                _raise = mix(_raise, _fraise, _fw);
+                            #endif
                         }
                     }
 
-                    // Depth-field normal: ground pushed DOWN by _depth, so the
-                    // tangent tilt is +slope (pit walls face inward + up). Summed
-                    // (overlapping) craters give one deeper, correctly-lit pit.
+                    // Relief-field normal: ground pushed DOWN by depth and UP by
+                    // raise, so the tangent tilt is +slope(depth−raise) (pit walls
+                    // face inward + up, berm/rim ridges face outward + up — same
+                    // sign convention this shader always used for depth alone, so
+                    // raise=0 reproduces prior behaviour exactly). Summed
+                    // (overlapping) marks give one deeper/taller, correctly-lit
+                    // relief.
                     vec2 _tilt = clamp(_grad * decalNormalScale, -1.0, 1.0);
                     normalW = normalize(normalW + vec3(_tilt.x, 0.0, _tilt.y));
 
-                    // Crater-detail mask keyed on DEPTH: craters (deep) get the
-                    // churn + rubble; vehicle/foot tracks (shallow) stay below the
-                    // threshold and read clean.
-                    float _mask = smoothstep(0.40, 0.70, _depth);
-                    float _reliefMag = _depth;
+                    // Crater/rim-detail mask keyed on RELIEF MAGNITUDE: deep
+                    // craters (depth) get the churn + rubble as before, and now so
+                    // does a raised rim/berm even where depth itself is shallow —
+                    // the depth-only term is untouched (raise=0 reduces this to
+                    // exactly the old formula), so this only ADDS coverage.
+                    float _mask = max(smoothstep(0.40, 0.70, _depth), smoothstep(0.20, 0.45, _raise));
+                    float _reliefMag = max(_depth, _raise);
                     if (_mask > 0.02) {
                         vec2 _wp = vPositionW.xz;
                         vec2 _churn = dDecGrad(_wp * 0.045)
@@ -225,7 +269,14 @@ export class DecalOverlayPlugin extends MaterialPluginBase {
                     }
 
                     // Darkening (G), capped by decalDarken (~0.5 = max 50%).
-                    baseColor.rgb *= (1.0 - min(_dark, 1.0) * decalDarken);
+                    // Tints toward dirt-brown (DIRECTION.md dust khaki #6b5a3e)
+                    // instead of a flat multiply toward black — disturbed ground
+                    // reads as dirt, not soot (PLAN-decal-tracks §9 task 3d).
+                    // ×2.0 mirrors decal-renderer.ts's scarColorTint convention
+                    // (0.5 grey sampled at max darkening ≈ the tint's own colour).
+                    vec3 _dirtTint = vec3(0.4196, 0.3529, 0.2431);
+                    float _darkAmt = min(_dark, 1.0) * decalDarken;
+                    baseColor.rgb = mix(baseColor.rgb, baseColor.rgb * _dirtTint * 2.0, _darkAmt);
                 #endif`,
             };
         }

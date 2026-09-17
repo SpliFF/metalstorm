@@ -254,16 +254,21 @@ describe('two squads crossing the same ground', () => {
 // they are computed by formation.js. Editing a template means editing both
 // ports and re-deriving this table — which is exactly the moment somebody
 // should have to think about it.
+// RE-DERIVED 2026-09-17 with the `sizes` correction of units-assets review
+// 2026-09-10 finding 4: the clearance column is now the SHIPPED hull's measured
+// extent over two (tanks 4.8/9.9/13.2/20.3 m, mechs s1 3.0 m), not the
+// DESIGN-GUIDE scale row. The soldier rows are unchanged — their metre values
+// moved but still round to the same 3-elmo radius.
 const M3_SQUAD_EXTENTS = [
   // def,               type,     count, authoredRadius, clearance, outerRadius
-  ['ms_tanks_s1',       'wedge',      8, 24,  18, 135],
-  ['ms_tanks_s2',       'wedge',      4, 34,  34, 145],
-  ['ms_tanks_s3',       'wedge',      2, 48,  48, 126],
+  ['ms_tanks_s1',       'wedge',      8, 24,  19, 143],
+  ['ms_tanks_s2',       'wedge',      4, 34,  40, 170],
+  ['ms_tanks_s3',       'wedge',      2, 48,  53, 139],
   ['ms_soldiers_s1',    'line',      16, 24,   3,  55],
   ['ms_soldiers_s2',    'line',       8, 34,   3,  37],
   ['ms_artillery_s1',   'line',       8, 24,  18, 163],
   ['ms_artillery_s2',   'line',       4, 34,  30, 134],
-  ['ms_mechs_s1',       'wedge',      8, 24,   7,  53],
+  ['ms_mechs_s1',       'wedge',      8, 24,  12,  90],
   ['ms_engineers_s1',   'line',       8, 24,   3,  27],
   ['ms_civilians',      'blob',      12, 20,   3,  17],
   ['ms_ships_s1',       'column',     4, 24,  80, 448],
@@ -290,7 +295,7 @@ describe('squad ground extent — the golden table the Lua port must reproduce',
   }
 
   it('a single hull covers exactly its own clearance — no formation to measure', () => {
-    expect(outerRadius('wedge', 1, 68, 104)).toBe(104);   // ms_tanks_s4
+    expect(outerRadius('wedge', 1, 68, 81)).toBe(81);     // ms_tanks_s4
   });
 
   it('memberSpacingMul is the shared input, so a change there moves BOTH ports', () => {

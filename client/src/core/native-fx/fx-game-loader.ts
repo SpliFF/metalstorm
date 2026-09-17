@@ -45,6 +45,7 @@ import {
 import {
     NativeFxRenderer,
     NATIVE_FX_SHADER_FILES,
+    type NativeFxPoolCapacities,
     type NativeFxSources,
     type PoolCounts,
     type TracerHandle,
@@ -55,16 +56,33 @@ import {
     resolveWeaponFx, slotsHaveEffects, weaponTypeForProjectileType,
     type NativeFxSink,
 } from '../weapon-fx-resolver.js';
+import type { UnitFxMap } from '../unit-fx-dispatch.js';
 
 /** The authored JSON the game path consumes. `unitFx` is loaded here (same
  *  fetch batch, one round trip each) so the unit-FX dispatcher can read it
- *  without a second loader; nothing in this file drives it yet. */
+ *  without a second loader. */
 export interface FxGameAssets {
     sources: NativeFxSources;
     library: FxLibrary;
     weaponFx: WeaponFxMap;
-    unitFx: unknown;
+    unitFx: UnitFxMap;
 }
+
+/** `gfx.particleQuality` (0/1/2) → native particle-pool capacity and
+ *  per-effect spawn-count scale (PLAN-beta-presentation L-FX step 5). Pool
+ *  capacity is read once at pass construction (a WebGL buffer can't resize
+ *  live); countScale is read live via setQuality. */
+export const NATIVE_FX_QUALITY_TIERS: ReadonlyArray<{ particleCap: number; countScale: number }> = [
+    { particleCap: 8000, countScale: 0.5 },    // 0 low
+    { particleCap: 24000, countScale: 0.75 },  // 1 medium
+    { particleCap: 50000, countScale: 1.0 },   // 2 high
+];
+
+/** Global wind drift (elmos/s) the game pass sets on construction — a
+ *  gentle, constant breeze (PLAN-beta-presentation L-FX step 7). Biased on
+ *  one horizontal axis so drift reads as directional rather than a diffuse
+ *  wobble. */
+const DEFAULT_WIND: readonly [number, number, number] = [4, 0, 1.5];
 
 /** Slot in the spawn scheduler: an emitter authored with `delay`. */
 interface DelayedSpawn {
@@ -105,7 +123,7 @@ export async function loadFxGameAssets(
     for (const f of NATIVE_FX_SHADER_FILES) sources[f] = await get(`shaders/fx/${f}`);
     const library = JSON.parse(await get('effects/library.json')) as FxLibrary;
     const weaponFx = JSON.parse(await get('effects/weapon-fx.json')) as WeaponFxMap;
-    const unitFx = JSON.parse(await get('effects/unit-fx.json')) as unknown;
+    const unitFx = JSON.parse(await get('effects/unit-fx.json')) as UnitFxMap;
     return { sources, library, weaponFx, unitFx };
 }
 
@@ -148,6 +166,10 @@ export class NativeFxGamePass implements NativeFxSink {
     private readonly engine: Engine;
     private readonly lib: FxLibrary;
     private readonly weaponFx: WeaponFxMap;
+    /** Unit-side FX map (death/damage-smoke/move-dust), consumed by
+     *  unit-fx-dispatch.ts — fetched here (one round trip) and read off the
+     *  pass rather than loaded twice. */
+    readonly unitFx: UnitFxMap;
 
     /** FX clock in seconds — the uNow every spawned row is stamped with. */
     private now = 0;
@@ -162,19 +184,31 @@ export class NativeFxGamePass implements NativeFxSink {
     private disposed = false;
     /** Optional sink for impact scars (game-processor wires the decal overlay). */
     private scarSink: ((x: number, y: number, z: number, radius: number) => void) | null = null;
+    /** `gfx.particleQuality` per-effect spawn-count scale (step 5) — live,
+     *  applied at every spawn/retrigger. Pool capacity itself is fixed at
+     *  construction (see NATIVE_FX_QUALITY_TIERS). */
+    private countScale = NATIVE_FX_QUALITY_TIERS[NATIVE_FX_QUALITY_TIERS.length - 1].countScale;
 
-    constructor(scene: Scene, engine: Engine, assets: FxGameAssets, atlas: WebGLTexture) {
+    constructor(
+        scene: Scene, engine: Engine, assets: FxGameAssets, atlas: WebGLTexture,
+        qualityTier = NATIVE_FX_QUALITY_TIERS.length - 1,
+    ) {
         this.scene = scene;
         this.engine = engine;
         this.lib = assets.library;
         this.weaponFx = assets.weaponFx;
+        this.unitFx = assets.unitFx;
         this.gl = getEngineGl(engine);
+        const tier = NATIVE_FX_QUALITY_TIERS[Math.max(0, Math.min(NATIVE_FX_QUALITY_TIERS.length - 1, qualityTier))];
+        this.countScale = tier.countScale;
+        const capacities: NativeFxPoolCapacities = { particle: tier.particleCap };
         this.renderer = new NativeFxRenderer(this.gl, assets.sources, {
             atlas,
             atlasCols: assets.library.atlas.cols,
             atlasRows: assets.library.atlas.rows,
             trailStrips: buildTrailStrips(this.gl),
-        });
+        }, capacities);
+        this.renderer.setWind(...DEFAULT_WIND);
         this.observer = scene.onAfterRenderingGroupObservable.add((info) => {
             const g = info.renderingGroupId;
             if (g > this.maxGroupSeen) this.maxGroupSeen = g;
@@ -184,6 +218,14 @@ export class NativeFxGamePass implements NativeFxSink {
 
     setScarSink(fn: ((x: number, y: number, z: number, radius: number) => void) | null): void {
         this.scarSink = fn;
+    }
+
+    /** Live-update the per-effect count scale (pool capacity stays fixed —
+     *  see the class doc). Called from game-processor's `gfx.particleQuality`
+     *  subscription. */
+    setQuality(tier: number): void {
+        const t = NATIVE_FX_QUALITY_TIERS[Math.max(0, Math.min(NATIVE_FX_QUALITY_TIERS.length - 1, tier))];
+        this.countScale = t.countScale;
     }
 
     // ── NativeFxSink ────────────────────────────────────────────────────────
@@ -202,7 +244,9 @@ export class NativeFxGamePass implements NativeFxSink {
     spawn(effect: string, x: number, y: number, z: number,
         dx: number, dy: number, dz: number): void {
         if (this.disposed) return;
-        const ctx: SpawnContext = { x, y, z, dirX: dx, dirY: dy, dirZ: dz, now: this.now };
+        const ctx: SpawnContext = {
+            x, y, z, dirX: dx, dirY: dy, dirZ: dz, now: this.now, countScale: this.countScale,
+        };
         let batch;
         try {
             batch = compileEffect(this.lib, effect, ctx);
@@ -392,6 +436,7 @@ function jitterDir(
  */
 export async function createNativeFxGamePass(
     scene: Scene, engine: Engine, gameId: string, lobbyHttpUrl = '',
+    qualityTier = NATIVE_FX_QUALITY_TIERS.length - 1,
 ): Promise<NativeFxGamePass | null> {
     if (!gameId) return null;
     try {
@@ -399,7 +444,7 @@ export async function createNativeFxGamePass(
         const gl = getEngineGl(engine);
         const atlas = await loadAtlasTexture(
             gl, assets.library, `${lobbyHttpUrl}${DEFAULT_BASE}/${gameId}`);
-        return new NativeFxGamePass(scene, engine, assets, atlas);
+        return new NativeFxGamePass(scene, engine, assets, atlas, qualityTier);
     } catch (err) {
         console.warn(`[native-fx] no native FX for game "${gameId}": ${(err as Error).message}`);
         return null;

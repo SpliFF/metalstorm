@@ -13,7 +13,9 @@
 -- backward collapse, holds final frame) — playable from the model-viewer
 -- clip buttons (task 6). Licensing: Generated rows in ../ASSETS.md.
 
-return {
+local mk = VFS.Include('units/_builder.lua')
+
+local defs = {
     fable_mech = {
         name = 'MW-3 Strider',
         description = 'Fable recon walker — generated-model showcase (authored clips)',
@@ -39,3 +41,8 @@ return {
         },
     },
 }
+
+-- Bipedal walker (category LAND MOBILE MECH): units/_builder.lua's
+-- trackDefaults fills the FOOT-pattern StdBipedFoot, not tank tread.
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs
