@@ -83,17 +83,17 @@ inline const char* WarTerminalReasonToString(WarTerminalReason r) {
 inline const char* WarTerminalReasonHeadline(WarTerminalReason r) {
     switch (r) {
         case WarTerminalReason::None:
-            return "The war continues.";
+            return "The Mission continues.";
         case WarTerminalReason::VictoryObjective:
-            return "The war was won on its objective.";
+            return "The Mission was won on its objective.";
         case WarTerminalReason::FactionElimination:
             return "A faction was driven out of the theatre.";
         case WarTerminalReason::OperatorRetire:
-            return "The war was retired.";
+            return "The Mission was retired.";
         case WarTerminalReason::SeasonEnd:
             return "The season ended.";
     }
-    return "The war ended.";
+    return "The Mission ended.";
 }
 
 /// Everything the terminal-condition rule is allowed to see. Values only.
