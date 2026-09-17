@@ -219,7 +219,7 @@ export function briefing(o: ObjectiveRecord, place: ObjectivePlace | null): stri
     }
 
     if (o.victory === 1) {
-        sentences.push('This is the war\'s terminal objective: winning it ends the war.');
+        sentences.push('This is the mission\'s terminal objective: winning it ends the mission.');
     }
     if (isJoint(o)) {
         sentences.push('This one is shared with a parley partner — it pays whoever finishes it first, not both of you.');
@@ -244,7 +244,7 @@ export function rewardPhrase(o: ObjectiveRecord): string {
 /** The consequence line — the half the old panel never showed at all. */
 export function consequencePhrase(o: ObjectiveRecord, teamId?: number): string {
     if (o.victory === 1) {
-        return 'Winning this ends the war. Losing the ground to the other side hands them the same win.';
+        return 'Winning this ends the mission. Losing the ground to the other side hands them the same win.';
     }
     if (o.state === 'complete') {
         return completedByUs(o, teamId) ? 'Paid.' : 'The reward went to whoever finished it.';

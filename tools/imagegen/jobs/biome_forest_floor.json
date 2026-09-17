@@ -1,11 +1,21 @@
 {
   "id": "biome_forest_floor",
   "class": "biome",
-  "prompt": "Dead-forest floor litter, root scars and bare duff over worn-steel-toned soil, scattered deadfall bark chips, no living canopy.",
+  "prompt": "Dead-forest floor: thick brown leaf litter, twigs, bark fragments and exposed root scars over dark worn-steel-grey soil, no cracks.",
   "seed": 100402,
   "width": 1024,
   "height": 1024,
-  "colors": ["#2b2e31", "#3d3a2e", "#5a5f63"],
+  "colors": [
+    "#2b2e31",
+    "#3d3a2e",
+    "#5a5f63"
+  ],
   "output": "art/gen/biomes/forest_floor_diffuse.png",
-  "post": ["seamless", "pow2", "pbr_derive", "ktx2"]
+  "post": [
+    "palette_grade",
+    "seamless",
+    "pow2",
+    "pbr_derive",
+    "ktx2"
+  ]
 }

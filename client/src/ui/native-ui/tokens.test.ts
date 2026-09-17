@@ -21,6 +21,11 @@ const GUARDED = [
     resolve(CLIENT, 'src/native-widgets/command-composer.css'),
     resolve(CLIENT, 'src/native-widgets/command-console.css'),
     resolve(REPO, 'data/games/metalstorm/ui/metalstorm.ui.css'),
+    resolve(CLIENT, 'src/ui/lobby/lobby.css'),
+    resolve(CLIENT, 'src/lobby/world-map.css'),
+    resolve(CLIENT, 'src/lobby/world-screen.css'),
+    resolve(CLIENT, 'src/ui/briefing/briefing.css'),
+    resolve(CLIENT, 'src/ui/game-over/game-over.css'),
 ];
 
 /** Strip /* ... *​/ comments: a hex quoted in prose is documentation. */
@@ -28,11 +33,14 @@ function stripComments(css: string): string {
     return css.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
-const HEX = /#[0-9a-fA-F]{3,8}\b/g;
+// A hex literal, or an rgb()/rgba()/hsl()/hsla() function call — all of them
+// name a colour in place instead of spending a --nui-* token. tokens.css is
+// the one file allowed to name colours (it is not in GUARDED).
+const COLOR_LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\(/g;
 
 describe('design tokens', () => {
     it.each(GUARDED)('names no colour of its own: %s', (file) => {
-        const found = stripComments(readFileSync(file, 'utf8')).match(HEX) ?? [];
+        const found = stripComments(readFileSync(file, 'utf8')).match(COLOR_LITERAL) ?? [];
         expect(found).toEqual([]);
     });
 
@@ -49,6 +57,9 @@ describe('design tokens', () => {
         }
         // moment-hud.ts sets this one inline, per pointer.
         defined.add('--nui-edge-angle');
+        // world-map-controller.ts sets this one inline, per claim marker; the
+        // CSS side always carries a --nui-accent fallback.
+        defined.add('--wm-accent');
 
         const missing = new Set<string>();
         for (const file of [...GUARDED, resolve(CLIENT, 'src/ui/native-ui/tokens.css')]) {

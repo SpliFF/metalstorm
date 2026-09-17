@@ -211,8 +211,18 @@ end
 -- proposes nor answers. It does not reject either — a rejection would take the
 -- decision away from the human and start the 2 min E6 cooldown in their name.
 -- The proposal is left pending for the humans; main.lua narrates the deferral
--- once. The single exception is ACCEPTING an `intel` offer: it obliges the
--- team to nothing (the PROPOSER reveals their strength) and is free.
+-- once. There are two exceptions:
+--   1. ACCEPTING an `intel` offer: it obliges the team to nothing (the
+--      PROPOSER reveals their strength) and is free.
+--   2. A proposal whose KIND the profile's own `evaluateProposal` hook
+--      answered explicitly (planner.lua's `explicit` flag, ai-eval PARLEY2):
+--      a profile that states an opinion about this exact kind — mentor.lua's
+--      "accept any ceasefire/pact, whatever the plan was about to do" — has
+--      the human's policy baked into its authorship, unlike the general
+--      shared valuation (evaluateOne) which reasons about strength/trust on
+--      the humans' behalf without them having said anything. The mentor's
+--      pact-teaching moment (recon_01's Diplomacy Mission) needs this: a
+--      verdict nobody sends teaches nothing.
 -- When the last human leaves, the same VM upgrades to full_side (caretaker)
 -- and gains full parley authority; pacts it makes then are team pacts and
 -- survive the humans' return like any other synced state.
@@ -235,18 +245,23 @@ end
 
 --- Answer a pending proposal addressed to our team.
 --- `proposal` is the Picture record ({ id, kind, ... }) or a bare id (then the
---- kind is unknown and the deference exception cannot apply). `decision` is
+--- kind is unknown and neither deference exception can apply). `decision` is
 --- accept | reject | counter (alias counterTerms); `extra.kind` optionally
---- re-kinds a counter. Returns ok[, reason] — the reason names WHY a response
---- was not sent (deferred / no_verb / bad_decision / rejected-by-engine), so a
+--- re-kinds a counter. `explicit` (planner.lua's `Planner.evaluateProposals`
+--- output) is true iff the profile's own `evaluateProposal` hook — not the
+--- shared valuation — spoke for this proposal's kind; see the deference-rule
+--- header above. Returns ok[, reason] — the reason names WHY a response was
+--- not sent (deferred / no_verb / bad_decision / rejected-by-engine), so a
 --- caller can narrate rather than silently drop.
-function Actuators:respondProposal(proposal, decision, extra)
+function Actuators:respondProposal(proposal, decision, extra, explicit)
     local id, kind = proposal, nil
     if type(proposal) == 'table' then id, kind = proposal.id, proposal.kind end
     local d = PARLEY_DECISIONS[decision]
     if id == nil or not d then self.stats.refused = self.stats.refused + 1; return false, 'bad_decision' end
     if not self.caps.sendMessage then return false, 'no_verb' end
-    if self:parleyAuthority() == 'defer' and not (kind == 'intel' and d == 'accept') then
+    if self:parleyAuthority() == 'defer'
+        and not (kind == 'intel' and d == 'accept')
+        and not explicit then
         self.stats.deferred = self.stats.deferred + 1
         return false, 'deferred'
     end

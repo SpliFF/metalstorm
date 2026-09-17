@@ -2,6 +2,21 @@
 
 Quick-reference for navigating the codebase. Read this before searching.
 
+## Vocabulary
+
+Player-facing text (UI copy, `docs/player-guide.md`) says **World / Mission / Faction /
+Standing**; the code underneath keeps its own names and is not renamed to match (PLAN-beta.md
+"Vocabulary", 2026-09-17 ruling). **World** is the one persistent game on the mega map (the
+world layer, `world_*` tables, `/api/world/*`). **Mission** is a bounded task on one map in one
+room — not always a battle — and is the player word for what the code calls a **war**/**room**
+(the `wars` table, `/api/wars/*`, `war_outcome`, `SessionKind::PersistentWar`, and every
+`war-*.ts`/`Room*` identifier in `client/src/lobby/`). **Faction** is the player's organisation
+in the World; a Mission's sides are which Faction each team fights for (world factions ↔ battle
+sides Compact/Union via `side_key`). **Standing** is the per-account rank the UI reads. Routes,
+DB tables/columns, enum values, test ids, log lines and every C++/Lua identifier keep saying
+`war`/`room`; only rendered strings and a handful of contained TS-only identifiers (e.g.
+`LobbyTemplates.browserMissionEntry` in `client/src/ui/lobby/loader.ts`) use the player words.
+
 ## Build Commands
 
 ```
@@ -1910,6 +1925,40 @@ and controller are per-client answers) on every landed control and on a 1 s
 wall-clock heartbeat; **a live game never sends one, and that absence is the
 client's entire mode signal** — the playback bar mounts on the first one it
 receives.
+
+### Broadcast tap (`.msb`)
+
+Delayed spectating records **effects**, not causes: `--broadcast-out <file>` seats a
+global-visibility spectator session under a reserved id (`broadcast::kTapClientId`,
+`rts/Server/BroadcastTap.h`) that is never in `playerHandler`, and the single outbound
+funnel (`WebTransportServer::SendStream`/`BroadcastStream`, via `SetTapSink`) writes every
+byte it would have sent to a `.msb` log — so the log can only contain what a spectator was
+entitled to see, by construction rather than by a second filter.
+`rts/Server/BroadcastLog.{h,cpp}` owns that container: magic `MSBCAST\0` + version +
+a reused `replay::Header` JSON + marker-framed `R` records / `K` keyframes / `T` trailer,
+uncompressed, with a **streaming reader over a growing file** (a short tail is the recorder
+mid-write, not corruption) and a keyframe index built by skipping payloads.
+Every 1800 frames the streamer writes a `K` and re-emits the tap's join bundle
+(`StateStreamer::EmitJoinBundle`) so a backward seek lands on a whole world; the
+`GetClientCount() > 0` gates are `GameServerContext::HasStreamConsumers()` instead, because
+a tapped mission must keep streaming with nobody connected. Playback is a memcpy and a
+clock, never a sim — the relay that serves it is PLAN-beta-broadcast.md lane S2.
+
+### Broadcast relay (delayed spectating)
+
+`spring-server --broadcast <log> --broadcast-delay-seconds N` (`rts/Server/BroadcastRelay.{h,cpp}`)
+boots like `--replay` up to map/game load so the content routes answer, then never fires
+GameStart and never ticks the sim: each watcher gets its own `broadcast::Reader` and
+`BroadcastCursor` (byte offset, virtual wall clock, speed, paused) over the same `.msb`, paced
+by wall-clock deltas, and a backward seek jumps to the nearest `K` and catches up with
+Control/Vision/Bulk uncapped plus only the last State record per lane. The delay is enforced
+here and nowhere else — `liveEdgeMs = now - delay`, no record past it is ever emitted, seeks
+clamp to it, and the floor `kMinBroadcastDelaySec = 3600` is compiled in and lowerable only by
+`--dev-broadcast-floor` (never a modoption). Inbound is an **allow-list**
+(`ClientMessageHandler`: Handshake, AuthRequest, Ping, ReplayControl; ViewportUpdate ignored,
+everything else dropped), watchers take the replay spectator seat (team -1, reserved player
+number, absent from `playerHandler`), and `ReplayState` carries
+`broadcast`/`behind_seconds`/`live_edge_frame` with `controller_player_num` = the watcher's own.
 
 ### Replay browsing
 

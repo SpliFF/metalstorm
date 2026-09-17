@@ -1,11 +1,17 @@
 {
   "id": "water_normal_choppy",
   "class": "water_normal",
+  "backend": "none",
+  "backend_reason": "kept on the procedural placeholder: SDXL renders 'greyscale height field, small ripples' as strongly anisotropic horizontal corrugation (calm and choppy came back near-identical, 2026-09-17), which scrolls as streaks rather than ripples once water-surface.ts drives it as a normal map; the isotropic procedural ripple field is the better normal source. Revisit with a ripple-specific prompt or a dedicated height-field model.",
   "prompt": "Choppy water surface, higher-frequency ripples, sharper wave crests.",
   "seed": 100702,
   "width": 512,
   "height": 512,
   "amplitude": 0.75,
   "output": "art/gen/water/water_normal_choppy.png",
-  "post": ["seamless", "pow2", "pbr_normal_only"]
+  "post": [
+    "seamless",
+    "pow2",
+    "pbr_normal_only"
+  ]
 }

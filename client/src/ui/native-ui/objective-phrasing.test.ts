@@ -180,7 +180,7 @@ describe('rewardPhrase', () => {
 describe('consequencePhrase — the half the old panel never showed', () => {
     it('leads with the war-ending stake when this is the terminal objective', () => {
         const phrase = consequencePhrase(obj({ victory: 1 }));
-        expect(phrase).toContain('ends the war');
+        expect(phrase).toContain('ends the mission');
     });
 
     it('tells the loser of an open race that the reward went elsewhere', () => {
@@ -238,7 +238,7 @@ describe('briefing — the "further information" the player asked for by name', 
     });
 
     it('adds the war-ending stake as its own sentence', () => {
-        expect(briefing(obj({ victory: 1 }), named)).toContain('ends the war');
+        expect(briefing(obj({ victory: 1 }), named)).toContain('ends the mission');
     });
 
     it('says an open race pays only the finisher', () => {

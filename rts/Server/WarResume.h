@@ -210,7 +210,8 @@ enum class WarState : uint8_t {
     ///
     /// Live evidence for why it matters: both wars that completed the §7 chain
     /// correctly, digest and all, were then announced to their players as
-    /// "Your war stopped without saving its last stretch — some of it is gone."
+    /// "Your Mission stopped without saving its last stretch — some of it is
+    /// gone."
     /// The scheduled `--postgame-exit-seconds` exit is indistinguishable from a
     /// crash by shape alone.
     Finished,

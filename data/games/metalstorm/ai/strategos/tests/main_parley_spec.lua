@@ -188,6 +188,31 @@ describe("main — co-commander deference and the caretaker hand-back", function
     end)
 end)
 
+describe("main — a profile hook's EXPLICIT kind actuates despite deference (ai-eval PARLEY2)", function()
+    it("mentor accepts a ceasefire itself — the hook's own kind, sent even with a human present", function()
+        local vm = bootMain()
+        vm.params['team:ai_profile_7'] = 'mentor'        -- deploys co_commander (roles.lua)
+        vm.params['team:team_active_humans'] = 1          -- a human is on our team
+        offer(vm, 1, 'ceasefire')
+        tick(vm, 150)
+        local responses = messagesOf(vm, 'parley.respond')
+        assert.are.equal(1, #responses, 'mentor.lua\'s own PEACE handler answered this kind — no human needed to send it')
+        assert.are.equal('1', responses[1].id)
+        assert.are.equal('accept', responses[1].decision)
+        assert.are.equal(0, chatsContaining(vm, 'deferred to my team'))
+    end)
+
+    it("a kind the mentor hook is silent on still defers to the human", function()
+        local vm = bootMain()
+        vm.params['team:ai_profile_7'] = 'mentor'
+        vm.params['team:team_active_humans'] = 1
+        offer(vm, 1, 'tribute')                            -- mentor.evaluateProposal only opines on PEACE kinds
+        tick(vm, 150)
+        assert.are.equal(0, #messagesOf(vm, 'parley.respond'))
+        assert.are.equal(1, chatsContaining(vm, 'deferred to my team'))
+    end)
+end)
+
 describe("main — health line and boot-retry gate", function()
     it("sends one ai.health message per tick with the documented fields", function()
         local vm = bootMain()

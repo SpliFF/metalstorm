@@ -11,8 +11,10 @@
 
 #include "Server/RulesParamKeyDict.h"
 #include "Server/IdRecycleAnnouncer.h"
+#include "Server/TerrainKnowledge.h"
 
 struct GameServerContext;
+struct ClientSession;
 
 // StateStreamer — owns the per-tick broadcast pipeline that used to be a long
 // sequence of blocks at the tail of the server_main.cpp sim loop. Tick() calls
@@ -26,6 +28,22 @@ public:
     explicit StateStreamer(GameServerContext& ctx) : ctx(ctx) {}
 
     void Tick(int frameNum);
+
+    /// Re-send `session` everything a fresh join would receive, so the next
+    /// tick's fan-out gives it full state rather than deltas
+    /// (PLAN-beta-broadcast.md S1). Called on the tap session behind every
+    /// broadcast keyframe: a watcher who seeks to that `K` replays the bundle
+    /// that follows and lands on a WHOLE world.
+    ///
+    /// Scope, stated because it is the lane's one real risk: this covers the
+    /// join state StateStreamer owns (delta cache, rules-param snapshot + key
+    /// dictionary, team-stats history cursors, the complete LOS set). The
+    /// auth-path one-shots in ClientMessageHandler — TeamStartInfo, GameModOptions
+    /// — are NOT re-emitted here, because a relay reconstructs them from the log
+    /// header (`replay::Header::modOptions`) and its own map/game load rather
+    /// than from the stream; GameInfo needs nothing either, it is broadcast
+    /// every 30 frames and so is already in the log.
+    void EmitJoinBundle(ClientSession& session);
 
     /// PLAN-long-uptime §3 (S1) growth metrics. Assigned interned ids,
     /// excluding the reserved id 0. Monotone between compactions, so pairing
@@ -64,6 +82,11 @@ private:
     void BroadcastFeatureLifecycle(int frameNum);
     void BroadcastUnitCommands(int frameNum);
     void StreamLosBitmaps(int frameNum);
+    /// terrain-knowledge-is-LOS K0: per-ally ever-seen terrain-chunk mask
+    /// (envelope 0x0A). Sits beside StreamLosBitmaps and shares its 1 Hz
+    /// cadence + Vision stream class. No-op unless the `terrainknowledge`
+    /// modoption is on. See client/src/core/DESIGN-TERRAIN-KNOWLEDGE.md.
+    void StreamTerrainKnowledge(int frameNum);
     void BroadcastRulesParams(int frameNum);
 
     // W3 helpers
@@ -101,6 +124,24 @@ private:
     static constexpr size_t   kKeyDictCompactMinDeadPct = 25;     // and ≥25% dead
     uint32_t gameParamsRev = 0;                         // generation counter for game params
     std::vector<uint32_t> teamParamsRev;                // per-team generation counters
+
+    // ── terrain-knowledge-is-LOS (K0) ───────────────────────────────────
+    // The per-ally ever-seen terrain-chunk mask. Owned here rather than in
+    // IntelEventCollector on purpose: the intel collector's explored plane is
+    // a *display* product (64x64 cap, OR-downsampled, cleared on resize,
+    // never serialised); this is the authority the wire and the null-query
+    // rule answer to. Design doc §1.2.
+    TerrainKnowledge::Mask terrainKnown;
+    // Off unless the `terrainknowledge` modoption is set. Read once, lazily,
+    // on the first streaming tick — modoptions are final by then.
+    bool terrainKnowledgeEnabled = false;
+    bool terrainKnowledgeInit = false;
+    // Last revision actually sent per session-ally, so a settled mask does not
+    // re-ship every second. Correctness never depends on this (the message is
+    // idempotent) — it is purely a bandwidth skip.
+    // Value packs (ally << 32 | revision) so a spectator switching the team
+    // it watches forces a resend rather than colliding on the revision.
+    std::unordered_map<int, uint64_t> terrainKnownSentRev;
 
     // Last-team-standing fallback latch (was a function-static int in the loop):
     // the team the alive-unit count declared the winner, or -1 while undecided.

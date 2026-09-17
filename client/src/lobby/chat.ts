@@ -495,7 +495,7 @@ export function roomTabSpecs(seat: RoomSeat, roomName: string): Array<{
     const out: Array<{ scope: ChatScopeKey; target: string; sendTarget: string;
                        label: string }> =
         [{ scope: 'room', target: id, sendTarget: id,
-           label: roomName || `Room ${id}` }];
+           label: roomName || `Mission ${id}` }];
     if (seat.isSpectator) {
         out.push({ scope: 'spectator' as const, target: `${id}/spec`,
                    sendTarget: id, label: 'Spectators' });
