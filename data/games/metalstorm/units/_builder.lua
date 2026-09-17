@@ -201,6 +201,50 @@ local function squadOuterRadius(ftype, count, authoredRadius, clearanceElmos)
     return maxR + clearanceElmos
 end
 
+-- ── Track/footprint decal trigger (PLAN-decal-tracks; pres-verify fire 3:
+-- ms_tanks_s2 drove a figure-8 with zero tread marks because no def anywhere
+-- set `leaveTracks`) ─────────────────────────────────────────────────────
+--
+-- The engine only lays segments for a def with `leaveTracks = true`
+-- (rts/Sim/Objects/SolidObjectDef.cpp Parse, gated in
+-- rts/Server/ServerTrackEmitter.cpp Emit); `trackType` is a free-form STRING
+-- the client buckets by keyword (decal-overlay.ts classifyTrackType:
+-- chicken/claw/pointy -> claw splay, foot/com -> alternating footprints,
+-- bike/wheel -> single rut, else -> tank tread), so the name chosen here is
+-- what actually selects the rendered pattern, not `movementclass`.
+--
+-- Ground movers only: SHIP/SUB/nil(aircraft) movementclass and immobile
+-- (`canmove == false`) defs are left untouched (engine default
+-- leaveTracks=false). INFANTRY is deliberately left untouched too — this
+-- closes the vehicle/mech tread-decal gap pres-verify found, not a new
+-- per-soldier footprint feature.
+local TRACKED_MOVE_CLASSES = { VEH = true, HEAVY = true }
+
+--- Mutates `t` with leaveTracks/trackType/trackWidth/trackOffset/
+--- trackStrength/trackStretch when it's a ground mover that wants tracks and
+--- doesn't already carry an explicit `leaveTracks`. A scale's `override` can
+--- always force a different trackType first (e.g. a wheeled hull in an
+--- otherwise-tracked class — see units/tanks.lua scale 1); this only fills
+--- in what isn't already set. Returns `t`.
+local function trackDefaults(t)
+    if t.leaveTracks ~= nil then return t end
+    if t.canmove == false then return t end
+    local isMech = type(t.category) == 'string' and t.category:find('MECH', 1, true) ~= nil
+    if not (isMech or TRACKED_MOVE_CLASSES[t.movementclass]) then return t end
+
+    local footprint = math.max(t.footprintx or 2, t.footprintz or 2)
+    t.leaveTracks = true
+    t.trackType = t.trackType or (isMech and 'StdBipedFoot' or 'StdTank')
+    -- Tread gauge ~ half the hull's footprint width (16 elmos/cell,
+    -- SPRING_FOOTPRINT_SCALE 2 x SQUARE_SIZE 8); clamped so a single-hull
+    -- def's widened SIM footprint (M3, above) can't imply an absurd gauge.
+    t.trackWidth = t.trackWidth or math.max(12, math.min(56, round(footprint * 8)))
+    t.trackOffset = t.trackOffset or 0
+    t.trackStrength = t.trackStrength or 1
+    t.trackStretch = t.trackStretch or 1
+    return t
+end
+
 local function mk(spec)
     local defs = {}
     for s = 1, 4 do
@@ -459,6 +503,11 @@ local function mk(spec)
             for k, v in pairs(o.override) do def[k] = v end
         end
 
+        -- Track/footprint decal trigger — after overrides so a scale that
+        -- moved itself into a different movementclass/category (e.g.
+        -- engineers s3/s4 into VEH/HEAVY) is judged on where it landed.
+        trackDefaults(def)
+
         -- Between-squad separation (M3). Deliberately the LAST thing computed:
         -- `tanks` scale 3 and 4 move themselves from VEH to HEAVY through
         -- `o.override`, and the separation floor to subtract is the one the
@@ -501,4 +550,9 @@ local function mk(spec)
     return defs
 end
 
-return mk
+-- `mk{...}` stays the primary call shape (every existing family file does
+-- `local mk = VFS.Include(...); return mk{...}`); the hand-written families
+-- that build literal def tables instead of going through `mk` still want
+-- the same track-decal defaults, so `trackDefaults` rides along as a field
+-- via a __call table rather than a second VFS.Include target.
+return setmetatable({ trackDefaults = trackDefaults }, { __call = function(_, spec) return mk(spec) end })

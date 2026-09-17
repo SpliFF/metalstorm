@@ -1,12 +1,18 @@
 -- Civilian vehicles — transport and work traffic (PLAN-metalstorm.md §7).
 -- Escort-objective payloads; environment-AI driven.
-return {
+--
+-- Both wheeled (truck/bus hulls); trackType is set explicitly ahead of
+-- units/_builder.lua's tracked default (see its trackDefaults).
+local mk = VFS.Include('units/_builder.lua')
+
+local defs = {
     ms_civtruck = {
         name = 'Cargo Truck',
         description = 'Civilian cargo hauler — convoy / escort objective payload',
         objectname = 'ms_civtruck',
         category = 'LAND MOBILE CIVILIAN',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 400, mass = 250,
         maxvelocity = 3.0, acceleration = 0.2, brakerate = 0.2, turnrate = 600,
         footprintx = 2, footprintz = 3,
@@ -20,6 +26,7 @@ return {
         objectname = 'ms_civbus',
         category = 'LAND MOBILE CIVILIAN',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 350, mass = 220,
         maxvelocity = 2.8, acceleration = 0.2, brakerate = 0.2, turnrate = 550,
         footprintx = 2, footprintz = 5,   -- 10.7 m bus: cells x 2 = 10 m (was 3 = 6 m)
@@ -39,3 +46,6 @@ return {
         },
     },
 }
+
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs
