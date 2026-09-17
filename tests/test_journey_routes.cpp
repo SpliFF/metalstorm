@@ -57,6 +57,21 @@ TEST_CASE("standing accrual pays the session whether or not objectives are credi
     CHECK(Journey::kStandingPerEndorsement > Journey::kStandingPerSession);
 }
 
+TEST_CASE("a replay or broadcast room's exit earns no standing; a played room earns the session") {
+    // A room that was never a replay or broadcast watch — an ordinary
+    // Mission — earns the full +10 for finishing.
+    CHECK(Journey::RoomEarnsAccrual(/*isReplayRoom=*/false, /*isBroadcastRoom=*/false));
+    CHECK(Journey::SessionAccrual(0).standing == 10);
+
+    // A replay room's "server" is a recording played back, and a broadcast
+    // room's is a relay tapped — neither is a Mission, so the health loop
+    // must not call SessionAccrual for either at all (zero accrual, not a
+    // zero-value accrual).
+    CHECK_FALSE(Journey::RoomEarnsAccrual(/*isReplayRoom=*/true, /*isBroadcastRoom=*/false));
+    CHECK_FALSE(Journey::RoomEarnsAccrual(/*isReplayRoom=*/false, /*isBroadcastRoom=*/true));
+    CHECK_FALSE(Journey::RoomEarnsAccrual(/*isReplayRoom=*/true, /*isBroadcastRoom=*/true));
+}
+
 TEST_CASE("war summary carries per-player objective credit, additively") {
     WarSummary s;
     s.sides.push_back({0, "compact", 1, 0, 0, 0});
