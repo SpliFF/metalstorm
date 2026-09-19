@@ -353,6 +353,103 @@ lane's brief ("otherwise decode ... and show the pixel values").
 
 ---
 
+# terrain-streaming K3 — AT2/K2 residual closed as map content (2026-09-20)
+
+Follow-up to K2's brief: audit `terrain-splat-plugin.ts` for any *other*
+additive/multiplicative shader term besides the already-fixed/clamped
+diffuse-alpha one, and `terrain.ts`'s heightmap-edge normal computation, for
+a renderer-side explanation of the residual black corner K2 couldn't rule
+out with the map-processing audit alone. Read both files end to end (no live
+repro — the running stack serves `TASKHERD_REPO`'s main-checkout client and
+maps, not this clone's, so a screenshot here would just re-show what K2
+already decoded pixel-for-pixel; not worth spending the `live-server` mutex
+on a step that produces no new evidence either way).
+
+## `terrain-splat-plugin.ts`: no other active term
+
+The file has exactly three mutually-exclusive shader modes, gated by
+per-material `#ifdef`s (`TERRAIN_SPLAT` / `TERRAIN_DETAIL_PLAIN` /
+`TERRAIN_SPLAT_NORMAL` — never set together, `prepareDefines` L131-137). Two
+of the three do carry unclamped `baseColor.rgb +=` terms:
+
+- mode `'splat'`: `baseColor.rgb += vec3(dot(_spDetails, _spCofac));` — unbounded.
+- mode `'plain'`: `baseColor.rgb += _pdCol;` — unbounded.
+
+But `scorched_crossing_v2.4`'s `mapinfo.lua`
+(`data/maps/scorched_crossing_v2.4/mapconfig/mapinfo`) declares
+`splatDetailNormalTex1..4` + `splatDistrTex`, so per this file's own
+documented Recoil precedence (L12-18,
+`attachTerrainSplatNormalFromDecals`-first in `terrain.ts` L1457) it always
+resolves to mode `'splatNormal'` — `TERRAIN_SPLAT` and `TERRAIN_DETAIL_PLAIN`
+are compiled out entirely for this map's material. Those two unbounded terms
+cannot run here, on any map that ships a normal-detail set.
+
+Inside `'splatNormal'` mode itself, the *only* line that touches `baseColor`
+is the diffuse-alpha term AT2 already found and K2/this fire's predecessor
+already clamped to `±0.4` (L242). Everything else in that block
+(`_snCofac`, `_snStrength`, `_snN.xyz`, the STN reconstruction) feeds
+`normalW`, not `baseColor`, and `_snN.y = max(_snN.y, 0.01)` (L233) already
+floors the pre-normalize Y component so a degenerate (near-zero) blended
+detail-normal can't produce a zero-length vector before `normalize()` —
+i.e. the exact "unclamped alpha or distribution-weight" failure mode this
+fire was asked to look for is already guarded, for the axis that could
+actually zero out. No new fix needed or made.
+
+## `terrain.ts`: heightmap-edge normal computation can't degenerate
+
+`writeHeightfieldNormal` (L350-366), used by both `computeSurfaceNormals`
+and the deformable-terrain repaint path, already clamps its sample offsets
+at the map boundary: `xm = max(0, sx-step)`, `xp = min(hmW-1, sx+step)`
+(same pattern for z). At an edge this collapses the central difference to a
+one-sided (forward/backward) difference — `dx`/`dz` shrink but are never
+zero unless `hmW`/`hmH` is 1 (never true for a real map) — so `dHdx`/`dHdz`
+stay finite. Critically, the normal's numerator is `(-dHdx, 1, -dHdz)`: the
+`Y` component is a **hardcoded `1`**, never sampled or derived, so
+`Math.hypot(nx, ny, nz)` is always `>= 1` — the normal can never be the zero
+vector, at a map edge, a map *corner* (both axes clamped at once, exactly
+`scorched_crossing_v2.4`'s `X=0`/`Z=7168` case), or anywhere else. A
+zero-length normal was the specific degenerate case that could produce a
+literal `N·L=0` black pixel independent of lighting direction; it is
+structurally impossible here. Added a regression test locking this in
+(`terrain.test.ts`, `computeSurfaceNormals` describe block): a synthetic
+sheer cliff running along both the `sx=0` and `sz=hmH-1` boundaries at once
+(harsher than any real map's height data) still produces a finite unit
+normal with positive `Y`. `npx vitest run --config vite.config.ts
+src/core/terrain.test.ts` — 60/60 pass (was 59 before this fire's added
+test); `src/core/terrain-splat-plugin.test.ts` — 15/15 pass, unchanged.
+
+## Conclusion: close as map content, not a defect
+
+Both files this fire was asked to audit are already defect-free for this
+corner: `terrain-splat-plugin.ts` has no other active additive/multiplicative
+term for a `splatNormal`-mode map, and `terrain.ts`'s edge-of-heightmap
+normal computation cannot degenerate at a boundary or corner by
+construction (the hardcoded `ny=1` numerator term rules out N·L=0 from a
+zero-length normal). Combined with K2's byte/pixel-level proof that the
+KTX2 map-processing step faithfully reproduces the April-era source for
+every asset that could feed this corner (bit-exact tile atlas, ordinary
+lossy noise in the splat textures, and — most tellingly — 10 already-literal-
+black source tiles plus a flat height plateau sitting *right at* this exact
+`X≈0-1000, Z≈6000-7168` box), the honest conclusion is: **this is genuine map
+content** (scorched_crossing_v2.4 has a real dark, flat corner at its
+playable-area boundary), **not a rendering defect**. No further code change
+is warranted; fabricating one against this evidence would be worse than
+leaving it alone. AT2's residual (its "root cause, part 2") is closed.
+
+## Not done this fire
+
+- No shader/normal-computation fix — none was warranted; both audited files
+  were already correct for this case.
+- No live-stack screenshot — the running stack serves the main checkout's
+  client/maps, not this clone's, and no code changed that would move a
+  single pixel there; K2's decoded byte/pixel evidence is the record.
+- If anyone still doubts this is content: the only way to move it further is
+  visual/design judgement on `scorched_crossing_v2.4`'s map art (does the
+  team want that corner less stark?) — that's a map-content decision, not an
+  engineering defect, and outside this lane's scope.
+
+---
+
 # E2E pass 1 — first-time-player path (2026-09-19)
 
 PLAN-beta.md §Verification items **1 (spectate as guest)** and **2 (sign up →

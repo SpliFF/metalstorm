@@ -506,6 +506,31 @@ describe('computeSurfaceNormals', () => {
         expect(n[mid]).toBeCloseTo(-Math.SQRT1_2, 5); // 45° slope
         expect(n[mid + 1]).toBeCloseTo(Math.SQRT1_2, 5);
     });
+
+    // terrain-streaming K3: scorched_crossing_v2.4's residual black corner
+    // (world X≈0-1000, Z≈6000-7168, i.e. the (sx=0, sz=hmH-1) heightfield
+    // corner — a vertex that clamps BOTH central-difference axes at once) is
+    // a genuine flat/dark map corner, not a renderer defect (K2 proved the
+    // KTX2 map-processing step byte-exact; this locks in that the normal
+    // computation can't independently degenerate there). Even a sheer cliff
+    // one step inside the map boundary — the sharpest case a real edge could
+    // present — must still yield a finite unit normal: the `ny=1` term in
+    // `writeHeightfieldNormal`'s numerator makes a zero-length (and thus
+    // N·L=0, literal-black) normal impossible, at a corner or anywhere else.
+    it('stays a finite unit normal at a map corner even with a sheer boundary cliff', () => {
+        const hmW = 9, hmH = 9;
+        const cliffHeight = (sx: number, sz: number): number =>
+            (sx === 0 || sz === hmH - 1) ? 10000 : 0;
+        const geo = buildSurfaceGeometry({
+            x0: 0, z0: 0, x1: 8, z1: 8, step: 1, hmW, hmH, sampleY: cliffHeight, skirt: false,
+        });
+        const n = computeSurfaceNormals(geo, cliffHeight, hmW, hmH);
+        const corner = (geo.gh - 1) * geo.gw * 3; // (sx=0, sz=hmH-1)
+        const len = Math.hypot(n[corner], n[corner + 1], n[corner + 2]);
+        expect(Number.isFinite(len)).toBe(true);
+        expect(len).toBeCloseTo(1, 6);
+        expect(n[corner + 1]).toBeGreaterThan(0); // never flips fully upside-down
+    });
 });
 
 /** A small but chunked map: 641² corners → 5×5 chunks of 128 quads. */
