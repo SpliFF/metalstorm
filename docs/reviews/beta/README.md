@@ -243,3 +243,164 @@ white.
 - `pres-atmos-at2/03-splat-diffusealpha-off-wedge-shrunk.png` —
   `TerrainSplatPlugin` diffuse-alpha term disabled; wedge visibly shrinks
   (confirms the fixed contributor + isolates the residual).
+
+---
+
+# E2E pass 1 — first-time-player path (2026-09-19)
+
+PLAN-beta.md §Verification items **1 (spectate as guest)** and **2 (sign up →
+solo tutorial)**, driven end to end with fresh eyes against the live stack
+(`spring-lobby` :8011 from the MAIN checkout, vite :8012, game servers 9100+).
+Items 3 (Support/mentor) and 4 (presentation) were **not** attempted — they are
+E2E2/E2E3.
+
+Accounts minted fresh this pass: guest `e2e_bkgn` (id 202, API probe), guest
+`e2e_dmg3` (id 203, browser), registered `e2e_kp47` (id 204, browser). The
+`raven` / `raven_beta` residue was left alone and used only as the "a registered
+account owns this name" fixture.
+
+## PASS/FAIL — item 1, spectate as guest
+
+| # | Sub-step | Result | Evidence |
+|---|---|---|---|
+| 1a | Welcome screen renders, callsign entry + "Watch as …" | **PASS** | `e2e/01-welcome.png` |
+| 1b | "Watch as `<name>`" mints a guest token carrying that nickname | **PASS** | `POST /api/auth/guest {"username":"e2e_bkgn"}` → 201, `username:"e2e_bkgn"`, `nickname_chosen:true`; browser guest `e2e_dmg3` = id 203 |
+| 1c | 409 when a **registered** account owns the name | **PASS** | `raven_beta` → 409 `{"error":"that name belongs to a registered player","name_taken":true}`; surfaced in the UI as "that name belongs to a registered player — choose another, or log in as them." `e2e/02-welcome-409-name-taken.png` |
+| 1d | Guest reaches the Missions browser and the Hub | **PASS** | `e2e/03-guest-missions-browser.png`, `e2e/04-guest-hub.png` (tier chip reads RECRUIT) |
+| 1e | Broadcasts panel lists a mission **"1h behind"** | **PASS** | Hub → SPECTATE → "Mission Broadcasts": row chip `Broadcast · 1h behind`. `POST /api/broadcasts/list` → `state:"live"`, `behind_seconds:3600`. `e2e/05-broadcasts-panel-1h-behind.png` |
+| 1f | A **dev-floor override a test can use** | **FAIL** | D2 below — `--dev-broadcast-floor` is a *spring-server* flag the lobby deliberately never passes, and the lobby's own list route hardcodes the 3600 s floor. No override is reachable through the live lobby at all. |
+| 1g | Watcher renders | **PASS** | `e2e/06-watcher-initial.png` — relay room 68 on :9100, replay bar reads `Broadcast · 1h behind · recording ends early (segment truncated)`, 2:44/2:44 |
+| 1h | A backward seek lands on a **whole world** | **PASS** | Seek to 20% → 2:44 became 0:37 and playback resumed. Units, an earlier objective board (`HOLD ASH VERGE 90%`), a "New objective" toast and minimap forces all present. Server: `broadcast: watcher 1 (playerNum 200) attached at frame 4938 (1476 records of join bundle)`. This is the first live proof of the EmitJoinBundle-after-backward-seek risk the broadcast lane named as untested. `e2e/07-watcher-after-backward-seek.png` |
+| 1i | No `PlayerCommand` reaches the relay | **PASS** (with caveat) | Relay log shows exactly one refusal: `broadcast: client 1 sent verb 31 — dropped (a relay admits watchers, not players)`. Verb 31 = `SelectionState`, **not** `PlayerCommand` (3) or `PlayerCommandBatch` (30). Caveat in D9: that warn is deduped per client (`warnedBroadcastClients`), so the live log proves the drop path fires but cannot enumerate every later verb. |
+
+Guest admission is correct at the server too: `replay: admitting client 1 as
+spectator 'e2e_dmg3' (playerNum 200, reserved range; not in the sim roster)`.
+
+## PASS/FAIL — item 2, sign up → solo tutorial
+
+| # | Sub-step | Result | Evidence |
+|---|---|---|---|
+| 2a | Sign up the same nickname → **409 while the guest holds it** | **PASS** | Sign-up form with `e2e_dmg3` → "username already taken"; `POST /api/auth/register` → 409. `e2e/08-signup-409-name-held-by-guest.png` |
+| 2b | Intro slides (3) | **PASS** | `e2e/09-intro-slide1.png`, `10-intro-slide2.png`, `11-intro-slide3-your-role.png`. Slide 3's "Your Role" placeholder renders the gold gradient (the old flat-rectangle defect stays fixed). |
+| 2c | Hub | **PASS** | `e2e/12-hub-registered.png` — `E2E_KP47 · RECRUIT · THE MERIDIAN COMPACT` |
+| 2d | First mission (Solo) boots `tutorial_01` via `POST /api/rooms/solo` | **PASS** | Room 69 `play:tutorial_01:e2e_kp47`, host 204, port 9101. Lobby: `room 69: scenario 'tutorial_01' (host choice)` and `seating the mentor AI on team 0 — a Recruit is on a side with no Veteran`. `e2e/13-solo-tutorial-briefing.png` |
+| 2e | Coach card advances on **select** | **PASS** | STEP 2 ("Select a squad") → STEP 3 ("Drill in") on a box-select; focus strip read `line tanks · idle · Units 1`. `e2e/15-solo-coach-step2-select.png`, `e2e/16-solo-coach-step3-selected.png` |
+| 2f | Coach card advances on **move** | **PASS** | STEP 4 ("Move to Grey Flat") → STEP 5 on arrival; later STEP 7 → STEP 8 on the move to Storm Sound. `e2e/17-solo-coach-step5-after-move.png` |
+| 2g | Victory | **PASS** | `HOLD STORM SOUND: complete` → `VICTORY — Ally team 0 is victorious! Battle ended at frame 13530`; server `GAME OVER: Spring.GameOver declared`. Coach reached "Training complete" (8/8). `e2e/18-solo-victory.png` |
+| 2h | Victory → **back in lobby** | **FAIL** | D4 — "RETURN TO LOBBY" lands on the *finished room's* page, still labelled **In Progress** with a **REJOIN GAME** button. Reaching the lobby needs a manual LEAVE. `e2e/19-after-victory-room-in-progress.png`, `e2e/20-back-in-lobby-after-victory.png` |
+| 2i | `users.standing` incremented | **FAIL** | D5 — still `0` after the won mission. A later control run credited +10 through a different exit path (see below), proving accrual itself works and the victory path specifically loses it. |
+| 2j | `users.sessions_played` +1 | **FAIL** | D5 — still `0` after the won mission; +1 in the control run. |
+| 2k | Tier still Recruit | **PASS** | At `standing=10` (control run) the hub still reads **RECRUIT** — 10 < `kTierThresholds[1]` = 20. `e2e/21-hub-standing10-still-recruit.png` |
+
+## Defects
+
+| # | Sev | Defect | Repro | Owning lane |
+|---|---|---|---|---|
+| D1 | **HIGH** | **Broadcast listing renders every date as "22 Jan, 03:06" (1970).** `BroadcastListing.available_since` is typed `string` and passed to `new Date()`, but the lobby sends UNIX **seconds** (`availableSinceMs / 1000`). `new Date(1789616390)` = 22 Jan **1970**. Both rows showed the same minute because a 3600 s gap is only 3.6 ms when misread. The unit test enshrined the wrong contract (an ISO string), which is why it was never caught. | Hub → SPECTATE with any `.msb` in `data/broadcasts/`; compare the row's date against `available_since` in `POST /api/broadcasts/list`. `e2e/05-broadcasts-panel-1h-behind.png` | **FIXED this pass** (broadcast-client) |
+| D2 | **MEDIUM** | **No dev-floor override is reachable by a test.** `--dev-broadcast-floor` exists only on `spring-server` (`rts/server_main.cpp:567`) and only lowers the **relay's** floor. `runDirectStart` documents that the lobby *never* sends it, and `POST /api/broadcasts/list` hardcodes `broadcast::kMinBroadcastDelaySec` with no override parameter — so a freshly recorded mission cannot be made to appear in the player-facing browser inside an hour by any supported means. PLAN-beta.md §Verification item 1 asks for exactly this ("dev-floor override for the test"), and `behindLabel()`'s own comment claims "a dev override can lower it for the live-verification recipe". This pass only proceeded because two `.msb` files from 2026-09-17 were already older than the floor. | `grep -rn "dev-broadcast-floor" rts/` — one parse site, server-only; `rts/lobby_main.cpp:9356` passes the constant. | broadcast-relay / broadcast-lobby |
+| D3 | **MEDIUM** | **`query_db` (spring-debug MCP) silently answers from a stale clone snapshot.** The MCP server runs from the lane clone and reads *its* `data/spring-server.db` (frozen at bootstrap, max user id 198) while the live lobby writes MAIN's copy. Every other MCP tool (`api_request`, `get_logs`, `list_processes`) talks to the live stack, so the mismatch is invisible: `query_db` returned an empty result for accounts that plainly existed. Any lane verifying DB state from a clone gets wrong answers with no warning — including this brief's own "query_db shows users.standing incremented" criterion. | `query_db("SELECT max(id) FROM users")` → 198; `sqlite3 <MAIN>/data/spring-server.db` → 204. `list_processes` already warns "lobby --db and MCP SPRING_DB may differ". | mcp-tools |
+| D4 | **MEDIUM** | **After victory, "RETURN TO LOBBY" lands on a stale "In Progress" room offering "REJOIN GAME".** A first-time player who just won is shown their finished mission as still running, with an invitation to rejoin it, instead of the hub. | Win `tutorial_01`, click RETURN TO LOBBY. `e2e/19-after-victory-room-in-progress.png` | journey-lobby-entry |
+| D5 | **HIGH** | **Leaving a finished mission destroys the standing/session credit.** Accrual lives only in the lobby health loop's "game server exited" branch (`lobby_main.cpp:10294`, `Journey::RoomEarnsAccrual`). `POST /api/rooms/leave` on `LeaveResult::Abandoned` (`lobby_main.cpp:8393-8410`) instead SIGTERMs the server, calls `removeGameServer(rid)` (so the health loop can never observe the exit) and `rooms.DeleteRoom(rid)` (so the roster is gone) — **without** accruing. Lobby log: `room 69 abandoned, killed game server pid 75339`; no `standing:` line; the `users` row stayed `standing=0, sessions_played=0`. On the **solo/tutorial path the player is the only human, so leaving is always `Abandoned`** — the first-time player's first victory reliably pays nothing unless they sit on the post-game screen and wait out the 180 s timer. This breaks the progression loop PLAN-beta's headline journey rests on. NOT a ≤10-line fix: the accrual block (~40 lines, using `warSummaryFor` + `WarPlayerBindings`) must be factored out, and the leave path must distinguish "left after game over" (pay) from "abandoned mid-mission" (do not) — a design call, not a mechanical one. | See the controlled run below. | journey-lobby-routes |
+| D6 | LOW | Guest mint with a name **another guest** holds answers `"that name belongs to a registered player"` — the name belongs to a *guest*, so the message is wrong and the suggested remedy ("log in as them") is impossible for a passwordless guest. | `POST /api/auth/guest {"username":"e2e_bkgn"}` twice. | journey-accounts |
+| D7 | LOW | The sign-up 409 ("username already taken") offers **no route to the claim/upgrade path that exists**. `POST /api/auth/upgrade` and the "CLAIM ACCOUNT" button are precisely the answer to "I watched as X, now I want to play as X", but the sign-up form never mentions them — and PLAN-beta's journey makes that collision the expected case. | `e2e/08-signup-409-name-held-by-guest.png` | journey-lobby-entry |
+| D8 | LOW | Victory copy reads **"Ally team 0 is victorious!"** — engine vocabulary in a player-facing string, against the World/Mission vocabulary ruling. Should name the player or their Faction. | `e2e/18-solo-victory.png` | rename-war |
+| D9 | LOW | The client's broadcast send-gate wraps `PlayerCommand` only, so a watcher still emits `SelectionState` to the relay (dropped by the relay's allow-list). Harmless, but it means the relay's allow-list — not the client gate — is what actually holds, and the drop warn is **deduped per client**, so the log cannot enumerate later dropped verbs. | Relay log for room 68. | broadcast-client |
+| D10 | LOW | `tutorial_01`'s **opening camera frames mostly off-map grey void** — a hard diagonal map edge fills ~60% of the first frame a new player ever sees. SHOW ME then frames the column correctly, so it is the initial camera, not the map. | `e2e/14-solo-coach-step1.png` vs `e2e/15-solo-coach-step2-select.png` | journey-tutorial |
+| D11 | INFO | The broadcast on `scorched_crossing_v2.4` renders near-black under the spectator camera (roads and rock silhouettes only). Uniform, **not** the hard-edged wedge pres-atmos AT2 fixed, and the same map is lit normally in the tutorial — so this reads as night lighting + unexplored FOW rather than the AT2 defect. Still worth a look: it is a new player's first sight of the game. Root cause **not** determined this pass. | `e2e/06-watcher-initial.png` | pres-atmos |
+| D13 | **MEDIUM** | **Game servers do not self-terminate when idle**, despite each logging `idle self-termination: exit after 300s with no clients (120s startup grace)` at boot. Room 68's broadcast relay ran **25+ minutes** at `clients:0` (`curl :9100/api/metrics` → `"clients":0`); room 70 ran ~9 minutes at `clients:0`, still simulating at frame 7438 with 2 AIs, and had to be killed by hand. Ports 9100–10099 are a finite pool the lobby already logs an error for exhausting, and every leaked server holds one plus a full sim. This is also why the D5 control run could not use the idle path. | Boot any room, navigate the browser away **without** LEAVE, wait > 420 s, then check `ps` and `/api/metrics`. | journey-lobby-routes / server |
+| D12 | INFO | After a backward seek the replay bar's status flips from "1h behind" to **"59h behind"** — it recomputes against wall-clock, and the test segment is two days old. Arguably correct for a stale segment; flagged because a real 1 h-delayed live mission is the only case that has been reasoned about. | `e2e/07-watcher-after-backward-seek.png` | broadcast-client |
+
+## The controlled run behind D5
+
+Because the brief's own acceptance criterion is "standing incremented", the
+failure was split into cause and effect rather than reported as "accrual is
+broken":
+
+1. **Run A (room 69)** — played to victory, clicked RETURN TO LOBBY, then LEAVE.
+   Lobby: `room 69 abandoned, killed game server pid 75339`. Room row deleted,
+   process killed. `standing=0, sessions_played=0`. No `standing:` log line.
+2. **Run B (room 70)** — booted the same solo mission and **navigated away
+   without calling `/api/rooms/leave`**, so the room survived and the server was
+   left to idle-exit on its own timer, which is the path the health loop watches.
+
+   Room 70 sat at frame ~7400 with `clients:0` for ~9 minutes without the
+   idle self-termination it had logged (D13), so the variable was isolated a
+   third way instead: `kill -TERM` on the server pid directly, leaving the room
+   row and roster intact. The lobby health loop then logged
+   `game server for room 70 (pid 89213) has exited` and **credited**:
+   `e2e_kp47` went `standing 0 → 10`, `sessions_played 0 → 1` — exactly one
+   `kStandingPerSession`.
+
+**Conclusion.** Accrual is not broken; the leave path destroys it. Same account,
+same scenario, same binary — the run that reached the health loop was paid, the
+run that went through `/api/rooms/leave` was not. Note run B never reached
+victory and was still paid, which is correct (`SessionAccrual(0)` pays the base
+session), and makes the contrast sharper: **losing interest and quitting pays,
+winning and clicking LEAVE does not.**
+
+Because of run B, `e2e_kp47` now reads `standing=10, sessions_played=1` — but
+that credit came from the *control* run, not from the victory. Items 2i/2j are
+still FAIL for the path the brief specifies. The upside is that 2k is no longer
+vacuous: at standing 10 (< the 20 threshold) the hub still reads **RECRUIT**
+(`e2e/21-hub-standing10-still-recruit.png`).
+
+Corroboration that the health-loop path itself works: `presverify2` (id 198)
+carries `standing=10, sessions_played=1` — exactly one `kStandingPerSession`
+credit — from an earlier fire that did not leave its room.
+
+## Fixed this pass (committed)
+
+- `client/src/lobby/broadcast-browser.ts` (D1, 8 lines): `available_since` is
+  typed `number | string` and `shortDate()` scales a numeric value by 1000
+  before constructing the `Date`. `client/src/lobby/broadcast-browser.test.ts`
+  gains a regression case pinning the seconds contract the lobby actually sends.
+  **This is a client fix and CANNOT be seen on the live stack** — the stack
+  serves MAIN's client and this lane must not edit MAIN. Verified by
+  `vitest run src/lobby/broadcast-browser.test.ts` (7/7) and `tsc --noEmit`
+  (clean) in this clone; the 1970 date will still appear live until it lands.
+
+No other defect was inside the ≤10-line budget. D5 is the one that most deserves
+a fix and explicitly does not fit it (see its row).
+
+## Not done this pass (stated plainly)
+
+- **PLAN-beta.md §Verification items 3 (Support/mentor) and 4 (presentation)** —
+  out of scope for this step (E2E2 / E2E3).
+- **Guest-prune half of item 2** — PLAN says the name is "free after guest
+  prune". `GuestAccounts::PruneAbandoned` only deletes guests unseen for 30
+  days, so this is untestable live without clock surgery; only the
+  409-while-held half was verified.
+- **`/api/auth/upgrade` (CLAIM ACCOUNT) was not exercised.** It was read in the
+  source and named in D7, but no guest was actually upgraded — the journey was
+  continued with a fresh callsign instead, so the intro slides could be seen
+  from a true first-time sign-up.
+- **Root cause of D11** (near-black broadcast render) was not investigated; FOW
+  and lighting were not bisected the way pres-atmos AT2 did.
+- **Screenshots are 1440×801, not the 1440×900 the brief asked for.**
+  `chrome-devtools resize_page` reports success but the viewport stays 801 CSS
+  px (verified by `innerHeight` after resizing to both 900 and 999) — a tooling
+  limitation, recorded rather than worked around.
+- `docs/reviews/beta/e2e/superseded-killed-fire-20260917/` holds four
+  screenshots left by the 2026-09-17 killed fire of this lane. They were never
+  referenced by any README section; moved aside rather than deleted (the harness
+  gates file deletion) so this pass's numbering is unambiguous.
+
+## TOOLING GAP
+
+- **`query_db` is not safe from a clone** — see D3. Until it is fixed, verify DB
+  state with `sqlite3 "file:<TASKHERD_REPO>/data/spring-server.db?mode=ro"`.
+- **`chrome-devtools resize_page` is a no-op here**, so "capture at 1440×900"
+  cannot be honoured.
+- **The native-UI coach/replay widgets are DOM, not canvas**, but carry no a11y
+  role, so they never appear in `take_snapshot` and the `click` tool refuses
+  them ("did not become interactive"). Driving them needs `evaluate_script` +
+  `el.click()`. The replay seek bar is `#replay-track` with an `onclick` reading
+  `clientX` — dispatching a `MouseEvent` on the **canvas** does nothing; it must
+  be dispatched on the track itself.
+- **A single synthetic click does not select a unit**; a dispatched box-drag
+  (pointerdown → several pointermoves → pointerup) does. Worth knowing before
+  concluding "selection is broken".
+- The lobby's own log is **not** ingested by the log server — `get_logs` /
+  `search_logs` only carry game-server entries. The lobby writes to its stdout
+  redirect (this stack: `/private/tmp/e2e-logs/lobby.log`), which is where the
+  accrual and room-lifecycle lines in D5 came from.
