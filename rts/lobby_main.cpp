@@ -523,6 +523,11 @@ static std::unordered_map<uint32_t, std::string> gReplayRooms;
 /// watching one played back through a relay.
 static std::unordered_map<uint32_t, std::string> gBroadcastRooms;
 
+/// Which (room, account) pairs have already been paid for a room's CURRENT
+/// mission (D5, PLAN-beta-journey.md §0, `Journey::AccrualLedger`). Consulted
+/// by `creditRoomAccrual`, reset by `spawnServerForRoom`.
+static Journey::AccrualLedger gAccrualLedger;
+
 /// The game-server binary this lobby forks. Release wins when it exists —
 /// which is also task 3b's field note ("a debug-only rebuild is invisible in a
 /// lobby arm") and the reason the engine-hash probe below has to ask THIS file
@@ -3880,6 +3885,60 @@ int main(int argc, char *argv[]) {
     return ok;
   };
 
+  // Pay standing/session credit for room `roomId`'s finished mission — the
+  // ONE place either exit path may call (D5, PLAN-beta-journey.md §0). Both
+  // the health loop's "game server exited" branch and
+  // POST /api/rooms/leave's abandon branch reach the same event (a mission
+  // is over); this function is what makes either of them safe to call for
+  // it, via `gAccrualLedger` above.
+  //
+  // Who took part is read from both halves, for the same reason the war
+  // browser reads both: a skirmish's players are in the room, a war's
+  // fighters are in the bindings and were never in it.
+  //
+  // Dev/provisional accounts are skipped. They are minted by
+  // `/api/rooms/direct` and by every harness that boots a room, and a
+  // standing ladder whose top is the test fixtures is not a ladder.
+  //
+  // Gated on the room being neither a replay nor a broadcast watch: a
+  // replay/broadcast room's "server" is a playback or relay process, not a
+  // Mission, so whoever first called /api/replays/watch or
+  // /api/broadcasts/watch must not be paid as if they had played one.
+  auto creditRoomAccrual = [&](uint32_t roomId) {
+    if (!Journey::RoomEarnsAccrual(gReplayRooms.count(roomId) > 0,
+                                   gBroadcastRooms.count(roomId) > 0))
+      return;
+    WarSummary finalSummary;
+    const bool haveSummary = warSummaryFor(roomId, finalSummary);
+    std::unordered_map<std::string, int> credited;
+    if (haveSummary)
+      for (const auto &c : finalSummary.credits)
+        credited[c.username] = c.objectives;
+
+    auto accrue = [&](int64_t accountId, const std::string &username) {
+      if (accountId <= 0 || !gAccrualLedger.TryCredit(roomId, accountId))
+        return;
+      const auto u = db.FindUserById(accountId);
+      if (!u || u->isDev || u->isProvisional)
+        return;
+      const auto cit = credited.find(username);
+      const Journey::Accrual a = Journey::SessionAccrual(
+          cit == credited.end() ? 0 : cit->second);
+      db.AddStanding(accountId, a.standing, a.sessions);
+      SLOG(SPRING_LOG_INFO,
+           "standing: '%s' +%d for finishing room %u (%d objective(s) "
+           "credited)",
+           username.c_str(), a.standing, roomId,
+           cit == credited.end() ? 0 : cit->second);
+    };
+    if (const auto *ended = rooms.GetRoom(roomId))
+      for (const auto &p : ended->players)
+        if (!p.isSpectator)
+          accrue(static_cast<int64_t>(p.playerId), p.username);
+    for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), roomId))
+      accrue(b.accountId, b.username);
+  };
+
   // Helper: JSON-serialize a room for API responses
   // `outState` (PLAN-persistence task 4d): the war state this row was built
   // with, handed back to the caller that wants the TRANSITION rather than the
@@ -6536,6 +6595,12 @@ int main(int argc, char *argv[]) {
     room.gameServerPort = inst.port;
     rooms.PersistRoomGameSession(room.id);
 
+    // This room's NEXT mission just began — its previous one's paid-accounts
+    // ledger (D5, gAccrualLedger above) no longer applies. Also the correct
+    // move if `room.id` is a deleted room's id reused by an unrelated later
+    // room: that room must start with a clean slate too.
+    gAccrualLedger.Reset(room.id);
+
     // ── Adopt the war (PLAN-metalstorm-wars.md §3, task 7) ────────────────
     //
     // §3's "operator pick": a war created the way a player or an operator
@@ -8394,6 +8459,15 @@ int main(int argc, char *argv[]) {
           // Kill the game server if one is running
           auto gsIt = gameServers.find(rid);
           if (gsIt != gameServers.end()) {
+            // D5: this IS the mission ending, exactly as much as the health
+            // loop noticing the same pid gone on its next tick would be —
+            // the last player leaving a room whose server is still up is
+            // the normal way a finished (or abandoned) mission is left.
+            // Credit before the SIGTERM/removeGameServer below so the room
+            // and its roster are still live to read; creditRoomAccrual is
+            // idempotent per (room, account), so if the health loop also
+            // reaches this pid's exit nobody is paid twice.
+            creditRoomAccrual(rid);
             kill(gsIt->second.pid, SIGTERM);
             gsIt->second.state = GameServerInstance::Ended;
             removeGameServer(rid);
@@ -10269,61 +10343,15 @@ int main(int argc, char *argv[]) {
           SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                roomId, inst.pid);
 
-          // ── Standing accrual (PLAN-beta-journey.md §0) ──────────────
-          //
-          // The mission is over the moment its process is: this branch runs
-          // exactly once per server exit, before the room is recycled or
-          // deleted, which is the only point in the lobby that is both
-          // once-per-mission and still holding the roster.
-          //
-          // Who took part is read from both halves, for the same reason the
-          // war browser reads both: a skirmish's players are in the room, a
-          // war's fighters are in the bindings and were never in it. Deduped
-          // by account id, so a player who is in both is paid once.
-          //
-          // Dev accounts are skipped. They are minted by `/api/rooms/direct`
-          // and by every harness that boots a room, and a standing ladder
-          // whose top is the test fixtures is not a ladder.
-          //
-          // Gated on the room being neither a replay nor a broadcast watch
-          // (checked BEFORE crediting, not just before the branches below
-          // that clean those rooms up): a replay/broadcast room's "server"
-          // is a playback or relay process, not a Mission, so whoever first
-          // called /api/replays/watch or /api/broadcasts/watch must not be
-          // paid as if they had played one.
-          if (Journey::RoomEarnsAccrual(gReplayRooms.count(roomId) > 0,
-                                         gBroadcastRooms.count(roomId) > 0)) {
-            WarSummary finalSummary;
-            const bool haveSummary = warSummaryFor(roomId, finalSummary);
-            std::unordered_map<std::string, int> credited;
-            if (haveSummary)
-              for (const auto &c : finalSummary.credits)
-                credited[c.username] = c.objectives;
-
-            std::set<int64_t> paid;
-            auto accrue = [&](int64_t accountId, const std::string &username) {
-              if (accountId <= 0 || !paid.insert(accountId).second)
-                return;
-              const auto u = db.FindUserById(accountId);
-              if (!u || u->isDev || u->isProvisional)
-                return;
-              const auto cit = credited.find(username);
-              const Journey::Accrual a = Journey::SessionAccrual(
-                  cit == credited.end() ? 0 : cit->second);
-              db.AddStanding(accountId, a.standing, a.sessions);
-              SLOG(SPRING_LOG_INFO,
-                   "standing: '%s' +%d for finishing room %u (%d objective(s) "
-                   "credited)",
-                   username.c_str(), a.standing, roomId,
-                   cit == credited.end() ? 0 : cit->second);
-            };
-            if (const auto *ended = rooms.GetRoom(roomId))
-              for (const auto &p : ended->players)
-                if (!p.isSpectator)
-                  accrue(static_cast<int64_t>(p.playerId), p.username);
-            for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), roomId))
-              accrue(b.accountId, b.username);
-          }
+          // Standing accrual (D5, PLAN-beta-journey.md §0): the mission is
+          // over the moment its process is. This is one of the two places
+          // that can observe that (POST /api/rooms/leave's abandon branch is
+          // the other, for the normal player-initiated exit); both call the
+          // same idempotent `creditRoomAccrual`, so a mission is paid once
+          // no matter which of them gets there first. Runs before the room
+          // is recycled or deleted below, which is the only point here that
+          // is both once-per-mission and still holding the roster.
+          creditRoomAccrual(roomId);
 
           // PLAN-replay task 4c: a replay room has no next game. Its server
           // exits when the recording runs out, and recycling it to Filling
