@@ -19,7 +19,9 @@ export interface BroadcastListing {
     game?: string;
     state: 'live' | 'recorded';
     behind_seconds?: number;
-    available_since?: string;
+    /// UNIX **seconds** (the lobby sends `availableSinceMs / 1000`). Typed as
+    /// `string` too because a future/older server may send an ISO instant.
+    available_since?: number | string;
     /// Seconds of mission covered so far, not frames — the catalog is built
     /// off wall-clock log spans, not a sim.
     duration?: number;
@@ -59,10 +61,13 @@ function behindLabel(seconds: number): string {
     return `${Math.max(1, Math.round(s / 60))}m behind`;
 }
 
-function shortDate(iso: string): string {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
+function shortDate(when: number | string): string {
+    if (when === '' || when === undefined || when === null) return '';
+    // The lobby sends UNIX SECONDS, not milliseconds and not an ISO string:
+    // `new Date(1789616390)` is 22 Jan 1970, which is what this rendered
+    // before the scale was applied (beta-e2e pass 1).
+    const d = new Date(typeof when === 'number' ? when * 1000 : when);
+    if (Number.isNaN(d.getTime())) return String(when);
     return d.toLocaleString(undefined, {
         month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit',

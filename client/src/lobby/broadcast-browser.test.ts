@@ -34,6 +34,17 @@ describe('describeBroadcastEntry', () => {
             .toBe(base.file);
     });
 
+    it('reads available_since as UNIX seconds, the shape the lobby actually sends', () => {
+        // Regression: the lobby sends `availableSinceMs / 1000` (a number), so
+        // `new Date(n)` read it as ms and rendered 22 Jan 1970 (beta-e2e pass 1).
+        const m = describeBroadcastEntry({ ...base, available_since: 1789616390 });
+        const expected = new Date(1789616390 * 1000).toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        });
+        expect(m.detail).toContain(expected);
+        expect(m.detail).not.toMatch(/1970/);
+    });
+
     it('offers to join an existing cast rather than start a second relay', () => {
         expect(describeBroadcastEntry({ ...base, watching_room: 7 }).watchLabel).toBe('Join cast');
     });
