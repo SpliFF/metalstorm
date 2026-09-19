@@ -104,6 +104,27 @@ describe('tutorial-guide widget', () => {
   });
 });
 
+describe('accessibility', () => {
+  // E2E1's TOOLING GAP: the card carried no a11y role, so chrome-devtools
+  // take_snapshot never listed it and click refused its buttons.
+  it('marks the coach card as a labelled region with labelled action buttons', () => {
+    const store = fakeStore({ ...RUNNING, tutorial_beat_id: 'welcome', tutorial_wait: 'ack', tutorial_check: undefined });
+    const { el } = mount(store);
+    const card = el.querySelector('.ms-tutorial');
+    expect(card.getAttribute('role')).toBe('region');
+    expect(card.getAttribute('aria-label')).toBeTruthy();
+    const buttons = el.querySelectorAll('[data-act]');
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const btn of buttons) expect(btn.getAttribute('aria-label')).toBeTruthy();
+  });
+
+  it('labels the finished-card buttons too', () => {
+    const store = fakeStore({ tutorial_active: 1, tutorial_state: 'done' });
+    const { el } = mount(store);
+    for (const btn of el.querySelectorAll('[data-act]')) expect(btn.getAttribute('aria-label')).toBeTruthy();
+  });
+});
+
 describe('showTarget', () => {
   it('prefers a camera, then the native-ui global, then an event', () => {
     const travelTo = vi.fn();
