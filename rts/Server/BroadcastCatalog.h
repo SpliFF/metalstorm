@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "BroadcastLog.h"
+#include "BroadcastRelay.h" // kMinBroadcastDelaySec — see EffectiveFloorSeconds
 
 namespace broadcastcatalog {
 
@@ -68,6 +69,18 @@ inline AvailabilityResult Availability(const broadcast::Summary &sum,
       sum.truncated ? sum.lastWallMs : sum.trailer.endWallMs;
   a.durationMs = (endMs > sum.firstWallMs) ? (endMs - sum.firstWallMs) : 0;
   return a;
+}
+
+/// E2E1 D2: the floor `/api/broadcasts/list` (and the relay a `/watch` may
+/// spawn) should enforce — `broadcast::kMinBroadcastDelaySec` unless a
+/// dev-build operator lowered it with the lobby's own
+/// `--dev-broadcast-floor-seconds`. `devFloorSec` is the lobby's `-1`
+/// sentinel for "flag absent" (a negative delay is nonsensical as a real
+/// floor, so the sign is free to carry that). Pure so the override-or-
+/// compiled decision gets a doctest independent of argv parsing and the
+/// HTTP route.
+inline int EffectiveFloorSeconds(int devFloorSec) {
+  return devFloorSec >= 0 ? devFloorSec : broadcast::kMinBroadcastDelaySec;
 }
 
 /// One listing entry's sort key: a segment file plus the timestamp encoded in

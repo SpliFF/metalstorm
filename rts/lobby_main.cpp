@@ -476,6 +476,18 @@ static std::string gReplayDir;
 /// room-creating call site, not a `main()` local.
 static std::string gBroadcastDir;
 
+/// E2E1 D2: `--dev-broadcast-floor-seconds`, this lobby's own override of the
+/// compiled `broadcast::kMinBroadcastDelaySec` floor — the piece
+/// `spring-server`'s `--dev-broadcast-floor` (BroadcastRelay.h) could not
+/// reach on its own, because nothing forwarded it and the list route never
+/// took a floor parameter at all. `-1` means "not overridden" (a negative
+/// delay is nonsensical, so the sign is free to mean "flag absent"); set
+/// only after the CLI gate below has confirmed `--i-understand-this-is-a-
+/// dev-build` also came in. Consulted by the list route
+/// (`broadcastcatalog::EffectiveFloorSeconds`) and forwarded to every relay
+/// `spawnGameServer` starts, exactly like `gBroadcastDir` above.
+static int gDevBroadcastFloorSec = -1;
+
 /// PLAN-metalstorm-lobby.md §8, task 9a: "when did this account last make an
 /// authenticated request", the only source of the `online` presence state.
 ///
@@ -689,10 +701,13 @@ static GameServerInstance spawnGameServer(
     // re-executing a `.msr`. Like `replayFile`, every argument describing the
     // world is withheld — the relay pulls map/game/modoptions out of the
     // log's own header (BroadcastLog.h reuses `replay::Header` verbatim for
-    // exactly this) — and no delay flag is passed: the relay's own compiled
-    // floor (`broadcast::kMinBroadcastDelaySec`) is what a fresh watch gets,
-    // and only `--dev-broadcast-floor` (never sent by this lobby) can lower
-    // it.
+    // exactly this) — and no `--broadcast-delay-seconds` is passed: the
+    // relay's own compiled floor (`broadcast::kMinBroadcastDelaySec`) is what
+    // a fresh watch gets. E2E1 D2: `--dev-broadcast-floor` IS forwarded, but
+    // only when the file-scope `gDevBroadcastFloorSec` override is set (the
+    // lobby's own `--dev-broadcast-floor-seconds`, gated on
+    // `--i-understand-this-is-a-dev-build` at parse time) — see the argv
+    // build below.
     const std::string &broadcastFile = "") {
   const bool isReplay = !replayFile.empty();
   const bool isBroadcastRelay = !broadcastFile.empty();
@@ -910,6 +925,7 @@ static GameServerInstance spawnGameServer(
     std::string idleGraceStr = std::to_string(idleStartupGraceSeconds);
     std::string idleExitStr = std::to_string(idleExitSeconds);
     std::string playerSlotCapStr = std::to_string(playerSlotCap);
+    std::string devBroadcastFloorStr = std::to_string(gDevBroadcastFloorSec);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -949,10 +965,18 @@ static GameServerInstance spawnGameServer(
       argv.push_back(replayFile.c_str());
     } else if (isBroadcastRelay) {
       // Deliberately no `--broadcast-delay-seconds`: the relay's own
-      // compiled floor applies, and only a `--dev-broadcast-floor` this
-      // lobby never sends can lower it (see the parameter comment).
+      // compiled floor applies unless overridden below.
       argv.push_back("--broadcast");
       argv.push_back(broadcastFile.c_str());
+      // E2E1 D2: forward the lobby's own dev floor override so a relay a
+      // test spawned serves the same lowered floor the list route just
+      // advertised it at, instead of waiting out the real one-hour floor.
+      // Only sent when the operator actually set it — see the parameter
+      // comment and the CLI gate in main().
+      if (gDevBroadcastFloorSec >= 0) {
+        argv.push_back("--dev-broadcast-floor");
+        argv.push_back(devBroadcastFloorStr.c_str());
+      }
     } else {
       // Not on the replay path: a recording re-executes with the gating its
       // own stream was produced under, and every argument that describes the
@@ -1184,6 +1208,16 @@ int main(int argc, char *argv[]) {
   // disk does not grow forever. <= 0 disables the sweep, same convention as
   // `clientErrorRetentionDays` above.
   int broadcastRetentionDays = 14;
+  // E2E1 D2: `--dev-broadcast-floor-seconds`. The ONLY way to lower the
+  // compiled one-hour floor this lobby's own list route enforces (mirrors
+  // `--dev-broadcast-floor` on spring-server itself, BroadcastRelay.h) —
+  // for a test that cannot wait out a real hour. Refused below unless
+  // `--i-understand-this-is-a-dev-build` is also given: this is strictly
+  // more dangerous than that flag alone, since it also lowers what every
+  // relay this lobby spawns will serve. Never a modoption (a modoption is
+  // written by whoever spawns the room) and never reachable from a client
+  // — a CLI-only operator setting. -1 = unset, use the compiled floor.
+  int devBroadcastFloorSec = -1;
   // PLAN-metalstorm-lobby.md §5.3, task 3: a persistent war's game server is
   // deliberately NOT killed when this lobby shuts down — the next lobby's
   // startup adoption pass re-attaches to the live pid, which is the only
@@ -1251,6 +1285,8 @@ int main(int argc, char *argv[]) {
       gBroadcastDir = argv[++i];
     } else if (arg == "--broadcast-retention-days" && i + 1 < argc) {
       broadcastRetentionDays = std::atoi(argv[++i]);
+    } else if (arg == "--dev-broadcast-floor-seconds" && i + 1 < argc) {
+      devBroadcastFloorSec = std::atoi(argv[++i]);
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
@@ -1278,6 +1314,19 @@ int main(int argc, char *argv[]) {
   // start listening at all without the operator's explicit acknowledgment.
   if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
     return 1;
+
+  // E2E1 D2: --dev-broadcast-floor-seconds lowers what every relay this
+  // lobby spawns will serve, on top of what the dev-build banner already
+  // warns about — refuse it outright unless the operator also acknowledged
+  // the dev build, rather than trusting the flag's name alone.
+  if (devBroadcastFloorSec >= 0 && !devBuildAcknowledged) {
+    SLOG(SPRING_LOG_ERROR,
+         "--dev-broadcast-floor-seconds requires %s (it lowers the "
+         "broadcast delay floor below its compiled value)",
+         DevBuildGate::kFlag);
+    return 1;
+  }
+  gDevBroadcastFloorSec = devBroadcastFloorSec;
 
   if (wtCertPath.empty() != wtKeyPath.empty()) {
     SLOG(SPRING_LOG_ERROR,
@@ -9353,7 +9402,8 @@ int main(int argc, char *argv[]) {
           if (!sum.ok)
             continue;
           const auto avail = broadcastcatalog::Availability(
-              sum, broadcast::kMinBroadcastDelaySec, nowMs);
+              sum, broadcastcatalog::EffectiveFloorSeconds(gDevBroadcastFloorSec),
+              nowMs);
           if (!avail.available)
             continue;
 
