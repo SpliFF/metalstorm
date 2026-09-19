@@ -756,6 +756,15 @@ local function stageUnits(units, landmarks)
     local warned = {}
     local skipped = {}
     local created = 0
+    -- teamID -> running x/z sum + count, so every team ends up with a start
+    -- position at the centroid of what actually got staged for it. The engine
+    -- only sets a team's start position from the MAP's default slot layout,
+    -- and the client's opening-camera framing (gpTryFrameStartCamera) reads
+    -- exactly that value — so a scenario that spawns its column somewhere
+    -- other than the map's own start corner (every metalstorm scenario) opens
+    -- on the wrong patch of terrain unless something moves the start position
+    -- to match (D10, beta E2E1).
+    local teamCentroid = {}
     for _, entry in ipairs(units or {}) do
         local staged = 0
         local u = entry
@@ -805,6 +814,14 @@ local function stageUnits(units, landmarks)
             else
                 created = created + 1
                 staged = staged + 1
+                local tc = teamCentroid[u.team]
+                if not tc then
+                    tc = { sumX = 0, sumZ = 0, count = 0 }
+                    teamCentroid[u.team] = tc
+                end
+                tc.sumX = tc.sumX + ux
+                tc.sumZ = tc.sumZ + uz
+                tc.count = tc.count + 1
                 -- Gaia set dressing is NEUTRAL, not merely unallied. Gaia is its
                 -- own ally team with no allies, which is this engine's definition
                 -- of hostile: a FIGHT-ordered column auto-acquires a village and
@@ -849,6 +866,11 @@ local function stageUnits(units, landmarks)
                     #skipped .. ' staged unit(s) — the ground was already ' ..
                     'occupied, so the war is short of what the scenario ' ..
                     'declares: ' .. table.concat(skipped, ', '))
+    end
+
+    for teamID, tc in pairs(teamCentroid) do
+        local cx, cz = tc.sumX / tc.count, tc.sumZ / tc.count
+        Spring.SetTeamStartPosition(teamID, cx, Spring.GetGroundHeight(cx, cz), cz)
     end
 end
 
