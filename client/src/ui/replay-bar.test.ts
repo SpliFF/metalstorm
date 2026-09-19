@@ -114,24 +114,60 @@ describe('describeReplayBar', () => {
         expect(describeReplayBar(state(), 200).refusal).toBe('');
     });
 
-    it('leads with the delay chip and hides POV for a broadcast', () => {
+    it('leads with the delay chip and hides POV for a live broadcast', () => {
         // PLAN-beta-broadcast.md lane C: the tap is Global-visibility only —
         // there is no other POV to switch to, and saying so would be a lie.
+        // `truncated: true` is what "still live" looks like on the wire for
+        // a broadcast (no trailer written yet) — see ReplayStateBroadcast.h.
         const m = describeReplayBar(
-            state({ broadcast: true, behindSeconds: 3600, povTeam: -1 }), 200);
+            state({ broadcast: true, truncated: true, behindSeconds: 3600, povTeam: -1 }), 200);
         expect(m.status).toContain('Broadcast · 1h behind');
         expect(m.status).not.toContain('POV');
+        // Not the E1 "server died mid-game" line — that's a `.msr` concept;
+        // for a broadcast, truncated just means the mission is ongoing.
+        expect(m.status).not.toContain('ends early');
     });
 
     it('formats the delay in minutes under an hour (dev-floor override)', () => {
-        const m = describeReplayBar(state({ broadcast: true, behindSeconds: 90 }), 200);
+        const m = describeReplayBar(
+            state({ broadcast: true, truncated: true, behindSeconds: 90 }), 200);
         expect(m.status).toContain('Broadcast · 2m behind');
     });
 
     it('drops the no-checkpoints line for a broadcast — backward seek works via keyframes', () => {
         const m = describeReplayBar(
-            state({ broadcast: true, behindSeconds: 3600, checkpointFrames: [] }), 200);
+            state({ broadcast: true, truncated: true, behindSeconds: 3600, checkpointFrames: [] }), 200);
         expect(m.status).not.toContain('forwards only');
+    });
+
+    it('D12: states when a finished/stale broadcast segment was recorded, not "behind"', () => {
+        // A closed segment (`truncated: false` — the trailer is written) has
+        // no live edge to be behind; showing "behind" here is what flipped
+        // from "1h behind" to "59h behind" on a backward seek in E2E1 pass 1
+        // (docs/reviews/beta/README.md D12), purely because it kept
+        // recomputing against wall clock for a two-day-old recording.
+        const recordedAt = new Date('2026-09-17T10:00:00Z').getTime();
+        const m = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 212400 }),
+            200, '', recordedAt);
+        expect(m.status).toContain('Recorded');
+        expect(m.status).not.toContain('behind');
+    });
+
+    it('D12: the recorded date does not move when the caller re-derives it after a seek', () => {
+        // The whole bug was re-deriving the label from `behindSeconds`, which
+        // grows after a backward seek moves the cursor away from the live
+        // edge. describeReplayBar takes the frozen instant as a parameter
+        // precisely so a later, larger `behindSeconds` on the same segment
+        // cannot change what is shown.
+        const recordedAt = new Date('2026-09-17T10:00:00Z').getTime();
+        const before = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 3600 }),
+            200, '', recordedAt);
+        const afterSeek = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 212400 }),
+            200, '', recordedAt);
+        expect(before.status).toBe(afterSeek.status);
     });
 
     it('marks the live edge on the track for a broadcast', () => {

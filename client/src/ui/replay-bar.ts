@@ -74,6 +74,18 @@ function behindLabel(seconds: number): string {
     return `${Math.max(1, Math.round(s / 60))}m behind`;
 }
 
+/** Same rendering broadcast-browser.ts's listing uses for `available_since`
+ *  (E2E1's fix e4ced580f7 for that field's UNIX-**seconds** scale) — this
+ *  one already works in milliseconds, so there is no scale to get wrong. */
+function shortDate(ms: number): string {
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+    });
+}
+
 const SIM_HZ = 30;
 
 function clock(frame: number): string {
@@ -82,9 +94,15 @@ function clock(frame: number): string {
 }
 
 /** Everything the bar shows, derived from one ReplayState plus who we are.
- *  Pure — this is the part with decisions in it. */
+ *  Pure — this is the part with decisions in it.
+ *
+ *  `recordedAtMs` is the wall-clock instant a finished/stale broadcast
+ *  segment was captured, supplied by the caller (`updateReplayBar` freezes
+ *  it from the first state it sees — see the note there for why). Unused
+ *  outside a broadcast, and for a still-live one. */
 export function describeReplayBar(
-    st: ReplayStateInfo, myPlayerNum: number, refusal = ''): ReplayBarModel {
+    st: ReplayStateInfo, myPlayerNum: number, refusal = '',
+    recordedAtMs: number | null = null): ReplayBarModel {
     const span = Math.max(1, st.endFrame - st.startFrame);
     const elapsed = Math.min(Math.max(0, st.currentFrame - st.startFrame), span);
     const isController =
@@ -98,15 +116,30 @@ export function describeReplayBar(
     }
 
     const bits: string[] = [];
-    // A broadcast leads with what makes it a broadcast: the delay. POV never
-    // shows (the tap is a Global-visibility spectator — there is no other
-    // POV to switch to) and the "no checkpoints" line is wrong here — a
-    // broadcast seeks backward via keyframes, checkpoints or not.
-    if (st.broadcast) bits.push(`Broadcast · ${behindLabel(st.behindSeconds)}`);
+    // A broadcast leads with what makes it a broadcast. `behindSeconds` is
+    // the relay's cursor position vs. wall clock — meaningful only while the
+    // segment is still live (`truncated`, i.e. no trailer written yet); for
+    // a finished/stale one it just measures how long ago the log ended, and
+    // a backward seek moves the cursor further from "now" and inflates it
+    // further still (E2E1 D12: "1h behind" → "59h behind" on a two-day-old
+    // segment after seeking backward). So a finished segment states when it
+    // was recorded instead — a fact that does not change under a seek.
+    // POV never shows either way (the tap is a Global-visibility spectator —
+    // there is no other POV to switch to) and the "no checkpoints" line is
+    // wrong here — a broadcast seeks backward via keyframes, checkpoints or
+    // not.
+    if (st.broadcast) {
+        bits.push(st.truncated
+            ? `Broadcast · ${behindLabel(st.behindSeconds)}`
+            : (recordedAtMs !== null ? `Recorded ${shortDate(recordedAtMs)}` : 'Recorded'));
+    }
     if (st.seeking) bits.push(`seeking to ${clock(st.seekTarget)}…`);
     // E1: a recording whose server died mid-game. Said out loud, because the
-    // alternative is a bar that just stops and reads as a bug.
-    if (st.truncated) bits.push('recording ends early (segment truncated)');
+    // alternative is a bar that just stops and reads as a bug. `truncated`
+    // means something else entirely for a broadcast (no trailer yet — it's
+    // simply still live, the expected state for its whole run), so this only
+    // applies to a finished (`.msr`) recording.
+    if (!st.broadcast && st.truncated) bits.push('recording ends early (segment truncated)');
     if (!st.broadcast) {
         bits.push(st.povTeam >= 0 ? `POV: team ${st.povTeam}` : 'POV: global view');
         if (st.checkpointFrames.length === 0)
@@ -151,6 +184,11 @@ let send: ReplayControlSender | null = null;
 let myPlayerNum = -1;
 let refusal = '';
 let refusalTimer: ReturnType<typeof setTimeout> | null = null;
+/** E2E1 D12: when this session's broadcast segment turns out to be
+ *  finished/stale, the wall-clock instant it was recorded — frozen from the
+ *  first state that revealed it, not recomputed on every update. See the
+ *  note on `describeReplayBar`'s `recordedAtMs` param. */
+let recordedAtMs: number | null = null;
 
 /** How long a refusal holds the status line. Long enough to read a sentence,
  *  short enough that it does not outlive the state it was about. */
@@ -206,6 +244,14 @@ export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
     lastState = st;
     send = sender;
     myPlayerNum = playerNum;
+    // D12: capture once, the first time this segment is seen to be
+    // finished/stale rather than live. A later seek moves the playback
+    // cursor and would otherwise re-derive a bogus, ever-growing "behind" —
+    // freezing the wall-clock instant here means the label it feeds
+    // (`describeReplayBar`'s "Recorded <date>") never moves under a seek.
+    if (st.broadcast && !st.truncated && recordedAtMs === null) {
+        recordedAtMs = Date.now() - st.behindSeconds * 1000;
+    }
     if (!root) root = buildBar();
     render();
 
@@ -228,12 +274,13 @@ export function hideReplayBar(): void {
     lastState = null;
     send = null;
     refusal = '';
+    recordedAtMs = null;
     if (refusalTimer) { clearTimeout(refusalTimer); refusalTimer = null; }
 }
 
 /** Test seam: the bar's current model, or null when it is not mounted. */
 export function replayBarModel(): ReplayBarModel | null {
-    return lastState ? describeReplayBar(lastState, myPlayerNum, refusal) : null;
+    return lastState ? describeReplayBar(lastState, myPlayerNum, refusal, recordedAtMs) : null;
 }
 
 function el(tag: string, css: string, text = ''): HTMLElement {
@@ -320,7 +367,7 @@ function buttonCss(): string {
 
 function render(): void {
     if (!root || !lastState) return;
-    const m = describeReplayBar(lastState, myPlayerNum, refusal);
+    const m = describeReplayBar(lastState, myPlayerNum, refusal, recordedAtMs);
     const play  = root.querySelector<HTMLButtonElement>('#replay-play');
     const speed = root.querySelector<HTMLButtonElement>('#replay-speed');
     const pos   = root.querySelector<HTMLElement>('#replay-position');
