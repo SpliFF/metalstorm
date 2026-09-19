@@ -2177,7 +2177,15 @@ function gpConnect(msg: GpInitToWorker): void {
             const won = winningAllyTeams.length === 0 || myTeam < 0
                 ? null
                 : winningAllyTeams.includes(myAllyTeam);
-            postToMain({ type: 'gp:gameOver', frame, winningAllyTeams, won });
+            // rename-war D8: the overlay names the winner as "You" or by
+            // Faction rather than the bare ally-team id, so it needs the
+            // viewer's own ally team and the room's war_sides modoption
+            // (faction:team pairs) — both already known here.
+            const warSides = liveState.modOptions.war_sides;
+            postToMain({
+                type: 'gp:gameOver', frame, winningAllyTeams, won, myAllyTeam,
+                warSides: typeof warSides === 'string' ? warSides : undefined,
+            });
             // Drive widget:GameOver + gadget-half GameOver with the real winners
             // table — Recoil's signature is GameOver(winningAllyTeams). The IDs
             // are server-validated allyteam ints, safe to inline as a Lua list.

@@ -7,6 +7,7 @@
 
 import { injectStyle, renderTemplate } from '../ui.js';
 import type { GameTemplates } from '../game/loader.js';
+import { parseWarSides, type WarSide } from '../../lobby/war-sides.js';
 
 export interface GameOverCallbacks {
     /** Winning allyteam IDs from the server (empty = undecided). */
@@ -14,20 +15,35 @@ export interface GameOverCallbacks {
     /** Local player's result: true = won, false = lost, null/undefined =
      *  draw / undecided / spectator (neutral headline). */
     won?: boolean | null;
+    /** The viewer's own ally team, so their own entry in the winners list
+     *  reads as "You" rather than by Faction (rename-war D8). */
+    myAllyTeam?: number;
+    /** The room's raw `war_sides` modoption (`"compact:0,union:4"`), if any —
+     *  parsed to name a winning ally team by its Faction. */
+    warSides?: string;
     onReturnToLobby: () => void;
 }
 
 /** Headline + winner line from the winners list and the local result (G2).
+ *  Names the viewer's own ally team "You" and any other winner by its
+ *  Faction (from `sides`, the room's parsed `war_sides`), falling back to a
+ *  bare team number only when no side data names it (rename-war D8 — the
+ *  engine's "Ally team N" is not player-facing vocabulary).
  *  Exported for unit testing (the overlay's user-visible copy). */
-export function describeResult(winningAllyTeams: number[], won: boolean | null | undefined): {
-    headline: string; result: string;
-} {
+export function describeResult(
+    winningAllyTeams: number[], won: boolean | null | undefined,
+    myAllyTeam?: number, sides?: readonly WarSide[],
+): { headline: string; result: string } {
     if (winningAllyTeams.length === 0) {
         return { headline: 'Game Over', result: 'The battle ended without a decisive winner.' };
     }
-    const names = winningAllyTeams.map((a) => `Ally team ${a}`);
+    const nameFor = (allyTeam: number): string => {
+        if (allyTeam === myAllyTeam) return 'You';
+        return sides?.find((s) => s.team === allyTeam)?.label ?? `Team ${allyTeam}`;
+    };
+    const names = winningAllyTeams.map(nameFor);
     const winnerLine = names.length === 1
-        ? `${names[0]} is victorious!`
+        ? `${names[0]} ${names[0] === 'You' ? 'are' : 'is'} victorious!`
         : `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]} share victory.`;
     const headline = won === true ? 'Victory' : won === false ? 'Defeat' : 'Game Over';
     return { headline, result: winnerLine };
@@ -40,6 +56,7 @@ export function showGameOver(
 
     const { headline, result } = describeResult(
         callbacks.winningAllyTeams ?? [], callbacks.won,
+        callbacks.myAllyTeam, parseWarSides(callbacks.warSides),
     );
 
     // Idempotent: the result can be announced more than once for one match —

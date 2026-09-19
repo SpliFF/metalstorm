@@ -1493,6 +1493,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 showGameOver(gameTemplates, m.frame, {
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,
+                    myAllyTeam: m.myAllyTeam,
+                    warSides: m.warSides,
                     onReturnToLobby: quitToLobby,
                 });
                 break;
