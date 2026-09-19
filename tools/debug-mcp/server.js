@@ -24,7 +24,7 @@ import { classifyEndResponse } from './room-end.js';
 import { validateToolArgs } from './tool-args.js';
 import { TOOLS } from './tools.js';
 import { pickServer, listCandidates } from './room-target.js';
-import { buildVerb } from './verb-args.js';
+import { buildVerb, buildOrderLua } from './verb-args.js';
 import { redactSessions } from './redact.js';
 import { worldHandlers } from './world-tools.js';
 import { aiHandlers } from './ai-tools.js';
@@ -36,6 +36,8 @@ import {
     DEFAULT_RELAY_TIMEOUT_MS, buildHarnessCall, describePlan, formatCaptureMeta,
     parseLosStatus, parseSpawnIds, planCapture, validateCaptureArgs,
 } from './capture-subject.js';
+import { generateWaypoints, createProgressTracker, patternSpan, passiveStateLua, queueReportLua, PATTERNS } from './drive-pattern.js';
+import { buildTrancheLua, trancheUnitCount } from './tranche.js';
 import {
     GAME_SPEED, MAX_STEP_FRAMES,
     buildSequenceHarnessCall, describeSequencePlan, extForMime, formatSequenceMeta,
@@ -2443,12 +2445,10 @@ async function executeTool(name, args) {
         case 'give_order': {
             const params = Array.isArray(args.params) ? args.params : [];
             if (params.length > 4) return 'Error: give_order takes at most 4 params.';
-            const cmd = buildVerb('order', [
-                [args.unitId, 'unitId', 'num'], [args.cmdId, 'cmdId', 'num'],
-                ...params.map((p, i) => [p, `params[${i}]`, 'num']),
-                [args.opts ?? 0, 'opts', 'num'],
-            ]);
-            const r = await execOnGameServer('server', cmd, args.roomId);
+            // Issued as a literal GiveOrderToUnit on LuaRules, not the `order`
+            // verb: that verb drops opts unless exactly 4 params precede it,
+            // so a 3-param MOVE with SHIFT (32) never queued (see buildOrderLua).
+            const r = await execOnGameServer('LuaRules', buildOrderLua(args.unitId, args.cmdId, params, args.opts ?? 0), args.roomId);
             return r.success ? r.output : `Error: ${r.output}`;
         }
 
@@ -3128,6 +3128,226 @@ async function executeTool(name, args) {
                 clientId: relayed?.clientId,
             }) });
             return { content };
+        }
+
+        case 'drive_pattern': {
+            if (!PATTERNS.includes(args.pattern)) {
+                return `Error: drive_pattern needs \`pattern\` — one of ${PATTERNS.join(', ')}.`;
+            }
+            if (!Number.isFinite(args.unitId) && !args.spawn) {
+                return 'Error: drive_pattern needs `unitId` (drive an existing unit) or `spawn` (create one first).';
+            }
+
+            const notes = [];
+            let unitId = args.unitId;
+            if (!Number.isFinite(unitId)) {
+                const s = args.spawn;
+                if (!s || !s.defName || !Number.isFinite(s.x) || !Number.isFinite(s.z)) {
+                    return 'Error: `spawn` needs {defName, x, z}.';
+                }
+                const cmd = buildVerb('spawn', [
+                    [s.defName, 'defName'], [s.x, 'x', 'num'], [s.z, 'z', 'num'],
+                    [s.team ?? 0, 'team', 'num'], [1, 'count', 'num'],
+                ]);
+                const j = await execJsonVerb(cmd, args.roomId);
+                let spawnReply;
+                if (j.json) {
+                    if (j.json.error) return `Error: spawn failed: ${j.json.error}`;
+                    spawnReply = j.json;
+                } else if (j.legacy) {
+                    return `Error: spawn failed: ${j.legacy}`;
+                } else {
+                    const r = await execOnGameServer('server', cmd, args.roomId);
+                    if (!r.success) return `Error: spawn failed: ${r.output}`;
+                    spawnReply = r.output;
+                }
+                const ids = parseSpawnIds(spawnReply);
+                if (!ids.length) return `Error: spawn did not return a unit id (${String(spawnReply).slice(0, 200)}).`;
+                unitId = ids[0];
+                notes.push(`spawned unit id: ${unitId}`);
+                // A unit ordered IMMEDIATELY after spawn_unit can silently
+                // drop its first order (empty queue, never moves) — a
+                // TOOLING GAP note from the pres-decals fire (docs/reviews/
+                // beta/README.md). A short settle before the first order,
+                // confirmed by polling unit_state, fixes it.
+                let exists = false;
+                for (let i = 0; i < 5 && !exists; i++) {
+                    await new Promise((r) => setTimeout(r, 200));
+                    exists = !!(await sampleUnitMotion(unitId, args.roomId));
+                }
+                if (!exists) notes.push(`unit ${unitId} did not confirm via unit_state while settling — ordering anyway`);
+            }
+
+            const origin = await sampleUnitMotion(unitId, args.roomId);
+            if (!origin) return `Error: unit ${unitId} not found (unit_state came back empty).`;
+
+            let waypoints;
+            try {
+                waypoints = generateWaypoints({
+                    pattern: args.pattern, center: { x: origin.pos.x, z: origin.pos.z },
+                    radius: args.radius, length: args.length,
+                    laps: args.laps, segmentsPerLap: args.segmentsPerLap,
+                    clearance: args.clearance,
+                });
+            } catch (e) { return `Error: ${e.message}`; }
+            if (waypoints.length > 200) {
+                return `Error: drive_pattern would issue ${waypoints.length} waypoints (max 200) — reduce laps or segmentsPerLap.`;
+            }
+            const arriveRadius = Number.isFinite(args.arriveRadius) && args.arriveRadius > 0 ? args.arriveRadius : 64;
+            const span = patternSpan({ pattern: args.pattern, radius: args.radius, length: args.length });
+            if (span <= arriveRadius) {
+                return `Error: drive_pattern's ${args.pattern} spans only ${span} elmos from the start, inside arriveRadius ${arriveRadius} — the unit could never be seen to leave. Enlarge radius/length or shrink arriveRadius.`;
+            }
+
+            // Hold fire + hold position first (default): an idling unit that
+            // sees an enemy is given an INTERNAL attack order by the engine,
+            // which replaces the move queue mid-loop.
+            const passive = args.passive !== false;
+            if (passive) {
+                const r = await execOnGameServer('LuaRules', passiveStateLua(unitId), args.roomId);
+                if (!r.success) notes.push(`could not set hold-fire/hold-position: ${r.output}`);
+                else notes.push('unit set to hold fire + hold position for the drive (passive:false to skip)');
+            }
+
+            // Queued MOVE orders (cmdId 10), first waypoint opts 0 (replace),
+            // the rest opts 32 (SHIFT/queue) — the "opts 0 then 32" pattern the
+            // hand-built pres-decals figure-8 used, issued through give_order's
+            // literal-Lua path (buildOrderLua) so opts actually reach the engine.
+            const startFrame = await readSimFrame(args.roomId);
+            for (let i = 0; i < waypoints.length; i++) {
+                const wp = waypoints[i];
+                const r = await execOnGameServer('LuaRules', buildOrderLua(unitId, 10, [wp.x, 0, wp.z], i === 0 ? 0 : 32), args.roomId);
+                if (!r.success) return `Error: waypoint ${i} order refused: ${r.output}`;
+            }
+
+            // Wait for the unit to visit every waypoint IN ORDER (order_and_film's
+            // polling cadence, but tracked sequentially): a closed loop ends where
+            // it began, so "near the last waypoint" is true before the unit has
+            // moved at all — the tracker refuses to call that arrival until the
+            // unit has first left its origin.
+            // Default 180 s: a tank averaged ~20 elmos/s through a loop's turns
+            // live, and the default 300-radius 12-point figure-8 is ~1900 elmos.
+            const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 180000;
+            const pollMs = Math.max(50, Number.isFinite(args.pollMs) ? args.pollMs : 500);
+            const tracker = createProgressTracker({ waypoints, arriveRadius, origin: origin.pos });
+            const started = Date.now();
+            let finalState = origin;
+            let progress = tracker.snapshot();
+            while (Date.now() - started < timeoutMs) {
+                const cur = await sampleUnitMotion(unitId, args.roomId);
+                if (!cur) { notes.push(`unit ${unitId} vanished while waiting to arrive`); break; }
+                finalState = cur;
+                progress = tracker.update(cur.pos);
+                if (progress.arrived) break;
+                await new Promise((r) => setTimeout(r, pollMs));
+            }
+            if (!progress.arrived) {
+                notes.push(`did not confirm arrival within ${timeoutMs}ms — reached ${progress.waypointsReached}/${waypoints.length} waypoints`
+                    + (progress.departed ? '' : ` and never moved more than ${arriveRadius} elmos from the start (first order dropped?)`)
+                    + ' — returning last known position');
+                // Quote the queue head so a replaced queue (engine auto-engage
+                // is `20[<enemy>]#8`, a gadget, a human) is visible right here.
+                try {
+                    const q = await execOnGameServer('LuaRules', queueReportLua(unitId), args.roomId);
+                    if (q.success) notes.push(`command queue now: ${q.output} (expected MOVE=10 entries; anything else replaced the drive)`);
+                } catch { /* diagnostic only */ }
+            }
+            const endFrame = await readSimFrame(args.roomId);
+
+            const result = {
+                unitId, pattern: args.pattern, waypoints,
+                arrived: progress.arrived,
+                waypointsReached: progress.waypointsReached,
+                departed: progress.departed,
+                framesElapsed: (endFrame ?? startFrame ?? 0) - (startFrame ?? 0),
+                finalPosition: finalState.pos,
+                notes,
+            };
+            if (!args.capture) return result;
+
+            // Optional capture: reuse the same capture_subject plumbing
+            // (imported above) for a top + low pair at the final position,
+            // rather than re-deriving the pause/reveal/restore dance.
+            const content = [{ type: 'text', text: JSON.stringify(result, null, 2) }];
+            for (const angle of ['top', 'low']) {
+                try {
+                    const capArgs = { unitId, angle, maxDim: args.maxDim, roomId: args.roomId, clientId: args.clientId };
+                    const state = await observeSimState(args.roomId, false);
+                    const plan = planCapture(capArgs, state);
+                    const cctx = { spawnedIds: [], revealed: state.los.allOn === true, notes: [] };
+                    const runStep = (step) => runPlanStep(step, args.roomId, cctx);
+                    let relayed;
+                    try {
+                        for (const s of plan.pre) await runStep(s);
+                        relayed = await clientEval('test', buildHarnessCall({
+                            ...capArgs,
+                            __revealed: cctx.revealed,
+                            syncPresentation: plan.pre.some((st) => st.op === 'pause'),
+                        }), args.roomId, args.clientId, DEFAULT_RELAY_TIMEOUT_MS);
+                    } finally {
+                        for (const s of plan.post) {
+                            try { await runStep(s); } catch { /* best-effort restore */ }
+                        }
+                    }
+                    if (relayed.fallback) {
+                        content.push({ type: 'text', text: `capture (${angle}) unavailable: relay ${relayed.fallback}` });
+                        continue;
+                    }
+                    if (!relayed.success) {
+                        content.push({ type: 'text', text: `capture (${angle}) error: ${relayed.output}` });
+                        continue;
+                    }
+                    const shot = clientEvalValue(relayed.output);
+                    const m = shot?.dataUrl && /^data:([^;]+);base64,(.*)$/s.exec(shot.dataUrl);
+                    if (!m) {
+                        content.push({ type: 'text', text: `capture (${angle}): unexpected reply` });
+                        continue;
+                    }
+                    content.push({ type: 'image', data: m[2], mimeType: m[1] });
+                    content.push({ type: 'text', text: `capture (${angle}): ${formatCaptureMeta(shot, {
+                        notes: cctx.notes, plan: describePlan(plan), clientId: relayed.clientId,
+                    })}` });
+                } catch (e) {
+                    content.push({ type: 'text', text: `capture (${angle}) threw: ${e.message}` });
+                }
+            }
+            return { content };
+        }
+
+        case 'populate_tranche': {
+            const rung = args.rung ?? 'XL900';
+            let lua;
+            try {
+                lua = buildTrancheLua(rung, {
+                    center: args.center,
+                    teamNorth: args.teamNorth,
+                    teamSouth: args.teamSouth,
+                    armored: args.armored,
+                    soldierDef: args.soldierDef,
+                    tankDef: args.tankDef,
+                    suppressGameOver: args.suppressGameOver,
+                });
+            } catch (e) { return `Error: ${e.message}`; }
+
+            if (args.clearFirst) {
+                const teamNorth = Number.isFinite(args.teamNorth) ? args.teamNorth : 0;
+                const teamSouth = Number.isFinite(args.teamSouth) ? args.teamSouth : 4;
+                for (const team of [teamNorth, teamSouth]) {
+                    await execOnGameServer('server', buildVerb('clear', [[team, 'team', 'num']]), args.roomId);
+                }
+            }
+
+            const result = await execOnGameServer('LuaRules', lua, args.roomId);
+            if (!result.success) return `Error: ${result.output || 'exec failed'}`;
+            let parsed;
+            try { parsed = JSON.parse(result.output); }
+            catch { return `Error: unexpected populate_tranche reply: ${String(result.output).slice(0, 400)}`; }
+            return {
+                rung,
+                expectedUnits: trancheUnitCount(rung),
+                ...parsed,
+                note: 'ids kept server-side in GG.perfTranche[team] — read them back with exec_lua if needed.',
+            };
         }
 
         // --- Scenario authoring (S3) -----------------------------------
