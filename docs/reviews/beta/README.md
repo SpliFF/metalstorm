@@ -246,6 +246,113 @@ white.
 
 ---
 
+# terrain-streaming K2 — AT2 residual black patch, map-processing audit (2026-09-20)
+
+Follow-up to AT2's "root cause, part 2": with FOW, CSM, atmosphere fog,
+`TerrainSplatPlugin` diffuse-alpha and `DecalOverlayPlugin` all disabled, a
+smaller hard-edged literal-`(0,0,0)`-black patch remains at world
+`X≈0-1000, Z≈6000-7168` on `scorched_crossing_v2.4` — a map corner (touches
+both the `X=0` and `Z=7168` edges). AT2 flagged the map's derived KTX2 assets
+(`tiles.ktx2`, `splat_normal_0..3.ktx2`) as regenerated today against
+April-era `.tga`/`.dds` sources, and named the server-side map-processing /
+KTX2 conversion step (`rts/Server/MapProcessor.cpp`, invoked from
+`spring-lobby`, using `tools/textureconverter`) as the suspect. This fire
+audits that step directly, byte-for-byte, rather than through the renderer.
+
+## Method
+
+No `ktx2`/map-processor unit test existed to reuse, so this ran the
+conversion's own inputs and outputs through direct binary comparison:
+
+- Parsed `scorchedcrossing.smf`'s header/tile-dictionary
+  (`data/maps/scorched_crossing_v2.4/maps/scorchedcrossing.smf`) and confirmed
+  `mapx=mapy=896` (divisible by 4, so `MapProcessor::ReadSMFHeader`'s
+  `tilesX = mapx/4` truncation is exact — ruling out an off-by-one from
+  non-multiple-of-4 map dims) and `tilesX=tilesZ=224` on a 7168×7168-elmo map
+  (`X≈0-1000, Z≈6000-7168` → tile columns `x∈[0,31]`, rows `z∈[187,223]`).
+  `data/maps/scorched_crossing_v2.4/tileindex.bin` (the processed copy) is
+  byte-identical to the SMF's own tile-index section for every entry — the
+  extraction in `ExtractBinaryData` (`MapProcessor.cpp:544-561`) is a plain
+  copy here, nothing to miscompute.
+- Read every SMT tile (`scorchedcrossing.smt`, tile-major, 680B/tile: mip0
+  512B + mip1 128B + mip2 32B + mip3 8B) referenced by that box's tile
+  indices, and the same tiles' bytes out of the derived `tiles.ktx2`
+  (level-major, per `MapProcessor.cpp:598-664` + `textureconverter
+  --raw-dxt1 --no-zstd`, parsed via the KTX2 level index) — **all 4 mip
+  levels, all 1088 tiles in the box: 4736 byte-range comparisons, 0
+  mismatches.** The SMT→KTX2 step for the tile atlas is a lossless,
+  bit-exact re-encode (`--no-zstd` means `ktxTexture_SetImageFromMemory`
+  stores each level's DXT1 blocks verbatim; confirmed against the actual
+  files, not just by reading the code).
+  - Of those 1088 tiles, only **10** decode (DXT1→RGB) to literal
+    `(0,0,0)` — `z=197,x∈[24,31]` and `z=201,x∈{32,33}` — and every one of
+    those 10 is *already* literal black in the April-era `.smt` source, i.e.
+    content, not conversion. They don't cover the reported box; a solid
+    black rectangle over the whole `X≈0-1000,Z≈6000-7168` region can't be
+    explained by the tile atlas alone.
+- Extracted `splat_distr.ktx2` and `splat_normal_0..3.ktx2` back to RGBA8 PNG
+  (`ktx extract --transcode rgba8 --level 0`, KTX-Software CLI) and diffed
+  pixel-for-pixel against their April sources (`maps/splatdistrtex.png`,
+  `maps/bgnoise_dnts.tga`, `maps/rock_46_highpass_dnts.tga`,
+  `maps/dirt_280_highpass_dnts.tga`, `maps/bgnoise_dnts_deeper.tga` — these
+  go through `ConvertMapTexture`'s generic `--encoding uastc --mipmaps`
+  path, unlike the tile atlas's raw-block wrap). All differences are small
+  and spread uniformly across each whole image (max per-channel delta
+  39-109, mean 1.6-15.5) — ordinary UASTC lossy-encode noise, not a
+  concentrated corner defect; the significant-diff bounding boxes for
+  `splat_distr` sit well inside the texture (`x:88-918, y:110-883` of
+  1024×1024), *excluding* the edges, so there's no edge-clamp/wrap artifact
+  at the texture boundary either.
+- Sampled `heightmap.bin` near the corner: a flat plateau (constant raw
+  height ≈22359, i.e. ≈241 elmos after the SMF min/max-height rescale) right
+  at the `Z=7168` edge — consistent with intentional map geometry (a cliff
+  or dead zone at the playable-area boundary), not a processing artifact
+  (heightmap extraction is a raw byte copy, no computation, per
+  `ExtractBinaryData`).
+
+## Conclusion: not a converter bug
+
+Every asset this map-processing step touches for that corner was checked
+against its source, directly, at the byte or pixel level — not just by
+reading the code. The tile atlas conversion is provably lossless (0/4736
+mismatches); the splat texture conversions show only ordinary lossy-codec
+noise, uniformly distributed, not concentrated at this corner or at any
+texture edge. **The KTX2 conversion step is a faithful re-encode of the
+April-era source content; it is not introducing this residual black
+patch.** The "today" `.processed-stamp`/mtime on the derived assets (which
+correctly made AT2 suspect this step) is just this map's most recent
+reprocessing run — it does not mean the pixels changed incorrectly.
+
+The residual is therefore either genuine map content (a real dark/flat
+corner — plausible for a "scorched crossing" map, and partially corroborated
+by the 10 literal-black source tiles + the flat height plateau right at that
+edge) or a renderer-side effect AT2's toggle sweep didn't isolate (e.g. the
+same distribution-weight mechanism as the already-fixed diffuse-alpha term,
+but acting through a different shader term the `±0.4` clamp doesn't bound,
+or heightmap-edge normal computation at the map boundary) — both outside
+this step's scope and this fire's brief (converter-only; "not the client").
+No code change is warranted here without conflating a real fix with a guess.
+
+Not reproduced against the live stack this fire: the live stack
+(`spring-lobby`:8011) serves `TASKHERD_REPO`'s (main checkout's) maps, not
+this clone's `data/maps/` copy, and no map content changed here to re-process
+or prove — the byte/pixel-level decode above is the evidence trail per this
+lane's brief ("otherwise decode ... and show the pixel values").
+
+## Not done this fire
+
+- No converter fix, no regression test — investigation did not find a
+  converter-side defect to fix or guard.
+- The actual residual root cause (content vs. a further renderer term) is
+  still open; whoever picks this up next should look at
+  `client/src/core/terrain-splat-plugin.ts`'s other shader terms and/or
+  `client/src/core/terrain.ts`'s edge-of-heightmap normal computation for
+  `scorched_crossing_v2.4`'s `X=0`/`Z=7168` corner, or simply confirm this is
+  intended map geometry (a scorched/dead corner) and close AT2's residual
+  as content, not a defect.
+
+---
+
 # E2E pass 1 — first-time-player path (2026-09-19)
 
 PLAN-beta.md §Verification items **1 (spectate as guest)** and **2 (sign up →
