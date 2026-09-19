@@ -9,7 +9,7 @@ the schemas themselves so the names, types, defaults and required fields cannot 
 a caller actually gets. For setup, the SQLite/`SPRING_DB` rules and the hand-written narrative
 sections, see [debugging-tools.md § Claude / MCP Integration](debugging-tools.md#claude--mcp-integration).
 
-79 tools in 13 groups.
+81 tools in 13 groups.
 
 ## Rules that apply to everything
 
@@ -25,15 +25,17 @@ sections, see [debugging-tools.md § Claude / MCP Integration](debugging-tools.m
 
 **Arguments are enforced.** A missing `required` field is refused by name, and an unknown property within a small edit distance of a real one is treated as a TYPO rather than an ignored extra — `set_los {enabled:true}` (the field is `enable`) used to read as "no arguments" and answer as if you had asked a question. `npm run check` diffs every schema against what its handler actually reads, so neither list can drift from the other.
 
+**One live stack per machine.** The lobby/logserver/vite you see running almost always belong to the USER's own interactive mprocs — this MCP is a guest on that box, not its owner. `stack_start` refuses outright if any of :8010/:8011/:8012 is already held, rather than racing a second lobby onto the same db (SO_REUSEPORT round-robins accepts between them — see `list_stack`'s duplicate-lobby finding). `cleanup_stack` refuses to kill ANY pid it did not itself start via `stack_start`, for the same reason, in both cases only overridable with `force:true` — and even then, only after actually looking (`list_stack`) at what you are about to kill.
+
 ## Index
 
-- **Logs** — `get_logs`, `search_logs`
+- **Logs** — `get_logs`, `search_logs`, `lobby_log`
 - **Reading the sim** — `get_game_state`, `list_units`, `get_unit_state`, `get_frame`, `get_combat_summary`, `list_gadgets`, `profile`
 - **Executing code** — `exec_lua`, `api_request`
 - **Driving the sim** — `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `revive_team`, `set_stockpile`, `set_debug_logging`, `pause_sim`, `set_sim_speed`, `step_sim`, `set_los`, `set_cheats`, `set_unit_invulnerable`, `drive_pattern`, `populate_tranche`
 - **Unit and weapon defs** — `get_unit_def`, `list_unit_defs`, `get_weapon_def`, `clear_defs_cache`, `get_lua_source`
 - **Processes, rooms and readiness** — `list_processes`, `list_stack`, `cleanup_stack`, `probe_game`, `wait_for_game`, `query_db`, `list_sessions`
-- **Starting and stopping** — `launch_scenario`, `launch_direct`, `launch_game`, `end_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client`
+- **Starting and stopping** — `launch_scenario`, `launch_direct`, `launch_game`, `end_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client`, `stack_start`
 - **Scenarios** — `list_scenarios`, `validate_scenario`, `write_scenario`, `generate_scenario`
 - **The browser client** — `open_client`, `close_client`, `list_clients`, `client_eval`, `client_ready`, `client_screenshot`, `browser_test`, `evaluate_widget_lua`, `spawn_at_camera`
 - **Looking at things** — `capture_subject`, `capture_sequence`, `order_and_film`
@@ -43,7 +45,7 @@ sections, see [debugging-tools.md § Claude / MCP Integration](debugging-tools.m
 
 ## Logs
 
-The log server is the only source that survives a server's death. Scope every query — an unscoped search is "the whole log", and the limit is clamped to 1000 for that reason.
+The log server is the only source that survives a server's death. Scope every query — an unscoped search is "the whole log", and the limit is clamped to 1000 for that reason. Exception: the lobby's own stdout/stderr is never posted to the log server at all — use `lobby_log` for that.
 
 #### `get_logs`
 
@@ -72,6 +74,14 @@ Full-text search across log entries. Scope a search to a single room/game and/or
 | `level` (number) | Minimum log level |
 | `sinceMinutes` (number) | Only entries from the last N minutes (recency window) |
 | `limit` (number, default `50`) | Max entries |
+
+#### `lobby_log`
+
+Tail the lobby process's own stdout/stderr. NOT covered by get_logs/search_logs — those read the log server, which the lobby never posts its own startup/crash output to; this is the only MCP-side view of it. Reads .tasks/logs/stack-lobby.log, which only exists once the lobby has been started with stack_start — a lobby started from the user's own interactive mprocs TUI keeps its output in the mprocs pane only, nothing on disk. When the file is missing this says so and points at the mprocs pane / `spring-services.sh status` instead of erroring.
+
+| Argument | Meaning |
+|---|---|
+| `lines` (number, default `200`) | Tail this many lines from the end of the log. Default 200. |
 
 ## Reading the sim
 
@@ -413,7 +423,7 @@ Read a Lua source file from the game content via HTTP. Path relative to game roo
 
 ## Processes, rooms and readiness
 
-What is running, and whether it is ready. `probe_game` checks pid liveness BEFORE the heartbeat row, because nothing deletes that row when a server dies by SIGKILL.
+What is running, and whether it is ready. `probe_game` checks pid liveness BEFORE the heartbeat row, because nothing deletes that row when a server dies by SIGKILL. `list_stack` classifies by the EXECUTABLE actually invoked (basename, following an interpreter like `node`), never by a substring anywhere in the full command line — an agent process merely talking about "spring-lobby" is not the lobby.
 
 #### `list_processes`
 
@@ -431,13 +441,13 @@ Full dev-stack census in one call — replaces ad-hoc pgrep/lsof hunts. Returns 
 
 #### `cleanup_stack`
 
-Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.
+Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; ONE LIVE STACK PER MACHINE — a pid is refused unless it was started by stack_start (this session's or a prior one), because the dev stack you are most likely looking at belongs to the user's own interactive mprocs and killing it out from under them is the one outcome that costs a whole session; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. `force:true` overrides BOTH the ownership refusal and the zombie-port command check — pass it only once you have actually looked at what you are about to kill (e.g. via list_stack). Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.
 
 | Argument | Meaning |
 |---|---|
 | `dryRun` (boolean, default `true`) | Report the plan without killing anything. Default TRUE. |
 | `kinds` (array) | Restrict to these classifications (default: all of stray-server, zombie-port, orphan-vite, duplicate-lobby). |
-| `force` (boolean, default `false`) | Allow killing a zombie-port pid whose command line is not spring-server (the 9100-10099 range can catch unrelated dev tools). Default false. |
+| `force` (boolean, default `false`) | Allow killing a pid that stack_start did not start, AND a zombie-port pid whose command line is not spring-server. Both checks exist because the 9100-10099 range can catch unrelated dev tools, and because most running processes are the user's own mprocs stack, not this tool's. Default false. |
 
 #### `probe_game`
 
@@ -461,7 +471,7 @@ Poll a game server (via probe_game) until it reaches a readiness phase (ready = 
 
 #### `query_db`
 
-Execute a read-only SQL query against the lobby database.
+Execute a read-only SQL query against the lobby database. The file opened is detected from the RUNNING lobby's own `--db` argument (falling back to PROJECT_ROOT/TASKHERD_REPO + data/spring-server.db, or SPRING_DB if set) — never assumed — because this is the one tool that reads the filesystem directly rather than the live lobby's HTTP API, so a stale assumption here is invisible everywhere else. Every answer is prefixed with `-- db: <path> (<source>)` naming exactly which file and how it was chosen.
 
 | Argument | Meaning |
 |---|---|
@@ -475,7 +485,7 @@ List recent game sessions from the log server.
 
 ## Starting and stopping
 
-Launch and teardown. `end_game` prefers the lobby's admin route because SIGTERM is what produces the exit checkpoint; `kill_game` is a deprecated alias for the ungraceful path.
+Launch and teardown. `end_game` prefers the lobby's admin route because SIGTERM is what produces the exit checkpoint; `kill_game` is a deprecated alias for the ungraceful path. `stack_start` is a different kind of tool in this section — it launches the dev stack itself (logserver/lobby/vite), and only belongs here when `list_stack`'s `stack-down` finding says nothing is up yet; prefer the user's own mprocs whenever one might already be running.
 
 #### `launch_scenario`
 
@@ -578,6 +588,14 @@ Restart the Vite client dev server (:8012) via the mprocs control channel (selec
 |---|---|
 | `clearCache` (boolean) | Also clear client/node_modules/.vite before restarting (use if a plain restart still serves stale worker code). Default false. |
 
+#### `stack_start`
+
+Launch logserver/lobby/vite from mprocs.yaml's own `shell:` lines — nohup, detached, cwd = the main checkout (PROJECT_ROOT or TASKHERD_REPO), logging to .tasks/logs/stack-<service>.log. Refuses outright if ANY requested port (:8010/:8011/:8012) is already held — one live stack per machine: that is very likely the user's own mprocs session, and starting a second lobby on the same db races SO_REUSEPORT accepts between them (see list_stack's duplicate-lobby finding). NOT a substitute for mprocs: no TUI, no restart-proc, no log-tail panes — prefer the user's own mprocs when one might already be running (check with list_stack first); this exists for when nothing is up at all (CI, a fresh box, a headless session). Every pid it starts is recorded so cleanup_stack will later kill it without needing force:true.
+
+| Argument | Meaning |
+|---|---|
+| `services` (array) | Subset to start. Default: all three, in logserver, lobby, vite order. |
+
 ## Scenarios
 
 Authoring and generating wars. `validate_scenario` runs BOTH parsers offline; a `skipped` finding means NOT CHECKED, never "fine".
@@ -642,7 +660,7 @@ Generate a war for a map with scenariogen.py via the lobby admin route, store it
 
 ## The browser client
 
-Everything here runs code in a CONNECTED browser over the P7 relay and is subject to its three gates (see below). The client is where rendering, LuaUI and the NL executor live — none of it is visible from the server.
+Everything here runs code in a CONNECTED browser over the P7 relay and is subject to its three gates (see below). The client is where rendering, LuaUI and the NL executor live — none of it is visible from the server. Note: chrome-devtools' own `resize_page` is a no-op against an `--isolated` launch here (the viewport stays pinned at its initial size) — set the size up front instead, either via chrome-devtools' `emulate` (viewport override) or by passing `--window-size=<W>,<H>` on the isolated launch itself.
 
 #### `open_client`
 
