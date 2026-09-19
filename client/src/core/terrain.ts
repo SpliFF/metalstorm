@@ -1936,9 +1936,14 @@ export class TerrainFog {
     private mat: StandardMaterial | null = null;
     /** Live-tunable darkening levels (see FogDarkening). */
     private darken: FogDarkening = { ...DEFAULT_FOG_DARKENING };
-    /** Last painted bitmap, kept so a live darkening change can repaint
-     *  without waiting for the next ~1 Hz LOS snapshot. */
-    private lastBitmap: LosBitmap | null = null;
+    /** Every ally team's latest snapshot, keyed by allyTeam. A Global-mode
+     *  spectator (a broadcast watcher — BroadcastTap.h: "the tap records
+     *  global visibility") round-robins through every team's bitmap, so
+     *  painting only "whichever arrived last" read most of the map as
+     *  unscouted at any instant (README.md D11: near-black broadcast
+     *  render). Union across every team heard from instead: a no-op for the
+     *  single-team case (players, Team-mode spectators). */
+    private bitmaps: Map<number, LosBitmap> = new Map();
 
     /** Build the overlay mesh + material. Idempotent — calling again
      *  disposes the previous mesh first so the caller can rebuild when
@@ -2061,16 +2066,14 @@ export class TerrainFog {
         this.mat = mat;
     }
 
-    /** Paint a new LOS snapshot into the fog texture. Called from the
-     *  connection event handler whenever an `ENVELOPE_LOS_BITMAP` frame
-     *  arrives (~1 Hz, server-paced). Spectators may see multiple
-     *  ally teams round-robin — we just take the latest, matching the
-     *  minimap's behaviour. */
+    /** Paint a new LOS snapshot into the fog texture. Stores it per ally
+     *  team and repaints from the union of every team heard from (see the
+     *  `bitmaps` field doc), not just this one. */
     apply(bitmap: LosBitmap): void {
         if (!this.mesh || !this.mat) return;
-        const { width, height, inLos, inRadar, explored } = bitmap;
+        const { width, height } = bitmap;
         if (width === 0 || height === 0) return;
-        this.lastBitmap = bitmap;
+        this.bitmaps.set(bitmap.allyTeam, bitmap);
 
         if (!this.texture
             || this.bitmapSize.w !== width
@@ -2105,18 +2108,26 @@ export class TerrainFog {
         // bitmap — the next LOS snapshot (~1 Hz) will retry.
         const ctx = this.texture.getContext() as CanvasRenderingContext2D | null;
         if (!ctx) return;
+        // Bitmaps from a differently-sized snapshot (shouldn't happen within
+        // one game, but cheap to guard) never merge into this texture size.
+        const layers = [...this.bitmaps.values()]
+            .filter(b => b.width === width && b.height === height);
         const img = ctx.createImageData(width, height);
         const data = img.data;
         for (let row = 0; row < height; ++row) {
             for (let col = 0; col < width; ++col) {
                 const idx = row * width + col;
                 const byte = idx >> 3;
-                const bit = 7 - (idx & 7);
-                const mask = 1 << bit;
-                const losBit   = (inLos[byte]    & mask) !== 0;
-                const radarBit = (inRadar[byte]  & mask) !== 0;
-                const expBit   = (explored[byte] & mask) !== 0;
-                const alpha255 = fogTierAlpha255(losBit, radarBit, expBit, this.darken);
+                const mask = 1 << (7 - (idx & 7));
+                // Union: a square stays as lit as the best-informed team.
+                let alpha255 = 255;
+                for (const b of layers) {
+                    const losBit   = (b.inLos[byte]    & mask) !== 0;
+                    const radarBit = (b.inRadar[byte]  & mask) !== 0;
+                    const expBit   = (b.explored[byte] & mask) !== 0;
+                    const a = fogTierAlpha255(losBit, radarBit, expBit, this.darken);
+                    if (a < alpha255) alpha255 = a;
+                }
                 const o = idx * 4;
                 data[o    ] = 0;
                 data[o + 1] = 0;
@@ -2143,7 +2154,8 @@ export class TerrainFog {
         if (levels.unscouted !== undefined) this.darken.unscouted = clamp01(levels.unscouted);
         // Keep the pre-bitmap fallback alpha in sync when no texture is live.
         if (this.mat && !this.texture) this.mat.alpha = this.darken.unscouted;
-        if (this.lastBitmap) this.apply(this.lastBitmap);
+        const any = this.bitmaps.values().next().value;
+        if (any) this.apply(any);
         return { ...this.darken };
     }
 
@@ -2169,6 +2181,6 @@ export class TerrainFog {
         this.mat = null;
         this.mesh = null;
         this.bitmapSize = { w: 0, h: 0 };
-        this.lastBitmap = null;
+        this.bitmaps.clear();
     }
 }
