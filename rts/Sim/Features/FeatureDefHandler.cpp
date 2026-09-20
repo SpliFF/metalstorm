@@ -156,10 +156,16 @@ FeatureDef* CFeatureDefHandler::CreateFeatureDef(const LuaTable& fdTable, const 
 
 	// PLAN-maps.md §2j option C. Resolved AFTER customParams is read, because
 	// the already-published `customparams.deck_top` is the fallback source —
-	// the content shipped that number (features/bridges.lua, per def: 1.5 road
-	// / 3.8 rail) before the engine could read it, and a parallel constant here
-	// would be free to disagree with it silently.
-	fd.deckHeight = FeatureSeating::ResolveDeckHeight(fdTable.GetFloat("deckHeight", 0.0f), fd.customParams);
+	// the content shipped that number (features/bridges.lua) before the engine
+	// could read it, and a parallel constant here would be free to disagree
+	// with it silently.
+	//
+	// `KeyExists`, not a value test: whether the def declares a deck and how
+	// high that deck is are two different facts, and since §2j option A put
+	// both shipped spans' origins ON their deck the honest height is 0. See
+	// Sim/Features/FeatureSeating.h.
+	fd.deck = FeatureSeating::ResolveDeck(
+		fdTable.KeyExists("deckHeight"), fdTable.GetFloat("deckHeight", 0.0f), fd.customParams);
 
 	return &fd;
 }
