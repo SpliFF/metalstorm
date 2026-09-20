@@ -290,13 +290,6 @@ let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
 /// to a replay server (PLAN-replay task 4b: a live game never sends one).
 /// Gates forwarding 403s to the playback bar.
 let gpSawReplayState = false;
-/// This client's role from AuthResponse ('player' | 'spectator' | ...).
-/// Set in onAuthenticated; PLAN-beta-broadcast.md lane C reads it alongside
-/// gpIsBroadcast to gate outgoing commands.
-let gpRole = '';
-/// True once the most recent ReplayState said `broadcast: true` — a Mission
-/// Broadcast (delayed relay), not a live game or a finished recording.
-let gpIsBroadcast = false;
 let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
@@ -1362,7 +1355,6 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
             postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
-            gpRole = role;
             postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
             // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
             // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
@@ -1436,7 +1428,6 @@ function gpConnect(msg: GpInitToWorker): void {
         // never receives one simply never shows a bar.
         onReplayState: (state) => {
             gpSawReplayState = true;
-            gpIsBroadcast = state.broadcast;
             postToMain({ type: 'gp:replayState', state });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
@@ -2201,24 +2192,13 @@ function gpConnect(msg: GpInitToWorker): void {
         schemaHash: msg.schemaHashOverride,
     });
     gpCtx.connection = conn;
-    // PLAN-beta-broadcast.md lane C: belt-and-braces client-side gate — the
-    // relay drops PlayerCommand from a broadcast spectator anyway, but there
-    // is no reason to send a doomed order and wait out the refusal. Wrapping
-    // here (rather than touching every call site — command-buffer.ts,
-    // worker-command-modes.ts, worker-build-placement.ts, and the three in
-    // this file) catches all of them, since they all hold this same `conn`.
-    {
-        const rawSendPlayerCommand = conn.sendPlayerCommand.bind(conn);
-        const rawSendPlayerCommandBatch = conn.sendPlayerCommandBatch.bind(conn);
-        conn.sendPlayerCommand = (...args: Parameters<Connection['sendPlayerCommand']>) => {
-            if (gpRole === 'spectator' && gpIsBroadcast) return;
-            rawSendPlayerCommand(...args);
-        };
-        conn.sendPlayerCommandBatch = (...args: Parameters<Connection['sendPlayerCommandBatch']>) => {
-            if (gpRole === 'spectator' && gpIsBroadcast) return;
-            rawSendPlayerCommandBatch(...args);
-        };
-    }
+    // E2E1 D9: the broadcast-spectator send gate used to be wrapped here
+    // around sendPlayerCommand/sendPlayerCommandBatch only, which left every
+    // other player verb (SelectionState chief among them) going out over the
+    // wire only to be dropped by the relay. It now lives in
+    // Connection.sendClientMessage — the one place every verb funnels
+    // through — via broadcast-send-gate.ts, driven off the ReplayState
+    // broadcast flag the connection already tracks internally.
     // PLAN-latency L4.1: register every command that goes on the wire, in the
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).

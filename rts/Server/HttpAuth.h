@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -400,7 +401,16 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
                               const std::unordered_map<std::string, FactionData::FactionInfo>& factionRegistry) {
     static LoginLimiter loginLimiter;
     static RefreshFailureLimiter refreshLimiter;
-    static GuestMintLimiter guestLimiter;
+    // Not `static`, unlike the two above: RegisterEndpoints runs once per
+    // real server process (lobby_main.cpp, or once per game room in
+    // GameHttpRoutes.cpp — each its own process), so a shared_ptr made fresh
+    // per call is identical to a process-wide static there. It stops being
+    // identical only in the test binary, where hundreds of Fixtures call
+    // RegisterEndpoints in one process; a `static` there would let one
+    // Fixture's guest-mint calls exhaust the budget for every other Fixture's
+    // tests, which is accidental cross-test coupling rather than the
+    // deliberate per-process "global" limit the docs above describe.
+    auto guestLimiter = std::make_shared<GuestMintLimiter>();
 #ifdef SPRING_PROD
     static RegistrationLimiter registrationLimiter;
 #endif
@@ -912,8 +922,8 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
     // limiter, which unlike RegistrationLimiter is NOT `#ifdef SPRING_PROD`:
     // a dev lobby that mints guests in a loop is a bug worth catching locally,
     // and 20/min is far above any human rate.
-    net.AddHttpPost("/api/auth/guest", RouteAuth::Public, [&db, &factionRegistry](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
-        if (!guestLimiter.TryConsume()) {
+    net.AddHttpPost("/api/auth/guest", RouteAuth::Public, [&db, &factionRegistry, guestLimiter](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+        if (!guestLimiter->TryConsume()) {
             return JsonResponse(429, R"({"error":"too many guest sign-ins — try again shortly"})");
         }
         // The provisional faction is optional and validated when present.
@@ -946,8 +956,19 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         if (!wanted.empty() && !GuestAccounts::ValidNickname(wanted)) {
             return JsonResponse(400, R"({"error":"a callsign is 2-32 characters of letters, numbers, _ or -"})");
         }
-        if (!wanted.empty() && db.FindUser(wanted)) {
-            return JsonResponse(409, R"({"error":"that name belongs to a registered player","name_taken":true})");
+        // D6: the name can be held by two different kinds of account, and
+        // only one of them supports the remedy the old single message
+        // implied ("log in as them"). A registered owner can be logged into;
+        // a fellow guest cannot, because a guest has no password — so it gets
+        // its own message and its own machine-readable key rather than being
+        // told to do something impossible.
+        if (!wanted.empty()) {
+            if (auto holder = db.FindUser(wanted)) {
+                if (holder->isProvisional) {
+                    return JsonResponse(409, R"({"error":"that callsign is in use right now — pick another","name_in_use_guest":true})");
+                }
+                return JsonResponse(409, R"({"error":"that name belongs to a registered player","name_taken":true})");
+            }
         }
 
         int64_t userId = 0;
@@ -964,6 +985,12 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
                                    /*isDev=*/false, factionOpt,
                                    /*isProvisional=*/true);
             if (userId == 0) {
+                // Lost the race between the check above and this insert —
+                // report the same distinction it would have made.
+                auto holder = db.FindUser(username);
+                if (holder && holder->isProvisional) {
+                    return JsonResponse(409, R"({"error":"that callsign is in use right now — pick another","name_in_use_guest":true})");
+                }
                 return JsonResponse(409, R"({"error":"that name belongs to a registered player","name_taken":true})");
             }
         } else {
