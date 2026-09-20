@@ -66,6 +66,7 @@ SCENARIO_SPECS=(
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_neutral_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_objectives_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_population_spec.lua"
+    "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_start_position_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_scenario_towns_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/game_tutorial_spec.lua"
     "$GADGETS_FROM_GAME_ROOT/tests/tutorial_scenarios_spec.lua"

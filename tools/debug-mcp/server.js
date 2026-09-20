@@ -53,13 +53,14 @@ import {
     STACK_PATTERNS, STACK_PORTS, STATUS_STALE_SEC,
     parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries, classifyStack,
     planCleanup, summarize, isStackPort, CLEANABLE_KINDS, parseLobbyDbFlag,
+    filterStackProcesses, parseMprocsShell,
 } from './stack-census.js';
 import { resolve, join, dirname } from 'path';
 import {
     readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, renameSync,
-    rmdirSync, statSync, mkdirSync,
+    rmdirSync, statSync, mkdirSync, openSync, closeSync,
 } from 'fs';
-import { execFile, execFileSync } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -93,6 +94,21 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:8012';
 // switch named widgets off once the worker is ready. launch_game suggests a
 // browser URL with this widget disabled unless `testStartupSelector` is set.
 const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
+
+/**
+ * The main checkout — where the LIVE stack (lobby/logserver/vite, and every
+ * relative path the lobby was launched with) actually lives, as opposed to
+ * this MCP server's own cwd. When this server runs from a taskherd worktree
+ * or clone (PROJECT_ROOT unset), `resolve('.')` silently resolves against
+ * that clone instead — the D3 bug: `query_db` read the CLONE's
+ * data/spring-server.db while the live lobby wrote MAIN's, and nothing else
+ * caught it because every other tool talks to the live stack over HTTP,
+ * where cwd never enters into it. TASKHERD_REPO is documented (taskherder's
+ * /task contract) as the main repo path and is the right fallback; PROJECT_ROOT
+ * still wins when a caller sets it explicitly.
+ */
+const mainRepoRoot = () => process.env.PROJECT_ROOT || process.env.TASKHERD_REPO || resolve('.');
+
 // --- Which SQLite file? ----------------------------------------------------
 //
 // This must be the file the RUNNING lobby writes, not a default. The committed
@@ -103,21 +119,23 @@ const STARTUP_SELECTOR_WIDGET = 'Startup Info and Selector';
 //
 // Order: an explicit SPRING_DB always wins (it is how you point at a db by
 // hand); otherwise ask the running lobby what it opened; otherwise the default.
-const DB_DEFAULT = resolve(process.env.PROJECT_ROOT || '.', 'data/spring-server.db');
+const DB_DEFAULT = resolve(mainRepoRoot(), 'data/spring-server.db');
 function detectLobbyDb() {
     try {
         const ps = execFileSync('ps', ['-eo', 'pid,ppid,lstart,args='], {
             encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5000,
         });
         const flag = parseLobbyDbFlag(ps);
-        return flag ? resolve(process.env.PROJECT_ROOT || '.', flag) : null;
+        return flag ? resolve(mainRepoRoot(), flag) : null;
     } catch { return null; }
 }
 const DB_EXPLICIT = !!process.env.SPRING_DB;
 const DB_DETECTED = DB_EXPLICIT ? null : detectLobbyDb();
 const DB_PATH = process.env.SPRING_DB
-    ? resolve(process.env.PROJECT_ROOT || '.', process.env.SPRING_DB)
+    ? resolve(mainRepoRoot(), process.env.SPRING_DB)
     : (DB_DETECTED || DB_DEFAULT);
+const DB_SOURCE = DB_EXPLICIT ? 'explicit (SPRING_DB)'
+    : DB_DETECTED ? "detected (running lobby's --db)" : 'default';
 if (DB_DETECTED && DB_DETECTED !== DB_DEFAULT) {
     // stdout is the MCP protocol channel — diagnostics go to stderr only.
     console.error(`SPRING_DB: following the running lobby's --db (${DB_DETECTED}); `
@@ -1281,9 +1299,18 @@ async function collectStackFindings({ probeHashes = false } = {}) {
         [STACK_PATTERNS.lobby, STACK_PATTERNS.server, STACK_PATTERNS.logserver, STACK_PATTERNS.vite]
             .map(pgrepPids),
     );
-    const [lobby, server, logserver, vite] = await Promise.all(
+    const [lobbyRows, serverRows, logserverRows, viteRows] = await Promise.all(
         [lobbyPids, serverPids, logserverPids, vitePids].map(psRows),
     );
+    // pgrep -f found these by a full-command-line substring — a broad, cheap
+    // net that also catches false positives (12:3x: an agent process whose
+    // PROMPT TEXT mentioned "spring-lobby"). filterStackProcesses is the
+    // authoritative check: did this pid actually EXEC the binary, judged by
+    // basename, never by a substring anywhere in argv.
+    const lobby = filterStackProcesses(lobbyRows, 'lobby');
+    const server = filterStackProcesses(serverRows, 'server');
+    const logserver = filterStackProcesses(logserverRows, 'logserver');
+    const vite = filterStackProcesses(viteRows, 'vite');
     const ports = await listListeners();
     const rows = await getGameServers();
     // getGameServers() silently folds two sources into one shape; which one
@@ -1321,6 +1348,96 @@ async function collectStackFindings({ probeHashes = false } = {}) {
     const findings = classifyStack(census);
     const lobbyPid = (ports.listeners || []).find(l => l.port === STACK_PORTS.lobby)?.pid ?? null;
     return { census, findings, lobbyPid };
+}
+
+// --- stack_start / ownership registry (one live stack per machine) --------
+//
+// The dev stack most callers see was started by the USER's own mprocs, not
+// by this tool. cleanup_stack must never kill it out from under them just
+// because a process happens to match a cleanable classification — that is
+// exactly the 12:3x incident's blast radius, one level up. The registry
+// records only what `stack_start` itself launched; `cleanup_stack` reads it
+// and refuses everything else unless `force:true`.
+
+const OWNED_PIDS_FILE = (repoRoot) => resolve(repoRoot, '.tasks/logs/stack-owned.json');
+
+function loadOwnedPids(repoRoot) {
+    try {
+        const rows = JSON.parse(readFileSync(OWNED_PIDS_FILE(repoRoot), 'utf-8'));
+        return new Set(rows.filter(r => pidAlive(r.pid)).map(r => r.pid));
+    } catch { return new Set(); }
+}
+
+/** Prunes dead pids on every write so the file doesn't grow without bound. */
+function recordOwnedPids(repoRoot, entries) {
+    if (!entries.length) return;
+    const file = OWNED_PIDS_FILE(repoRoot);
+    let rows = [];
+    try { rows = JSON.parse(readFileSync(file, 'utf-8')); } catch { /* none yet */ }
+    rows = rows.filter(r => pidAlive(r.pid));
+    for (const e of entries) rows.push({ pid: e.pid, service: e.service, startedAt: Date.now() });
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(rows, null, 2));
+}
+
+/** mprocs.yaml proc key for each stack_start service name. */
+const STACK_START_PROC = { logserver: 'logserver', lobby: 'lobby', vite: 'client' };
+const STACK_START_ORDER = ['logserver', 'lobby', 'vite'];
+
+/**
+ * Launch logserver/lobby/vite exactly as mprocs.yaml would — nohup, detached,
+ * cwd = the main checkout, logging to .tasks/logs/stack-<service>.log — and
+ * refuse outright if ANY requested port is already held: this is very likely
+ * the user's own interactive mprocs session, and starting a second copy is
+ * the "two lobbies" / SO_REUSEPORT trap (see the duplicate-lobby finding).
+ * NOT a substitute for mprocs: no TUI, no restart-proc, no log-tail panes.
+ * Prefer the user's own mprocs when one might already be running; this exists
+ * for when nothing is up at all (CI, a fresh box, a headless session).
+ */
+async function stackStart(services) {
+    const repoRoot = mainRepoRoot();
+    const yamlPath = resolve(repoRoot, 'mprocs.yaml');
+    let yamlText;
+    try { yamlText = readFileSync(yamlPath, 'utf-8'); }
+    catch {
+        return { error: `mprocs.yaml not found at ${yamlPath}. Set PROJECT_ROOT or TASKHERD_REPO `
+            + 'to the main checkout.' };
+    }
+
+    const ports = await listListeners();
+    const heldPorts = ports.available ? new Set((ports.listeners || []).map(l => l.port)) : new Set();
+    const held = services.filter(s => heldPorts.has(STACK_PORTS[s]));
+    if (held.length) {
+        return {
+            error: `refusing to start — already listening on ${held.map(s => `:${STACK_PORTS[s]} (${s})`).join(', ')}. `
+                + "One live stack per machine: this is very likely the user's own mprocs session. "
+                + 'Use list_stack to inspect what is running; stop it yourself (or use cleanup_stack) before calling stack_start again.',
+        };
+    }
+
+    const logDir = resolve(repoRoot, '.tasks/logs');
+    mkdirSync(logDir, { recursive: true });
+
+    const started = [];
+    for (const service of services) {
+        const shell = parseMprocsShell(yamlText, STACK_START_PROC[service]);
+        if (!shell) {
+            started.push({ service, error: `no '${STACK_START_PROC[service]}:' shell: line in ${yamlPath}` });
+            continue;
+        }
+        const logFile = resolve(logDir, `stack-${service}.log`);
+        const fd = openSync(logFile, 'a');
+        let child;
+        try {
+            child = spawn('nohup', ['bash', '-c', shell], {
+                cwd: repoRoot, detached: true, stdio: ['ignore', fd, fd],
+            });
+            child.unref();
+        } finally { closeSync(fd); }
+        started.push({ service, pid: child.pid, log: logFile, shell });
+    }
+    recordOwnedPids(repoRoot, started.filter(s => s.pid));
+    return { repoRoot, started };
 }
 
 /**
@@ -1554,10 +1671,18 @@ async function executeTool(name, args) {
         case 'cleanup_stack': {
             const dryRun = args.dryRun !== false;   // default TRUE
             const { census, findings, lobbyPid } = await collectStackFindings({ probeHashes: false });
+            const repoRoot = mainRepoRoot();
+            const ownedPids = loadOwnedPids(repoRoot);
             const { actions, refusals } = planCleanup(findings, {
                 kinds: args.kinds, force: !!args.force, lobbyPid,
-                authoritySource: census.authority.source,
+                authoritySource: census.authority.source, ownedPids,
             });
+            // Loud by construction, not just in the refusal reason: the dev
+            // stack most callers see belongs to the USER's own mprocs, not to
+            // this tool. `force:true` is the only way past it, on purpose.
+            const ownershipNote = "NOTE: only processes started by stack_start (this session's, or a "
+                + `prior one — ${ownedPids.size} pid(s) currently known) are killed by default. Everything `
+                + "else is very likely the user's own mprocs dev stack; pass force:true to kill it anyway.";
 
             if (!actions.length && !refusals.length) {
                 const managed = findings.filter(f => f.kind === 'managed').length;
@@ -1573,14 +1698,48 @@ async function executeTool(name, args) {
                 return JSON.stringify({
                     dryRun: true, plan: actions, refusals,
                     note: 'Dry run — nothing was killed. Re-run with dryRun:false to execute this exact plan.',
+                    ownershipNote,
                     summary: summarize(findings),
                 }, null, 2);
             }
             const results = [];
             for (const a of actions) results.push(await cleanupKill(a, lobbyPid));
             return JSON.stringify({
-                dryRun: false, results, refusals, summary: summarize(findings),
+                dryRun: false, results, refusals, ownershipNote, summary: summarize(findings),
             }, null, 2);
+        }
+
+        case 'stack_start': {
+            const services = (args.services && args.services.length) ? args.services : STACK_START_ORDER;
+            const result = await stackStart(services);
+            if (result.error) return `Error: ${result.error}`;
+            return JSON.stringify({
+                note: "Started via mprocs.yaml's own shell lines (nohup, detached) — NOT through mprocs "
+                    + "itself, so these panes will not appear in the user's mprocs TUI and cannot be "
+                    + 'restarted with restart_client / the mprocs control channel. Prefer the user\'s own '
+                    + 'mprocs when one might already be running; this is for when nothing is up at all.',
+                repoRoot: result.repoRoot, started: result.started,
+            }, null, 2);
+        }
+
+        case 'lobby_log': {
+            const repoRoot = mainRepoRoot();
+            const file = resolve(repoRoot, '.tasks/logs/stack-lobby.log');
+            if (!existsSync(file)) {
+                return `No log file at ${file}. This only exists once the lobby has been started with `
+                    + "stack_start — a lobby started from the user's own interactive mprocs TUI keeps its "
+                    + 'output in the mprocs pane only (nothing is written to disk, and get_logs/search_logs '
+                    + "never see it either — the lobby's own stdout is not ingested by the log server). "
+                    + "Check the mprocs pane directly, or `tools/scripts/spring-services.sh status`.";
+            }
+            try {
+                const n = args.lines || 200;
+                const text = readFileSync(file, 'utf-8');
+                const tail = text.split('\n').slice(-(n + 1)).join('\n');
+                return tail || '(empty log)';
+            } catch (err) {
+                return `Error reading ${file}: ${err.message}`;
+            }
         }
 
         case 'get_lua_source': {
@@ -1648,18 +1807,23 @@ async function executeTool(name, args) {
             // `WITH t AS (…) INSERT …`, a leading comment, or `REPLACE INTO`
             // straight through. The readonly handle stays as defence in depth.
             if (sqliteUnavailable) return `Error: sqliteUnavailable: ${sqliteUnavailable}`;
+            // Label every answer with the db actually opened — the clone/main
+            // divergence (D3) is invisible otherwise, since this is the only
+            // tool that reads the filesystem directly rather than the live
+            // lobby's HTTP API.
+            const label = `-- db: ${DB_PATH} (${DB_SOURCE})\n`;
             try {
                 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
                 try {
                     const stmt = db.prepare(args.query);
                     if (!stmt.reader)
-                        return 'Error: only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads).';
+                        return label + 'Error: only row-returning statements are allowed (SELECT, WITH … SELECT, EXPLAIN, PRAGMA reads).';
                     const rows = stmt.all();
-                    if (!rows.length) return '(empty result)';
-                    return JSON.stringify(rows, null, 2);
+                    if (!rows.length) return label + '(empty result)';
+                    return label + JSON.stringify(rows, null, 2);
                 } finally { db.close(); }
             } catch (err) {
-                return `Error: ${err.message}`;
+                return label + `Error: ${err.message}`;
             }
         }
 

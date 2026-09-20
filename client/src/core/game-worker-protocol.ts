@@ -741,8 +741,12 @@ export type GpMessageToMain =
     | { type: 'gp:cursorMode'; name: string | null; css: string }
     /** Game-over → main shows the results overlay. `winningAllyTeams` is the
      *  server's winners list (empty = undecided); `won` is the local player's
-     *  result (true/false), or null for a draw/undecided/spectator. */
-    | { type: 'gp:gameOver'; frame: number; winningAllyTeams: number[]; won: boolean | null }
+     *  result (true/false), or null for a draw/undecided/spectator.
+     *  `myAllyTeam` and `warSides` (the raw `war_sides` modoption, if any) let
+     *  the overlay name the winner as "You" or by Faction instead of the
+     *  engine's bare ally-team id (rename-war D8). */
+    | { type: 'gp:gameOver'; frame: number; winningAllyTeams: number[]; won: boolean | null;
+        myAllyTeam: number; warSides: string | undefined }
     /** Worker reached the game server + authed (mirrors connection onAuthenticated).
      *  `accountId` is the DB account; `playerNum` is Spring's sim player id.
      *  They are different numbers — see `AuthenticatedInfo` in connection.ts. */

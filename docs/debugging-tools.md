@@ -129,6 +129,20 @@ gameStatus, binaries, mprocs, summary}`. Read-only. Each finding is
 | `stale-status-row` | a `game_status` row naming a dead pid — **report-only**, never deleted (spring-server owns that row) | warning |
 | `binary-drift` | the lobby forks `build/release/spring-server` when it exists, so a **debug-only rebuild is invisible** in a lobby-driven arm | warning |
 | `stale-binary-running` | a running server's `/api/metrics` → `identity.engineHash` ≠ the on-disk binary's (`probeHashes` only). "The process you are testing is not the binary you just built" | warning / info |
+| `stack-down` | no listener on `:8010`/`:8011`/`:8012` at all — the dev stack simply isn't running | error |
+
+**Process identity is by executable basename, never by a substring of the full
+command line.** `pgrep -f` still finds candidate pids cheaply (it matches
+anywhere in argv), but a candidate is only classified as e.g. the lobby if the
+invoked executable's basename is actually `spring-lobby` — following a known
+interpreter (`node`, `bash`, …) through to argv[1] for a script like Vite. This
+exists because of a real incident: an agent process launched as `claude -p
+"...check build/debug/spring-lobby is up..."` matched the OLD substring
+pattern on its own **prompt text** and was reported as the lobby, as a
+stray-server, and (via the "only one lobby process" fallback) as *the*
+lobby — while the real stack was down. `stack-down` is the fix's other half:
+an empty port census is now its own loud finding instead of reading as "no
+lobby processes to report, so nothing to say."
 
 `authority.source` is `lobby` \| `sqlite` \| `none`. **When it is `none`, every
 game server looks unmanaged** — so `stray-server` findings drop to `info` and
@@ -149,6 +163,12 @@ poll 5 s → SIGKILL (SIGTERM is what gives spring-server its exit checkpoint).
 `dryRun` defaults to **true** and returns the exact plan. Invariants:
 
 - the pid holding `:8011` is **never** killed, whatever its classification;
+- **one live stack per machine**: a pid is refused unless `stack_start`
+  itself launched it (tracked in `.tasks/logs/stack-owned.json` in the main
+  checkout) — the stack you are looking at is very likely the user's own
+  interactive `mprocs`, and killing it out from under them is the failure
+  mode this whole section exists to prevent. `force:true` overrides it,
+  deliberately the same flag as the zombie-port override below;
 - `managed` is never touched — to stop a real game use `end_game({roomId})`,
   which drains gracefully;
 - `stale-status-row` is report-only (a third writer on that table is a race,
@@ -161,6 +181,23 @@ list_stack {probeHashes:true}   → "1 stray-server, 1 binary-drift"
 cleanup_stack {}                → plan: pid 14932 stray-server, SIGTERM → poll 5s → SIGKILL
 cleanup_stack {dryRun:false}    → {outcome:"killed", signal:"SIGKILL", waitedMs:5122}
 ```
+
+**`stack_start {services?}`** launches logserver/lobby/vite from
+`mprocs.yaml`'s own `shell:` lines — `nohup`, detached, cwd = the main
+checkout, logging to `.tasks/logs/stack-<service>.log`. It refuses outright if
+any requested port is already held, rather than start a second lobby on the
+same db (the `duplicate-lobby` trap above). It is **not** a substitute for
+`mprocs`: no TUI, no `restart-proc`, no log-tail panes — reach for it only
+when `list_stack` reports `stack-down`, i.e. nothing is up at all. Every pid
+it starts becomes killable by `cleanup_stack` without `force:true`.
+
+**`lobby_log {lines?}`** tails `.tasks/logs/stack-lobby.log`. The lobby's own
+stdout/stderr is **not** ingested by the log server — `get_logs`/`search_logs`
+only see what `spring-server`/`spring-lobby` explicitly POST there — so this
+is the only MCP-side view of the lobby's own startup/crash output. It only has
+anything to read once the lobby has been started via `stack_start`; a lobby
+run from the user's own interactive `mprocs` TUI keeps its output in the pane
+only, with nothing written to disk at all.
 
 **Engine identity.** The game server's public `GET :port/api/metrics` carries
 `identity: {stamp, engineHash, pid}` — `engineHash` is the same 16-hex value
@@ -251,15 +288,17 @@ condition and keeps the ordinary per-tool error paths.
 |------|-----------|-------------|
 | `get_logs` | `roomId`, `game`, `level`, `section`, `scope`, `sinceMinutes`, `limit` | Fetch recent log entries; `roomId` scopes to one game instance |
 | `search_logs` | `query`, `roomId`, `game`, `section`, `level`, `sinceMinutes`, `limit` | Search logs; scope with `roomId`/`game`/`sinceMinutes` to avoid a flood of history |
+| `lobby_log` | `lines` (default `200`) | Tail the lobby's own stdout/stderr — **not** covered by `get_logs`/`search_logs`, which only see what the game servers POST to the log server. Reads `.tasks/logs/stack-lobby.log`, which only exists once the lobby has been started via `stack_start`; see [stack census](#stack-census-list_stack--cleanup_stack) |
 | `exec_lua` | `scope`, `code`, `roomId` | Execute Lua code in a specific scope. With `scope:"server"`, a leading `json ` token asks the converted verbs for a JSON object instead of free text — see [structured server verbs](#structured-server-verbs-json-prefix) |
 | `get_game_state` | `roomId` | Sim state as an object: `{frame, paused, speed, teams, units, luaHeapKb}` (`luaHeapKb` is 0 when LuaRules is not loaded). Falls back to the legacy `frame=N teams=N units=N` text on a pre-`json ` game server |
 | `list_units` | `team`, `roomId` | Units as `{total, returned, units:[{id, def, team, hp, maxHp, x, y, z}]}`. `total` counts every match of the team filter (the legacy text reports the *unfiltered* active count); `units` is capped at 100 rows. Falls back to legacy text on a pre-`json ` game server |
 | `list_processes` | | Game servers as JSON: `{servers:[{roomId, port, pid, state, gameId, mapId, ready, clientCount, heartbeatAgeSec, heartbeatStale, identity}], count}`. Discovery is the lobby `/api/processes` with a SQLite fallback; `ready`/`clientCount`/heartbeat are left-joined from `game_status` (`null` when the room has no row — e.g. hibernated) and `identity` is `{stamp, engineHash, pid}` read from each server's `/api/metrics` (`null` on a server built before P8, or one that didn't answer in 1.5 s). Still returns the literal string `No game server processes found.` when there are none |
 | `list_stack` | `probeHashes` (default `false`) | **Full-stack census in one call** — replaces ad-hoc `pgrep`/`lsof` hunts. Returns `{findings, processes, ports, authority, gameStatus, binaries, mprocs, summary}`. See [stack census](#stack-census-list_stack--cleanup_stack) |
-| `cleanup_stack` | `dryRun` (default **`true`**), `kinds`, `force` (default `false`) | Kill what `list_stack` classified as *not* managed. Dry-run first by default; see [stack census](#stack-census-list_stack--cleanup_stack) |
+| `cleanup_stack` | `dryRun` (default **`true`**), `kinds`, `force` (default `false`) | Kill what `list_stack` classified as *not* managed **and** that `stack_start` itself started (`force:true` to go further). Dry-run first by default; see [stack census](#stack-census-list_stack--cleanup_stack) |
+| `stack_start` | `services` (default: all of `logserver`/`lobby`/`vite`) | Launch the dev stack from `mprocs.yaml`'s own shell lines; refuses if any target port is already held. See [stack census](#stack-census-list_stack--cleanup_stack) |
 | `get_lua_source` | `gameId`, `filePath` | Read a Lua source file from disk (`data/games/<gameId>/<filePath>`) |
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
-| `query_db` | `query` (the only param — the database is fixed by the server's `SPRING_DB`) | SQL query against the lobby database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too. Answers `Error: sqliteUnavailable: …` (with the rebuild command) when the native binding failed the boot self-check |
+| `query_db` | `query` (the only param — the database is auto-detected from the running lobby's `--db`; see [readiness phases](#reliable-live-game-drive-verification)) | SQL query against the lobby database — only **row-returning** statements are accepted (SELECT, `WITH … SELECT`, EXPLAIN, PRAGMA reads); the check is better-sqlite3's `stmt.reader`, so a write hidden behind a CTE or a comment is rejected too. Every answer is prefixed `-- db: <path> (<source>)`. Answers `Error: sqliteUnavailable: …` (with the rebuild command) when the native binding failed the boot self-check |
 | `list_sessions` | | List recent game sessions |
 | `get_frame` | `roomId` | Current sim `frame` + `simFps` + `clients` via the public `GET :port/api/metrics`. No exec, no auth — answers while the sim is paused, pre-`GameStart`, or the exec queue is wedged, and survives `SPRING_PROD` (where `/api/exec` is compiled out) |
 | `end_game` | `roomId` (required), `graceful` (default `true`), `timeoutMs` (default `10000`), `escalate` (default `true`) | Graceful teardown of **one** room. SIGTERM is what gives the server a clean loop exit, war-log drain and **exit checkpoint** (the only site where a world becomes resumable); SIGKILL skips all of it. Prefers the lobby's [`POST /api/admin/rooms/end`](api.md#post-apiadminroomsend), which returns a drain-quality report — the exit checkpoint verified against the snapshot store — as `{source:'/api/admin/rooms/end', roomId, pid, kind, exited, escalated, waitedMs, outcome, frame, label, lossy, resume_eligibility, engine_hash, describe}`. `timeoutMs` is clamped server-side to [100, 30000]. A **route-level 404** (a lobby binary predating that endpoint) falls back to SIGTERM/poll/SIGKILL from the MCP process, reported as `source:'sigterm-fallback'` with no checkpoint verification; a 400/401/403 is reported as an error and **never** downgraded to a local kill, and the route's own `unknown roomId` 404 is reported as-is rather than guessing a pid. **The room does not read "ended" in the response** — the lobby health loop flips it a moment later (poll `/api/rooms` or `probe_game`). To stop a room cleanly *with* a report use this, not a same-name `launch_direct` relaunch (that SIGTERMs, deletes and respawns) |
@@ -317,10 +356,16 @@ phase from four signals: the lobby's process row, pid liveness, the `game_status
 heartbeat, and `/api/metrics`. `spawning` means *the process is up but nothing
 has been published yet* — which is also exactly what you get when the MCP is
 reading a **different SQLite file** from the one the lobby was started with. The
-MCP's DB is `SPRING_DB` (`.mcp.json`); the lobby's is its `--db` flag; `mprocs.yaml`
-keeps both on `data/spring-server.db`, but a hand-started lobby on another `--db`
-silently strips every heartbeat-derived field (`ready`/`clientCount`/`statusAgeSec`
-go `null` and the phase sticks at `spawning` for a server that is perfectly ready).
+MCP resolves its DB path, in order: an explicit `SPRING_DB` env var; otherwise
+the **running lobby's own `--db` flag** (read straight off its command line,
+resolved against `PROJECT_ROOT` or `TASKHERD_REPO` — the main checkout, not
+necessarily this process's own cwd, which matters when the MCP server itself
+runs from a taskherd worktree/clone); otherwise `data/spring-server.db` under
+the same root. `mprocs.yaml` keeps both on `data/spring-server.db`, but a
+hand-started lobby on another `--db` silently strips every heartbeat-derived
+field (`ready`/`clientCount`/`statusAgeSec` go `null` and the phase sticks at
+`spawning` for a server that is perfectly ready) — `query_db`'s answers are
+now always prefixed with `-- db: <path> (<source>)` so this is never silent.
 **This condition now self-diagnoses**: when the lobby vouches for the process,
 SQLite reads fine, and `game_status` has no row for the room, the probe carries
 `warning: "lobby --db and MCP SPRING_DB may differ; lobby reports the server but
