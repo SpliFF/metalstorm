@@ -100,6 +100,7 @@ local function freshWorld()
         GiveOrderToUnit    = function() end,
         SetGameRulesParam  = function() end,
         SetTeamRulesParam  = function() end,
+        SetTeamStartPosition = function() end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
         Log  = function() end,
     }

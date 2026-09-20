@@ -27,8 +27,13 @@ export type LoginOutcome =
     /// No such account (and the caller offered a confirm-password), so the
     /// register call is the next step.
     | { kind: 'register' }
-    /// Anything else. `message` is the server's own wording where it gave one.
-    | { kind: 'failed'; message: string };
+    /// Anything else. `message` is the server's own wording where it gave
+    /// one. `claimable` (D7, docs/reviews/beta/README.md "E2E pass 1") is set
+    /// when this is a register 409 for the exact name the CURRENT session's
+    /// guest account already holds — not "somebody else has this name", but
+    /// "you already are this", and the caller should offer the upgrade flow
+    /// rather than a dead end.
+    | { kind: 'failed'; message: string; claimable?: boolean };
 
 export interface LoginResponseLike {
     ok: boolean;
@@ -42,11 +47,17 @@ export interface LoginResponseLike {
  * that a new account is an acceptable outcome. The `totp_required` flag beats
  * it, which is the whole point of this function: a 401 carrying that flag
  * means the account exists and its password was correct.
+ *
+ * `guestNameCheck` names what was attempted and, if this browser is currently
+ * a guest, the callsign that guest session holds — used only to tell a
+ * register 409 against your own guest name apart from one against a stranger's
+ * registered account (D6, a different defect).
  */
 export function classifyLoginResponse(
     resp: LoginResponseLike,
     data: Record<string, unknown> | null,
     canRegister: boolean,
+    guestNameCheck?: { attempted: string; heldByGuest: string | null },
 ): LoginOutcome {
     const totpRequired = data?.totp_required === true;
     if (resp.ok && data && typeof data.token === 'string' && data.token) {
@@ -60,10 +71,11 @@ export function classifyLoginResponse(
         };
     }
     if (!resp.ok && canRegister) return { kind: 'register' };
-    return {
-        kind: 'failed',
-        message: typeof data?.error === 'string' ? data.error : 'Login failed',
-    };
+    const message = typeof data?.error === 'string' ? data.error : 'Login failed';
+    const claimable = resp.status === 409
+        && !!guestNameCheck?.heldByGuest
+        && guestNameCheck.attempted.trim().toLowerCase() === guestNameCheck.heldByGuest.toLowerCase();
+    return claimable ? { kind: 'failed', message, claimable: true } : { kind: 'failed', message };
 }
 
 /// Strip the spaces and dashes a player types or pastes. Sent normalised

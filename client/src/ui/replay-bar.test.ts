@@ -1,16 +1,21 @@
+// @vitest-environment happy-dom
 /**
- * Replay playback bar — the pure half (PLAN-replay.md task 4b).
+ * Replay playback bar — the pure half (PLAN-replay.md task 4b), plus the DOM
+ * accessibility contract the E2E1 TOOLING GAP flagged (docs/reviews/beta
+ * §"E2E pass 1"): the bar and its seek track carried no a11y role, so
+ * chrome-devtools take_snapshot never listed them.
  *
- * The DOM half is verified in a browser against a real recording; what is
- * worth pinning here is the reading of a ReplayState: whose controls these
- * are, what the bar says when they are not yours, and the scrub arithmetic —
- * an off-by-one in `seekFrameFor` is a seek to the wrong minute of somebody's
- * match, and it would look like a server bug.
+ * The rest of the DOM half is verified in a browser against a real
+ * recording; what is worth pinning here is the reading of a ReplayState:
+ * whose controls these are, what the bar says when they are not yours, and
+ * the scrub arithmetic — an off-by-one in `seekFrameFor` is a seek to the
+ * wrong minute of somebody's match, and it would look like a server bug.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     describeReplayBar, seekFrameFor, shouldApplyDeepLinkSeek, SPEED_STEPS,
+    ReplayAction, updateReplayBar, hideReplayBar,
 } from './replay-bar.js';
 import type { ReplayStateInfo } from '../core/connection.js';
 
@@ -35,6 +40,48 @@ function state(over: Partial<ReplayStateInfo> = {}): ReplayStateInfo {
         ...over,
     };
 }
+
+afterEach(() => hideReplayBar());
+
+describe('replay bar DOM accessibility', () => {
+    it('mounts the bar as a labelled region with a labelled slider track', () => {
+        const sender = vi.fn();
+        updateReplayBar(state({ currentFrame: 3075 }), 200, sender);
+
+        const bar = document.getElementById('replay-bar')!;
+        expect(bar.getAttribute('role')).toBe('region');
+        expect(bar.getAttribute('aria-label')).toBeTruthy();
+
+        const track = document.getElementById('replay-track')! as HTMLElement;
+        expect(track.getAttribute('role')).toBe('slider');
+        expect(track.tabIndex).toBe(0);
+        expect(track.getAttribute('aria-valuemin')).toBe('0');
+        expect(track.getAttribute('aria-valuemax')).toBe('100');
+        expect(track.getAttribute('aria-valuenow')).toBe('50'); // 3075/6150
+
+        for (const id of ['replay-play', 'replay-speed', 'replay-pov']) {
+            expect(document.getElementById(id)!.getAttribute('aria-label')).toBeTruthy();
+        }
+    });
+
+    it('seeks forward and backward from the keyboard, ARIA-slider style', () => {
+        const sender = vi.fn();
+        updateReplayBar(state({ currentFrame: 3075 }), 200, sender);
+        const track = document.getElementById('replay-track')!;
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenCalledTimes(1);
+        const [action, opts] = sender.mock.calls[0]!;
+        expect(action).toBe(ReplayAction.Seek);
+        expect(opts?.frame).toBeGreaterThan(3075);
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenLastCalledWith(ReplayAction.Seek, { frame: 0 });
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenLastCalledWith(ReplayAction.Seek, { frame: 6150 });
+    });
+});
 
 describe('describeReplayBar', () => {
     it('reads the controls as yours when you hold them', () => {

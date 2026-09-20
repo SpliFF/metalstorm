@@ -104,11 +104,16 @@ TEST_CASE("a guest may choose a nickname, and the second claim on it is a 409") 
     CHECK(Field(body, "username") == "raven");
     CHECK(body.find("\"nickname_chosen\":true") != std::string::npos);
 
-    // Second claim — same namespace as a registered account, so it is taken.
+    // Second claim — same `users.username` namespace as a registered
+    // account, so it is refused. D6: the holder here is ANOTHER GUEST, who
+    // cannot be logged into (no password), so this must NOT be name_taken —
+    // that message's implied remedy ("log in as them") is impossible for a
+    // passwordless guest. It gets its own key instead.
     r = Post(f.net, "/api/auth/guest", R"({"username":"raven"})");
     CHECK(r.status == 409);
     body = BodyText(r);
-    CHECK(body.find("\"name_taken\":true") != std::string::npos);
+    CHECK(body.find("\"name_in_use_guest\":true") != std::string::npos);
+    CHECK(body.find("\"name_taken\":true") == std::string::npos);
 
     // A bad nickname is refused before an account is minted at all.
     CHECK(Post(f.net, "/api/auth/guest", R"({"username":"guest-ff00"})").status == 400);
@@ -120,6 +125,24 @@ TEST_CASE("a guest may choose a nickname, and the second claim on it is a 409") 
     body = BodyText(r);
     CHECK(Field(body, "username").rfind("guest-", 0) == 0);
     CHECK(body.find("\"nickname_chosen\":false") != std::string::npos);
+}
+
+TEST_CASE("D6: a guest name held by a REGISTERED player still says name_taken") {
+    Fixture f;
+
+    // A real, password-holding account claims "falcon" via sign-up.
+    const HttpResponse reg = Post(f.net, "/api/auth/register",
+        R"({"username":"falcon","password":"correcthorsebattery","faction":"union"})");
+    REQUIRE(reg.status == 201);
+
+    // A guest mint under the same name collides with a holder that CAN be
+    // logged into — the original message and key are correct here, and must
+    // stay distinct from the guest-holder case above.
+    const HttpResponse r = Post(f.net, "/api/auth/guest", R"({"username":"falcon"})");
+    CHECK(r.status == 409);
+    const std::string body = BodyText(r);
+    CHECK(body.find("\"name_taken\":true") != std::string::npos);
+    CHECK(body.find("\"name_in_use_guest\":true") == std::string::npos);
 }
 
 TEST_CASE("Standing::TierFor derives the tier from the one stored number") {

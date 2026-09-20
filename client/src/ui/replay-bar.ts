@@ -173,6 +173,12 @@ export function seekFrameFor(st: ReplayStateInfo, fraction: number): number {
     return Math.round(st.startFrame + f * (st.endFrame - st.startFrame));
 }
 
+/** Fraction the ArrowLeft/ArrowRight/Home/End keys move the slider by a
+ *  single press — the ARIA slider pattern requires *some* key handling, and
+ *  2% (≈ 4s of a 3-minute recording) is fine enough to reach any beat without
+ *  taking forever from the far end. */
+const KEY_SEEK_STEP = 0.02;
+
 /** Sends a control to the server. Supplied by the caller so this module never
  *  reaches for the worker itself. */
 export type ReplayControlSender =
@@ -268,6 +274,14 @@ export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
     }
 }
 
+/** Send a seek to `fraction` along the track. Shared by the click handler and
+ *  the slider's keyboard handling so a click and an arrow key ask the same
+ *  question. */
+function seekTo(fraction: number): void {
+    if (!lastState) return;
+    send?.(ReplayAction.Seek, { frame: seekFrameFor(lastState, fraction) });
+}
+
 export function hideReplayBar(): void {
     root?.remove();
     root = null;
@@ -296,10 +310,13 @@ function buildBar(): HTMLElement {
         'padding:8px 12px;border-radius:8px;background:rgba(20,20,24,0.88);color:#fff;' +
         'font:13px system-ui,sans-serif;pointer-events:auto;');
     bar.id = 'replay-bar';
+    bar.setAttribute('role', 'region');
+    bar.setAttribute('aria-label', 'Replay controls');
 
     const row = el('div', 'display:flex;align-items:center;gap:10px;');
     const play = el('button', buttonCss(), '▶');
     play.id = 'replay-play';
+    play.setAttribute('aria-label', 'Play or pause replay');
     play.onclick = () => {
         if (!lastState) return;
         send?.(lastState.paused ? ReplayAction.Resume : ReplayAction.Pause);
@@ -307,6 +324,7 @@ function buildBar(): HTMLElement {
 
     const speed = el('button', buttonCss(), '1×');
     speed.id = 'replay-speed';
+    speed.setAttribute('aria-label', 'Cycle playback speed');
     speed.onclick = () => {
         if (!lastState) return;
         // Cycle: one button, five stops. A dropdown for five values that the
@@ -322,6 +340,11 @@ function buildBar(): HTMLElement {
     const track = el('div', 'position:relative;flex:1;height:8px;border-radius:4px;' +
         'background:rgba(255,255,255,0.18);cursor:pointer;');
     track.id = 'replay-track';
+    track.tabIndex = 0;
+    track.setAttribute('role', 'slider');
+    track.setAttribute('aria-label', 'Seek replay position');
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', '100');
     const fill = el('div', 'position:absolute;left:0;top:0;bottom:0;width:0%;' +
         'border-radius:4px;background:#3b82f6;');
     fill.id = 'replay-fill';
@@ -336,12 +359,26 @@ function buildBar(): HTMLElement {
         if (!lastState) return;
         const r = track.getBoundingClientRect();
         if (r.width <= 0) return;
-        send?.(ReplayAction.Seek,
-               { frame: seekFrameFor(lastState, (ev.clientX - r.left) / r.width) });
+        seekTo((ev.clientX - r.left) / r.width);
+    };
+    // ARIA slider pattern: ArrowLeft/ArrowRight (and the Up/Down equivalents
+    // some screen readers send) nudge by a step, Home/End jump to an end.
+    track.onkeydown = (ev: KeyboardEvent) => {
+        if (!lastState) return;
+        const current = describeReplayBar(lastState, myPlayerNum, refusal).progress;
+        let fraction: number | null = null;
+        if (ev.key === 'ArrowLeft' || ev.key === 'ArrowDown') fraction = current - KEY_SEEK_STEP;
+        else if (ev.key === 'ArrowRight' || ev.key === 'ArrowUp') fraction = current + KEY_SEEK_STEP;
+        else if (ev.key === 'Home') fraction = 0;
+        else if (ev.key === 'End') fraction = 1;
+        if (fraction === null) return;
+        ev.preventDefault();
+        seekTo(fraction);
     };
 
     const pov = el('button', buttonCss(), 'POV');
     pov.id = 'replay-pov';
+    pov.setAttribute('aria-label', 'Toggle spectator point of view');
     pov.onclick = () => {
         if (!lastState) return;
         // Global ⇄ the team the recording's first army is on. A full team
@@ -375,18 +412,27 @@ function render(): void {
     const liveEdge = root.querySelector<HTMLElement>('#replay-live-edge');
     const pov   = root.querySelector<HTMLButtonElement>('#replay-pov');
     const status = root.querySelector<HTMLElement>('#replay-status');
+    const track = root.querySelector<HTMLElement>('#replay-track');
     if (play) {
         play.textContent = m.playLabel;
         play.disabled = !m.isController;
         play.style.opacity = m.isController ? '1' : '0.45';
+        // playLabel is what the button will do when pressed: '▶' offers Resume.
+        play.setAttribute('aria-label', m.playLabel === '▶' ? 'Resume replay' : 'Pause replay');
     }
     if (speed) {
         speed.textContent = m.speedLabel;
         speed.disabled = !m.isController;
         speed.style.opacity = m.isController ? '1' : '0.45';
+        speed.setAttribute('aria-label', `Cycle playback speed (currently ${m.speedLabel})`);
     }
     if (pos) pos.textContent = m.positionLabel;
     if (fill) fill.style.width = `${(m.progress * 100).toFixed(2)}%`;
+    if (track) {
+        track.setAttribute('aria-valuenow', String(Math.round(m.progress * 100)));
+        track.setAttribute('aria-valuetext', m.positionLabel);
+        track.setAttribute('aria-disabled', String(!m.isController));
+    }
     // Broadcast: no POV to switch (Global-visibility only), live-edge marker
     // shown instead.
     if (pov) pov.style.display = m.isBroadcast ? 'none' : '';
