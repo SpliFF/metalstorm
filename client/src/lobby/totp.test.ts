@@ -64,6 +64,51 @@ describe('classifyLoginResponse', () => {
         expect(classifyLoginResponse({ ok: true, status: 200 }, null, false).kind)
             .toBe('failed');
     });
+
+    // D7 (docs/reviews/beta/README.md "E2E pass 1"): a register 409 for the
+    // name the CURRENT guest session already holds is not a stranger's
+    // account — it is the player's own, and the sign-up form offered no way
+    // from there to the upgrade path that already exists.
+    describe('claimable — a register 409 against your own guest name', () => {
+        it('flags it when the attempted name is this guest session\'s own', () => {
+            const out = classifyLoginResponse({ ok: false, status: 409 },
+                { error: 'username already taken' }, false,
+                { attempted: 'e2e_dmg3', heldByGuest: 'e2e_dmg3' });
+            expect(out).toEqual({
+                kind: 'failed', message: 'username already taken', claimable: true,
+            });
+        });
+
+        it('is case-insensitive — a callsign is not case-sensitive to its owner', () => {
+            const out = classifyLoginResponse({ ok: false, status: 409 },
+                { error: 'username already taken' }, false,
+                { attempted: 'E2E_DMG3', heldByGuest: 'e2e_dmg3' });
+            expect(out.kind === 'failed' && out.claimable).toBe(true);
+        });
+
+        it('does not flag a 409 for a name a DIFFERENT account holds (D6)', () => {
+            const out = classifyLoginResponse({ ok: false, status: 409 },
+                { error: 'that name belongs to a registered player' }, false,
+                { attempted: 'raven', heldByGuest: 'e2e_dmg3' });
+            expect(out).toEqual({
+                kind: 'failed', message: 'that name belongs to a registered player',
+            });
+        });
+
+        it('does not flag it when this browser is not a guest at all', () => {
+            const out = classifyLoginResponse({ ok: false, status: 409 },
+                { error: 'username already taken' }, false,
+                { attempted: 'raven', heldByGuest: null });
+            expect(out).toEqual({ kind: 'failed', message: 'username already taken' });
+        });
+
+        it('does not flag a non-409 failure even for a matching name', () => {
+            const out = classifyLoginResponse({ ok: false, status: 400 },
+                { error: 'invalid username' }, false,
+                { attempted: 'e2e_dmg3', heldByGuest: 'e2e_dmg3' });
+            expect(out).toEqual({ kind: 'failed', message: 'invalid username' });
+        });
+    });
 });
 
 describe('code and secret formatting', () => {

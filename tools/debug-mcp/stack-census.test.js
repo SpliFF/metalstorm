@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
     parsePsOutput, parseLsofF, resolveMprocsAddr, classifyBinaries,
     classifyStack, planCleanup, summarize, isStackPort, STACK_PATTERNS,
-    parseLobbyDbFlag,
+    parseLobbyDbFlag, executableBasename, isStackExecutable, filterStackProcesses,
+    parseMprocsShell,
 } from './stack-census.js';
 
 // --- parsers ----------------------------------------------------------------
@@ -81,6 +82,102 @@ test('the pgrep patterns still spell out both build dirs (no `.` wildcard)', () 
     assert.equal(STACK_PATTERNS.server, 'build/(debug|release)/spring-server');
 });
 
+// --- executable identity (the 12:3x incident) --------------------------------
+
+// A fake ps row shaped exactly like the incident: a `claude -p "..."` agent
+// process whose PROMPT mentions the lobby binary's own path. pgrep -f would
+// still hand this pid to us as a candidate (full-command-line substring
+// match) — the fix is that nothing downstream may trust that.
+const FAKE_CLAUDE_AGENT_ROW = {
+    pid: 42965, ppid: 39836, lstart: 'Sun Sep 20 04:57:23 2026',
+    cmd: 'claude --model sonnet -p "check whether build/debug/spring-lobby is bound to port 8011"',
+};
+
+test('a claude agent process whose prompt mentions the lobby path is not the lobby executable', () => {
+    assert.equal(isStackExecutable(FAKE_CLAUDE_AGENT_ROW.cmd, 'lobby'), false);
+    assert.equal(isStackExecutable(FAKE_CLAUDE_AGENT_ROW.cmd, 'server'), false);
+    assert.equal(executableBasename(FAKE_CLAUDE_AGENT_ROW.cmd), 'claude');
+});
+
+test('filterStackProcesses drops the stray agent row and keeps the real lobby', () => {
+    const real = { pid: 81794, ppid: 1, lstart: 'x', cmd: './build/debug/spring-lobby --port 8011 --db data/spring-server.db' };
+    const kept = filterStackProcesses([FAKE_CLAUDE_AGENT_ROW, real], 'lobby');
+    assert.deepEqual(kept, [real]);
+});
+
+test('isStackExecutable matches the real binaries by basename, build dir does not matter', () => {
+    assert.equal(isStackExecutable('./build/debug/spring-lobby --port 8011', 'lobby'), true);
+    assert.equal(isStackExecutable('build/release/spring-lobby --port 8011', 'lobby'), true);
+    assert.equal(isStackExecutable('./build/debug/spring-server --room 7', 'server'), true);
+    assert.equal(isStackExecutable('./build/debug/spring-logserver --port 8010', 'logserver'), true);
+});
+
+test('isStackExecutable follows a script through its interpreter, but not through npm', () => {
+    // Real ps rows for a vite dev server: npm's own wrapper process, and the
+    // node child it forks that actually execs the vite script.
+    assert.equal(isStackExecutable('npm exec vite dev --port 8012', 'vite'), false);
+    assert.equal(
+        isStackExecutable('node /Users/x/client/node_modules/.bin/vite dev --port 8012', 'vite'),
+        true,
+    );
+});
+
+// --- stack-down ---------------------------------------------------------------
+
+test('no listener on any of the three fixed ports is its own stack-down finding', () => {
+    const f = classifyStack(baseCensus({ ports: { available: true, listeners: [] } }));
+    assert.deepEqual(kinds(f), ['stack-down']);
+    assert.equal(f[0].severity, 'error');
+    assert.match(f[0].suggestedAction, /stack_start/);
+});
+
+test('an unrelated listener does not satisfy stack-down — only the three fixed ports do', () => {
+    const f = classifyStack(baseCensus({
+        ports: { available: true, listeners: [{ pid: 1, cmd: 'nc', port: 9105 }] },
+    }));
+    assert.ok(kinds(f).includes('stack-down'));
+});
+
+test('stack-down does not fire once any of :8010/:8011/:8012 is held', () => {
+    const f = classifyStack(baseCensus({
+        ports: { available: true, listeners: [{ pid: 1, cmd: 'spring-lobb', port: 8011 }] },
+    }));
+    assert.ok(!kinds(f).includes('stack-down'));
+});
+
+test('stack-down is skipped, not falsely fired, when lsof is unavailable', () => {
+    const f = classifyStack(baseCensus({ ports: { available: false } }));
+    assert.ok(!kinds(f).includes('stack-down'));
+});
+
+// --- mprocs.yaml shell lines (for stack_start) --------------------------------
+
+const MPROCS_YAML =
+    'server: 127.0.0.1:4050\n\n'
+    + 'procs:\n'
+    + '  logserver:\n'
+    + '    shell: "./build/debug/spring-logserver --port 8010 --db data/debug.db"\n'
+    + '    stop: SIGINT\n\n'
+    + '  lobby:\n'
+    + '    shell: "./build/debug/spring-lobby --no-cache --port 8011 --db data/spring-server.db"\n'
+    + '    stop: SIGINT\n\n'
+    + '  client:\n'
+    + '    shell: "cd client && GAME_SERVER_PORT=8011 npx vite dev --port 8012"\n';
+
+test('parseMprocsShell reads each proc\'s shell line verbatim', () => {
+    assert.equal(parseMprocsShell(MPROCS_YAML, 'logserver'),
+        './build/debug/spring-logserver --port 8010 --db data/debug.db');
+    assert.equal(parseMprocsShell(MPROCS_YAML, 'lobby'),
+        './build/debug/spring-lobby --no-cache --port 8011 --db data/spring-server.db');
+    assert.equal(parseMprocsShell(MPROCS_YAML, 'client'),
+        'cd client && GAME_SERVER_PORT=8011 npx vite dev --port 8012');
+});
+
+test('parseMprocsShell returns null for an unknown proc name', () => {
+    assert.equal(parseMprocsShell(MPROCS_YAML, 'nope'), null);
+    assert.equal(parseMprocsShell('', 'lobby'), null);
+});
+
 // --- binaries ---------------------------------------------------------------
 
 test('classifyBinaries picks release when it exists, and flags a newer debug', () => {
@@ -105,9 +202,16 @@ test('classifyBinaries: a newer release over an older debug is not drift', () =>
 
 // --- classification ---------------------------------------------------------
 
+// A synthetic lobby listener so the default fixture reads as "stack is up" —
+// most of these tests are about some OTHER finding and would otherwise all
+// trip the new stack-down finding too. The stack-down tests above set
+// `ports.listeners` explicitly (which replaces this default wholesale) to
+// exercise the empty case on purpose.
+const STACK_UP_LISTENER = { pid: -1, cmd: 'spring-lobby', port: 8011 };
+
 const baseCensus = (over = {}) => ({
     processes: { lobby: [], server: [], logserver: [], vite: [] },
-    ports: { available: true, listeners: [] },
+    ports: { available: true, listeners: [STACK_UP_LISTENER] },
     authority: { source: 'lobby', rows: [] },
     gameStatus: { available: true, rows: [] },
     binaries: classifyBinaries({}),
@@ -126,7 +230,7 @@ test('a server pid in the lobby list is managed, one outside it is a stray', () 
                 { pid: 11, cmd: 'build/debug/spring-server --headless-run' },
             ],
         },
-        ports: { available: true, listeners: [{ pid: 10, cmd: 'spring-serv', port: 9100 }, { pid: 11, cmd: 'spring-serv', port: 9101 }] },
+        ports: { available: true, listeners: [STACK_UP_LISTENER, { pid: 10, cmd: 'spring-serv', port: 9100 }, { pid: 11, cmd: 'spring-serv', port: 9101 }] },
         authority: { source: 'lobby', rows: [{ pid: 10, port: 9100, room_id: 7, state: 'running' }] },
     }));
     assert.deepEqual(kinds(f).sort(), ['managed', 'stray-server']);
@@ -152,7 +256,7 @@ test('with no authority every server is only info, and cleanup refuses it', () =
 
 test('a game-range listener with no managed pid is a zombie-port at error', () => {
     const f = classifyStack(baseCensus({
-        ports: { available: true, listeners: [{ pid: 77, cmd: 'nc', port: 9105 }] },
+        ports: { available: true, listeners: [STACK_UP_LISTENER, { pid: 77, cmd: 'nc', port: 9105 }] },
     }));
     assert.deepEqual(kinds(f), ['zombie-port']);
     assert.equal(f[0].severity, 'error');
@@ -260,7 +364,7 @@ test('missing lsof degrades to an info finding, not a failure', () => {
 test('findings sort error-first and summarize ignores managed rows', () => {
     const f = classifyStack(baseCensus({
         processes: { lobby: [], logserver: [], vite: [], server: [{ pid: 11, cmd: 'build/debug/spring-server' }] },
-        ports: { available: true, listeners: [{ pid: 77, cmd: 'nc', port: 9105 }] },
+        ports: { available: true, listeners: [STACK_UP_LISTENER, { pid: 77, cmd: 'nc', port: 9105 }] },
         authority: { source: 'lobby', rows: [] },
     }));
     assert.equal(f[0].severity, 'error');
@@ -274,4 +378,32 @@ test('planCleanup deduplicates a pid that produced two findings', () => {
         { kind: 'zombie-port', severity: 'error', pid: 11, port: 9101, cmd: 'build/debug/spring-server' },
     ];
     assert.equal(planCleanup(findings).actions.length, 1);
+});
+
+// --- ownedPids: "one live stack per machine" --------------------------------
+
+test('with no ownedPids given at all, cleanup behaves exactly as before (opt-in gate)', () => {
+    const findings = [{ kind: 'orphan-vite', severity: 'warning', pid: 6, cmd: 'vite' }];
+    assert.equal(planCleanup(findings).actions.length, 1);
+});
+
+test('a pid stack_start did not start is refused by default — the shared mprocs stack is not ours to kill', () => {
+    const findings = [{ kind: 'orphan-vite', severity: 'warning', pid: 6, cmd: 'vite' }];
+    const { actions, refusals } = planCleanup(findings, { ownedPids: new Set([999]) });
+    assert.deepEqual(actions, []);
+    assert.equal(refusals.length, 1);
+    assert.match(refusals[0].reason, /not started by stack_start/);
+    assert.match(refusals[0].reason, /force:true/);
+});
+
+test('a pid stack_start DID start is cleaned up normally', () => {
+    const findings = [{ kind: 'orphan-vite', severity: 'warning', pid: 6, cmd: 'vite' }];
+    const { actions } = planCleanup(findings, { ownedPids: new Set([6]) });
+    assert.equal(actions.length, 1);
+});
+
+test('force:true overrides the ownership gate, same flag as the zombie-port override', () => {
+    const findings = [{ kind: 'orphan-vite', severity: 'warning', pid: 6, cmd: 'vite' }];
+    const { actions } = planCleanup(findings, { ownedPids: new Set(), force: true });
+    assert.equal(actions.length, 1);
 });

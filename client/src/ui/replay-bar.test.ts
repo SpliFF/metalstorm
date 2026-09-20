@@ -1,16 +1,21 @@
+// @vitest-environment happy-dom
 /**
- * Replay playback bar — the pure half (PLAN-replay.md task 4b).
+ * Replay playback bar — the pure half (PLAN-replay.md task 4b), plus the DOM
+ * accessibility contract the E2E1 TOOLING GAP flagged (docs/reviews/beta
+ * §"E2E pass 1"): the bar and its seek track carried no a11y role, so
+ * chrome-devtools take_snapshot never listed them.
  *
- * The DOM half is verified in a browser against a real recording; what is
- * worth pinning here is the reading of a ReplayState: whose controls these
- * are, what the bar says when they are not yours, and the scrub arithmetic —
- * an off-by-one in `seekFrameFor` is a seek to the wrong minute of somebody's
- * match, and it would look like a server bug.
+ * The rest of the DOM half is verified in a browser against a real
+ * recording; what is worth pinning here is the reading of a ReplayState:
+ * whose controls these are, what the bar says when they are not yours, and
+ * the scrub arithmetic — an off-by-one in `seekFrameFor` is a seek to the
+ * wrong minute of somebody's match, and it would look like a server bug.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
     describeReplayBar, seekFrameFor, shouldApplyDeepLinkSeek, SPEED_STEPS,
+    ReplayAction, updateReplayBar, hideReplayBar,
 } from './replay-bar.js';
 import type { ReplayStateInfo } from '../core/connection.js';
 
@@ -35,6 +40,48 @@ function state(over: Partial<ReplayStateInfo> = {}): ReplayStateInfo {
         ...over,
     };
 }
+
+afterEach(() => hideReplayBar());
+
+describe('replay bar DOM accessibility', () => {
+    it('mounts the bar as a labelled region with a labelled slider track', () => {
+        const sender = vi.fn();
+        updateReplayBar(state({ currentFrame: 3075 }), 200, sender);
+
+        const bar = document.getElementById('replay-bar')!;
+        expect(bar.getAttribute('role')).toBe('region');
+        expect(bar.getAttribute('aria-label')).toBeTruthy();
+
+        const track = document.getElementById('replay-track')! as HTMLElement;
+        expect(track.getAttribute('role')).toBe('slider');
+        expect(track.tabIndex).toBe(0);
+        expect(track.getAttribute('aria-valuemin')).toBe('0');
+        expect(track.getAttribute('aria-valuemax')).toBe('100');
+        expect(track.getAttribute('aria-valuenow')).toBe('50'); // 3075/6150
+
+        for (const id of ['replay-play', 'replay-speed', 'replay-pov']) {
+            expect(document.getElementById(id)!.getAttribute('aria-label')).toBeTruthy();
+        }
+    });
+
+    it('seeks forward and backward from the keyboard, ARIA-slider style', () => {
+        const sender = vi.fn();
+        updateReplayBar(state({ currentFrame: 3075 }), 200, sender);
+        const track = document.getElementById('replay-track')!;
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenCalledTimes(1);
+        const [action, opts] = sender.mock.calls[0]!;
+        expect(action).toBe(ReplayAction.Seek);
+        expect(opts?.frame).toBeGreaterThan(3075);
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenLastCalledWith(ReplayAction.Seek, { frame: 0 });
+
+        track.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        expect(sender).toHaveBeenLastCalledWith(ReplayAction.Seek, { frame: 6150 });
+    });
+});
 
 describe('describeReplayBar', () => {
     it('reads the controls as yours when you hold them', () => {
@@ -114,24 +161,60 @@ describe('describeReplayBar', () => {
         expect(describeReplayBar(state(), 200).refusal).toBe('');
     });
 
-    it('leads with the delay chip and hides POV for a broadcast', () => {
+    it('leads with the delay chip and hides POV for a live broadcast', () => {
         // PLAN-beta-broadcast.md lane C: the tap is Global-visibility only —
         // there is no other POV to switch to, and saying so would be a lie.
+        // `truncated: true` is what "still live" looks like on the wire for
+        // a broadcast (no trailer written yet) — see ReplayStateBroadcast.h.
         const m = describeReplayBar(
-            state({ broadcast: true, behindSeconds: 3600, povTeam: -1 }), 200);
+            state({ broadcast: true, truncated: true, behindSeconds: 3600, povTeam: -1 }), 200);
         expect(m.status).toContain('Broadcast · 1h behind');
         expect(m.status).not.toContain('POV');
+        // Not the E1 "server died mid-game" line — that's a `.msr` concept;
+        // for a broadcast, truncated just means the mission is ongoing.
+        expect(m.status).not.toContain('ends early');
     });
 
     it('formats the delay in minutes under an hour (dev-floor override)', () => {
-        const m = describeReplayBar(state({ broadcast: true, behindSeconds: 90 }), 200);
+        const m = describeReplayBar(
+            state({ broadcast: true, truncated: true, behindSeconds: 90 }), 200);
         expect(m.status).toContain('Broadcast · 2m behind');
     });
 
     it('drops the no-checkpoints line for a broadcast — backward seek works via keyframes', () => {
         const m = describeReplayBar(
-            state({ broadcast: true, behindSeconds: 3600, checkpointFrames: [] }), 200);
+            state({ broadcast: true, truncated: true, behindSeconds: 3600, checkpointFrames: [] }), 200);
         expect(m.status).not.toContain('forwards only');
+    });
+
+    it('D12: states when a finished/stale broadcast segment was recorded, not "behind"', () => {
+        // A closed segment (`truncated: false` — the trailer is written) has
+        // no live edge to be behind; showing "behind" here is what flipped
+        // from "1h behind" to "59h behind" on a backward seek in E2E1 pass 1
+        // (docs/reviews/beta/README.md D12), purely because it kept
+        // recomputing against wall clock for a two-day-old recording.
+        const recordedAt = new Date('2026-09-17T10:00:00Z').getTime();
+        const m = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 212400 }),
+            200, '', recordedAt);
+        expect(m.status).toContain('Recorded');
+        expect(m.status).not.toContain('behind');
+    });
+
+    it('D12: the recorded date does not move when the caller re-derives it after a seek', () => {
+        // The whole bug was re-deriving the label from `behindSeconds`, which
+        // grows after a backward seek moves the cursor away from the live
+        // edge. describeReplayBar takes the frozen instant as a parameter
+        // precisely so a later, larger `behindSeconds` on the same segment
+        // cannot change what is shown.
+        const recordedAt = new Date('2026-09-17T10:00:00Z').getTime();
+        const before = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 3600 }),
+            200, '', recordedAt);
+        const afterSeek = describeReplayBar(
+            state({ broadcast: true, truncated: false, behindSeconds: 212400 }),
+            200, '', recordedAt);
+        expect(before.status).toBe(afterSeek.status);
     });
 
     it('marks the live edge on the track for a broadcast', () => {

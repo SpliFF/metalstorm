@@ -106,13 +106,33 @@ export const TOOLS = [
     },
     {
         name: 'cleanup_stack',
-        description: 'Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.',
+        description: 'Kill the non-managed processes list_stack found. CALL WITH dryRun:true FIRST (the default) — it returns the exact plan (pid, kind, signal sequence) and touches nothing. Acts only on stray-server, zombie-port, orphan-vite and duplicate-lobby; `managed` processes are never touched (to stop a real game use end_game({roomId}), which drains gracefully), and stale game_status rows are report-only. Hard invariants: the pid holding :8011 is never killed whatever its classification; ONE LIVE STACK PER MACHINE — a pid is refused unless it was started by stack_start (this session\'s or a prior one), because the dev stack you are most likely looking at belongs to the user\'s own interactive mprocs and killing it out from under them is the one outcome that costs a whole session; stray-server is refused entirely when the lobby is unreachable (with no authority, "stray" cannot be established); a zombie-port pid whose command is not spring-server needs force:true. `force:true` overrides BOTH the ownership refusal and the zombie-port command check — pass it only once you have actually looked at what you are about to kill (e.g. via list_stack). Kill discipline is SIGTERM → poll 5s → SIGKILL, because spring-server turns SIGTERM into a clean exit checkpoint.',
         inputSchema: {
             type: 'object',
             properties: {
                 dryRun: { type: 'boolean', description: 'Report the plan without killing anything. Default TRUE.', default: true },
                 kinds: { type: 'array', items: { type: 'string', enum: CLEANABLE_KINDS }, description: `Restrict to these classifications (default: all of ${CLEANABLE_KINDS.join(', ')}).` },
-                force: { type: 'boolean', description: 'Allow killing a zombie-port pid whose command line is not spring-server (the 9100-10099 range can catch unrelated dev tools). Default false.', default: false },
+                force: { type: 'boolean', description: 'Allow killing a pid that stack_start did not start, AND a zombie-port pid whose command line is not spring-server. Both checks exist because the 9100-10099 range can catch unrelated dev tools, and because most running processes are the user\'s own mprocs stack, not this tool\'s. Default false.', default: false },
+            },
+        },
+    },
+    {
+        name: 'stack_start',
+        description: 'Launch logserver/lobby/vite from mprocs.yaml\'s own `shell:` lines — nohup, detached, cwd = the main checkout (PROJECT_ROOT or TASKHERD_REPO), logging to .tasks/logs/stack-<service>.log. Refuses outright if ANY requested port (:8010/:8011/:8012) is already held — one live stack per machine: that is very likely the user\'s own mprocs session, and starting a second lobby on the same db races SO_REUSEPORT accepts between them (see list_stack\'s duplicate-lobby finding). NOT a substitute for mprocs: no TUI, no restart-proc, no log-tail panes — prefer the user\'s own mprocs when one might already be running (check with list_stack first); this exists for when nothing is up at all (CI, a fresh box, a headless session). Every pid it starts is recorded so cleanup_stack will later kill it without needing force:true.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                services: { type: 'array', items: { type: 'string', enum: ['logserver', 'lobby', 'vite'] }, description: 'Subset to start. Default: all three, in logserver, lobby, vite order.' },
+            },
+        },
+    },
+    {
+        name: 'lobby_log',
+        description: 'Tail the lobby process\'s own stdout/stderr. NOT covered by get_logs/search_logs — those read the log server, which the lobby never posts its own startup/crash output to; this is the only MCP-side view of it. Reads .tasks/logs/stack-lobby.log, which only exists once the lobby has been started with stack_start — a lobby started from the user\'s own interactive mprocs TUI keeps its output in the mprocs pane only, nothing on disk. When the file is missing this says so and points at the mprocs pane / `spring-services.sh status` instead of erroring.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                lines: { type: 'number', description: 'Tail this many lines from the end of the log. Default 200.', default: 200 },
             },
         },
     },
@@ -140,7 +160,7 @@ export const TOOLS = [
     },
     {
         name: 'query_db',
-        description: 'Execute a read-only SQL query against the lobby database.',
+        description: 'Execute a read-only SQL query against the lobby database. The file opened is detected from the RUNNING lobby\'s own `--db` argument (falling back to PROJECT_ROOT/TASKHERD_REPO + data/spring-server.db, or SPRING_DB if set) — never assumed — because this is the one tool that reads the filesystem directly rather than the live lobby\'s HTTP API, so a stale assumption here is invisible everywhere else. Every answer is prefixed with `-- db: <path> (<source>)` naming exactly which file and how it was chosen.',
         inputSchema: {
             type: 'object',
             properties: {

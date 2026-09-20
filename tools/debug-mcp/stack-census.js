@@ -129,6 +129,73 @@ export function resolveMprocsAddr({ env = '', yamlText = '' } = {}) {
     return '127.0.0.1:4050';
 }
 
+/**
+ * A proc's `shell:` command from mprocs.yaml, mirroring
+ * spring-services.sh's `mprocs_proc_shell` so `stack_start` launches the
+ * EXACT command mprocs would rather than a hand-kept parallel arg list that
+ * can drift (dropping `--dev-direct-start`, say).
+ *
+ * @param {string} yamlText
+ * @param {string} procName  top-level key under `procs:` (e.g. 'lobby')
+ * @returns {string|null}
+ */
+export function parseMprocsShell(yamlText, procName) {
+    const lines = String(yamlText || '').split('\n');
+    const header = new RegExp(`^  ${procName}:\\s*$`);
+    const start = lines.findIndex(l => header.test(l));
+    if (start === -1) return null;
+    for (let j = start + 1; j < lines.length; j++) {
+        if (/^  \S/.test(lines[j])) break;   // next top-level proc entry
+        const m = /^\s*shell:\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(lines[j]);
+        if (m) return m[1];
+    }
+    return null;
+}
+
+// --- Executable identity -----------------------------------------------------
+//
+// The 12:3x incident: `pgrep -f` matches the FULL command line, so an agent
+// process launched as `claude -p "...check build/debug/spring-lobby is up..."`
+// — its PROMPT TEXT, not anything it execs — matched STACK_PATTERNS.lobby and
+// was reported as the lobby, as a stray-server AND (via the `lobbyPids.length
+// === 1` fallback below) as "the only lobby process", while the real stack was
+// down. pgrep -f still finds the CANDIDATE pids (cheap, broad net); this is
+// the authoritative filter applied to those candidates before they are
+// classified as anything: which of them actually EXEC'd the binary, judged by
+// the invoked executable's basename, never by a substring anywhere in argv.
+//
+// A script launched via shebang shows its INTERPRETER as argv[0] (`node
+// .../client/node_modules/.bin/vite dev --port 8012`), so a known interpreter
+// defers the check to argv[1] rather than rejecting every script-based
+// service.
+
+const INTERPRETER_BASENAMES = new Set(['node', 'bun', 'deno', 'python', 'python3', 'sh', 'bash', 'zsh']);
+
+/** kind -> the basename of the executable that kind actually is. */
+const STACK_EXECUTABLE = {
+    lobby: 'spring-lobby', server: 'spring-server', logserver: 'spring-logserver', vite: 'vite',
+};
+
+/** basename(argv[0]) — or, behind a known interpreter, basename(argv[1]). */
+export function executableBasename(cmd) {
+    const tokens = String(cmd || '').trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return '';
+    let base = tokens[0].split('/').pop();
+    if (INTERPRETER_BASENAMES.has(base) && tokens[1]) base = tokens[1].split('/').pop();
+    return base;
+}
+
+/** Is `cmd` actually an invocation of the `kind` executable — not merely a mention of it? */
+export function isStackExecutable(cmd, kind) {
+    const want = STACK_EXECUTABLE[kind];
+    return !!want && executableBasename(cmd) === want;
+}
+
+/** Narrow a pgrep -f candidate list down to rows that really exec the `kind` binary. */
+export function filterStackProcesses(rows, kind) {
+    return (rows || []).filter(r => isStackExecutable(r.cmd, kind));
+}
+
 // --- Binaries ---------------------------------------------------------------
 
 /**
@@ -183,6 +250,24 @@ export function classifyStack(c) {
             detail: 'lsof not available — port-based classification skipped',
             suggestedAction: 'install lsof, or read `processes` only',
         }));
+    }
+
+    // --- stack down: no listener on any of the three fixed ports -----------
+    //
+    // Distinct from every per-process finding below: this fires when the
+    // dev stack simply is not there, so a caller with an empty `processes`
+    // census (the 12:3x incident, once the basename filter above strips the
+    // false-positive candidates) gets ONE clear "start it" finding instead of
+    // silence that reads as "everything's fine, nothing to report".
+    if (c.ports?.available) {
+        const stackPortHeld = [STACK_PORTS.logserver, STACK_PORTS.lobby, STACK_PORTS.vite]
+            .some(p => holderOf(p));
+        if (!stackPortHeld) {
+            findings.push(F('stack-down', 'error', {
+                detail: 'no listener on :8010 (logserver), :8011 (lobby) or :8012 (vite) — the dev stack is not running',
+                suggestedAction: 'stack_start() to launch logserver/lobby/vite from mprocs.yaml (refuses if a port is already held)',
+            }));
+        }
     }
 
     const authoritySource = c.authority?.source || 'none';
@@ -369,9 +454,16 @@ export const CLEANABLE_KINDS = ['stray-server', 'zombie-port', 'orphan-vite', 'd
  * @param {object[]} findings   classifyStack() output
  * @param {object} opts
  * @param {string[]} [opts.kinds]   subset of CLEANABLE_KINDS (default: all)
- * @param {boolean} [opts.force]    allow zombie-port kills whose cmd isn't spring-server
+ * @param {boolean} [opts.force]    allow zombie-port kills whose cmd isn't spring-server,
+ *                                  AND allow killing a pid `ownedPids` does not recognise
  * @param {number|null} [opts.lobbyPid]  pid holding :8011, if known
  * @param {string} [opts.authoritySource]
+ * @param {Set<number>} [opts.ownedPids]  pids `stack_start` itself launched (server.js's
+ *        ownership registry). When given (even empty), any pid NOT in it is refused
+ *        unless `force:true` — the shared dev stack most callers see was started by the
+ *        user's own mprocs, not by this tool, and killing it out from under them is the
+ *        one outcome the 12:3x incident was about. Omitted entirely (undefined), this
+ *        gate does not apply — the caller has no ownership story to check against.
  * @returns {{actions:object[], refusals:object[]}}
  */
 export function planCleanup(findings, opts = {}) {
@@ -388,6 +480,11 @@ export function planCleanup(findings, opts = {}) {
         if (!f.pid) { add('finding has no pid'); continue; }
         if (opts.lobbyPid && f.pid === opts.lobbyPid) {
             add('pid holds a LISTEN on :8011 — never killed, whatever its classification');
+            continue;
+        }
+        if (opts.ownedPids && !opts.force && !opts.ownedPids.has(f.pid)) {
+            add("pid was not started by stack_start — it is very likely the user's own mprocs "
+                + 'dev stack, which this tool never kills unasked; pass force:true if you mean it');
             continue;
         }
         if (f.kind === 'stray-server' && opts.authoritySource === 'none') {

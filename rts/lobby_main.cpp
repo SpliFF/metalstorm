@@ -476,6 +476,18 @@ static std::string gReplayDir;
 /// room-creating call site, not a `main()` local.
 static std::string gBroadcastDir;
 
+/// E2E1 D2: `--dev-broadcast-floor-seconds`, this lobby's own override of the
+/// compiled `broadcast::kMinBroadcastDelaySec` floor — the piece
+/// `spring-server`'s `--dev-broadcast-floor` (BroadcastRelay.h) could not
+/// reach on its own, because nothing forwarded it and the list route never
+/// took a floor parameter at all. `-1` means "not overridden" (a negative
+/// delay is nonsensical, so the sign is free to mean "flag absent"); set
+/// only after the CLI gate below has confirmed `--i-understand-this-is-a-
+/// dev-build` also came in. Consulted by the list route
+/// (`broadcastcatalog::EffectiveFloorSeconds`) and forwarded to every relay
+/// `spawnGameServer` starts, exactly like `gBroadcastDir` above.
+static int gDevBroadcastFloorSec = -1;
+
 /// PLAN-metalstorm-lobby.md §8, task 9a: "when did this account last make an
 /// authenticated request", the only source of the `online` presence state.
 ///
@@ -522,6 +534,11 @@ static std::unordered_map<uint32_t, std::string> gReplayRooms;
 /// that side records a LIVE mission's own stream; this side tracks who is
 /// watching one played back through a relay.
 static std::unordered_map<uint32_t, std::string> gBroadcastRooms;
+
+/// Which (room, account) pairs have already been paid for a room's CURRENT
+/// mission (D5, PLAN-beta-journey.md §0, `Journey::AccrualLedger`). Consulted
+/// by `creditRoomAccrual`, reset by `spawnServerForRoom`.
+static Journey::AccrualLedger gAccrualLedger;
 
 /// The game-server binary this lobby forks. Release wins when it exists —
 /// which is also task 3b's field note ("a debug-only rebuild is invisible in a
@@ -689,10 +706,13 @@ static GameServerInstance spawnGameServer(
     // re-executing a `.msr`. Like `replayFile`, every argument describing the
     // world is withheld — the relay pulls map/game/modoptions out of the
     // log's own header (BroadcastLog.h reuses `replay::Header` verbatim for
-    // exactly this) — and no delay flag is passed: the relay's own compiled
-    // floor (`broadcast::kMinBroadcastDelaySec`) is what a fresh watch gets,
-    // and only `--dev-broadcast-floor` (never sent by this lobby) can lower
-    // it.
+    // exactly this) — and no `--broadcast-delay-seconds` is passed: the
+    // relay's own compiled floor (`broadcast::kMinBroadcastDelaySec`) is what
+    // a fresh watch gets. E2E1 D2: `--dev-broadcast-floor` IS forwarded, but
+    // only when the file-scope `gDevBroadcastFloorSec` override is set (the
+    // lobby's own `--dev-broadcast-floor-seconds`, gated on
+    // `--i-understand-this-is-a-dev-build` at parse time) — see the argv
+    // build below.
     const std::string &broadcastFile = "") {
   const bool isReplay = !replayFile.empty();
   const bool isBroadcastRelay = !broadcastFile.empty();
@@ -910,6 +930,7 @@ static GameServerInstance spawnGameServer(
     std::string idleGraceStr = std::to_string(idleStartupGraceSeconds);
     std::string idleExitStr = std::to_string(idleExitSeconds);
     std::string playerSlotCapStr = std::to_string(playerSlotCap);
+    std::string devBroadcastFloorStr = std::to_string(gDevBroadcastFloorSec);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -949,10 +970,18 @@ static GameServerInstance spawnGameServer(
       argv.push_back(replayFile.c_str());
     } else if (isBroadcastRelay) {
       // Deliberately no `--broadcast-delay-seconds`: the relay's own
-      // compiled floor applies, and only a `--dev-broadcast-floor` this
-      // lobby never sends can lower it (see the parameter comment).
+      // compiled floor applies unless overridden below.
       argv.push_back("--broadcast");
       argv.push_back(broadcastFile.c_str());
+      // E2E1 D2: forward the lobby's own dev floor override so a relay a
+      // test spawned serves the same lowered floor the list route just
+      // advertised it at, instead of waiting out the real one-hour floor.
+      // Only sent when the operator actually set it — see the parameter
+      // comment and the CLI gate in main().
+      if (gDevBroadcastFloorSec >= 0) {
+        argv.push_back("--dev-broadcast-floor");
+        argv.push_back(devBroadcastFloorStr.c_str());
+      }
     } else {
       // Not on the replay path: a recording re-executes with the gating its
       // own stream was produced under, and every argument that describes the
@@ -1184,6 +1213,16 @@ int main(int argc, char *argv[]) {
   // disk does not grow forever. <= 0 disables the sweep, same convention as
   // `clientErrorRetentionDays` above.
   int broadcastRetentionDays = 14;
+  // E2E1 D2: `--dev-broadcast-floor-seconds`. The ONLY way to lower the
+  // compiled one-hour floor this lobby's own list route enforces (mirrors
+  // `--dev-broadcast-floor` on spring-server itself, BroadcastRelay.h) —
+  // for a test that cannot wait out a real hour. Refused below unless
+  // `--i-understand-this-is-a-dev-build` is also given: this is strictly
+  // more dangerous than that flag alone, since it also lowers what every
+  // relay this lobby spawns will serve. Never a modoption (a modoption is
+  // written by whoever spawns the room) and never reachable from a client
+  // — a CLI-only operator setting. -1 = unset, use the compiled floor.
+  int devBroadcastFloorSec = -1;
   // PLAN-metalstorm-lobby.md §5.3, task 3: a persistent war's game server is
   // deliberately NOT killed when this lobby shuts down — the next lobby's
   // startup adoption pass re-attaches to the live pid, which is the only
@@ -1251,6 +1290,8 @@ int main(int argc, char *argv[]) {
       gBroadcastDir = argv[++i];
     } else if (arg == "--broadcast-retention-days" && i + 1 < argc) {
       broadcastRetentionDays = std::atoi(argv[++i]);
+    } else if (arg == "--dev-broadcast-floor-seconds" && i + 1 < argc) {
+      devBroadcastFloorSec = std::atoi(argv[++i]);
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
@@ -1278,6 +1319,19 @@ int main(int argc, char *argv[]) {
   // start listening at all without the operator's explicit acknowledgment.
   if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
     return 1;
+
+  // E2E1 D2: --dev-broadcast-floor-seconds lowers what every relay this
+  // lobby spawns will serve, on top of what the dev-build banner already
+  // warns about — refuse it outright unless the operator also acknowledged
+  // the dev build, rather than trusting the flag's name alone.
+  if (devBroadcastFloorSec >= 0 && !devBuildAcknowledged) {
+    SLOG(SPRING_LOG_ERROR,
+         "--dev-broadcast-floor-seconds requires %s (it lowers the "
+         "broadcast delay floor below its compiled value)",
+         DevBuildGate::kFlag);
+    return 1;
+  }
+  gDevBroadcastFloorSec = devBroadcastFloorSec;
 
   if (wtCertPath.empty() != wtKeyPath.empty()) {
     SLOG(SPRING_LOG_ERROR,
@@ -3878,6 +3932,60 @@ int main(int argc, char *argv[]) {
     if (s)
       sqlite3_finalize(s);
     return ok;
+  };
+
+  // Pay standing/session credit for room `roomId`'s finished mission — the
+  // ONE place either exit path may call (D5, PLAN-beta-journey.md §0). Both
+  // the health loop's "game server exited" branch and
+  // POST /api/rooms/leave's abandon branch reach the same event (a mission
+  // is over); this function is what makes either of them safe to call for
+  // it, via `gAccrualLedger` above.
+  //
+  // Who took part is read from both halves, for the same reason the war
+  // browser reads both: a skirmish's players are in the room, a war's
+  // fighters are in the bindings and were never in it.
+  //
+  // Dev/provisional accounts are skipped. They are minted by
+  // `/api/rooms/direct` and by every harness that boots a room, and a
+  // standing ladder whose top is the test fixtures is not a ladder.
+  //
+  // Gated on the room being neither a replay nor a broadcast watch: a
+  // replay/broadcast room's "server" is a playback or relay process, not a
+  // Mission, so whoever first called /api/replays/watch or
+  // /api/broadcasts/watch must not be paid as if they had played one.
+  auto creditRoomAccrual = [&](uint32_t roomId) {
+    if (!Journey::RoomEarnsAccrual(gReplayRooms.count(roomId) > 0,
+                                   gBroadcastRooms.count(roomId) > 0))
+      return;
+    WarSummary finalSummary;
+    const bool haveSummary = warSummaryFor(roomId, finalSummary);
+    std::unordered_map<std::string, int> credited;
+    if (haveSummary)
+      for (const auto &c : finalSummary.credits)
+        credited[c.username] = c.objectives;
+
+    auto accrue = [&](int64_t accountId, const std::string &username) {
+      if (accountId <= 0 || !gAccrualLedger.TryCredit(roomId, accountId))
+        return;
+      const auto u = db.FindUserById(accountId);
+      if (!u || u->isDev || u->isProvisional)
+        return;
+      const auto cit = credited.find(username);
+      const Journey::Accrual a = Journey::SessionAccrual(
+          cit == credited.end() ? 0 : cit->second);
+      db.AddStanding(accountId, a.standing, a.sessions);
+      SLOG(SPRING_LOG_INFO,
+           "standing: '%s' +%d for finishing room %u (%d objective(s) "
+           "credited)",
+           username.c_str(), a.standing, roomId,
+           cit == credited.end() ? 0 : cit->second);
+    };
+    if (const auto *ended = rooms.GetRoom(roomId))
+      for (const auto &p : ended->players)
+        if (!p.isSpectator)
+          accrue(static_cast<int64_t>(p.playerId), p.username);
+    for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), roomId))
+      accrue(b.accountId, b.username);
   };
 
   // Helper: JSON-serialize a room for API responses
@@ -6536,6 +6644,12 @@ int main(int argc, char *argv[]) {
     room.gameServerPort = inst.port;
     rooms.PersistRoomGameSession(room.id);
 
+    // This room's NEXT mission just began — its previous one's paid-accounts
+    // ledger (D5, gAccrualLedger above) no longer applies. Also the correct
+    // move if `room.id` is a deleted room's id reused by an unrelated later
+    // room: that room must start with a clean slate too.
+    gAccrualLedger.Reset(room.id);
+
     // ── Adopt the war (PLAN-metalstorm-wars.md §3, task 7) ────────────────
     //
     // §3's "operator pick": a war created the way a player or an operator
@@ -8394,6 +8508,15 @@ int main(int argc, char *argv[]) {
           // Kill the game server if one is running
           auto gsIt = gameServers.find(rid);
           if (gsIt != gameServers.end()) {
+            // D5: this IS the mission ending, exactly as much as the health
+            // loop noticing the same pid gone on its next tick would be —
+            // the last player leaving a room whose server is still up is
+            // the normal way a finished (or abandoned) mission is left.
+            // Credit before the SIGTERM/removeGameServer below so the room
+            // and its roster are still live to read; creditRoomAccrual is
+            // idempotent per (room, account), so if the health loop also
+            // reaches this pid's exit nobody is paid twice.
+            creditRoomAccrual(rid);
             kill(gsIt->second.pid, SIGTERM);
             gsIt->second.state = GameServerInstance::Ended;
             removeGameServer(rid);
@@ -9353,7 +9476,8 @@ int main(int argc, char *argv[]) {
           if (!sum.ok)
             continue;
           const auto avail = broadcastcatalog::Availability(
-              sum, broadcast::kMinBroadcastDelaySec, nowMs);
+              sum, broadcastcatalog::EffectiveFloorSeconds(gDevBroadcastFloorSec),
+              nowMs);
           if (!avail.available)
             continue;
 
@@ -10269,61 +10393,15 @@ int main(int argc, char *argv[]) {
           SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
                roomId, inst.pid);
 
-          // ── Standing accrual (PLAN-beta-journey.md §0) ──────────────
-          //
-          // The mission is over the moment its process is: this branch runs
-          // exactly once per server exit, before the room is recycled or
-          // deleted, which is the only point in the lobby that is both
-          // once-per-mission and still holding the roster.
-          //
-          // Who took part is read from both halves, for the same reason the
-          // war browser reads both: a skirmish's players are in the room, a
-          // war's fighters are in the bindings and were never in it. Deduped
-          // by account id, so a player who is in both is paid once.
-          //
-          // Dev accounts are skipped. They are minted by `/api/rooms/direct`
-          // and by every harness that boots a room, and a standing ladder
-          // whose top is the test fixtures is not a ladder.
-          //
-          // Gated on the room being neither a replay nor a broadcast watch
-          // (checked BEFORE crediting, not just before the branches below
-          // that clean those rooms up): a replay/broadcast room's "server"
-          // is a playback or relay process, not a Mission, so whoever first
-          // called /api/replays/watch or /api/broadcasts/watch must not be
-          // paid as if they had played one.
-          if (Journey::RoomEarnsAccrual(gReplayRooms.count(roomId) > 0,
-                                         gBroadcastRooms.count(roomId) > 0)) {
-            WarSummary finalSummary;
-            const bool haveSummary = warSummaryFor(roomId, finalSummary);
-            std::unordered_map<std::string, int> credited;
-            if (haveSummary)
-              for (const auto &c : finalSummary.credits)
-                credited[c.username] = c.objectives;
-
-            std::set<int64_t> paid;
-            auto accrue = [&](int64_t accountId, const std::string &username) {
-              if (accountId <= 0 || !paid.insert(accountId).second)
-                return;
-              const auto u = db.FindUserById(accountId);
-              if (!u || u->isDev || u->isProvisional)
-                return;
-              const auto cit = credited.find(username);
-              const Journey::Accrual a = Journey::SessionAccrual(
-                  cit == credited.end() ? 0 : cit->second);
-              db.AddStanding(accountId, a.standing, a.sessions);
-              SLOG(SPRING_LOG_INFO,
-                   "standing: '%s' +%d for finishing room %u (%d objective(s) "
-                   "credited)",
-                   username.c_str(), a.standing, roomId,
-                   cit == credited.end() ? 0 : cit->second);
-            };
-            if (const auto *ended = rooms.GetRoom(roomId))
-              for (const auto &p : ended->players)
-                if (!p.isSpectator)
-                  accrue(static_cast<int64_t>(p.playerId), p.username);
-            for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), roomId))
-              accrue(b.accountId, b.username);
-          }
+          // Standing accrual (D5, PLAN-beta-journey.md §0): the mission is
+          // over the moment its process is. This is one of the two places
+          // that can observe that (POST /api/rooms/leave's abandon branch is
+          // the other, for the normal player-initiated exit); both call the
+          // same idempotent `creditRoomAccrual`, so a mission is paid once
+          // no matter which of them gets there first. Runs before the room
+          // is recycled or deleted below, which is the only point here that
+          // is both once-per-mission and still holding the roster.
+          creditRoomAccrual(roomId);
 
           // PLAN-replay task 4c: a replay room has no next game. Its server
           // exits when the recording runs out, and recycling it to Filling

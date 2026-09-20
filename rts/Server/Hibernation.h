@@ -182,6 +182,42 @@ struct IdleHibernateDecision {
 /// put that sentence in the log of every replay and every skirmish.
 IdleHibernateDecision DecideIdleHibernate(const IdleHibernateContext& c);
 
+// ────────────────────────── idle exit (skirmishes) ──────────────────────────
+//
+// The non-persistent counterpart to `DecideIdleHibernate` above: a skirmish
+// (or a broadcast relay, which is not a war at all) that nobody is connected
+// to just exits — there is no world worth checkpointing for a room nobody
+// asked to resume. `DecideIdleHibernate` already refuses a persistent room
+// this path's way ("not a persistent war — the idle-exit path applies
+// instead"); this is that path, made a named, tested decision instead of an
+// `if` inlined at each of its call sites (D13, beta E2E pass 1: the relay
+// loop is a *second* call site server_main's sim loop does not share code
+// with, and it had no idle check at all — the two loops silently drifting
+// apart is exactly what a shared decision function forecloses).
+struct IdleExitContext {
+    /// Mirrors `IdleHibernateContext::persistentRoom`: a persistent-war room
+    /// never idle-exits (it hibernates instead, on the timer above).
+    bool persistentRoom = false;
+    /// `idleExitSeconds > 0 && !headlessRun` — a headless run's own stop
+    /// conditions own its exit, and `idleExitSeconds <= 0` is the operator
+    /// asking for "never".
+    bool idleExitEnabled = true;
+    int  idleExitSec = 300;       ///< exit once idle this long past the grace
+    int64_t sinceStartSec = 0;    ///< uptime, against the startup grace
+    int64_t startupGraceSec = 0;
+    int64_t idleForSec = 0;       ///< since the last connected client left
+};
+
+struct IdleExitDecision {
+    bool exit = false;
+    /// Always populated — the caller logs it whichever way this went, same
+    /// discipline as `IdleHibernateDecision::reason`.
+    std::string reason;
+};
+
+/// Pure. Order: not eligible at all → the startup grace → the idle window.
+IdleExitDecision DecideIdleExit(const IdleExitContext& c);
+
 // ────────────────────────────── resume ──────────────────────────────
 
 /// The store, narrowed to what a resume needs. GameStateStore satisfies this;
