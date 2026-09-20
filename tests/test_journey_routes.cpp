@@ -72,6 +72,44 @@ TEST_CASE("a replay or broadcast room's exit earns no standing; a played room ea
     CHECK_FALSE(Journey::RoomEarnsAccrual(/*isReplayRoom=*/true, /*isBroadcastRoom=*/true));
 }
 
+TEST_CASE("leave after game-over credits once") {
+    // D5, E2E1: the normal player-exit path is POST /api/rooms/leave
+    // abandoning the room, not the health loop observing the server pid
+    // exit — `creditRoomAccrual` in lobby_main.cpp calls through this ledger
+    // from that path so the leave-driven SIGTERM pays the session exactly
+    // like the health-loop exit always has.
+    Journey::AccrualLedger ledger;
+    const uint32_t room = 42;
+    const int64_t account = 7;
+
+    CHECK(ledger.TryCredit(room, account));
+    // The same leave request must never be able to pay this account twice
+    // for the one mission it just left.
+    CHECK_FALSE(ledger.TryCredit(room, account));
+
+    // A different account in the same room is a separate mission credit.
+    CHECK(ledger.TryCredit(room, 8));
+}
+
+TEST_CASE("leave then health-loop exit does not double-credit") {
+    // Whichever of the two exit paths reaches a room's mission end first —
+    // here, leave — pays it; the other (the health loop, catching the same
+    // pid's exit on a later tick) must be a no-op for every account leave
+    // already paid.
+    Journey::AccrualLedger ledger;
+    const uint32_t room = 9;
+    const int64_t solo = 3;
+
+    CHECK(ledger.TryCredit(room, solo));       // leave/abandon pays it
+    CHECK_FALSE(ledger.TryCredit(room, solo)); // health loop: already paid
+
+    // The room's NEXT mission (a fresh game server spawn resets the ledger)
+    // is a clean slate — including if the room id were reused after the
+    // old room was deleted.
+    ledger.Reset(room);
+    CHECK(ledger.TryCredit(room, solo));
+}
+
 TEST_CASE("war summary carries per-player objective credit, additively") {
     WarSummary s;
     s.sides.push_back({0, "compact", 1, 0, 0, 0});

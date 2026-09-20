@@ -101,6 +101,29 @@ IdleHibernateDecision DecideIdleHibernate(const IdleHibernateContext& c) {
     return d;
 }
 
+IdleExitDecision DecideIdleExit(const IdleExitContext& c) {
+    IdleExitDecision d;
+    if (c.persistentRoom) {
+        d.reason = "a persistent room — the hibernate path applies instead";
+        return d;
+    }
+    if (!c.idleExitEnabled) {
+        d.reason = "idle-exit is switched off for this process";
+        return d;
+    }
+    if (c.sinceStartSec <= c.startupGraceSec) {
+        d.reason = "still inside the startup grace";
+        return d;
+    }
+    if (c.idleForSec <= c.idleExitSec) {
+        d.reason = "a client has been connected within the idle window";
+        return d;
+    }
+    d.exit = true;
+    d.reason = "no connected clients for the idle window";
+    return d;
+}
+
 ResumeOutcome DoResume(IResumeSource& src, uint32_t roomId, const ResumeRequest& req) {
     ResumeOutcome o;
     if (!req.requested) {

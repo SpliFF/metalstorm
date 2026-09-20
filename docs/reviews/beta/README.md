@@ -306,7 +306,7 @@ spectator 'e2e_dmg3' (playerNum 200, reserved range; not in the sim roster)`.
 | D8 | LOW | Victory copy reads **"Ally team 0 is victorious!"** — engine vocabulary in a player-facing string, against the World/Mission vocabulary ruling. Should name the player or their Faction. | `e2e/18-solo-victory.png` | rename-war |
 | D9 | LOW | The client's broadcast send-gate wraps `PlayerCommand` only, so a watcher still emits `SelectionState` to the relay (dropped by the relay's allow-list). Harmless, but it means the relay's allow-list — not the client gate — is what actually holds, and the drop warn is **deduped per client**, so the log cannot enumerate later dropped verbs. | Relay log for room 68. | broadcast-client |
 | D10 | LOW | `tutorial_01`'s **opening camera frames mostly off-map grey void** — a hard diagonal map edge fills ~60% of the first frame a new player ever sees. SHOW ME then frames the column correctly, so it is the initial camera, not the map. | `e2e/14-solo-coach-step1.png` vs `e2e/15-solo-coach-step2-select.png` | journey-tutorial |
-| D11 | INFO | The broadcast on `scorched_crossing_v2.4` renders near-black under the spectator camera (roads and rock silhouettes only). Uniform, **not** the hard-edged wedge pres-atmos AT2 fixed, and the same map is lit normally in the tutorial — so this reads as night lighting + unexplored FOW rather than the AT2 defect. Still worth a look: it is a new player's first sight of the game. Root cause **not** determined this pass. | `e2e/06-watcher-initial.png` | pres-atmos |
+| D11 | INFO | The broadcast on `scorched_crossing_v2.4` renders near-black under the spectator camera (roads and rock silhouettes only). Uniform, **not** the hard-edged wedge pres-atmos AT2 fixed. **Root cause investigated in "pres-atmos — AT3 follow-up: D11" below**: it is neither night lighting nor FOW/LOS — both were live-toggled with no effect. It isolates to the terrain's diffuse ground texture (`terrainTexMat.diffuseTexture`) itself sampling near-black for a Global-mode spectator session, independent of the TerrainSplat/DecalOverlay plugins and CSM shadows (all individually disabled live, no change) — the same *class* of map-asset/pipeline defect AT2's "part 2" residual finding named for this exact map, not a pres-atmos renderer bug. Separately, a real (but here ruled out as the cause) design bug was found and fixed in the client's spectator FOW code: it painted from only the most-recently-arrived ally team's LOS bitmap, which is wrong for a Global-mode spectator watching several teams round-robin. | `e2e/06-watcher-initial.png` | pres-atmos |
 | D13 | **MEDIUM** | **Game servers do not self-terminate when idle**, despite each logging `idle self-termination: exit after 300s with no clients (120s startup grace)` at boot. Room 68's broadcast relay ran **25+ minutes** at `clients:0` (`curl :9100/api/metrics` → `"clients":0`); room 70 ran ~9 minutes at `clients:0`, still simulating at frame 7438 with 2 AIs, and had to be killed by hand. Ports 9100–10099 are a finite pool the lobby already logs an error for exhausting, and every leaked server holds one plus a full sim. This is also why the D5 control run could not use the idle path. | Boot any room, navigate the browser away **without** LEAVE, wait > 420 s, then check `ps` and `/api/metrics`. | journey-lobby-routes / server |
 | D12 | INFO | After a backward seek the replay bar's status flips from "1h behind" to **"59h behind"** — it recomputes against wall-clock, and the test segment is two days old. Arguably correct for a stale segment; flagged because a real 1 h-delayed live mission is the only case that has been reasoned about. | `e2e/07-watcher-after-backward-seek.png` | broadcast-client |
 
@@ -404,3 +404,161 @@ a fix and explicitly does not fit it (see its row).
   `search_logs` only carry game-server entries. The lobby writes to its stdout
   redirect (this stack: `/private/tmp/e2e-logs/lobby.log`), which is where the
   accrual and room-lifecycle lines in D5 came from.
+
+---
+
+# pres-atmos — AT3 follow-up: D11 (near-black broadcast/spectator render)
+
+E2E1 guessed "night lighting + unexplored FOW". Neither survived a live
+bisection this pass. Both hypotheses were tested directly against the running
+stack and a genuine, different bug was found and fixed along the way — but it
+is **not** what makes D11's screenshot look the way it does.
+
+## Method
+
+`tutorial_01` and `crossing_standoff` both run on `scorched_crossing_v2.4`, so
+D11's "lit normally in the tutorial" claim is a same-map, same-assets
+comparison — confirmed via `list_scenarios` (both declare `map:
+"scorched_crossing_v2.4"`). The tutorial's own E2E1 screenshot
+(`e2e/17-solo-coach-step5-after-move.png`) shows a normal, visibly-textured
+dark-ash terrain, not the near-black of `e2e/06-watcher-initial.png`.
+
+Reproduced a Global-mode spectator live: `launch_scenario(crossing_standoff,
+ai:"strategos", players:[{username:"admin", spectator:true}])` — `ai:
+"strategos"` seats an AI on both `compact` and `union`, giving two ally
+teams with different vision footprints, matching a real broadcast tap (which
+is itself a `SpectatorVisibilityMode::Global` session per `BroadcastTap.h`).
+Framed the view with `window.test.cameraFitMap()` and `cameraSnapToGround()`
+(both real gameplay-camera calls, not `capture_subject`) and drove the rest
+with `client_eval` against the render-core worker. `admin` was the only
+username that authenticated onto the eval relay as admin — a `spectator:true`
+non-`admin` username reliably left the lobby's own sessions-table check
+failing (the same D3-class clone/live DB mismatch, reproduced independently
+of D3 across 5 separate launches with fresh usernames) even though the
+underlying game-server connection succeeded fine (`clients:1` in
+`/api/metrics`, `role=player`/`role=spectator via=session` in the server log)
+— a live-tooling gap, not a game bug, noted below.
+
+Reproduced the symptom on the first shot: `cameraFitMap({pitchDeg:55})` gave a
+1280×657 frame reading `mean:2.38` (out of 255) — visually identical to
+`06-watcher-initial.png` (near-black, only the gold road ribbon and a faint
+rock silhouette visible).
+
+## Hypothesis 1: night lighting — ruled out
+
+Queried the live scene directly rather than guessing from a screenshot:
+
+- `self.__mapLighting` → `sunDir:[-0.5,0.75,-0.5]` (sun above the horizon),
+  `groundAmbient:[0.85,0.85,0.85]`, `groundDiffuse:[0.6,0.6,0.6]` — a normal
+  daytime preset, not a night one.
+- `scene.lights` → `sun` (DirectionalLight, intensity 1, diffuse
+  `[0.7,0.7,0.7]`) and `ambient` (HemisphericLight, intensity 1, diffuse
+  `[0.85,0.85,0.85]`), both enabled. No light is dimmed or disabled.
+- Proof the lighting pipeline itself works: swapped `terrainTexMat`'s
+  `diffuseTexture` for a flat red `diffuseColor` live — the terrain
+  immediately rendered as a normally-shaded red surface (`mean:55`, visible
+  gradient from the sun/shadow), confirming the sun + ambient + shadow stack
+  lights geometry correctly. The blackness is specific to the *textured*
+  material, not the lights.
+
+## Hypothesis 2: FOW / LOS — ruled out for this symptom (but a real bug found)
+
+- `window.__gp('__fowDarkening.set({unscouted:0,explored:0,radar:0}))` (the
+  same technique AT2 used) forces every non-inLos tile's overlay alpha to 0.
+  Confirmed via direct pixel readback of the fog `DynamicTexture`
+  (`meanAlpha:0, maxAlpha:0` over the full 64×64 bitmap) that the overlay
+  was doing precisely nothing. The screenshot mean moved from 2.38 to 2.48 —
+  noise, not a fix.
+- `set_los`-equivalent per-ally-team bitmaps were already flowing normally;
+  `__terrainKnowledge.stats()` reports `active:false` (the `terrainknowledge`
+  modoption is off for this scenario, as for any stock game), so the
+  chunk-reveal gate cannot be hiding geometry either — and indeed the terrain
+  meshes are all present and `isVisible:true`.
+- **A real bug found along the way, independent of D11's cause**:
+  `client/src/core/terrain.ts`'s `TerrainFog.apply()` painted the fog overlay
+  from only the single most-recently-arrived ally-team LOS bitmap (its own
+  doc comment: "Spectators may see multiple ally teams round-robin — we just
+  take the latest"). For a Global-mode spectator — which is what every
+  broadcast watcher is (`BroadcastTap.h`: "the tap records global
+  visibility") — the server round-robins up to 4 ally teams/second
+  (`StateStreamer::StreamLosBitmaps`), so the overlay was flickering between
+  whichever single team's vision arrived last, showing everyone else's
+  ground as "unscouted" even though some other team could see it. **Fixed**
+  in this pass (`client/src/core/terrain.ts`, ~35 line diff): `TerrainFog`
+  now keeps every ally team's latest bitmap and paints the union (the
+  lightest tier across all teams heard from) instead of overwriting — a
+  no-op for the single-team case (players, Team-mode spectators) and closer
+  to "sees the whole world" for a Global-mode one. `vitest run
+  src/core/terrain.test.ts` (59/59) and `tsc --noEmit` (clean) in this
+  clone. **This fix does not touch D11's screenshot** (proven above — FOW
+  was already fully disabled and the image didn't change), so it is
+  worthwhile on its own merits but is not "the D11 fix".
+
+## Root cause: the ground diffuse texture itself, not a shader term or overlay
+
+With night-lighting and FOW/LOS both eliminated, bisected the same way AT2
+bisected the wedge — by disabling one renderer system at a time via
+`client_eval` against the live `terrainTexMat`:
+
+- `TerrainSplatPlugin` (`mode:"splatNormal", diffuseAlpha:true`, the exact
+  plugin AT2's fix bounded): forced `diffuseAlpha=false` **and** the whole
+  plugin `isEnabled=false` — no change (`mean` stayed ~1.9-2.5).
+- `DecalOverlayPlugin`: `isEnabled=false` — no change.
+- CSM shadow: `__csm.getLight().shadowEnabled=false` **and**
+  `mesh.receiveShadows=false` on all 98 terrain tiles — no change.
+- `scene.ambientColor` is `[0,0,0]` (Babylon's own default — StandardMaterial
+  only multiplies this into a separate `ambientColor` material term, not
+  `diffuseColor`); not evidence of anything since the red-swap test above
+  already proved the light+shadow stack lights the mesh correctly.
+
+None of the renderer toggles that produced the AT2 wedge move this at all.
+What's left, by elimination, is the diffuse texture (`terrainTexMat.
+diffuseTexture`) itself: the red-swap test isolated that when the *lit
+material's colour input* is a flat, known-good colour, shading is normal; the
+only remaining input is the texture the plugins sample on top of. The texture
+object reports `isReady:true`, 7168×7168, a real internal WebGL texture (not
+a missing/placeholder 1×1) — so this is not a load failure, it's the actual
+sampled content reading as near-black across the full map for this session.
+
+This matches AT2's own "root cause, part 2" finding for this exact map
+almost exactly in kind — a map-asset/KTX2-pipeline defect, not a client
+renderer bug — except AT2's residual was a single corner (`X≈0-1000,
+Z≈6000-7168`); this pass's repro shows it across the *entire* visible
+terrain at every camera position and zoom tried (`cameraFitMap` top-down,
+and `cameraSnapToGround` at height 500 close to the ground — both ~mean 2).
+Whether that is the same defect having spread since AT2's pass, or a
+second, separate map-asset problem, is **not established this pass** — it
+needs whoever owns `data/maps/scorched_crossing_v2.4`'s asset-build step
+(the same escalation AT2 made) to diff the current `tiles.ktx2` (and its
+mip chain) against a known-good rebuild, the way AT2 recommended for
+`splat_normal_*.ktx2`.
+
+## Caveats
+
+- **A pre-existing, documented tooling issue may color this**: this same
+  README (pres-verify's original defect table, `pres-atmos` row) already
+  flags `window.test.cameraFitMap()` as broken ("renders a single flat
+  solid-colour frame … instead of an actual top-down view"). This pass's
+  `cameraFitMap` screenshots do **not** show that symptom (real terrain
+  detail, road geometry, a visible unit) — but to rule out any relationship,
+  the near-black result was independently reproduced with
+  `cameraSnapToGround()` too (a different code path), at a height (500
+  elmos) comparable to the tutorial's own camera distance. Same result.
+- **Not verified against `main`'s exact deployed commit**: this was run
+  live against whatever `TASKHERD_REPO` is currently serving on
+  `spring-lobby:8011` / `vite:8012` (this lane's own live-server), not a
+  fresh checkout diffed line-for-line against the E2E1 fire's commit.
+- **The `/api/rooms/direct` "session token not in the lobby's sessions
+  table" warning fired on every `launch_scenario` call this pass**,
+  regardless of username or spectator/player role, and regardless of
+  whether the browser actually authenticated (it always did once `open_
+  client`/an `admin`-named account was used) — worth folding into D3's
+  writeup as the same underlying clone/live DB mismatch, not a new defect.
+
+## Not fixed this pass
+
+The terrain diffuse texture / map-asset-pipeline defect is a `data/maps/`
+content problem outside pres-atmos's renderer scope (same reasoning as AT2's
+"part 2" residual), so it is handed off rather than patched here. The
+`TerrainFog` spectator-union fix above **is** committed this pass, on its own
+merits, but is explicitly not a fix for the defect this row describes.

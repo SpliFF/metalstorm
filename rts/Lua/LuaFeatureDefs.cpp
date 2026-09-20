@@ -357,11 +357,18 @@ static bool InitParamMap()
 	ADD_FLOAT("mass", fd.mass);
 
 	// PLAN-maps.md §2j option C: height of the trafficable deck above the
-	// model origin, 0 when the def declares none. Published here so placement
-	// code can compute a staging y from a wanted deck level
-	// (y = deckLevel - deckHeight) instead of re-parsing customparams.deck_top
-	// as a string, which is where the number came from.
-	ADD_FLOAT("deckHeight", fd.deckHeight);
+	// model origin. Published here so placement code can compute a staging y
+	// from a wanted deck level (y = deckLevel - deckHeight) instead of
+	// re-parsing customparams.deck_top as a string, which is where the number
+	// came from.
+	//
+	// `hasDeck` is published ALONGSIDE it because 0 is a real deck height —
+	// §2j option A put both shipped spans' origins on their deck — so a reader
+	// cannot tell "no deck" from "deck at the origin" out of the float alone.
+	// That is the exact confusion that unseated both spans on 2026-08-19; Lua
+	// gets the same two-fact answer the engine now uses.
+	ADD_FLOAT("deckHeight", fd.deck.height);
+	ADD_BOOL("hasDeck",     fd.deck.declared);
 
 	ADD_INT("xsize", fd.xsize);
 	ADD_INT("zsize", fd.zsize);

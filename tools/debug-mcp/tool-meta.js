@@ -16,8 +16,8 @@ export const SECTIONS = [
     {
         key: 'logs',
         title: 'Logs',
-        blurb: 'The log server is the only source that survives a server\'s death. Scope every query — an unscoped search is "the whole log", and the limit is clamped to 1000 for that reason.',
-        tools: ['get_logs', 'search_logs'],
+        blurb: 'The log server is the only source that survives a server\'s death. Scope every query — an unscoped search is "the whole log", and the limit is clamped to 1000 for that reason. Exception: the lobby\'s own stdout/stderr is never posted to the log server at all — use `lobby_log` for that.',
+        tools: ['get_logs', 'search_logs', 'lobby_log'],
     },
     {
         key: 'sim',
@@ -50,7 +50,7 @@ export const SECTIONS = [
     {
         key: 'processes',
         title: 'Processes, rooms and readiness',
-        blurb: 'What is running, and whether it is ready. `probe_game` checks pid liveness BEFORE the heartbeat row, because nothing deletes that row when a server dies by SIGKILL.',
+        blurb: 'What is running, and whether it is ready. `probe_game` checks pid liveness BEFORE the heartbeat row, because nothing deletes that row when a server dies by SIGKILL. `list_stack` classifies by the EXECUTABLE actually invoked (basename, following an interpreter like `node`), never by a substring anywhere in the full command line — an agent process merely talking about "spring-lobby" is not the lobby.',
         tools: [
             'list_processes', 'list_stack', 'cleanup_stack', 'probe_game', 'wait_for_game',
             'query_db', 'list_sessions',
@@ -59,10 +59,10 @@ export const SECTIONS = [
     {
         key: 'lifecycle',
         title: 'Starting and stopping',
-        blurb: 'Launch and teardown. `end_game` prefers the lobby\'s admin route because SIGTERM is what produces the exit checkpoint; `kill_game` is a deprecated alias for the ungraceful path.',
+        blurb: 'Launch and teardown. `end_game` prefers the lobby\'s admin route because SIGTERM is what produces the exit checkpoint; `kill_game` is a deprecated alias for the ungraceful path. `stack_start` is a different kind of tool in this section — it launches the dev stack itself (logserver/lobby/vite), and only belongs here when `list_stack`\'s `stack-down` finding says nothing is up yet; prefer the user\'s own mprocs whenever one might already be running.',
         tools: [
             'launch_scenario', 'launch_direct', 'launch_game', 'end_game', 'kill_game',
-            'restart_lobby', 'restart_logserver', 'restart_game', 'restart_client',
+            'restart_lobby', 'restart_logserver', 'restart_game', 'restart_client', 'stack_start',
         ],
     },
     {
@@ -74,7 +74,7 @@ export const SECTIONS = [
     {
         key: 'browser',
         title: 'The browser client',
-        blurb: 'Everything here runs code in a CONNECTED browser over the P7 relay and is subject to its three gates (see below). The client is where rendering, LuaUI and the NL executor live — none of it is visible from the server.',
+        blurb: 'Everything here runs code in a CONNECTED browser over the P7 relay and is subject to its three gates (see below). The client is where rendering, LuaUI and the NL executor live — none of it is visible from the server. Note: chrome-devtools\' own `resize_page` is a no-op against an `--isolated` launch here (the viewport stays pinned at its initial size) — set the size up front instead, either via chrome-devtools\' `emulate` (viewport override) or by passing `--window-size=<W>,<H>` on the isolated launch itself.',
         tools: [
             'open_client', 'close_client', 'list_clients', 'client_eval', 'client_ready',
             'client_screenshot', 'browser_test', 'evaluate_widget_lua', 'spawn_at_camera',
@@ -148,5 +148,9 @@ export const CROSS_CUTTING = [
         body: 'A missing `required` field is refused by name, and an unknown property within a small edit distance of a real one is treated as a TYPO rather than an '
             + 'ignored extra — `set_los {enabled:true}` (the field is `enable`) used to read as "no arguments" and answer as if you had asked a question. '
             + '`npm run check` diffs every schema against what its handler actually reads, so neither list can drift from the other.',
+    },
+    {
+        title: 'One live stack per machine',
+        body: 'The lobby/logserver/vite you see running almost always belong to the USER\'s own interactive mprocs — this MCP is a guest on that box, not its owner. `stack_start` refuses outright if any of :8010/:8011/:8012 is already held, rather than racing a second lobby onto the same db (SO_REUSEPORT round-robins accepts between them — see `list_stack`\'s duplicate-lobby finding). `cleanup_stack` refuses to kill ANY pid it did not itself start via `stack_start`, for the same reason, in both cases only overridable with `force:true` — and even then, only after actually looking (`list_stack`) at what you are about to kill.',
     },
 ];

@@ -65,6 +65,7 @@ local function newWorld(opts)
         end,
         GiveOrderToUnit = function() end,
         SetTeamRulesParam = function() end,
+        SetTeamStartPosition = function() end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
     }

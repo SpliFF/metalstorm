@@ -757,6 +757,10 @@ every other spectate route) and 404 with a clear message when the lobby has no
 Old `.msb` files are swept on the existing hourly maintenance pass once their own file age
 (not the mission's) passes `--broadcast-retention-days` (default 14; `<= 0` disables it).
 
+| Flag | Effect |
+|---|---|
+| `--dev-broadcast-floor-seconds N` | Dev/test only — lowers the one-hour `kMinBroadcastDelaySec` floor to `N` seconds for **this lobby's** `/api/broadcasts/list` availability check and every relay it spawns (forwarded as the relay's own `--dev-broadcast-floor`), so a test does not have to wait out a real hour. Refused at startup unless `--i-understand-this-is-a-dev-build` is also given. Never a modoption and never reachable from a client. |
+
 ### GM tools
 
 The per-game GM verbs (pause/rollback/grant/broadcast/inspect/kick) live on each game

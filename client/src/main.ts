@@ -576,7 +576,14 @@ let currentFrame = 0;
 /// Tear down the active game session and show the lobby browser. Safe to
 /// call from any in-game context: "Quit" button, ESC-confirm, Game Over
 /// overlay, or an error handler. No-op if no game is active.
-function quitToLobby(): void {
+///
+/// `gameEnded` (D4, docs/reviews/beta/README.md "E2E pass 1") marks the Game
+/// Over overlay's path specifically: the game genuinely finished, so instead
+/// of showing the just-finished room (which can still read "In Progress"
+/// with a live "REJOIN GAME" for ~180s — PostGamePolicy's reconnect grace
+/// period) the lobby remembers that room as locally ended and lands on the
+/// Hub.
+function quitToLobby(gameEnded: boolean = false): void {
     // Bump session: any in-flight async work from this session (map
     // fetch, defs fetch, queued onMapData) will see a stale token and
     // bail before creating widget managers / canvases.
@@ -706,7 +713,7 @@ function quitToLobby(): void {
     // `?scenario=`/`?direct=` game leaves a permanently blank page. The
     // lobby templates were deliberately kept while suppressed for this.
     lobbyUI?.unsuppress();
-    lobbyUI?.showAfterGame();
+    lobbyUI?.showAfterGame(gameEnded);
     lobbyUI?.show();
 }
 
@@ -1495,7 +1502,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     won: m.won,
                     myAllyTeam: m.myAllyTeam,
                     warSides: m.warSides,
-                    onReturnToLobby: quitToLobby,
+                    onReturnToLobby: () => quitToLobby(/*gameEnded=*/true),
                 });
                 break;
             // Forward rules param updates to native UI store

@@ -74,6 +74,18 @@ function behindLabel(seconds: number): string {
     return `${Math.max(1, Math.round(s / 60))}m behind`;
 }
 
+/** Same rendering broadcast-browser.ts's listing uses for `available_since`
+ *  (E2E1's fix e4ced580f7 for that field's UNIX-**seconds** scale) — this
+ *  one already works in milliseconds, so there is no scale to get wrong. */
+function shortDate(ms: number): string {
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+    });
+}
+
 const SIM_HZ = 30;
 
 function clock(frame: number): string {
@@ -82,9 +94,15 @@ function clock(frame: number): string {
 }
 
 /** Everything the bar shows, derived from one ReplayState plus who we are.
- *  Pure — this is the part with decisions in it. */
+ *  Pure — this is the part with decisions in it.
+ *
+ *  `recordedAtMs` is the wall-clock instant a finished/stale broadcast
+ *  segment was captured, supplied by the caller (`updateReplayBar` freezes
+ *  it from the first state it sees — see the note there for why). Unused
+ *  outside a broadcast, and for a still-live one. */
 export function describeReplayBar(
-    st: ReplayStateInfo, myPlayerNum: number, refusal = ''): ReplayBarModel {
+    st: ReplayStateInfo, myPlayerNum: number, refusal = '',
+    recordedAtMs: number | null = null): ReplayBarModel {
     const span = Math.max(1, st.endFrame - st.startFrame);
     const elapsed = Math.min(Math.max(0, st.currentFrame - st.startFrame), span);
     const isController =
@@ -98,15 +116,30 @@ export function describeReplayBar(
     }
 
     const bits: string[] = [];
-    // A broadcast leads with what makes it a broadcast: the delay. POV never
-    // shows (the tap is a Global-visibility spectator — there is no other
-    // POV to switch to) and the "no checkpoints" line is wrong here — a
-    // broadcast seeks backward via keyframes, checkpoints or not.
-    if (st.broadcast) bits.push(`Broadcast · ${behindLabel(st.behindSeconds)}`);
+    // A broadcast leads with what makes it a broadcast. `behindSeconds` is
+    // the relay's cursor position vs. wall clock — meaningful only while the
+    // segment is still live (`truncated`, i.e. no trailer written yet); for
+    // a finished/stale one it just measures how long ago the log ended, and
+    // a backward seek moves the cursor further from "now" and inflates it
+    // further still (E2E1 D12: "1h behind" → "59h behind" on a two-day-old
+    // segment after seeking backward). So a finished segment states when it
+    // was recorded instead — a fact that does not change under a seek.
+    // POV never shows either way (the tap is a Global-visibility spectator —
+    // there is no other POV to switch to) and the "no checkpoints" line is
+    // wrong here — a broadcast seeks backward via keyframes, checkpoints or
+    // not.
+    if (st.broadcast) {
+        bits.push(st.truncated
+            ? `Broadcast · ${behindLabel(st.behindSeconds)}`
+            : (recordedAtMs !== null ? `Recorded ${shortDate(recordedAtMs)}` : 'Recorded'));
+    }
     if (st.seeking) bits.push(`seeking to ${clock(st.seekTarget)}…`);
     // E1: a recording whose server died mid-game. Said out loud, because the
-    // alternative is a bar that just stops and reads as a bug.
-    if (st.truncated) bits.push('recording ends early (segment truncated)');
+    // alternative is a bar that just stops and reads as a bug. `truncated`
+    // means something else entirely for a broadcast (no trailer yet — it's
+    // simply still live, the expected state for its whole run), so this only
+    // applies to a finished (`.msr`) recording.
+    if (!st.broadcast && st.truncated) bits.push('recording ends early (segment truncated)');
     if (!st.broadcast) {
         bits.push(st.povTeam >= 0 ? `POV: team ${st.povTeam}` : 'POV: global view');
         if (st.checkpointFrames.length === 0)
@@ -140,6 +173,12 @@ export function seekFrameFor(st: ReplayStateInfo, fraction: number): number {
     return Math.round(st.startFrame + f * (st.endFrame - st.startFrame));
 }
 
+/** Fraction the ArrowLeft/ArrowRight/Home/End keys move the slider by a
+ *  single press — the ARIA slider pattern requires *some* key handling, and
+ *  2% (≈ 4s of a 3-minute recording) is fine enough to reach any beat without
+ *  taking forever from the far end. */
+const KEY_SEEK_STEP = 0.02;
+
 /** Sends a control to the server. Supplied by the caller so this module never
  *  reaches for the worker itself. */
 export type ReplayControlSender =
@@ -151,6 +190,11 @@ let send: ReplayControlSender | null = null;
 let myPlayerNum = -1;
 let refusal = '';
 let refusalTimer: ReturnType<typeof setTimeout> | null = null;
+/** E2E1 D12: when this session's broadcast segment turns out to be
+ *  finished/stale, the wall-clock instant it was recorded — frozen from the
+ *  first state that revealed it, not recomputed on every update. See the
+ *  note on `describeReplayBar`'s `recordedAtMs` param. */
+let recordedAtMs: number | null = null;
 
 /** How long a refusal holds the status line. Long enough to read a sentence,
  *  short enough that it does not outlive the state it was about. */
@@ -206,6 +250,14 @@ export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
     lastState = st;
     send = sender;
     myPlayerNum = playerNum;
+    // D12: capture once, the first time this segment is seen to be
+    // finished/stale rather than live. A later seek moves the playback
+    // cursor and would otherwise re-derive a bogus, ever-growing "behind" —
+    // freezing the wall-clock instant here means the label it feeds
+    // (`describeReplayBar`'s "Recorded <date>") never moves under a seek.
+    if (st.broadcast && !st.truncated && recordedAtMs === null) {
+        recordedAtMs = Date.now() - st.behindSeconds * 1000;
+    }
     if (!root) root = buildBar();
     render();
 
@@ -222,18 +274,27 @@ export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
     }
 }
 
+/** Send a seek to `fraction` along the track. Shared by the click handler and
+ *  the slider's keyboard handling so a click and an arrow key ask the same
+ *  question. */
+function seekTo(fraction: number): void {
+    if (!lastState) return;
+    send?.(ReplayAction.Seek, { frame: seekFrameFor(lastState, fraction) });
+}
+
 export function hideReplayBar(): void {
     root?.remove();
     root = null;
     lastState = null;
     send = null;
     refusal = '';
+    recordedAtMs = null;
     if (refusalTimer) { clearTimeout(refusalTimer); refusalTimer = null; }
 }
 
 /** Test seam: the bar's current model, or null when it is not mounted. */
 export function replayBarModel(): ReplayBarModel | null {
-    return lastState ? describeReplayBar(lastState, myPlayerNum, refusal) : null;
+    return lastState ? describeReplayBar(lastState, myPlayerNum, refusal, recordedAtMs) : null;
 }
 
 function el(tag: string, css: string, text = ''): HTMLElement {
@@ -249,10 +310,13 @@ function buildBar(): HTMLElement {
         'padding:8px 12px;border-radius:8px;background:rgba(20,20,24,0.88);color:#fff;' +
         'font:13px system-ui,sans-serif;pointer-events:auto;');
     bar.id = 'replay-bar';
+    bar.setAttribute('role', 'region');
+    bar.setAttribute('aria-label', 'Replay controls');
 
     const row = el('div', 'display:flex;align-items:center;gap:10px;');
     const play = el('button', buttonCss(), '▶');
     play.id = 'replay-play';
+    play.setAttribute('aria-label', 'Play or pause replay');
     play.onclick = () => {
         if (!lastState) return;
         send?.(lastState.paused ? ReplayAction.Resume : ReplayAction.Pause);
@@ -260,6 +324,7 @@ function buildBar(): HTMLElement {
 
     const speed = el('button', buttonCss(), '1×');
     speed.id = 'replay-speed';
+    speed.setAttribute('aria-label', 'Cycle playback speed');
     speed.onclick = () => {
         if (!lastState) return;
         // Cycle: one button, five stops. A dropdown for five values that the
@@ -275,6 +340,11 @@ function buildBar(): HTMLElement {
     const track = el('div', 'position:relative;flex:1;height:8px;border-radius:4px;' +
         'background:rgba(255,255,255,0.18);cursor:pointer;');
     track.id = 'replay-track';
+    track.tabIndex = 0;
+    track.setAttribute('role', 'slider');
+    track.setAttribute('aria-label', 'Seek replay position');
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', '100');
     const fill = el('div', 'position:absolute;left:0;top:0;bottom:0;width:0%;' +
         'border-radius:4px;background:#3b82f6;');
     fill.id = 'replay-fill';
@@ -289,12 +359,26 @@ function buildBar(): HTMLElement {
         if (!lastState) return;
         const r = track.getBoundingClientRect();
         if (r.width <= 0) return;
-        send?.(ReplayAction.Seek,
-               { frame: seekFrameFor(lastState, (ev.clientX - r.left) / r.width) });
+        seekTo((ev.clientX - r.left) / r.width);
+    };
+    // ARIA slider pattern: ArrowLeft/ArrowRight (and the Up/Down equivalents
+    // some screen readers send) nudge by a step, Home/End jump to an end.
+    track.onkeydown = (ev: KeyboardEvent) => {
+        if (!lastState) return;
+        const current = describeReplayBar(lastState, myPlayerNum, refusal).progress;
+        let fraction: number | null = null;
+        if (ev.key === 'ArrowLeft' || ev.key === 'ArrowDown') fraction = current - KEY_SEEK_STEP;
+        else if (ev.key === 'ArrowRight' || ev.key === 'ArrowUp') fraction = current + KEY_SEEK_STEP;
+        else if (ev.key === 'Home') fraction = 0;
+        else if (ev.key === 'End') fraction = 1;
+        if (fraction === null) return;
+        ev.preventDefault();
+        seekTo(fraction);
     };
 
     const pov = el('button', buttonCss(), 'POV');
     pov.id = 'replay-pov';
+    pov.setAttribute('aria-label', 'Toggle spectator point of view');
     pov.onclick = () => {
         if (!lastState) return;
         // Global ⇄ the team the recording's first army is on. A full team
@@ -320,7 +404,7 @@ function buttonCss(): string {
 
 function render(): void {
     if (!root || !lastState) return;
-    const m = describeReplayBar(lastState, myPlayerNum, refusal);
+    const m = describeReplayBar(lastState, myPlayerNum, refusal, recordedAtMs);
     const play  = root.querySelector<HTMLButtonElement>('#replay-play');
     const speed = root.querySelector<HTMLButtonElement>('#replay-speed');
     const pos   = root.querySelector<HTMLElement>('#replay-position');
@@ -328,18 +412,27 @@ function render(): void {
     const liveEdge = root.querySelector<HTMLElement>('#replay-live-edge');
     const pov   = root.querySelector<HTMLButtonElement>('#replay-pov');
     const status = root.querySelector<HTMLElement>('#replay-status');
+    const track = root.querySelector<HTMLElement>('#replay-track');
     if (play) {
         play.textContent = m.playLabel;
         play.disabled = !m.isController;
         play.style.opacity = m.isController ? '1' : '0.45';
+        // playLabel is what the button will do when pressed: '▶' offers Resume.
+        play.setAttribute('aria-label', m.playLabel === '▶' ? 'Resume replay' : 'Pause replay');
     }
     if (speed) {
         speed.textContent = m.speedLabel;
         speed.disabled = !m.isController;
         speed.style.opacity = m.isController ? '1' : '0.45';
+        speed.setAttribute('aria-label', `Cycle playback speed (currently ${m.speedLabel})`);
     }
     if (pos) pos.textContent = m.positionLabel;
     if (fill) fill.style.width = `${(m.progress * 100).toFixed(2)}%`;
+    if (track) {
+        track.setAttribute('aria-valuenow', String(Math.round(m.progress * 100)));
+        track.setAttribute('aria-valuetext', m.positionLabel);
+        track.setAttribute('aria-disabled', String(!m.isController));
+    }
     // Broadcast: no POV to switch (Global-visibility only), live-edge marker
     // shown instead.
     if (pov) pov.style.display = m.isBroadcast ? 'none' : '';

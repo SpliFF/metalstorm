@@ -2835,6 +2835,36 @@ int main(int argc, char* argv[])
                 broadcast::LiveEdgeMs(t, broadcast::DelaySeconds());
             edge.Advance(liveEdgeMs);
 
+            // Idle exit (D13): this loop REPLACES the sim loop (see the block
+            // comment above) rather than running beside it, so it never
+            // reaches the sim loop's "Lifetime bookkeeping" section below —
+            // a relay with zero watchers had no idle check at all and ran
+            // until killed by hand. Same decision, same `lastClientTime`
+            // the sim loop uses, just ticked here instead.
+            {
+                const auto wall = std::chrono::steady_clock::now();
+                if (rtcServer.GetClientCount() > 0) lastClientTime = wall;
+                hibernate::IdleExitContext ic;
+                ic.persistentRoom = roomPersistent;
+                ic.idleExitEnabled = idleExitEnabled;
+                ic.idleExitSec = kIdleExitSec;
+                ic.sinceStartSec = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - serverStartTime).count();
+                ic.startupGraceSec = kStartupGraceSec;
+                ic.idleForSec = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - lastClientTime).count();
+                const hibernate::IdleExitDecision id = hibernate::DecideIdleExit(ic);
+                if (id.exit) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "no connected watchers for %llds — shutting down idle "
+                        "broadcast relay",
+                        static_cast<long long>(ic.idleForSec));
+                    exitReason = hibernate::ExitReason::Idle;
+                    keepRunning.store(false);
+                    continue;
+                }
+            }
+
             for (auto& msg : rtcServer.DrainInbound()) {
                 // ReplayControl is the playback bar, and it is answered HERE
                 // rather than in ClientMessageHandler: the cursors live in this
@@ -3075,15 +3105,23 @@ int main(int argc, char* argv[])
             }
             // Idle exit: non-persistent rooms shut down once they've had no
             // connected clients for kIdleExitSec (past the startup grace).
-            if (!roomPersistent && idleExitEnabled) {
-                const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
+            // Decision lives in hibernate::DecideIdleExit (D13) so the relay
+            // loop above can share it instead of growing its own copy.
+            {
+                hibernate::IdleExitContext ic;
+                ic.persistentRoom = roomPersistent;
+                ic.idleExitEnabled = idleExitEnabled;
+                ic.idleExitSec = kIdleExitSec;
+                ic.sinceStartSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - serverStartTime).count();
-                const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
+                ic.startupGraceSec = kStartupGraceSec;
+                ic.idleForSec = std::chrono::duration_cast<std::chrono::seconds>(
                     wall - lastClientTime).count();
-                if (sinceStart > kStartupGraceSec && idleFor > kIdleExitSec) {
+                const hibernate::IdleExitDecision id = hibernate::DecideIdleExit(ic);
+                if (id.exit) {
                     SLOG(SPRING_LOG_NOTICE,
                         "no connected clients for %llds — shutting down idle game server",
-                        static_cast<long long>(idleFor));
+                        static_cast<long long>(ic.idleForSec));
                     exitReason = hibernate::ExitReason::Idle;
                     keepRunning.store(false);
                 }
