@@ -83,6 +83,7 @@ local function newWorld(opts)
         end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
         GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
+        SetTeamStartPosition = function() end,
         -- stageCivilians marks every scenario-staged ambient civilian
         -- neutral so an army walking past does not stop to shoot it
         -- (endtoend D53). Absent from this mock, the whole civilians

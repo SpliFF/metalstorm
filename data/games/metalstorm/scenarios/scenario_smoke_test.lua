@@ -111,8 +111,10 @@ return {
             { def = 'ms_ancient_hulk',       x = 6000, z = 4400, facing = 'east' },
 
             -- The ancient span (features/bridges.lua): chained at its own 36 m
-            -- pitch, y = 0 like the two steel spans — and unlike them it is
-            -- SEATED (positive deck_top), so the same y holds on dry ground.
+            -- pitch, y = 0 like the two steel spans. All three are SEATED
+            -- (each publishes deck_top, which is the declaration), so the same
+            -- y holds on dry ground; this one's deck then reads 56 elmos above
+            -- it, because its origin is its footings rather than its deck.
             { def = 'ms_anc_bridge_span', x = 7600, z = 7000, facing = 'north', chain = 2, y = 0 },
 
             -- Civilian landmark (features/landmarks.lua).

@@ -9,6 +9,10 @@
 // be able to check without a lobby, a database or a socket.
 #pragma once
 
+#include <cstdint>
+#include <set>
+#include <unordered_map>
+
 namespace Journey {
 
 // ── SOLO scenario allow-list (§(c)) ────────────────────────────────────────
@@ -78,5 +82,37 @@ inline constexpr Accrual SessionAccrual(int objectivesCredited) {
 inline constexpr bool RoomEarnsAccrual(bool isReplayRoom, bool isBroadcastRoom) {
     return !isReplayRoom && !isBroadcastRoom;
 }
+
+/// Guards `SessionAccrual` against being paid twice for one mission (D5,
+/// E2E1: leaving a finished mission used to reach no accrual at all because
+/// only the health loop's "server exited" branch ever called it).
+///
+/// Two independent places in the lobby can observe a mission's end — the
+/// health loop noticing the game server's pid is gone, and
+/// `POST /api/rooms/leave` SIGTERMing a still-running server when the last
+/// player leaves — and either may get there first. Both must call through
+/// this ledger rather than `SessionAccrual` directly, keyed by (room,
+/// account), so whichever of the two runs first pays and the other becomes a
+/// no-op instead of a second payment.
+class AccrualLedger {
+public:
+    /// First call for this (room, account) pair returns true — pay it. Every
+    /// later call for the same pair, until `Reset(roomId)`, returns false.
+    bool TryCredit(uint32_t roomId, int64_t accountId) {
+        return paid_[roomId].insert(accountId).second;
+    }
+
+    /// Clears `roomId`'s paid-accounts set. Call when a fresh game server is
+    /// spawned for the room: that is the unambiguous "this room's next
+    /// mission has begun" event, and it is also what must happen when a
+    /// deleted room's numeric id is later reused by an unrelated room — that
+    /// room starts with a clean ledger rather than inheriting a stranger's.
+    void Reset(uint32_t roomId) {
+        paid_.erase(roomId);
+    }
+
+private:
+    std::unordered_map<uint32_t, std::set<int64_t>> paid_;
+};
 
 }  // namespace Journey

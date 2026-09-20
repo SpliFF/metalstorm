@@ -54,6 +54,27 @@ export const enum RoomState {
     Ended = 5,
 }
 
+/**
+ * D4 (docs/reviews/beta/README.md "E2E pass 1"): fold this browser's own
+ * memory of having already watched `roomId`'s game end (the Game Over
+ * overlay was shown) into the state the room view renders from.
+ *
+ * The room JSON can validly still report Loading/Active for up to ~180s
+ * after that — PostGamePolicy keeps the subprocess alive for a
+ * disconnect/reconnect grace period, which is real for someone who dropped
+ * mid-game. But offering "REJOIN GAME" to the player who just watched the
+ * result and clicked "Return to lobby" is the bug: they are not reconnecting
+ * to anything, they are being invited back into a mission they already
+ * finished. `locallyEndedRoomId` is one-shot client memory, not server
+ * truth — the caller clears it once a fresh game starts in the same room.
+ */
+export function effectiveRoomState(
+    state: number, roomId: number, locallyEndedRoomId: number | null,
+): number {
+    const running = state === RoomState.Loading || state === RoomState.Active;
+    return running && roomId === locallyEndedRoomId ? RoomState.Ended : state;
+}
+
 export type RoomTransition =
     /// Hide the lobby and mount the game surface for this room.
     | 'enter-game'

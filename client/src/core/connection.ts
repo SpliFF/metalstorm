@@ -133,6 +133,7 @@ import {
 import { recordInbound, recordOutbound } from './net-inspector.js';
 import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
 import { SCHEMA_HASH } from '../protocol/schema-hash.js';
+import { isBroadcastSendGated } from './broadcast-send-gate.js';
 
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
@@ -1332,6 +1333,11 @@ export class Connection {
     public playerNum: number = -1;
     public myTeam: number = -1;
     public myRole: string = '';  // "admin", "player", or "spectator"
+    /** True once the most recent `ReplayState` said `broadcast: true` — a
+     *  Mission Broadcast (delayed relay), not a live game or a finished
+     *  recording. Feeds {@link isBroadcastSendGated} in `sendClientMessage`;
+     *  see broadcast-send-gate.ts (E2E1 D9). */
+    private isBroadcastFeed: boolean = false;
     private clock = new ServerClock();
     /** Sim frame of the most recent GameEventBatch. Legacy fallback for
      *  onEntityDestroy against a server that does not stamp
@@ -2129,6 +2135,10 @@ export class Connection {
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {
+        // E2E1 D9: the one choke point every outgoing verb funnels through —
+        // gate here instead of at each call site so a watcher can never emit
+        // a verb the relay would only drop anyway. See broadcast-send-gate.ts.
+        if (isBroadcastSendGated(payloadType, this.myRole, this.isBroadcastFeed)) return;
         ClientMessage.startClientMessage(builder);
         ClientMessage.addPayloadType(builder, payloadType);
         ClientMessage.addPayload(builder, payloadOffset);
@@ -2595,6 +2605,7 @@ export class Connection {
             }
             case ServerPayload.ReplayState: {
                 const rs = msg.payload(new ReplayState()) as ReplayState;
+                this.isBroadcastFeed = rs.broadcast();
                 const ticks: number[] = [];
                 for (let i = 0; i < rs.checkpointFramesLength(); i++) {
                     const f = rs.checkpointFrames(i);
