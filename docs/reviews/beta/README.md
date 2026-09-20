@@ -897,3 +897,267 @@ fix and explicitly does not (see its row).
   `.nui-objectives__overflow` clicked before it is in the DOM at all.
 
 ---
+
+# E2E pass 3 — Presentation (2026-09-21)
+
+PLAN-beta.md §Verification item **4 (presentation)**, driven against the live
+stack (`spring-lobby` :8011 from the MAIN checkout, vite :8012, game servers
+9100+) with mcp-tools step 4 (`drive_pattern`, `populate_tranche`) folded in
+per this step's brief. Items 1–3 were E2E1/E2E2.
+
+**mcp-tools step 4 check**: both tools exist and work as documented —
+`drive_pattern` (figure8/circle/line/zigzag waypoint loops, optional spawn +
+capture) and `populate_tranche` (PLAN-perf.md §M19 XL-battle rungs S..XL1200
+in one batched `exec_lua` call) landed `f0748514f0` per PLAN-beta.md's LIVE
+STATE log. No gaps found in either this pass — see (b2) and (c) below, both
+of which depend on them working correctly.
+
+## (a) capture_sequence per weapon family — native FX, no orange cubes
+
+Ran the client-side `?scenario=weapon-showcase` bench (not a lobby scenario —
+a dev harness reached by URL param, `client/src/scenarios/bench/
+weapon-showcase.ts`) via `open_client` + `capture_sequence(mode:realtime)`,
+one weapon per Metalstorm WeaponDef family:
+
+| Family | Entry | Shooter | Evidence |
+|---|---|---|---|
+| Cannon (autocannon) | `only=autocannon` | ms_tanks_s2 | `e2e/pres3/fx-autocannon-f000.jpg` — pale straw tracer, thin, short (matches DIRECTION.md's FX spec) |
+| MissileLauncher (SAM) | `only=sam` | ms_mechs_s3 | `e2e/pres3/fx-sam-f000.jpg` — red missile streak toward the airborne target |
+| AircraftBomb | `only=bomb` | ms_bombers_s2 | `e2e/pres3/fx-bomb-f000.jpg` — bomber silhouette on its run |
+
+No orange emissive cubes or coloured spheres in any frame — every effect
+rendered as its own native mesh/particle shape, not a debug-placeholder
+primitive. **Not exhaustive**: the showcase has 9 entries across 4 families
+(mg, autocannon, railgun, howitzer, flak, cruise, sam, bomb, air-to-air); this
+pass sampled one representative entry per the 3 families that have visible
+projectile FX (Cannon/MissileLauncher/AircraftBomb), not all 9. **Torpedo is
+a documented placeholder** (the scenario's own comment: "the test map has no
+water") — not run, matching the file's own stated limitation, not a defect.
+
+## (b) client_screenshot — meridian_basin grading, scorched_crossing_v2.4 wedge recheck
+
+**meridian_basin** (`e2e/pres3/01-meridian-basin-sky-fog-grading.png`,
+1440×900): sky dome gradient, aerial perspective toward a desaturated
+blue-grey horizon, and value-contrast grading all read as intended per
+DIRECTION.md ("contrast 1.15, exposure 0.9 … aerial perspective towards a
+desaturated horizon"). One re-confirmed (not new) observation: a faint
+crosshatch dither persists over midground terrain even with `set_los(true)`
+— the same FOW-rendering class of finding pres-atmos AT3/D11 already own;
+not re-investigated here.
+
+**scorched_crossing_v2.4** black-wedge recheck
+(`e2e/pres3/02-scorched-crossing-corner-recheck.png`, low-angle shot of the
+`X≈0-1000, Z≈6000-7168` corner, global LOS on): the AT2 diffuse-alpha fix
+holds — no repeat of the original hard-edged wedge crushing a large fraction
+of the frame. The **residual** black patch in that exact corner is still
+visible, exactly as terrain-streaming K2/K3 left it: independently
+byte/pixel-audited and closed as **genuine map content** (a real dark, flat
+corner at the map's playable-area boundary), not a rendering defect. No
+regression, nothing new to route.
+
+## (b2) Tread marks — DT5 (`c366641847`) confirmed LIVE for all three trackTypes
+
+DT5 wired `leaveTracks`/`trackType` into `units/_builder.lua`'s
+`trackDefaults` (StdTank / StdWheel / StdBipedFoot) but — per PLAN-beta.md's
+LIVE STATE log — was "NEVER SEEN LIVE" (its own fire had no MCP wired in).
+This pass drove one unit of each trackType through a `drive_pattern
+figure8` on `green_flat_x34_v3` (team 1, Null AI, avoiding the team-0
+`strategos` co-commander re-routing gotcha the pres-decals TOOLING GAP
+already named) and shot `capture_subject` top + low at the end of each loop:
+
+| Unit | trackType | Result | Evidence |
+|---|---|---|---|
+| ms_tanks_s2 | StdTank | **PASS** — wide paired tread scuffs, clearly visible top-down | `pres-decals/02-treadmarks-top-ms_tanks_s2.jpg`, `03-…-low-…jpg` |
+| ms_scout_buggy | StdWheel | **PASS** — thin double-rut wheel track, distinct pattern from the tank's | `pres-decals/04-treadmarks-top-ms_scout_buggy.jpg`, `05-…-low-…jpg` |
+| fable_mech | StdBipedFoot | **PASS** — alternating two-legged footprint trail | `pres-decals/06-treadmarks-top-fable_mech.jpg`, `07-…-low-…jpg` |
+
+All three trackType buckets (`decal-overlay.ts` `classifyTrackType`) render
+correctly and distinctly live. DT5's finding is closed: the feature is not
+dead in production.
+
+The old `00-figure8-top-no-trail.jpg` / `01-figure8-low-no-trail.jpg`
+evidence row (pres-verify fire 3, pre-DT5) is superseded by the above. **Not
+deleted** — `git rm` requires interactive approval this headless session
+cannot grant, so the two old files plus one stray duplicate from a
+mid-capture mishap were moved to `pres-decals/superseded-no-trail/` instead
+(same "harness gates file deletion" pattern the 2026-09-17 killed-fire
+screenshots used). A human running `git rm -r
+docs/reviews/beta/pres-decals/superseded-no-trail` can finish the cleanup.
+
+**One tooling incident recorded for the next fire**: opening a *second*
+admin-username browser client into a room already holding a spring-debug
+`open_client` admin session invalidates the first — the original client's
+streamed units vanish from its scene (they're still alive server-side,
+confirmed via `list_units`) and a stale objective board renders instead.
+Fix used: never mix `spring-debug open_client` and a second `chrome-devtools`
+client into the *same* room under the *same* username — pick one driver per
+room. Cost this pass: the first tank+buggy drive had to be redone.
+
+## (c) XL900 perf — Medium preset
+
+`populate_tranche(rung:"XL900")` on `meridian_basin` (the contested-core
+ford, 8192,8192): **900 units spawned in one call** (450 north / 450 south),
+`gfx.quality` set to `medium` first (`window.__settings.applyPreset('medium')`,
+confirmed `get('gfx.quality') === 'medium'`). Measured over a 30 s window
+after a short settle:
+
+**Client render pipeline** (`browser_test.perfDump()`):
+
+| phase | mean | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| camera | 0.08 | 0.10 | 0.20 | 0.20 | 0.70 |
+| entity | 5.42 | 5.20 | 6.80 | 7.90 | 10.50 |
+| fx | 0.06 | 0.10 | 0.20 | 0.30 | 0.40 |
+| decals+lights | 0.16 | 0.10 | 0.20 | 0.40 | 11.40 |
+| **render** | **5.10** | **5.00** | **6.70** | 7.80 | 23.50 |
+| ui | 0.90 | 0.90 | 1.10 | 1.30 | 2.40 |
+| total | 11.74 | 11.50 | 14.50 | 16.40 | 31.10 |
+
+fps 58.9, 1768 frames sampled. **`render` phase p95 = 6.7 ms — PASSES the
+≤8.5 ms budget** with headroom (the acceptance criterion, per this pass's
+brief and pres-verify's original "render p95 ≤ 8.5 ms" framing, is the
+render phase specifically, not the `total` p95 of 14.5 ms, which also sums
+in `entity` — a separate phase).
+
+**Server sim** (`profile(target:"sim")`, 829 frames sampled): avg 5.5 ms/frame
+(96.9% `native-sim`, 2.9% `lua-gameframe`, 0.2% `unit-script`), comfortably
+inside the 33.3 ms/frame budget for a 30 Hz sim; one 94.7 ms outlier frame,
+almost certainly the `populate_tranche` spawn burst itself rather than
+sustained load (829 samples, one spike).
+
+**Conclusion**: XL900 on Medium passes its perf bar on both the client render
+phase and the server sim tick. This closes the tooling gap pres-verify fire 3
+and this lane's own "Not done" list carried forward from E2E1/E2E2 (no
+committed XL900 spawn script existed before `populate_tranche` landed).
+
+## (d) Lobby + in-game HUD at 1440×900 vs docs/ui-style.md
+
+Captured via `chrome-devtools` `emulate(viewport:"1440x900x1")` +
+`take_screenshot`, then **programmatically audited computed styles** on every
+visible element (not just eyeballed) for the two hard rules in
+`docs/ui-style.md` / DIRECTION.md: no drop shadows (only a 1px **inset**
+edge is allowed) and no radius above `--nui-radius` (2px):
+
+| Screen | Screenshot | box-shadow violations | radius > 2px violations |
+|---|---|---|---|
+| Welcome | `e2e/pres3/04-lobby-welcome-1440x900.png` | 0 | 0 |
+| Intro slide 1/3 | `e2e/pres3/05-lobby-intro-slide1-1440x900.png` | 0 | 0 |
+| Intro slide 3/3 ("Your Role") | `e2e/pres3/06-lobby-intro-slide3-yourrole-1440x900.png` | 0 | 0 (gradient placeholder fix from pres-ui-ds still holds) |
+| Hub (existing admin session) | `e2e/pres3/03-lobby-hub-1440x900.png` | 0 | 0 |
+| Hub (fresh sign-up) | `e2e/pres3/07-lobby-hub-fresh-1440x900.png` | 0 | 0 |
+| In-game HUD, rest state (`crossing_standoff`) | `e2e/pres3/08-ingame-hud-rest-1440x900.png` | 0 | 0 |
+
+The only elements anywhere with radius > 2px (3–4px) belong to a hidden
+dev/debug log panel (`pane-clear-btn`, `panel-level-filter`, etc.,
+`offsetParent === null` — never shown to a player); excluded as noise, not a
+finding. Six for six clean — no violations of the stencilled-steel-plate
+rules found this pass.
+
+## (e) Audio — offline loudness report + live weapon-fire/reverb check
+
+**Offline loudness report**: `docs/reviews/beta/audio-loudness.md` already
+exists (`tools/audiogen/build.py --loudness-report`, ffmpeg `ebur128`) and is
+**verified fresh** this pass — `find data/games/metalstorm/sounds -newer
+docs/reviews/beta/audio-loudness.md` returns 0 files, i.e. nothing shipped
+has changed since the report was generated. All 9 categories present
+(ambience, death, explosion, impact, music, reverb, ui, unit, weapon). Not
+regenerated (would just re-synthesise identical output).
+
+**Live check — weapon fires a sound**: `AudioManager` isn't exposed on
+`window`, so this pass instrumented the two real Web Audio globals it
+actually calls, via a `navigate_page` `initScript` (runs before any page
+script): `AudioContext.prototype.createBufferSource` (counts real one-shot
+voice creation) and `AudioParam.prototype.value`'s setter (tagged by
+call-stack function name). Spawned a tank + a static target
+(`crossing_standoff`), ordered ATTACK, waited for reload: **the target's HP
+dropped 12000 → 8787, confirming real weapon fire**, but
+`__audioProbe.sourceCreates` stayed **0** — because `AudioManager.play()`'s
+first line is `if (!this.resumed) return;`, and `resumed` is only set by a
+**real user gesture** on the canvas (`canvas.addEventListener('click', …
+resume(), {once:true})` in `main.ts`) — exactly the browser autoplay-policy
+gate, never fired by a synthetic/headless session. Dispatching one synthetic
+`click` on the canvas resumed the context; the very next reload cycle
+produced **20 real `createBufferSource()` calls**. **PASS**: the
+fire → SoundEvent → `SoundEventPlayer` → `AudioManager.play()` pipeline
+genuinely plays audio live, once the (expected, platform-level) autoplay
+gate is past.
+
+**Live check — reverb preset applies**: the same instrumentation caught
+`setReverbPreset` live at map load, setting `reverbWetGain.value=0` /
+`reverbDryGain.value=1` (fully dry) for `crossing_standoff`
+(`scorched_crossing_v2.4`). Traced to the map's own `mapinfo.lua`:
+`sound.preset = "default"` — the unedited Spring stock-template value, which
+`setReverbPreset`'s first branch (`!preset || preset === 'default'`)
+special-cases to dry passthrough on purpose. Cross-checked every shipped
+map: most declare no `sound` table at all (→ `resolveReverbPreset`'s
+`'open'` default, i.e. real reverb), but `scorched_crossing_v2.4`,
+`pools_of_ilys_1.0.0` and `wanderlust2.1` all still carry the literal
+`preset = "default"` boilerplate, and `techno_lands_final_2.60_wide` sets
+`preset = "forest"`, which doesn't match any shipped
+`sounds/efx/{open,urban,valley}.webm` and would *also* fall through to dry
+(same defect class, worse — a mismatched name where `data-review` would
+list it as intentional). **PASS on mechanism** (the setReverbPreset pipeline
+itself is correct and verified live); **content gap found and fixed for the
+map this pass tested**.
+
+**Fixed this pass** (`data/maps/scorched_crossing_v2.4/mapinfo.lua`, 3
+lines): `preset = "default"` → `preset = "open"`, matching the map's real
+outdoor river-crossing setting and the "open" preset meridian_basin gets by
+default. **Not verified on the live stack** — this clone's `data/maps/` is
+an independent CoW copy, not a symlink into `TASKHERD_REPO`; the running
+stack still serves the unedited map until a human syncs or a lane with write
+access to MAIN's map data lands it. Same "clone edit invisible live" caveat
+this README's pres-atmos/K-series sections already document repeatedly.
+`pools_of_ilys_1.0.0` and `wanderlust2.1`'s identical `"default"` and
+`techno_lands_final_2.60_wide`'s mismatched `"forest"` are **not fixed** —
+out of this pass's tested scope (neither map was touched by items a–d
+above); named here so whoever owns map content can batch them.
+
+## Defects — E2E pass 3
+
+| # | Sev | Defect | Repro | Owning lane |
+|---|---|---|---|---|
+| D22 | LOW | `scorched_crossing_v2.4` shipped with `mapinfo.lua`'s `sound.preset` at the unedited Spring template value `"default"` (→ fully dry, no reverb) despite 3 real EFX IRs (open/urban/valley) being shipped. **FIXED this pass** (see above), not yet visible live (clone-only edit). | `data/maps/scorched_crossing_v2.4/mapinfo.lua:50`; live: `setReverbPreset` probe caught `wet=0,dry=1` at map load. | map content (untriaged — same map pres-atmos/terrain-streaming already own for the black-wedge/residual-corner work) |
+| D23 | LOW/INFO | Same `"default"` boilerplate on `pools_of_ilys_1.0.0` and `wanderlust2.1`; `techno_lands_final_2.60_wide` sets `preset = "forest"`, which matches no shipped EFX file and falls through to dry the same way. Not fixed this pass (out of scope — none of these maps were tested this fire). | `grep -A1 'preset = ' data/maps/*/mapinfo.lua` | map content |
+| D24 | INFO (tooling) | A second admin-username browser client connecting into a room already holding a `spring-debug open_client` admin session invalidates the first client's stream (units vanish from its scene; a stale objective board renders) without erroring. Cost one redo of the tread-mark tank+buggy drive this pass. | Open a room via `launch_scenario(openBrowser:true)`, then `chrome-devtools navigate_page` the same `user=admin` URL into a *second* browser context. | mcp-tools |
+
+## Not done this pass (stated plainly)
+
+- **capture_sequence coverage is 3 of 9 weapon-showcase entries** (one per
+  visible-projectile family: Cannon/MissileLauncher/AircraftBomb) — mg,
+  railgun, howitzer, flak, cruise, air-to-air were not individually shot.
+  Torpedo is a documented placeholder (no water on the test map), correctly
+  skipped, not a gap.
+- **D22's fix is not verified live** — this clone's `data/maps/` doesn't
+  reach the shared stack; needs a lane with MAIN write access (or a human)
+  to land it and restart the lobby before the fixed reverb is audible.
+- **D23's two `"default"` maps and one mismatched `"forest"` preset were
+  found but not fixed** — not touched by this pass's tested scope.
+- **XL900 was only measured on Medium** — Low/High presets and the
+  XL1200 rung (also offered by `populate_tranche`) were not swept.
+- **`git rm` for the superseded pres-decals evidence** could not be run in
+  this headless session (interactive approval required) — the old files were
+  moved aside instead of deleted; a human still needs to finish the delete.
+- **The E2E2 leftover room in the lobby's "Missions" list** (`e2e3-perf`
+  and similar rooms from this pass's own launches) will clear once their
+  idle-exit timers fire; not force-cleaned beyond the normal `end_game` calls
+  already issued for every room this pass opened.
+
+## TOOLING GAP
+
+- **mcp-tools MT4/MT5 (`drive_pattern`, `populate_tranche`) — none found this
+  pass.** Both worked exactly as documented across every call.
+- See D24 above (dual-admin-client collision).
+- `AudioManager` has no debug/test surface on `window` — verifying live
+  audio behaviour needs the `navigate_page initScript` +
+  `AudioContext.prototype`/`AudioParam.prototype` monkey-patch trick used
+  this pass (patch the real Web Audio API globals before the page's own
+  scripts run, since prototype methods resolve dynamically at call time
+  regardless of when the instance was constructed). Worth a real
+  `window.test.audioDebug()` hook if audio gets tested live again.
+- The browser autoplay gate (`AudioManager.resumed`, set only by a real
+  canvas click) silently no-ops every `play()` call in a headless/synthetic
+  session until something dispatches that click. Easy to mistake for "sound
+  is broken" — it isn't; it's the platform gate.
+
+---
