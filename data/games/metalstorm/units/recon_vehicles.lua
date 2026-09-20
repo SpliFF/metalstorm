@@ -5,8 +5,13 @@
 -- Hand-written (not units/_builder.lua): one-off vehicles wired to ONE shipped
 -- forge model each, not a 4-scale class curve. Shape follows fable_tank.lua.
 -- Provenance: the Generated rows in ../ASSETS.md.
+--
+-- Both hulls below are wheeled (axle_*/wheel* pieces, wheel-spin-driver.ts),
+-- so trackType is set explicitly ahead of the builder's tracked default; see
+-- units/_builder.lua's trackDefaults for what that fills in.
+local mk = VFS.Include('units/_builder.lua')
 
-return {
+local defs = {
     -- Open-frame buggy: body / axle_f / axle_r / dish, clip idle (±60° dish
     -- sweep, 8 s). Axles spin off wire speed (wheel-spin-driver.ts).
     ms_scout_buggy = {
@@ -15,6 +20,7 @@ return {
         objectname = 'ms_scout_buggy',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 240, mass = 120,
         maxvelocity = 4.2, acceleration = 0.36, brakerate = 0.3, turnrate = 1100,
         footprintx = 2, footprintz = 2,
@@ -48,6 +54,7 @@ return {
         objectname = 'ms_obs_balloon',
         category = 'LAND MOBILE VEHICLE',
         movementclass = 'VEH',
+        trackType = 'StdWheel',
         maxdamage = 300, mass = 260,
         maxvelocity = 1.4, acceleration = 0.1, brakerate = 0.14, turnrate = 300,
         footprintx = 2, footprintz = 3,
@@ -63,3 +70,6 @@ return {
         },
     },
 }
+
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs

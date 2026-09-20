@@ -95,6 +95,47 @@ const STATUS = /^(?:status(?:\s+(?:of|on))?|report\s+on|how\s+(?:is|are)\s+(.+?)
 const RESOURCES = /^(?:how\s+(?:much|many)\s+(?:authority|resources?)|how\s+are\s+we\s+doing\s+on\s+(?:authority|resources?)|authority|what(?:'s|\s+is)\s+(?:my|our)\s+authority)(?:\s+(?:do|have)\s+(?:we|i)(?:\s+(?:have|got))?)?\s*\??\s*$/i;
 const OBJECTIVES = /^(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:mission|objectives?)|objectives?|what\s+are\s+we\s+(?:supposed\s+to\s+be\s+)?doing|orders)\s*\??\s*$/i;
 
+/**
+ * "what's happening" / "what's happening at Slag Forge" / "what's happening
+ * there" — the `events` query (contract v2).
+ *
+ * The place is OPTIONAL and a pronoun is a legal place: "there" leaves here as
+ * `near: "there"` and `bindFocusReferences` turns it into the drilled panel's
+ * place, exactly as an order's target pronoun is bound. That is why this emits
+ * the player's own word rather than reading the focus itself — two places that
+ * decide what "there" means is how the answer and the order that follows it end
+ * up describing different corners of the map.
+ */
+const WHATS_HAPPENING = new RegExp(
+    '^(?:'
+    + "what(?:'s|\\s+is|\\s+has\\s+been)?\\s+(?:happening|going\\s+on)"
+    + '|what\\s+happened'
+    + '|sitrep|sit\\s+rep'
+    + "|what(?:'s|\\s+is)\\s+(?:the\\s+)?situation"
+    + '|any(?:thing)?\\s+(?:news|contact)'
+    + ')'
+    + '(?:\\s+(?:at|in|near|around|over\\s+at|out\\s+at)\\s+(.+?))?'
+    + '\\s*\\??\\s*$',
+    'i');
+
+/**
+ * "go there" / "show me that" / "look at it" — a camera move whose target is a
+ * PRONOUN.
+ *
+ * `ZOOM_TO` already carries "look at X", so the only thing missing was the
+ * shapes that have no X at all ("go there") and the ones `ZOOM_TO` does not
+ * spell ("show me that"). Like every other ref in this file the pronoun is
+ * handed on unresolved — `nl-focus.ts` is the one place that decides what the
+ * player was pointing at.
+ */
+const LOOK_DEICTIC = new RegExp(
+    '^(?:go|look|take\\s+me|zoom|jump|pan|move\\s+the\\s+camera'
+    + '|show(?:\\s+me)?|centre|center|focus)'
+    + '(?:\\s+(?:to|at|on|over|in))?'
+    + '\\s+(there|here|that|this|it|that\\s+one|this\\s+one|that\\s+place)'
+    + '\\s*[.!?]?\\s*$',
+    'i');
+
 /** Side words a count/locate phrase may carry, and which side they mean. The
  *  global twins are for stripping (a non-global `replace` drops one word and
  *  leaves the second, which is how "their enemy tanks" would keep a side word). */
@@ -125,11 +166,15 @@ export function matchLocalPattern(
         ?? matchPanel(text, deps)          // before the camera patterns: "show me
                                            // the minimap" is a panel, not a place
         ?? matchFollow(text)
+        ?? matchLookDeictic(text)      // before matchZoomTo: "look at it" is the
+                                       // same shape as "look at Northgate", and
+                                       // only this one knows "it" is a pronoun
         ?? matchZoomTo(text)
         ?? matchHowMany(text, deps)
         ?? matchWhereIs(text)
         ?? matchResources(text)
         ?? matchObjectives(text)
+        ?? matchEvents(text)
         ?? matchStatus(text)
         ?? null
     );
@@ -343,6 +388,26 @@ function matchResources(text: string): LocalPatternMatch | null {
 function matchObjectives(text: string): LocalPatternMatch | null {
     if (!OBJECTIVES.test(text)) return null;
     return { action: { kind: 'query', query: { op: 'objectives' } }, say: 'checking objectives' };
+}
+
+function matchEvents(text: string): LocalPatternMatch | null {
+    const m = WHATS_HAPPENING.exec(text);
+    if (!m) return null;
+    const near = cleanRef(m[1] ?? '');
+    return {
+        action: { kind: 'query', query: { op: 'events', ...(near ? { near } : {}) } },
+        say: near ? `checking what's happening at ${near}` : "checking what's happening",
+    };
+}
+
+function matchLookDeictic(text: string): LocalPatternMatch | null {
+    const m = LOOK_DEICTIC.exec(text);
+    if (!m) return null;
+    const phrase = m[1].toLowerCase().replace(/\s+/g, ' ');
+    return {
+        action: { kind: 'camera', camera: { op: 'focus', targetRef: phrase } },
+        say: `camera to ${phrase}`,
+    };
 }
 
 function matchStatus(text: string): LocalPatternMatch | null {

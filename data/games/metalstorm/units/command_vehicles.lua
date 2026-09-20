@@ -14,8 +14,9 @@
 -- (turret-aim-controller.ts needs a `turret` piece); tracked, so the axle
 -- wheel-spin driver correctly skips it.
 -- Provenance: the Generated rows in ../ASSETS.md.
+local mk = VFS.Include('units/_builder.lua')
 
-return {
+local defs = {
     ms_command_s2 = {
         name = 'Command Vehicle',
         description = 'Tracked mobile HQ — map table, antenna farm, sensor head',
@@ -46,3 +47,8 @@ return {
         },
     },
 }
+
+-- Tracked (tracks_l/tracks_r above), so units/_builder.lua's trackDefaults
+-- fills StdTank without any explicit trackType here.
+for _, d in pairs(defs) do mk.trackDefaults(d) end
+return defs

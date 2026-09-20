@@ -6,51 +6,71 @@
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: rgba(0, 0, 0, 0.75);
+    background: var(--nui-scrim);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-family: system-ui, sans-serif;
-    color: #e0e0e0;
+    font-family: var(--nui-family-text);
+    color: var(--nui-text);
 }
 
 #game-over-overlay .game-over-card {
-    background: #16213e;
-    border-radius: 12px;
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate), var(--nui-rivet), var(--nui-rivet), var(--nui-rivet), var(--nui-rivet);
+    background-repeat: no-repeat;
+    background-position:
+        0 0, 10px 10px, calc(100% - 10px) 10px,
+        10px calc(100% - 10px), calc(100% - 10px) calc(100% - 10px);
+    background-size: auto, 6px 6px, 6px 6px, 6px 6px, 6px 6px;
+    border: 1px solid var(--nui-border);
+    border-top-color: var(--nui-border-hi);
+    border-radius: var(--nui-radius);
     padding: 40px;
     text-align: center;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--nui-edge);
 }
 
 #game-over-overlay .game-over-card h1 {
-    color: #f07;
+    font: var(--nui-font-display-hi);
+    font-size: 24px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+    color: var(--nui-gold);
     margin: 0 0 12px;
 }
 
 #game-over-overlay .game-over-card p {
-    color: #888;
+    color: var(--nui-text-faint);
     margin: 0 0 24px;
 }
 
 #game-over-overlay .game-over-card .game-over-result {
-    color: #e0e0e0;
+    color: var(--nui-text);
     font-size: 17px;
     margin: 0 0 8px;
 }
 
 #game-over-overlay .game-over-card .game-over-frame {
-    color: #888;
+    font: var(--nui-font-mono);
+    color: var(--nui-text-faint);
     font-size: 13px;
     margin: 0 0 24px;
 }
 
 #game-over-overlay .game-over-card button {
     padding: 12px 28px;
-    border: none;
-    border-radius: 6px;
-    background: #4cc9f0;
-    color: #0f1626;
-    font-weight: 600;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-accent-dim);
+    box-shadow: var(--nui-edge), inset 0 0 0 1px var(--nui-accent-dim);
+    border-radius: var(--nui-radius);
+    color: var(--nui-accent);
+    font: var(--nui-font-display);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
     cursor: pointer;
-    font-size: 15px;
+}
+#game-over-overlay .game-over-card button:hover {
+    background: var(--nui-bg-hover);
+    border-color: var(--nui-accent);
 }

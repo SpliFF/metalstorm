@@ -29,11 +29,28 @@
  * ACCUMULATE additively — overlapping craters deepen, traffic darkens — which a
  * signed 0.5-centered normal encoding could not do.
  *
- * Overlay channels (RGBA8), ADDITIVE blend, init/neutral = (0,0,0,0):
- *   R    depression depth 0..1   (plugin: normal = gradient; deeper = darker)
- *   G    albedo darkening 0..1   (plugin: albedo *= 1 - G*cap, cap ~50%)
- *   B,A  spare
- * Both channels saturate at 1.0 = the cap; that bounds heavily-worked ground.
+ * Overlay channels, ADDITIVE blend, init/neutral = (0,0,0,0). Two pixel
+ * formats, chosen once at construction (PLAN-decal-tracks §3):
+ *   - Primary: R11F_G11F_B10F (float, colour-renderable + additive-blendable
+ *     under WebGL2 `EXT_color_buffer_float`, same 32 bpp as the old RGBA8 —
+ *     zero VRAM change) —
+ *       R (11F) depression depth 0..1   (plugin: normal = gradient of raise-depth)
+ *       G (11F) albedo darkening 0..1   (plugin: albedo tinted dirt-brown, capped)
+ *       B (10F) raise 0..1              (displaced-soil berms/rims; additive like depth)
+ *   - Fallback (extension unavailable — flagged loudly in the console, not
+ *     silently): RGBA8 —
+ *       R+A     depression depth, packed coarse(R)+residual(A) for a bit more
+ *               than 8-bit precision (see `dDecSample` in decal-overlay-plugin.ts)
+ *       G       albedo darkening, as above
+ *       B       unused — no raise field; berms/rims don't render in this path.
+ * Both formats saturate their depth/darkening range at 1.0 = the cap; that
+ * bounds heavily-worked ground. Plugin surface height = raise − depth, so the
+ * gradient normal derived from that signed field gives pit walls AND ridges.
+ *
+ * Continuous vehicle tracks (tread/wheel) do NOT go through the mark list: they
+ * accumulate as per-unit polyline trails (decal-trails.ts) and bake as one
+ * joint-free ribbon strip each, keyed on world arc length (PLAN-decal-tracks
+ * §2). Scars and discrete prints (foot/claw) remain marks.
  *
  * Fade / "global reset": additive blending can't subtract over time, so fade
  * comes from a periodic age-scaled REBUILD — every REBUILD_INTERVAL_S each
@@ -56,6 +73,43 @@ import {
     Vector3,
 } from '@babylonjs/core';
 import type { ScarEvent, TrackSegmentEvent } from './decal-events.js';
+import { TrailStore, tessellateTrail, writeRibbonIndices, GaitTracker } from './decal-trails.js';
+
+/** Capability shape {@link chooseOverlayFormat} needs — just the one flag,
+ *  so it's testable with a plain object instead of a real engine. */
+export interface OverlayFormatCaps {
+    colorBufferFloat: boolean;
+}
+
+/** Result of the RTT pixel-format decision (PLAN-decal-tracks §3). */
+export interface OverlayFormat {
+    type: number;
+    format: number;
+    /** True when the format has a real B raise channel (float path); false in
+     *  the RGBA8 fallback, where depth is packed R+A and there is no raise. */
+    hasRaise: boolean;
+}
+
+/** Choose the overlay RTT pixel format: R11F_G11F_B10F (colour-renderable +
+ *  additive-blendable under WebGL2 `EXT_color_buffer_float`) when available —
+ *  same 32 bpp as the old RGBA8, now split R=depth/G=dark/B=raise instead of
+ *  R=depth/G=dark/(B,A spare). Falls back to RGBA8 (depth packed R+A, no
+ *  raise — §3) when the extension is missing; callers must flag that loudly,
+ *  not silently, since it drops berms/rims entirely. */
+export function chooseOverlayFormat(caps: OverlayFormatCaps): OverlayFormat {
+    if (caps.colorBufferFloat) {
+        return {
+            type: Constants.TEXTURETYPE_UNSIGNED_INT_10F_11F_11F_REV,
+            format: Constants.TEXTUREFORMAT_RGB,
+            hasRaise: true,
+        };
+    }
+    return {
+        type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
+        format: Constants.TEXTUREFORMAT_RGBA,
+        hasRaise: false,
+    };
+}
 
 /** Fine-window texture dimension (square). The window covers `winElmos` of
  *  world, so texel = winElmos / FINE_DIM; the window size is chosen from zoom
@@ -105,6 +159,16 @@ function classifyTrackType(name: string): number {
     if (n.includes('foot') || n.includes('com')) return TRACK_FOOT;
     if (n.includes('bike') || n.includes('wheel')) return TRACK_WHEEL;
     return TRACK_TREAD; // tank/tread and anything unrecognised
+}
+
+/** For TRACK_WHEEL names, whether the tire gets the aggressive knobby
+ *  chevron lug pattern (§4) instead of a plain rut — a further per-name
+ *  sub-selection within the WHEEL category, same keyword convention as
+ *  {@link classifyTrackType}. */
+function wheelIsChevron(name: string): boolean {
+    const n = name.toLowerCase();
+    return n.includes('moto') || n.includes('dirt') || n.includes('off')
+        || n.includes('knob') || n.includes('atv') || n.includes('tractor');
 }
 
 /** Build the sorted distinct lowercased trackType-name table from the unit
@@ -175,12 +239,34 @@ void main() {
 }
 `;
 
-// Blit fragment shader. Outputs depression depth (R) + darkening (G),
-// additively summed into the persistent overlay (PLAN-decal-vt.md V0).
-const BLIT_FRAG = /* glsl */ `
+/** Scar rim raise, as a fraction of the crater's depthAmp (PLAN-decal-tracks
+ *  §9 task 3d — deferred from fire 1 until the raise channel existed). A
+ *  ratio, not an independent amp, since depthAmp is the only per-scar knob
+ *  wired through today (always 0.5 — see addScar). */
+const SCAR_RIM_RATIO = 0.45;
+
+/** Foot/claw kick-back berm raise, as a fraction of the print's depthAmp
+ *  (§4's "small kick-back berm behind the print") — same ratio convention as
+ *  {@link SCAR_RIM_RATIO}. */
+const FOOT_BERM_RATIO = 0.5;
+/** Discrete foot/claw stamp orientation jitter, ±this many radians (§4's
+ *  "±10° jitter" — kills Q7's identical-stamp rubber-stamp rows). */
+const FOOT_JITTER_RAD = (10 * Math.PI) / 180;
+/** Stride (elmos) that maps to strideScale = 1 for the kick-back berm size;
+ *  clamped in {@link DecalOverlay.addTrack} so a very short/long stride still
+ *  gives a sane berm. */
+const FOOT_STRIDE_REF = 20;
+
+// Blit fragment shader. Outputs depression depth (R) + darkening (G) always;
+// raise (B) only when the RTT format has a real float B channel (PLAN-
+// decal-tracks §3) — the RGBA8 fallback packs depth across R (coarse byte) +
+// A (sub-LSB residual) instead, and has no raise field at all.
+function buildBlitFrag(hasRaise: boolean): string {
+    return /* glsl */ `
 precision highp float;
 varying vec2 vLocalUv;
-varying vec4 vParams;       // x=kind y=darkAmp z=depthAmp w=treadFreq/seed
+varying vec4 vParams;       // x=kind y=darkAmp z=depthAmp w=seed (scar: crater
+                            // noise seed; foot/claw: side*strideScale gait pack)
 varying float vFade;        // per-instance age fade 0..1 (scales coverage)
 
 // --- cheap value-noise FBM for procedural crater detail ---
@@ -204,24 +290,47 @@ float fbm(vec2 p) {
     return v;
 }
 
-// Pressed-in oval depression: 1 inside the oval, 0 outside (we return a 0..1
-// mask, sign is handled by the caller). r = (across-radius, along-radius) in
-// local quad uv. Used for the discrete footprint / claw shapes.
-float ovalMask(vec2 p, vec2 c, vec2 r) {
-    vec2 d = (p - c) / r;
-    return clamp(1.0 - dot(d, d), 0.0, 1.0);
+// Elliptical SDF (0 at centre, 1 at the r-scaled boundary) + an fwidth-scaled
+// edge (analytic AA: the smoothstep width tracks the actual derivative of the
+// distance field at whatever resolution is currently baking — coarse or fine
+// — instead of a fixed width tuned for one of them). Replaces the old
+// quadratic ovalMask + fixed-width smoothstep pair (Q6) everywhere below.
+float ovalDist(vec2 p, vec2 c, vec2 r) {
+    return length((p - c) / r);
 }
-// Bipedal footprint pair: a fore-left + an aft-right oval.
-float feetMask(vec2 p) {
-    return max(ovalMask(p, vec2(0.37, 0.32), vec2(0.12, 0.20)),
-               ovalMask(p, vec2(0.63, 0.72), vec2(0.12, 0.20)));
+float aaMask(float dist, float edge) {
+    float aa = max(fwidth(dist), 1e-4);
+    return 1.0 - smoothstep(edge - aa, edge + aa, dist);
 }
-// Chicken / spider claw: three thin toes splayed forward.
-float clawMask(vec2 p) {
-    float a = ovalMask(p, vec2(0.34, 0.40), vec2(0.05, 0.17));
-    float b = ovalMask(p, vec2(0.50, 0.50), vec2(0.05, 0.17));
-    float c = ovalMask(p, vec2(0.66, 0.40), vec2(0.05, 0.17));
+
+// One footprint: an oval offset to whichever side gait says is due (§4 — one
+// stamp = one footfall, alternating, not both feet at once), with a
+// heel(rear)-deeper-than-toe(front) depth gradient returned via depthWeight.
+float footMask(vec2 p, float side, out float depthWeight) {
+    vec2 c = vec2(0.5 + side * 0.14, 0.5);
+    vec2 r = vec2(0.15, 0.24);
+    float alongFrac = clamp((p.y - (c.y - r.y)) / (2.0 * r.y), 0.0, 1.0); // 0 heel .. 1 toe
+    depthWeight = mix(1.0, 0.55, alongFrac);
+    return aaMask(ovalDist(p, c, r), 1.0);
+}
+// Chicken / spider claw: three toes splayed forward, same side-offset + gait
+// convention as footMask.
+float clawMask(vec2 p, float side, out float depthWeight) {
+    vec2 base = vec2(0.5 + side * 0.14, 0.5);
+    float a = aaMask(ovalDist(p, base + vec2(-0.11, -0.07), vec2(0.05, 0.16)), 1.0);
+    float b = aaMask(ovalDist(p, base + vec2( 0.00,  0.05), vec2(0.05, 0.17)), 1.0);
+    float c = aaMask(ovalDist(p, base + vec2( 0.11, -0.07), vec2(0.05, 0.16)), 1.0);
+    float alongFrac = clamp((p.y - (base.y - 0.22)) / 0.44, 0.0, 1.0);
+    depthWeight = mix(1.0, 0.6, alongFrac);
     return max(max(a, b), c);
+}
+// Kick-back berm: a small raised ridge just behind the print (further rear
+// than the heel), sized by stride — a full stride kicks more soil back than
+// a shuffle (§4's "small kick-back berm behind the print").
+float kickBerm(vec2 p, float side, float strideScale) {
+    vec2 c = vec2(0.5 + side * 0.14, 0.5 - 0.32);
+    vec2 r = vec2(0.11, 0.08 + 0.05 * strideScale);
+    return aaMask(ovalDist(p, c, r), 1.0);
 }
 
 void main() {
@@ -237,12 +346,13 @@ void main() {
     // can't accumulate additively).
     float depth = 0.0;  // depression magnitude → R
     float dark = 0.0;   // darkening → G
+    float raise = 0.0;  // raised rim/berm → B (PLAN-decal-tracks §3/§9 task 3)
 
     if (kind < 0.5) {
-        // SCAR crater: a depression bowl (R) + scorch soot (G). The raised rim
-        // is synthesised in the plugin from the depth edge, so only the
-        // depression — a scalar that sums — is stored, and overlapping craters
-        // deepen.
+        // SCAR crater: a depression bowl (R) + scorch soot (G) + a raised rim
+        // (B) of displaced soil right at the crater edge. The plugin derives
+        // the surface normal from raise-minus-depth's gradient, so the pit
+        // wall AND the rim ridge both come out of one signed field.
         vec2 c = vLocalUv - 0.5;
         float dist = length(c);
         float r = dist * 2.0;                 // 0 centre .. 1 edge
@@ -277,61 +387,219 @@ void main() {
         float scorch = clamp(max(core, max(streaks, spatter * 0.7)), 0.0, 1.0);
         dark = scorch * darkAmp;
 
-        if (depth < 0.004 && dark < 0.004) discard;
+        // Raised rim: a ring of displaced soil right at the crater edge,
+        // lower and thinner than the bowl is deep. Derived from depthAmp (the
+        // only per-scar amp wired through today) via a fixed ratio rather
+        // than an independent attribute.
+        float rim = smoothstep(rimR * 0.80, rimR * 0.98, r)
+                  * (1.0 - smoothstep(rimR * 0.98, rimR * 1.32, r));
+        rim *= 0.6 + 0.4 * fbm(vec2(ang * 10.0 + seed * 2.0, r * 6.0));
+        raise = clamp(rim, 0.0, 1.0) * depthAmp * ${SCAR_RIM_RATIO};
+
+        if (depth < 0.004 && dark < 0.004 && raise < 0.004) discard;
     } else {
-        // TRACK: depression + darkening by category encoded in the kind value
-        //   1 = tread, 2 = wheel, 3 = footprint, 4 = claw.
-        // A single 0..1 shape mask drives both channels. local uv.x = across
-        // width, uv.y = along travel. Tread/wheel are continuous, footprint/claw
-        // are DISCRETE (the mask is ~0 between prints, so additive adds nothing
-        // there and they read as individual marks).
+        // TRACK, discrete stamps only: 3 = footprint, 4 = claw. TREAD/WHEEL
+        // (1/2) are continuous and bake as ribbons instead (PLAN-decal-tracks
+        // §2) — they never reach this mark path, so their old per-segment
+        // branches here (dead since fire 1, lane notes §pres-decals note 3)
+        // are deleted with this rewrite rather than carried forward.
         float cat    = kind - 1.0;
         float along  = vLocalUv.y;
         float across = vLocalUv.x;
-        float freq   = vParams.w;            // rung frequency along travel (tread)
+        // Gait pack (decal-trails.ts GaitTracker, §4): side selects which
+        // foot/claw is offset this stamp (alternates every footfall so
+        // consecutive stamps don't rubber-stamp identically — Q7);
+        // strideScale sizes the kick-back berm to how far the unit stepped.
+        float side        = sign(vParams.w);
+        float strideScale = abs(vParams.w);
 
-        // Feather across always, feather the along ends only for discrete prints
-        // (continuous strips overlap end-to-end, so an end feather would seam).
-        float acrossEdge = smoothstep(0.0, 0.08, across) * smoothstep(1.0, 0.92, across);
-        float alongEdge  = smoothstep(0.0, 0.04, along)  * smoothstep(1.0, 0.96, along);
+        // Feather the quad edges with an fwidth-scaled smoothstep (Q6: the
+        // feather width now tracks the actual derivative at whichever
+        // resolution is baking, instead of a fixed 0.08/0.04 tuned for one).
+        float aaA = max(fwidth(across), 1e-4);
+        float acrossEdge = smoothstep(0.0, aaA, across) * smoothstep(1.0, 1.0 - aaA, across);
+        float aaL = max(fwidth(along), 1e-4);
+        float alongEdge  = smoothstep(0.0, aaL, along)  * smoothstep(1.0, 1.0 - aaL, along);
 
-        float shape = 0.0;
-        if (cat < 0.5) {
-            // TWO THIN wheel ruts (one per wheel) with a transparent gap
-            // between, so crossing tracks interleave rather than erase. The
-            // ruts are narrow (≈ wheel width, not the full track band) and sit
-            // at 0.27 / 0.73 across — the spacing between the wheels. Only a
-            // faint rung ripple (mostly a smooth line, not a tank-tread ladder).
-            float rutL = exp(-pow((across - 0.27) / 0.05, 2.0));
-            float rutR = exp(-pow((across - 0.73) / 0.05, 2.0));
-            float ruts = clamp(rutL + rutR, 0.0, 1.0);
-            float rung = 0.88 + 0.12 * sin(along * freq * 6.2831853);
-            shape = acrossEdge * smoothstep(0.10, 0.40, ruts) * rung;
-        } else if (cat < 1.5) {
-            // WHEEL / bike: a single narrow central rut.
-            float d = (across - 0.5) / 0.08;
-            float line = clamp(1.0 - d * d, 0.0, 1.0);
-            shape = acrossEdge * smoothstep(0.05, 0.30, line);
-        } else if (cat < 2.5) {
-            // FOOTPRINT: two discrete oval feet.
-            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, feetMask(vec2(across, along)));
+        float depthWeight = 1.0;
+        float printMask;
+        if (cat < 2.5) {
+            printMask = footMask(vec2(across, along), side, depthWeight);
         } else {
-            // CLAW: discrete three-toe splay.
-            shape = acrossEdge * alongEdge * smoothstep(0.05, 0.30, clawMask(vec2(across, along)));
+            printMask = clawMask(vec2(across, along), side, depthWeight);
         }
-        depth = shape * depthAmp;
+        float edge  = acrossEdge * alongEdge;
+        float shape = edge * printMask;
+        depth = shape * depthWeight * depthAmp;
         dark  = shape * darkAmp;
-        if (depth < 0.004 && dark < 0.004) discard;
+        raise = edge * kickBerm(vec2(across, along), side, strideScale) * depthAmp * ${FOOT_BERM_RATIO};
+        if (depth < 0.004 && dark < 0.004 && raise < 0.004) discard;
     }
 
     // Age fade scales the additive contribution, the rebuild re-stamps marks
     // age-scaled so old marks contribute less and recover toward neutral.
     depth *= vFade;
     dark  *= vFade;
-    // Additive (ALPHA_ONEONE): R += depth, G += dark, both saturate at 1.0 = cap.
-    gl_FragColor = vec4(depth, dark, 0.0, 0.0);
+    raise *= vFade;
+    // Additive (ALPHA_ONEONE): every channel saturates at 1.0 = cap.
+    ${hasRaise
+        ? '    gl_FragColor = vec4(depth, dark, raise, 0.0); // R=depth G=dark B=raise'
+        : `    // §3 fallback (no EXT_color_buffer_float): pack depth across R
+    // (coarse byte) + A (sub-LSB residual) for a bit more than 8-bit
+    // precision; no raise channel in RGBA8 — berms/rims don't render here.
+    float packHi = floor(depth * 255.0) / 255.0;
+    float packLo = depth - packHi;
+    gl_FragColor = vec4(packHi, dark, 0.0, packLo);`}
 }
 `;
+}
+
+// --- Ribbon path (PLAN-decal-tracks §2) ------------------------------------
+// Continuous tracks (tread/wheel) are ONE triangle strip per unit trail instead
+// of a chain of overlapping quads: no interior joints to double-stamp (Q1), a
+// spline-smooth centreline (Q2), and a world-space arc-length pattern parameter
+// that never resets at a joint (Q3). Geometry comes from decal-trails.ts; this
+// material is the same additive depth/darkening blit, driven by per-VERTEX
+// attributes rather than per-instance quad params.
+const RIBBON_VERT = /* glsl */ `
+precision highp float;
+attribute vec3 position;    // x = world X, y = world Z (elmos), z unused
+attribute vec4 ribbon;      // x=across -1..1  y=arc length s (elmos)  z=fade  w=kind
+attribute vec4 ribbon2;     // x=width (elmos) y=darkAmp z=depthAmp w=wheelStyle (0 smooth, 1 chevron)
+uniform vec2 uOrigin;
+uniform vec2 uInvExtent;
+varying vec4 vRibbon;
+varying vec4 vRibbon2;
+void main() {
+    vec2 tuv = (position.xy - uOrigin) * uInvExtent;
+    vRibbon = ribbon;
+    vRibbon2 = ribbon2;
+    gl_Position = vec4(tuv * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+/** Ribbon berm/rim raise, as a fraction of the ribbon's depthAmp — mirrors
+ *  {@link SCAR_RIM_RATIO}. */
+const RIBBON_RAISE_RATIO = 0.5;
+
+function buildRibbonFrag(hasRaise: boolean): string {
+    return /* glsl */ `
+precision highp float;
+varying vec4 vRibbon;       // x=across -1..1  y=s  z=fade  w=kind
+varying vec4 vRibbon2;      // x=width y=darkAmp z=depthAmp w=wheelStyle
+
+// Crisp band mask (0 outside, 1 inside a half-width hw of c) with an
+// fwidth-scaled edge: the anti-alias width tracks the actual derivative of
+// the distance field at whichever resolution is currently baking (coarse or
+// fine), so it stays crisp at any zoom instead of a gaussian tuned for one
+// resolution (Q4/Q6 — the whole point of this rewrite).
+float aaBand(float x, float c, float hw) {
+    float d = abs(x - c) / hw;
+    float aa = max(fwidth(d), 1e-4);
+    return 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+}
+// Rectangular lug at a WORLD-constant phase (= s/pitch, plus any shear),
+// duty fraction of the pitch cell filled — the classic tread-link "ladder"
+// imprint, analytically anti-aliased instead of a soft sine ripple.
+float rectLug(float phase, float duty) {
+    float aa = max(fwidth(phase), 1e-4);
+    float local = fract(phase) - 0.5;
+    return 1.0 - smoothstep(duty * 0.5 - aa, duty * 0.5 + aa, abs(local));
+}
+
+void main() {
+    float across = vRibbon.x;
+    float s      = vRibbon.y;
+    float fade   = vRibbon.z;
+    float kind   = vRibbon.w;
+    float width  = max(1.0, vRibbon2.x);
+
+    // Side feather so the band edge isn't a hard line.
+    float edge = 1.0 - smoothstep(0.84, 1.0, abs(across));
+
+    float shape;
+    float berm;
+    if (kind < 1.5) {
+        // TREAD: two rut bands at the real gauge (from the wire width),
+        // each a crisp rectangular lug grid at a WORLD-constant pitch on s
+        // — spacing/phase never resets at a ribbon joint (Q3, fixed by the
+        // geometry) and now reads as an actual ladder, not a ripple (Q4).
+        // The two bands are staggered half a pitch apart, like real
+        // interleaved tread links, so they don't mirror each other.
+        float gauge = 0.46, rutHalfW = 0.11;
+        float bandL = aaBand(across, -gauge, rutHalfW);
+        float bandR = aaBand(across,  gauge, rutHalfW);
+
+        float pitch = max(4.0, width * 0.22);   // elmos between lug centres
+        float phase = s / pitch;
+        float lugL = rectLug(phase,       0.55) * bandL;
+        float lugR = rectLug(phase + 0.5, 0.55) * bandR; // half-pitch L/R stagger
+        float lug  = max(lugL, lugR);
+
+        // Faint continuous under-rut depression: a shallow trough spanning
+        // each band so the lugs sit IN a groove rather than floating on
+        // flat ground between prints.
+        float underRut = max(bandL, bandR) * 0.35;
+        shape = edge * clamp(underRut + lug, 0.0, 1.0);
+
+        // Berm ridges along both outer edges, plus a low centre ridge
+        // between the ruts — the pushed-up soil either side of the "ladder".
+        float outer = aaBand(across, -0.86, rutHalfW) + aaBand(across, 0.86, rutHalfW);
+        float centreRidge = aaBand(across, 0.0, 0.10) * 0.5;
+        berm = edge * clamp(outer + centreRidge, 0.0, 1.0);
+    } else {
+        // WHEEL / bike: a single rut with a low-amp sinuous wander on the
+        // centreline, keyed on s, so a long straight run doesn't look
+        // ruled with a laser-straight line. wheelStyle (per trackType
+        // name) picks a plain smooth-tire line or a knobby chevron lug
+        // pattern, sheared from rectLug by across so a straight bar reads
+        // as a herringbone V — analytic, not a texture. Side berms flank
+        // the rut either way.
+        float wander = 0.10 * sin(s / max(40.0, width * 3.0));
+        float ac = across - wander;
+
+        if (vRibbon2.w > 0.5) {
+            float pitch = max(4.0, width * 0.30);
+            float phase = s / pitch + ac * 2.2; // shear → chevron/herringbone
+            shape = edge * aaBand(ac, 0.0, 0.18) * rectLug(phase, 0.6);
+        } else {
+            shape = edge * aaBand(ac, 0.0, 0.11);
+        }
+        float sideL = aaBand(ac, -0.34, 0.10);
+        float sideR = aaBand(ac,  0.34, 0.10);
+        berm = edge * clamp(sideL + sideR, 0.0, 1.0);
+    }
+
+    float depth = shape * vRibbon2.z * fade;
+    float dark  = shape * vRibbon2.y * fade;
+    float raise = berm * vRibbon2.z * ${RIBBON_RAISE_RATIO} * fade;
+    if (depth < 0.004 && dark < 0.004 && raise < 0.004) discard;
+    ${hasRaise
+        ? '    gl_FragColor = vec4(depth, dark, raise, 0.0); // R=depth G=dark B=raise'
+        : `    // §3 fallback: pack depth across R (coarse byte) + A (residual);
+    // no raise channel in RGBA8 (see buildBlitFrag for the same scheme).
+    float packHi = floor(depth * 255.0) / 255.0;
+    float packLo = depth - packHi;
+    gl_FragColor = vec4(packHi, dark, 0.0, packLo);`}
+}
+`;
+}
+
+/** Per-pass amplitudes for a ribbon (PLAN-decal-tracks §9 task 3c re-tune).
+ *  Fire 1 kept these at the old chained-quad values deliberately, to isolate
+ *  the Q1 structural fix (no more joint double-stamp) from any amp change —
+ *  see the lane notes' note 2. That fix alone makes a trail read slightly
+ *  lighter than before (the old joints summed depth twice; the ribbon never
+ *  does), so re-tuned up ~20-25% here to land back near the old visual
+ *  density minus the joint-artifact spikes. Also now safe to tune freely at
+ *  all: float storage (§3) means these small per-pass increments no longer
+ *  quantise into visible 8-bit "shelf" steps once the gradient normal
+ *  differentiates them (Q5) — unlike the RGBA8 fallback, which still bands.
+ *  Unverified against a live render this fire (no live-server mutex held). */
+const RIBBON_DARK_AMP = 0.22;
+const RIBBON_DEPTH_AMP = 0.075;
+/** Floats per ribbon vertex: position(3) + ribbon(4) + ribbon2(4). */
+const RIBBON_POS = 3, RIBBON_A = 4, RIBBON_B = 4;
 
 interface PendingMark {
     /** world centre (elmos) */
@@ -348,7 +616,9 @@ interface PendingMark {
     darkAmp: number;
     /** Depression depth amplitude added to R (additive; capped at 1.0). */
     depthAmp: number;
-    treadFreq: number;
+    /** Per-kind extra param (blit shader's `vParams.w`): scar crater noise
+     *  seed, or foot/claw's gait pack (sign = side, magnitude = strideScale). */
+    seed: number;
     /** Per-instance fade 0..1 (coverage multiplier). Undefined = 1 (fresh). Set
      *  by the rebuild from the mark's age; fresh appends leave it 1. */
     fade?: number;
@@ -387,6 +657,11 @@ export interface FineWindowState {
     extent: number;
     /** 1 = fine window valid, 0 = use coarse only (far zoom / window ≥ map) */
     enabled: number;
+    /** 1 = overlay RTTs are float R11F_G11F_B10F with a real B raise channel;
+     *  0 = RGBA8 fallback (§3) — no raise, depth packed R+A. Set once at
+     *  construction (never changes); the plugin reads it to gate raise
+     *  sampling and the R+A depth reconstruction. */
+    hasRaise: number;
 }
 
 export class DecalOverlay {
@@ -404,9 +679,27 @@ export class DecalOverlay {
      *  trackTypeId). Empty until {@link setTrackTypes} is called; an unknown
      *  id then falls back to TREAD. */
     private trackCategories: number[] = [];
-    /** Last track-segment world position per unit, for connecting consecutive
-     *  continuous (tread/wheel) segments into one elongated quad. */
-    private lastTrackPos = new Map<number, { x: number; z: number }>();
+    /** Per-`trackTypeId`, whether a TRACK_WHEEL name gets the chevron/knobby
+     *  lug pattern vs a plain smooth-tire rut (§4). Same indexing/lifecycle
+     *  as {@link trackCategories}; meaningless for non-WHEEL ids. */
+    private wheelChevron: boolean[] = [];
+    /** Continuous (tread/wheel) tracks as per-unit polyline trails, baked as
+     *  ribbons instead of chained quads (PLAN-decal-tracks §2). */
+    private trailStore = new TrailStore();
+    /** Per-unit gait state for discrete FOOT/CLAW stamps (§4): which side is
+     *  due next + the stride since the last stamp. Separate from trailStore
+     *  — foot/claw stay discrete marks, this only tracks alternation. */
+    private gaitTracker = new GaitTracker();
+    private ribbonMesh: Mesh;
+    private ribbonMat: ShaderMaterial;
+    /** Persistent ribbon geometry buffers (grown on demand, never per frame). */
+    private ribbonVerts = new Float32Array(0);
+    private ribbonAttrA = new Float32Array(0);
+    private ribbonAttrB = new Float32Array(0);
+    private ribbonIdx = new Uint32Array(0);
+    /** Built once per frame (both targets share it), like frameRebuildBatch. */
+    private frameRibbonBuilt = false;
+    private ribbonIndexCount = 0;
     /** world extent in elmos. */
     private worldW = 1;
     private worldH = 1;
@@ -426,12 +719,30 @@ export class DecalOverlay {
     private uOrigin = new Vector2(0, 0);
     private uInvExtent = new Vector2(1, 1);
     /** Shared with the terrain plugin (by reference) — updated each tick. */
-    readonly fineState: FineWindowState = { originX: 0, originZ: 0, extent: 0, enabled: 0 };
+    readonly fineState: FineWindowState = { originX: 0, originZ: 0, extent: 0, enabled: 0, hasRaise: 0 };
+    /** RTT pixel format decided once at construction (PLAN-decal-tracks §3). */
+    private formatChoice: OverlayFormat;
 
     constructor(scene: Scene, worldWidthElmos: number, worldHeightElmos: number) {
         this.scene = scene;
         this.worldW = Math.max(1, worldWidthElmos);
         this.worldH = Math.max(1, worldHeightElmos);
+
+        const caps = scene.getEngine().getCaps();
+        this.formatChoice = chooseOverlayFormat({ colorBufferFloat: !!caps.colorBufferFloat });
+        this.fineState.hasRaise = this.formatChoice.hasRaise ? 1 : 0;
+        if (!this.formatChoice.hasRaise) {
+            // Loud, not silent (§3): this path drops the raise channel
+            // entirely (no berms, no scar rims) and depth precision is
+            // reduced to an 8-bit-coarse + residual pack instead of a real
+            // float channel.
+            console.warn(
+                '[decals] EXT_color_buffer_float unavailable — falling back to the RGBA8 ' +
+                'decal overlay (PLAN-decal-tracks §3): no raise channel (no berms/scar rims), ' +
+                'reduced depth precision. A WebGL2 driver with float colour-buffer rendering ' +
+                'restores full decal quality.',
+            );
+        }
 
         // Coarse: whole map at low res. Density ~ map/16, clamped — it's only
         // the far/outside-window fallback, so it can be coarse.
@@ -447,7 +758,7 @@ export class DecalOverlay {
 
         this.blitMat = new ShaderMaterial(
             'decalBlit', scene,
-            { vertexSource: BLIT_VERT, fragmentSource: BLIT_FRAG },
+            { vertexSource: BLIT_VERT, fragmentSource: buildBlitFrag(this.formatChoice.hasRaise) },
             {
                 attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'params', 'fade'],
                 uniforms: ['uOrigin', 'uInvExtent'],
@@ -459,6 +770,24 @@ export class DecalOverlay {
         // darken) and saturate at 1.0 = the cap. Fade comes from the age-scaled
         // rebuild (additive can't subtract over time), not this blend.
         this.blitMat.alphaMode = Constants.ALPHA_ONEONE;
+
+        this.ribbonMat = new ShaderMaterial(
+            'decalRibbon', scene,
+            { vertexSource: RIBBON_VERT, fragmentSource: buildRibbonFrag(this.formatChoice.hasRaise) },
+            {
+                attributes: ['position', 'ribbon', 'ribbon2'],
+                uniforms: ['uOrigin', 'uInvExtent'],
+                needAlphaBlending: true,
+            },
+        );
+        this.ribbonMat.backFaceCulling = false;
+        this.ribbonMat.alphaMode = Constants.ALPHA_ONEONE;
+        this.ribbonMesh = new Mesh('decalRibbonStrip', scene);
+        this.ribbonMesh.material = this.ribbonMat;
+        this.ribbonMesh.isPickable = false;
+        this.ribbonMesh.alwaysSelectAsActiveMesh = true;
+        this.ribbonMesh.layerMask = BLIT_LAYER;
+        this.ribbonMesh.isVisible = false;
 
         this.blitMesh = buildUnitQuadXY(scene, 'decalBlitQuad');
         this.blitMesh.material = this.blitMat;
@@ -490,8 +819,8 @@ export class DecalOverlay {
             name, dim, this.scene,
             {
                 generateMipMaps: false,
-                type: Constants.TEXTURETYPE_UNSIGNED_BYTE,
-                format: Constants.TEXTUREFORMAT_RGBA,
+                type: this.formatChoice.type,
+                format: this.formatChoice.format,
                 samplingMode: Texture.BILINEAR_SAMPLINGMODE,
             },
         );
@@ -520,13 +849,14 @@ export class DecalOverlay {
     private attachTargetRender(t: TargetState, isLast: boolean): void {
         // Set the render list here (after blitMesh is constructed) — see the
         // note in makeTarget about the init-order trap.
-        t.rtt.renderList = [this.blitMesh];
+        t.rtt.renderList = [this.blitMesh, this.ribbonMesh];
         t.rtt.activeCamera = this.rttCamera;
         t.rtt.onBeforeRenderObservable.add(() => this.prepareTarget(t));
         t.rtt.onAfterRenderObservable.add(() => {
             this.blitMesh.thinInstanceCount = 0;
+            this.ribbonMesh.isVisible = false;
             // Both targets have consumed this frame's rebuild batch (if any).
-            if (isLast) this.frameRebuildBatch = null;
+            if (isLast) { this.frameRebuildBatch = null; this.frameRibbonBuilt = false; }
         });
     }
 
@@ -538,11 +868,15 @@ export class DecalOverlay {
     get coarseTexel(): number { return 1 / this.coarseDim; }
     /** 1 / fine texture dimension. */
     get fineTexel(): number { return 1 / FINE_DIM; }
+    /** True when the overlay RTTs are float R11F_G11F_B10F with a real raise
+     *  channel; false in the RGBA8 fallback (§3 — no berms/scar rims). */
+    get hasRaiseChannel(): boolean { return this.formatChoice.hasRaise; }
 
     /** Supply the sorted track-type-name table (index == wire trackTypeId;
      *  see {@link buildTrackTypeNames}). */
     setTrackTypes(names: string[]): void {
         this.trackCategories = names.map(classifyTrackType);
+        this.wheelChevron = names.map(wheelIsChevron);
     }
 
     /** Per-frame tick: advance the clock, schedule the periodic fade rebuild,
@@ -554,6 +888,7 @@ export class DecalOverlay {
         if (this.disposed) return;
         this.elapsed += dtSeconds;
         this.sinceRebuild += dtSeconds;
+        this.trailStore.tick(dtSeconds);
         // Re-bake the whole overlay from the mark list either when new marks
         // arrived (debounced by MARK_REBUILD_S so a burst coalesces into one
         // re-bake) or periodically to advance the fade. Each re-bake is a clean
@@ -564,6 +899,7 @@ export class DecalOverlay {
         if (dirtyReady || fadeReady) {
             this.sinceRebuild = 0;
             this.dirty = false;
+            this.trailStore.retire();
             this.coarse.rebuild = true;
             this.fine.rebuild = true;
         }
@@ -696,7 +1032,7 @@ export class DecalOverlay {
             // (deeper/darker pit). Scar darkening is heavier than tracks.
             darkAmp: Math.min(0.6, (ev.alpha > 0 ? ev.alpha : 0.85) * 0.6),
             depthAmp: 0.5,
-            treadFreq: Math.random() * 100, // per-scar seed for crater noise
+            seed: Math.random() * 100, // per-scar seed for crater noise
         });
     }
 
@@ -708,68 +1044,56 @@ export class DecalOverlay {
         const kind = KIND_TRACK_BASE + cat;
 
         if (cat === TRACK_TREAD || cat === TRACK_WHEEL) {
-            // CONTINUOUS tracks: connect this segment to the unit's previous
-            // one into a single elongated quad (length = travel since the last
-            // segment), so the strip stays unbroken on turns and at speed
-            // instead of dropping isolated square stamps that gap + jag.
-            const last = this.lastTrackPos.get(ev.unitId);
-            this.lastTrackPos.set(ev.unitId, { x: ev.x, z: ev.z });
-            if (last) {
-                const dx = ev.x - last.x;
-                const dz = ev.z - last.z;
-                const len = Math.hypot(dx, dz);
-                // Drop degenerate / implausibly long links (a long gap means the
-                // unit was out of LOS, died + a new one reused the id, or
-                // teleported — bridging it would draw one giant streak).
-                if (len > 1e-3 && len < w * 8) {
-                    const tx = dx / len, tz = dz / len;          // travel unit vec
-                    // Overlap the joint slightly so consecutive segments meet
-                    // seamlessly (the shader no longer feathers strip ends).
-                    const halfLen = len * 0.5 + w * 0.15;
-                    const halfW = w * 0.5;
-                    // World half-axes: across ⟂ travel = (tz,-tx); along = travel.
-                    this.emit({
-                        cx: (last.x + ev.x) * 0.5,
-                        cz: (last.z + ev.z) * 0.5,
-                        axx: tz * halfW, axz: -tx * halfW,
-                        azx: tx * halfLen, azz: tz * halfLen,
-                        kind,
-                        // Light + shallow per pass; accumulates additively as
-                        // more vehicles drive the same ground (capped at the
-                        // plugin's max). One pass ≈ a faint groove; ~6 passes
-                        // reach the darkening cap. Depth stays shallow vs scars.
-                        darkAmp: 0.18,
-                        depthAmp: 0.06,
-                        // Rung frequency = rungs over this segment, chosen for a
-                        // constant ~world spacing regardless of segment length.
-                        treadFreq: Math.max(1, len / Math.max(6, w * 0.5)),
-                    });
-                }
+            // CONTINUOUS tracks feed the unit's trail polyline; the bake draws
+            // the whole trail as one ribbon (PLAN-decal-tracks §2), so there
+            // are no per-segment quads and no joints to double-stamp.
+            if (this.trailStore.append(ev.unitId, ev.x, ev.z, ev.trackTypeId, w)) {
+                this.dirty = true;
             }
-            return; // first sighting (no last pos) lays nothing; the next links
+            return;
         }
 
-        // DISCRETE prints (foot / claw): one square stamp per segment, oriented
-        // along travel. The shapes tile across abutting stamps into a trail; we
-        // want them individual, so no segment-connecting here.
+        // DISCRETE prints (foot / claw): one stamp per segment = one
+        // footfall (§4). Gait (decal-trails.ts GaitTracker) says which
+        // foot/claw is offset this stamp and how far the unit strode since
+        // the last one — the shader uses that to alternate L/R and size the
+        // kick-back berm. A small random jitter on the stamp's orientation
+        // kills the identical-stamp rubber-stamp look (Q7).
         const halfW = w * 0.5;
         // Travel direction (along = local +Y); across ⟂ travel = (dirZ,-dirX).
         let tx = ev.dirX, tz = ev.dirZ;
         const dl = Math.hypot(tx, tz);
         if (dl > 1e-4) { tx /= dl; tz /= dl; } else { tx = 0; tz = 1; }
+        const jitter = (Math.random() * 2 - 1) * FOOT_JITTER_RAD;
+        const cj = Math.cos(jitter), sj = Math.sin(jitter);
+        const jtx = tx * cj - tz * sj;
+        const jtz = tx * sj + tz * cj;
+
+        const gait = this.gaitTracker.step(ev.unitId, ev.x, ev.z);
+        const strideScale = Math.min(1.6, Math.max(0.2, gait.stride / FOOT_STRIDE_REF));
         this.emit({
             cx: ev.x,
             cz: ev.z,
-            axx: tz * halfW, axz: -tx * halfW,
-            azx: tx * halfW, azz: tz * halfW,
+            axx: jtz * halfW, axz: -jtx * halfW,
+            azx: jtx * halfW, azz: jtz * halfW,
             kind,
             // Bot footprints / spider claws: ~vehicle-level darkening (not
             // darker), a touch more depression so the discrete prints stay
             // legible. Discrete marks rarely overlap, so they stay light.
             darkAmp: 0.18,
             depthAmp: 0.1,
-            treadFreq: 4.0,
+            // Gait pack for the shader: sign = which side (-1/+1), magnitude
+            // = stride scale (see buildBlitFrag's TRACK branch).
+            seed: gait.side * strideScale,
         });
+    }
+
+    /** Close a unit's trail + gait state when it dies (PLAN-decal-tracks §8
+     *  E2 / P-d): its ribbon stops growing and fades out, and a reused id
+     *  starts a fresh trail and gait cycle (left foot first). */
+    onEntityDestroy(unitId: number): void {
+        this.trailStore.close(unitId);
+        this.gaitTracker.close(unitId);
     }
 
     /** Build (once per frame) the age-scaled batch of all live marks, pruning
@@ -805,10 +1129,85 @@ export class DecalOverlay {
             this.uInvExtent.set(1 / t.extentX, 1 / t.extentZ);
             this.blitMat.setVector2('uOrigin', this.uOrigin);
             this.blitMat.setVector2('uInvExtent', this.uInvExtent);
+            this.ribbonMat.setVector2('uOrigin', this.uOrigin);
+            this.ribbonMat.setVector2('uInvExtent', this.uInvExtent);
             this.uploadBatch(this.getRebuildBatch());
+            this.buildRibbons();
+            this.ribbonMesh.isVisible = this.ribbonIndexCount > 0;
         } else {
             this.uploadBatch([]);        // nothing to draw — texture persists
+            this.ribbonMesh.isVisible = false;
         }
+    }
+
+    /** Tessellate every live trail into one shared triangle-strip mesh (once
+     *  per frame, shared by both targets). Each station contributes two
+     *  vertices at centre ± normal·halfWidth; consecutive stations form a quad
+     *  from those SAME vertices, so a trail has no interior seam to double-add
+     *  (Q1) and the pattern parameter `s` runs continuously along it (Q3). */
+    private buildRibbons(): void {
+        if (this.frameRibbonBuilt) return;
+        this.frameRibbonBuilt = true;
+
+        const fade = (birth: number) => this.trailStore.fadeAt(birth);
+        const trails = this.trailStore.drawable();
+        const strips: {
+            stations: ReturnType<typeof tessellateTrail>; halfW: number; kind: number; chevron: boolean;
+        }[] = [];
+        let stationCount = 0;
+        for (const t of trails) {
+            const st = tessellateTrail(t, fade);
+            if (st.length < 2) continue;
+            const cat = this.trackCategories[t.trackTypeId] ?? TRACK_TREAD;
+            const chevron = cat === TRACK_WHEEL && (this.wheelChevron[t.trackTypeId] ?? false);
+            strips.push({ stations: st, halfW: t.width * 0.5, kind: KIND_TRACK_BASE + cat, chevron });
+            stationCount += st.length;
+        }
+
+        const vertCount = stationCount * 2;
+        const idxCount = (stationCount - strips.length) * 6; // (n-1) quads per strip
+        this.ribbonIndexCount = Math.max(0, idxCount);
+        if (vertCount === 0 || idxCount <= 0) {
+            this.ribbonIndexCount = 0;
+            return;
+        }
+        this.growRibbonBuffers(vertCount, idxCount);
+
+        const pos = this.ribbonVerts, a = this.ribbonAttrA, b = this.ribbonAttrB, idx = this.ribbonIdx;
+        let v = 0, ii = 0;
+        for (const strip of strips) {
+            const base = v;
+            for (const p of strip.stations) {
+                for (let side = 0; side < 2; side++) {
+                    const across = side === 0 ? -1 : 1;
+                    const o3 = v * RIBBON_POS, o4 = v * RIBBON_A, o2 = v * RIBBON_B;
+                    pos[o3] = p.x + p.nx * strip.halfW * across;
+                    pos[o3 + 1] = p.z + p.nz * strip.halfW * across;
+                    pos[o3 + 2] = 0;
+                    a[o4] = across; a[o4 + 1] = p.s; a[o4 + 2] = p.fade; a[o4 + 3] = strip.kind;
+                    b[o2] = strip.halfW * 2; b[o2 + 1] = RIBBON_DARK_AMP; b[o2 + 2] = RIBBON_DEPTH_AMP;
+                    b[o2 + 3] = strip.chevron ? 1 : 0;
+                    v++;
+                }
+            }
+            ii = writeRibbonIndices(strip.stations.length, base, idx, ii);
+        }
+
+        this.ribbonMesh.setVerticesData('position', pos.subarray(0, vertCount * RIBBON_POS), true, RIBBON_POS);
+        this.ribbonMesh.setVerticesData('ribbon', a.subarray(0, vertCount * RIBBON_A), true, RIBBON_A);
+        this.ribbonMesh.setVerticesData('ribbon2', b.subarray(0, vertCount * RIBBON_B), true, RIBBON_B);
+        this.ribbonMesh.setIndices(idx.subarray(0, ii), vertCount, true);
+    }
+
+    /** Grow the persistent ribbon buffers to fit (never shrink — steady-state
+     *  rebuilds then allocate nothing). */
+    private growRibbonBuffers(verts: number, indices: number): void {
+        if (this.ribbonVerts.length < verts * RIBBON_POS) {
+            this.ribbonVerts = new Float32Array(verts * RIBBON_POS);
+            this.ribbonAttrA = new Float32Array(verts * RIBBON_A);
+            this.ribbonAttrB = new Float32Array(verts * RIBBON_B);
+        }
+        if (this.ribbonIdx.length < indices) this.ribbonIdx = new Uint32Array(indices);
     }
 
     /** Upload a batch of marks as thin instances of the unit quad. */
@@ -835,7 +1234,7 @@ export class DecalOverlay {
             params[i * 4 + 0] = m.kind;
             params[i * 4 + 1] = m.darkAmp;
             params[i * 4 + 2] = m.depthAmp;
-            params[i * 4 + 3] = m.treadFreq;
+            params[i * 4 + 3] = m.seed;
             fades[i] = m.fade ?? 1;
         }
         this.blitMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
@@ -853,9 +1252,12 @@ export class DecalOverlay {
         }
         this.blitMesh.dispose();
         this.blitMat.dispose();
+        this.ribbonMesh.dispose();
+        this.ribbonMat.dispose();
         this.rttCamera.dispose();
         this.marks = [];
-        this.lastTrackPos.clear();
+        this.trailStore.clear();
+        this.gaitTracker.clear();
     }
 }
 

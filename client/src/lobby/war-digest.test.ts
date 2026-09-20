@@ -88,10 +88,10 @@ describe('formatDigestLine', () => {
         // not acquire a "who" even if a team ever rides along.
         expect(formatDigestLine(ev({ kind: 'patch', subject: '11 units retuned, 6 units lost',
                                      detail: 'summary', team: -1 }), SIDES, 0))
-            .toBe('A balance patch reached this war: 11 units retuned, 6 units lost');
+            .toBe('A balance patch reached this mission: 11 units retuned, 6 units lost');
         expect(formatDigestLine(ev({ kind: 'patch', subject: 'bastion',
                                      detail: 'removed', team: 0 }), SIDES, 0))
-            .toBe('bastion was withdrawn from the war');
+            .toBe('bastion was withdrawn from the mission');
     });
 
     it('drops a kind it has no wording for', () => {

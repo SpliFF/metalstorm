@@ -1,0 +1,17 @@
+{
+  "id": "emblem_union",
+  "class": "emblem",
+  "prompt": "The Foundry Union — foundry crews and shipyard guilds, hands-on-the-line loyalty. A crossed hammer-and-wrench motif over a furnace-hatch roundel, hazard-yellow accent on worn steel.",
+  "seed": 100202,
+  "width": 512,
+  "height": 512,
+  "tint": "#c9a227",
+  "output": "art/gen/emblems/union.png",
+  "post": [
+    "bg_key",
+    "pow2",
+    "svg_trace"
+  ],
+  "key_bright_unsat": true,
+  "key_circle": 0.48
+}

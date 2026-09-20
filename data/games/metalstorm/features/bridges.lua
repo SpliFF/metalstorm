@@ -39,9 +39,11 @@
 -- the blocking map's sampled Y and it does NOT make anything walk over a span.
 -- The paragraphs above stand exactly as written: `blocking = false` is still
 -- the right half of a binary choice, and flipping it is still gated on the
--- pathing work, which nobody has done. (And since §2j option A landed,
--- `deck_top` is 0 and the seating half does not fire either — see the next
--- section; the pathing half was never contingent on it.)
+-- pathing work, which nobody has done. (For a month after §2j option A landed
+-- the seating half did not fire on these two defs either, because a truthful
+-- `deck_top` of 0 read as "no deck"; that was repaired on 2026-09-20 and is
+-- written up in the next section. The pathing half was never contingent on
+-- either.)
 --
 -- ============================================================================
 -- THE ORIGIN IS THE DECK (PLAN-maps.md §2j option A, LANDED 2026-08-19)
@@ -87,20 +89,28 @@
 -- finding it cannot tell "no deck" from "deck at 0" (ms_defs.feature_deck_top
 -- raises rather than defaulting, for exactly that reason).
 --
--- ⛔ AND IT COLLIDES WITH THE ENGINE'S SEATING ENCODING. `FeatureSeating::
--- IsSeated` is `deckHeight > 0.0f`, and `ResolveDeckHeight` reads `deck_top`
--- as that number, so a truthful `deck_top = 0` reads to the engine as "no
--- deck declared" and these defs are NO LONGER SEATED. That encoding predates
--- A — it was written when a deck could not be at the origin. It has NO LIVE
--- EFFECT on shipped content: scenariogen stages every chain at y = 0 with
--- every span centre over water (`chain_is_afloat_at`), and at pos.y <= 0 the
--- engine sets the INWATER bit (SolidObject.cpp:48) so `floating = true` below
--- zeroes gravity and the chain holds y = 0 regardless — which is exactly the
--- 0/0/0/0 §M3 measured BEFORE seating existed. What is lost is the case
--- seating was built for: a level deck over a DRY ravine, where each span
--- would again settle onto its own ground. Repairing the encoding (declaring
--- a deck must not mean "positive offset") is ENGINE work and is filed as
--- such; see .tasks/notes/model-integration.md.
+-- ✅ THE ENGINE NOW AGREES — REPAIRED 2026-09-20. For a month it did not, and
+-- the shape of that bug is worth keeping: `FeatureSeating::IsSeated` was
+-- `deckHeight > 0.0f`, so a truthful `deck_top = 0` read as "no deck declared"
+-- and NEITHER of these two defs was seated. The encoding predated A — it was
+-- written when a deck could not be at the origin — and A silently cancelled C.
+-- It had no live effect (scenariogen stages every chain at y = 0 with every
+-- span centre over water via `chain_is_afloat_at`, and at pos.y <= 0 the engine
+-- sets the INWATER bit, SolidObject.cpp:48, so `floating = true` below zeroes
+-- gravity and the chain holds y = 0 regardless — exactly the 0/0/0/0 §M3
+-- measured BEFORE seating existed), but it lost the case seating was built for:
+-- a level deck over a DRY ravine.
+--
+-- The repair split the two facts apart. `FeatureSeating::DeckSpec` carries
+-- `declared` and `height` separately; `ResolveDeck` derives `declared` from the
+-- PRESENCE of this key, never from its value, which is the same raise-don't-
+-- default contract `ms_defs.feature_deck_top` already kept on the Python side.
+-- So publishing `deck_top = '0'` below is what SEATS these defs, and deleting
+-- the key is what would unseat them. Measured on green_flat_x34_v3 (dry,
+-- ground 40.87), three features staged at 80.87: before, ms_road_bridge fell
+-- to 40.87 exactly like the deckless ms_train_wreck control; after, it holds
+-- 80.87 while the control still falls. `FeatureDefs[d].hasDeck` is published
+-- to Lua alongside `deckHeight` for the same reason.
 --
 -- ============================================================================
 -- CHAINING — the acceptance criterion, and why 24.0 exactly is safe
@@ -143,14 +153,14 @@ local function span(t)
     t.indestructible = true            -- implies reclaimable = false; correct, a bridge is not scrap
     t.flammable      = false
     t.upright        = true
-    -- FLOATING IS LOAD-BEARING AGAIN. When the engine-side seating landed
-    -- (§2j option C) it was redundant for these defs, because both published
-    -- a POSITIVE `deck_top` and a seated feature never runs the gravity term
-    -- `floating` zeroes. §2j option A then moved the origin onto the deck and
-    -- `deck_top` became 0, which the engine reads as "no deck declared" — so
-    -- these two defs are unseated once more and `floating` is once again the
-    -- only thing holding a chain level over water. DO NOT REMOVE IT while the
-    -- seating encoding still means "positive offset"; see the header.
+    -- FLOATING IS REDUNDANT FOR A SEATED DEF, AND KEPT ANYWAY. A seated
+    -- feature never runs the gravity term `floating` zeroes, so with the
+    -- seating repair of 2026-09-20 (see the header) every def in this file is
+    -- seated and `floating` changes nothing for them. It is kept because it
+    -- costs nothing, because it is the correct posture for a span regardless,
+    -- and because it is the belt to seating's braces: between option A landing
+    -- and the repair, `floating` was the ONLY thing holding a chain level over
+    -- water, and that is not a hole worth reopening for a one-line saving.
     --
     -- Features are not fixed in the air: CFeature::UpdatePosition applies
     -- gravity every tick and then clamps to
@@ -185,9 +195,12 @@ local function span(t)
     t.metal          = 0
     t.energy         = 0
     t.customparams   = t.customparams or {}
-    t.customparams.ms_feature_kind = 'bridge'
+    -- Defaults, not overrides: the ancient span below publishes its own kind
+    -- and its own (36 m) pitch, and a posture helper must not silently undo a
+    -- def's measured number.
+    t.customparams.ms_feature_kind = t.customparams.ms_feature_kind or 'bridge'
     t.customparams.chain_axis  = 'z'   -- tiles along local Z (RH, -Z forward)
-    t.customparams.chain_pitch = '24'  -- metres between segment centres; measured, exact
+    t.customparams.chain_pitch = t.customparams.chain_pitch or '24'  -- metres between segment centres; measured, exact
     t.customparams.cosmetic_span = '1' -- non-blocking pending the deck-pathing engine ask
     t.customparams.generator = 'Claude Fable 5 (tools/forge)'
     return t
@@ -209,8 +222,9 @@ return {
             -- shipped mesh: 28 verts at y = 0.000 spanning x -4.35..+4.35,
             -- kerb tops 0.22 above it, model floor at -1.50 (was 1.500 above
             -- a pier-base origin running 0.00..4.52). Read by the ENGINE
-            -- (FeatureDef::deckHeight) as well as by content — and zero is
-            -- what stops it seating; see the header.
+            -- (FeatureDef::deck) as well as by content: PRESENCE of this key
+            -- is what seats the def, and zero is simply the offset. See the
+            -- header — that has only been true since 2026-09-20.
             deck_top = '0',
         },
     },
@@ -229,7 +243,50 @@ return {
             -- a vehicle would stand on and what an abutment has to meet, and
             -- it is the surface §2j option A put at y = 0. Model floor at
             -- -3.80 (was 3.80 above a pier-base origin running 0.00..4.15).
+            -- Presence seats it; the 0 is just the offset. See the header.
             deck_top = '0',
+        },
+    },
+
+    -- ------------------------------------------------------------------
+    -- Batch-04 ancient span (units-assets review finding 9, 2026-09-17)
+    -- ------------------------------------------------------------------
+    -- 12.9 m wide, 13.4 m tall, 36.0 m per segment. One impossible shallow
+    -- monolithic arc with no mid-span supports, a seamless deck carrying an
+    -- active cyan guide-channel, a perfect floating alloy ring threaded
+    -- around mid-span, half-plinth footings at both tile ends so segments
+    -- chain. The ancient counterpart of the two steel spans above, and the
+    -- same posture: cosmetic, non-blocking, unselectable, permanent, floating.
+    --
+    -- ⚠️ THE ORIGIN IS THE FOOTINGS, NOT THE DECK. This model predates §2j
+    -- option A and was never re-authored: measured off the shipped glTF the
+    -- footings sit at y = 0 and the trafficable deck is a 136-vertex plateau
+    -- at y = +7.0 m (56 elmos) across the mid-span. So unlike the two spans
+    -- above, its `deck_top` is POSITIVE. That difference used to decide
+    -- whether the engine seated a def at all; since the 2026-09-20 repair it
+    -- decides only WHERE the deck is, and this span is seated for the same
+    -- reason the two above are — it publishes the key. (It was, in fact, the
+    -- only span still seated during the month the sign test was live.) Over
+    -- water that changes nothing (`floating` already holds it). On dry ground
+    -- it is the case seating was built for: stage it at grade and the deck
+    -- reads 7 m above the valley floor, footings on the ground. Value is in
+    -- engine world units (elmos), which is what FeatureSeating::
+    -- ResolveDeckHeight consumes.
+    --
+    -- NOT placed automatically. BRIDGE_SPANS names it under "ancient" the way
+    -- the rail span is named under "rail": available to hand-authored
+    -- scenarios, not chosen by scenariogen's crossing placer, which lays road.
+    ms_anc_bridge_span = span{
+        description = 'Ancient bridge span — self-supporting monolithic arc, 36 m segment',
+        object      = 'ms_anc_bridge_span',
+        footprintx  = 6, footprintz = 18,     -- 12 x 36 m
+        health      = 30000,
+        mass        = 40000,
+        customparams = {
+            ms_feature_kind = 'ancient',      -- overrides span()'s 'bridge': it is both, and the relic reading wins for consumers that filter on kind
+            relic_kind  = 'span',
+            chain_pitch = '36',   -- metres between segment centres; measured, exact (overrides span()'s 24)
+            deck_top    = '56',   -- elmos: the deck plateau at +7.0 m over a footings origin (seated, like every def that publishes the key)
         },
     },
 }

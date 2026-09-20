@@ -36,15 +36,15 @@ std::string Headline(Kind k) {
         case Kind::None:
             return "";
         case Kind::Resuming:
-            return "Your war is coming back — restoring its world now.";
+            return "Your Mission is coming back — restoring its world now.";
         case Kind::Back:
-            return "Your war is running again.";
+            return "Your Mission is running again.";
         case Kind::Hibernated:
-            return "Your war went to sleep. Its world is saved; joining brings "
-                   "it back.";
+            return "Your Mission went to sleep. Its world is saved; joining "
+                   "brings it back.";
         case Kind::Lost:
-            return "Your war stopped without saving its last stretch — some of "
-                   "it is gone.";
+            return "Your Mission stopped without saving its last stretch — "
+                   "some of it is gone.";
     }
     return "";
 }

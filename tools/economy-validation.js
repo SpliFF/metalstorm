@@ -1,188 +1,199 @@
 #!/usr/bin/env node
 
 /**
- * economy-validation.js — acceptance script for economy validation grid
- * (PLAN-metalstorm-economy.md §4, task 4).
+ * economy-validation.js — the economy validation gate
+ * (PLAN-metalstorm-economy.md §4, PLAN-economy-grid.md task 3).
  *
  * Usage:
- *   node tools/economy-validation.js <results-dir>
+ *   node tools/economy-validation.js [--seed N ...] [--json] [--lua PATH]
  *
- * Reads all .json stats dumps from <results-dir>, applies acceptance criteria
- * from economy_validation_grid.json, emits a pass/fail verdict + summary stats.
+ * This is a THIN RUNNER. It spawns `lua` on
+ * `data/games/metalstorm/LuaRules/Gadgets/authority/economy_sim.lua`, prints
+ * the grid it emits, and exits non-zero if any cell is outside its acceptance
+ * band. All the arithmetic — the cost formula, the escrow ledger, the rate
+ * EMAs, the generator's caps and rewards — happens in Lua against the real
+ * game modules. Nothing is reimplemented here, deliberately.
+ *
+ * ── Why it no longer drives headless runs ──────────────────────────────────
+ *
+ * It used to read `.json` stats dumps from a matrix of headless server runs.
+ * PLAN-economy-grid.md's autopsy (B1–B7) found every layer of that broken, and
+ * two findings killed the approach rather than the implementation:
+ *
+ *   * B6 — every criterion read `run.data.economy.teams`, a key the engine has
+ *     never written. `StatsDump` is a fixed 15-field C++ struct with no Lua
+ *     hook, and the economy metrics live in a Lua-local. Each check iterated an
+ *     empty object and returned true, so the grid went green on ANY dump.
+ *   * B7d — `gsRNG.SetSeed(18655, true)` is hard-coded, so the four-seed axis
+ *     produced four byte-identical runs and "≥90% of runs pass" was n=1.
+ *
+ * Both are consequences of measuring the economy from outside the sim. The
+ * economy needs no map, no units and no pathfinder to exercise, so the harness
+ * now runs it directly and the seed axis is a real one.
+ *
+ * What this does NOT cover: whether units can reach the objectives, whether the
+ * AI spends the way the player model assumes, whether a map produces the
+ * contest the control rule keys on. Those need a live match and always will.
  *
  * Exit codes:
- *   0 = grid passes (≥90% of runs meet all criteria)
- *   1 = grid fails (too many runs failed)
- *   2 = error (missing files, parse failures, etc.)
+ *   0 = every cell inside every band
+ *   1 = at least one cell outside a band
+ *   2 = the harness could not be run (no lua, load error, bad output)
  */
 
-const fs = require('fs');
+const { spawnSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
-// Acceptance criteria (from PLAN-metalstorm-economy.md §4)
-const ACCEPTANCE = {
-  velocityRange: [0.6, 1.5],
-  velocityAfterFrame: 2592000,  // day 1 in sim frames
-  poolRatioMax: 8,
-  deadTeamTimePctMax: 1,
-  joinGrantMintPctMax: 10,
-  passThreshold: 0.9,  // ≥90% of runs must pass
-};
+const GADGETS_DIR = path.join(
+  __dirname, '..', 'data', 'games', 'metalstorm', 'LuaRules', 'Gadgets');
+const SIM = path.join('authority', 'economy_sim.lua');
 
-function loadStatsFiles(dir) {
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-  const runs = [];
-  for (const file of files) {
-    const fullPath = path.join(dir, file);
-    try {
-      const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-      runs.push({ file, data });
-    } catch (err) {
-      console.error(`WARN: Failed to parse ${file}: ${err.message}`);
+function parseArgs(argv) {
+  const opts = { seeds: [], json: false, lua: 'lua' };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--seed') opts.seeds.push(Number(argv[++i]));
+    else if (a === '--json') opts.json = true;
+    else if (a === '--lua') opts.lua = argv[++i];
+    else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(2);
     }
   }
-  return runs;
+  if (opts.seeds.length === 0) opts.seeds = [1, 2, 3, 4];
+  return opts;
 }
 
-function checkVelocity(run) {
-  // Velocity ∈ [0.6, 1.5] after day 1
-  const teams = run.data.economy?.teams || {};
-  for (const teamID in teams) {
-    const timeline = teams[teamID].velocity_timeline || [];
-    const afterDay1 = timeline.filter(e => e.frame >= ACCEPTANCE.velocityAfterFrame);
-    if (afterDay1.length === 0) continue;  // No data after day 1 — skip team
-    for (const entry of afterDay1) {
-      if (entry.velocity < ACCEPTANCE.velocityRange[0] || entry.velocity > ACCEPTANCE.velocityRange[1]) {
-        return false;
-      }
+/** Run the Lua harness for one seed; returns its TSV on stdout. */
+function runSeed(opts, seed) {
+  const res = spawnSync(opts.lua, [SIM, String(seed)], {
+    cwd: GADGETS_DIR,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (res.error) {
+    if (res.error.code === 'ENOENT') {
+      console.error(`ERROR: '${opts.lua}' not found on PATH. Install Lua, or pass --lua <path>.`);
+    } else {
+      console.error(`ERROR: could not run ${opts.lua}: ${res.error.message}`);
     }
+    process.exit(2);
   }
-  return true;
+  if (res.status !== 0) {
+    console.error(`ERROR: economy_sim.lua exited ${res.status}`);
+    if (res.stderr) console.error(res.stderr.trim());
+    process.exit(2);
+  }
+  return res.stdout;
 }
 
-function checkPoolRatio(run) {
-  // Pool ratio < 8 sustained (checked at end of run)
-  const teams = run.data.economy?.teams || {};
-  for (const teamID in teams) {
-    const poolRatio = teams[teamID].final_pool_ratio || 0;
-    if (poolRatio >= ACCEPTANCE.poolRatioMax) {
-      return false;
-    }
+/** TSV (header row + data rows) -> array of objects. */
+function parseTSV(tsv) {
+  const lines = tsv.split('\n').filter(l => l.trim().length > 0);
+  if (lines.length < 2) {
+    console.error('ERROR: economy_sim.lua produced no rows');
+    console.error(tsv);
+    process.exit(2);
   }
-  return true;
+  const header = lines[0].split('\t');
+  return lines.slice(1).map(line => {
+    const cells = line.split('\t');
+    const row = {};
+    header.forEach((key, i) => {
+      const raw = cells[i] === undefined ? '' : cells[i];
+      const num = Number(raw);
+      row[key] = (raw !== '' && !Number.isNaN(num)) ? num : raw;
+    });
+    return row;
+  });
 }
 
-function checkDeadTeamTime(run) {
-  // Dead-team time < 1% of runtime (excluding end-game = final 10%)
-  const totalFrames = run.data.finalFrame || 0;
-  const endGameStart = totalFrames * 0.9;
-  const teams = run.data.economy?.teams || {};
-  for (const teamID in teams) {
-    const deadFrames = teams[teamID].dead_frames_before_endgame || 0;
-    const pct = (deadFrames / endGameStart) * 100;
-    if (pct >= ACCEPTANCE.deadTeamTimePctMax) {
-      return false;
-    }
-  }
-  return true;
+function pad(s, n) {
+  s = String(s);
+  return s.length >= n ? s : s + ' '.repeat(n - s.length);
 }
 
-function checkJoinGrantInflation(run) {
-  // Join grants < 10% of total mint (churn-amplified runs only)
-  const teams = run.data.economy?.teams || {};
-  for (const teamID in teams) {
-    const counters = teams[teamID].ledger || {};
-    const mint = counters.mint || 0;
-    const joinGrantMint = counters.join_grant_mint || 0;  // Assuming ledger tracks this separately
-    if (mint > 0) {
-      const pct = (joinGrantMint / mint) * 100;
-      if (pct >= ACCEPTANCE.joinGrantMintPctMax) {
-        return false;
-      }
-    }
-  }
-  return true;
+function num(v, dp) {
+  return typeof v === 'number' ? v.toFixed(dp) : String(v);
 }
 
-function validateRun(run) {
-  const checks = {
-    velocity: checkVelocity(run),
-    poolRatio: checkPoolRatio(run),
-    deadTeamTime: checkDeadTeamTime(run),
-    joinGrantInflation: checkJoinGrantInflation(run),
-  };
-  const passed = Object.values(checks).every(Boolean);
-  return { passed, checks };
+function printTable(rows) {
+  console.log([
+    pad('type', 9), pad('dens', 7), pad('seed', 5), pad('veloc', 7),
+    pad('mint/m', 9), pad('burn/m', 9), pad('pool×', 8), pad('escrow', 7),
+    pad('broke', 7), pad('dead', 7), pad('objs', 6), pad('done', 6), 'verdict',
+  ].join(' '));
+  console.log('-'.repeat(110));
+  for (const r of rows) {
+    console.log([
+      pad(r.type, 9), pad(r.density, 7), pad(r.seed, 5), pad(num(r.velocity, 3), 7),
+      pad(num(r.mintRate, 1), 9), pad(num(r.burnRate, 1), 9),
+      pad(num(r.poolRatio, 2), 8), pad(r.escrowFloat, 7),
+      pad(num(r.timeToBrokeMinutes, 1), 7), pad(num(r.deadMinutes, 1), 7),
+      pad(r.created, 6), pad(r.completed, 6),
+      r.verdict === 'PASS' || r.verdict === 'INFO'
+        ? r.verdict : `FAIL  ${r.failures}`,
+    ].join(' '));
+  }
 }
 
 function main() {
-  const resultsDir = process.argv[2];
-  if (!resultsDir) {
-    console.error('Usage: node tools/economy-validation.js <results-dir>');
+  const opts = parseArgs(process.argv.slice(2));
+
+  if (!fs.existsSync(path.join(GADGETS_DIR, SIM))) {
+    console.error(`ERROR: ${path.join(GADGETS_DIR, SIM)} not found`);
     process.exit(2);
   }
 
-  if (!fs.existsSync(resultsDir)) {
-    console.error(`ERROR: Results directory ${resultsDir} does not exist`);
-    process.exit(2);
-  }
+  const rows = [];
+  for (const seed of opts.seeds) rows.push(...parseTSV(runSeed(opts, seed)));
 
-  console.log(`Loading stats dumps from ${resultsDir}...`);
-  const runs = loadStatsFiles(resultsDir);
-  if (runs.length === 0) {
-    console.error('ERROR: No valid .json stats files found');
-    process.exit(2);
-  }
-  console.log(`Loaded ${runs.length} runs.`);
-
-  const results = runs.map(run => ({
-    file: run.file,
-    ...validateRun(run),
-  }));
-
-  const passed = results.filter(r => r.passed).length;
-  const passRate = passed / results.length;
-
-  console.log('\n=== VALIDATION SUMMARY ===');
-  console.log(`Total runs: ${results.length}`);
-  console.log(`Passed: ${passed} (${(passRate * 100).toFixed(1)}%)`);
-  console.log(`Failed: ${results.length - passed}`);
-  console.log('');
-
-  // Per-criterion breakdown
-  const criterionCounts = { velocity: 0, poolRatio: 0, deadTeamTime: 0, joinGrantInflation: 0 };
-  for (const r of results) {
-    for (const criterion in criterionCounts) {
-      if (!r.checks[criterion]) criterionCounts[criterion]++;
-    }
-  }
-  console.log('Failures by criterion:');
-  for (const criterion in criterionCounts) {
-    console.log(`  ${criterion}: ${criterionCounts[criterion]} runs`);
-  }
-  console.log('');
-
-  // List failed runs
-  const failedRuns = results.filter(r => !r.passed);
-  if (failedRuns.length > 0 && failedRuns.length <= 10) {
-    console.log('Failed runs:');
-    for (const r of failedRuns) {
-      const failedCriteria = Object.keys(r.checks).filter(c => !r.checks[c]);
-      console.log(`  ${r.file}: ${failedCriteria.join(', ')}`);
-    }
-    console.log('');
-  }
-
-  // Verdict
-  if (passRate >= ACCEPTANCE.passThreshold) {
-    console.log(`✅ GRID PASSES (${(passRate * 100).toFixed(1)}% ≥ ${ACCEPTANCE.passThreshold * 100}%)`);
-    console.log('Constants in authority_cost.lua are validated. No tuning needed.');
-    process.exit(0);
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
   } else {
-    console.log(`❌ GRID FAILS (${(passRate * 100).toFixed(1)}% < ${ACCEPTANCE.passThreshold * 100}%)`);
-    console.log('Economy constants need adjustment. See failures above.');
-    process.exit(1);
+    printTable(rows);
   }
+
+  // INFO rows (the `mixednorm` reward-normalisation probe) are measured and
+  // printed, never graded — see economy_sim.lua's M.INFO_TYPES.
+  const failed = rows.filter(r => r.verdict !== 'PASS' && r.verdict !== 'INFO');
+
+  console.log('');
+  const info = rows.filter(r => r.verdict === 'INFO');
+  console.log(`Cells: ${rows.length}  passed: ${rows.length - failed.length - info.length}`
+    + `  failed: ${failed.length}  informational: ${info.length}`);
+  if (info.length > 0) {
+    console.log('\n`mixednorm` is the reward-normalisation probe (economy §3.2 lever 2):');
+    console.log('the `mixed` war with the lever ON. Measured, never graded — the shipped');
+    console.log('spec has `reward_normalisation_enabled = false`. Compare it to `mixed`.');
+  }
+
+  if (failed.length === 0) {
+    console.log('✅ Every cell is inside its acceptance band.');
+    process.exit(0);
+  }
+
+  // Which band, and how often. A single out-of-band constant usually shows up
+  // as one band failing across many cells, which is the useful shape to see.
+  const byBand = new Map();
+  for (const r of failed) {
+    for (const f of String(r.failures).split('; ')) {
+      if (!f) continue;
+      const band = f.split(' ')[0];
+      byBand.set(band, (byBand.get(band) || 0) + 1);
+    }
+  }
+  console.log('\nFailures by band:');
+  for (const [band, count] of [...byBand].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${pad(band, 14)} ${count} cell(s)`);
+  }
+  console.log('\n❌ The economy is outside its bands. Read the `mixed` rows first:');
+  console.log('   they are the only cells where all six generator rules run at once,');
+  console.log('   which is what a real war looks like. A per-type row failing alone');
+  console.log('   says that rule cannot fund a team by itself — which it is not');
+  console.log('   meant to.');
+  process.exit(1);
 }
 
 main();

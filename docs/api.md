@@ -731,6 +731,32 @@ when the lobby has no `--replay-dir`.
   422 with the parser's own error for an unreadable recording. There is deliberately no
   start-frame parameter — seeking travels as a `ReplayControl::Seek` after attach.
 
+### Broadcasts
+
+Delayed spectating (PLAN-beta-broadcast.md): a live mission's outbound spectator stream is
+tapped to a `.msb` log (`--broadcast-out`, set automatically per room when the lobby was
+started with `--broadcast-dir`); watching one goes through a **relay** process that never
+GameStarts or ticks the sim. Both routes are **token required** (a guest token passes, same as
+every other spectate route) and 404 with a clear message when the lobby has no
+`--broadcast-dir`.
+
+- **POST /api/broadcasts/list** → `{dir, broadcasts:[...]}`, newest segment first. Each row is
+  `{file, mission_title, map, game, state, behind_seconds, available_since, duration,
+  watching_room}`. `state` is `"live"` while the mission is still running (or its tap died
+  mid-write) and `"recorded"` once it closed cleanly. Only logs whose start time plus the
+  enforced delay has already elapsed are listed at all — the one-hour floor
+  (`kMinBroadcastDelaySec`, `BroadcastRelay.h`) is compiled into the relay, so a segment never
+  advertises availability the relay would then refuse.
+- **POST /api/broadcasts/watch** `{file}` → the same room JSON every other room route returns,
+  with `is_broadcast: true` and `broadcast_file` (spawns a relay on a `9100+` port, or **joins
+  the existing relay room** for a file already being watched — one relay serves every watcher
+  of a segment, each on their own cursor). 422 with the parser's own error for an unreadable
+  log. Beta serves one segment only: hibernate/end closes it, and a resumed mission opens a
+  fresh one — there is no stitching across segments.
+
+Old `.msb` files are swept on the existing hourly maintenance pass once their own file age
+(not the mission's) passes `--broadcast-retention-days` (default 14; `<= 0` disables it).
+
 ### GM tools
 
 The per-game GM verbs (pause/rollback/grant/broadcast/inspect/kick) live on each game

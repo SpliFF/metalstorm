@@ -28,6 +28,8 @@
 //   • datagram = quarter-stream-id-prefixed QUIC datagram.
 
 #include "WebTransportServer.h"
+
+#include "Server/BroadcastTap.h"  // kTapClientId
 #include "Server/NetworkServer.h" // InboundMessage
 
 #include <ngtcp2/ngtcp2.h>
@@ -1493,6 +1495,13 @@ void WebTransportServer::ReloadCert() { impl_->forceReload.store(true); }
 
 void WebTransportServer::SendStream(ClientID clientId, StreamClass cls,
                                     const uint8_t* data, size_t len, uint32_t lane) {
+    // The broadcast tap has no QUIC connection: its bytes go to the log and
+    // stop there. Enqueueing them would hand the network thread a client id
+    // that will never resolve. Before the suppression check — see SetTapSink.
+    if (tapSink_ && clientId == broadcast::kTapClientId) {
+        tapSink_(clientId, cls, lane, /*broadcast=*/false, data, len);
+        return;
+    }
     if (outboundSuppressed_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(impl_->txMutex);
     impl_->pendingTx.push_back({clientId, false, cls, lane, std::vector<uint8_t>(data, data + len)});
@@ -1500,6 +1509,10 @@ void WebTransportServer::SendStream(ClientID clientId, StreamClass cls,
 
 void WebTransportServer::BroadcastStream(StreamClass cls, const uint8_t* data, size_t len,
                                          uint32_t lane) {
+    // A broadcast reaches the tap AND the wire: it is addressed to everyone,
+    // and `broadcast=1` tells a relay to fan it out per watcher rather than
+    // replay it to one.
+    if (tapSink_) tapSink_(0, cls, lane, /*broadcast=*/true, data, len);
     if (outboundSuppressed_.load(std::memory_order_relaxed)) return;
     std::lock_guard<std::mutex> lk(impl_->txMutex);
     impl_->pendingTx.push_back({0, true, cls, lane, std::vector<uint8_t>(data, data + len)});

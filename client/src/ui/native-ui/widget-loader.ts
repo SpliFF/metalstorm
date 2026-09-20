@@ -25,6 +25,7 @@ import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
 import { uiActionRegistry } from './ui-action-registry.js';
 import { globalSurface, parseMenuMount } from './global-surface.js';
 import { focusModel, type NLFocusView } from './focus-model.js';
+import { getAccessToken, browserTokenStore, type TokenStore } from '../../lobby/auth-tokens.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -141,6 +142,11 @@ export interface WidgetContext {
      * the shape and ships the helpers that read it.
      */
     focus?: WidgetFocusPort;
+    /** Authenticated door to the lobby's `/api/*` for a game-dir widget.
+     *  Always present on a context the loader builds (`loadWidget` below);
+     *  optional here only so the hand-built contexts in other widgets' tests
+     *  don't all need one to keep typechecking. */
+    api?: WidgetApiPort;
 }
 
 /** The focus slice a game-dir widget may read. Ids never cross this seam. */
@@ -162,6 +168,45 @@ function createFocusPort(): WidgetFocusPort {
         openSurface: (id) => focusModel.openSurface(id),
         closeSurface: (id) => focusModel.closeSurface(id),
         isSurfaceOpen: (id) => focusModel.isSurfaceOpen(id),
+    };
+}
+
+/**
+ * The lobby-API door for a game-dir widget (journey-lobby-routes fire 2 —
+ * `mentor-card.js`'s `fetch('/api/mentor/ai', {credentials:'include'})`
+ * always 401s: the lobby has no cookie auth, only `Authorization: Bearer`,
+ * and a game-dir module is a standalone ES module with no import of the
+ * client's token code to get one).
+ */
+export interface WidgetApiPort {
+    /** Fetch against the lobby, with the bearer token attached when one is
+     *  held. `path` is resolved against `lobbyBase` unless it is already
+     *  absolute; any `init.headers` a widget passes are kept, not replaced. */
+    fetch(path: string, init?: RequestInit): Promise<Response>;
+    /** The lobby's HTTP base, for a widget that needs to build its own URL. */
+    lobbyBase: string;
+}
+
+/**
+ * Build a `WidgetApiPort`. `store`/`fetchImpl` are injectable so this is
+ * testable without a browser; every real widget gets the browser defaults.
+ */
+export function createWidgetApiPort(
+    lobbyBase: string,
+    store: TokenStore = browserTokenStore,
+    fetchImpl: typeof fetch = fetch,
+): WidgetApiPort {
+    return {
+        lobbyBase,
+        fetch(path, init = {}) {
+            const url = /^https?:\/\//i.test(path)
+                ? path
+                : `${lobbyBase}${path.startsWith('/') ? '' : '/'}${path}`;
+            const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+            const token = getAccessToken(store);
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            return fetchImpl(url, { ...init, headers });
+        },
     };
 }
 
@@ -229,6 +274,10 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     'briefing-panel': () => import('./briefing-panel.js'),
 };
 
+/** Sessions after which the HUD stops growing and arrives whole (PLAN-beta.md
+ *  §(b) — `sessions_played < 3`). */
+export const NEW_PLAYER_SESSIONS = 3;
+
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */
 const GAME_STYLE_TIMEOUT_MS = 5000;
 
@@ -246,14 +295,25 @@ export class WidgetLoader {
     private uiRoot: HTMLElement | null = null;
     private sendCommandProvider: ((cmd: any) => void) | null = null;
     private gameId = '';
+    /** The lobby's HTTP base for this session, handed to every widget as
+     *  `ctx.api.lobbyBase` / used to resolve `ctx.api.fetch`'s relative paths. */
+    private httpBase = '';
     /** Local DB account id, surfaced as `ctx.identity.accountId`. Distinct
      *  from the sim playerNum threaded through as `playerId`. */
     private accountId = 0;
     /** PLAN-metalstorm-onboarding.md §4 — gates `hideForSpectator` widgets. */
     private isSpectator = false;
-    /** PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
-     *  every widget mounts at load. Onboarding gates this on `sessions_played`
-     *  so a veteran account gets the whole HUD immediately. */
+    /**
+     * PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
+     * every widget mounts at load.
+     *
+     * Set from the account's `sessions_played < 3` at each `load()`
+     * (PLAN-beta.md §(b)): the first three missions are the only ones a HUD
+     * that grows is worth the confusion of, and a returning player must never
+     * have to re-earn panels they have already used. An account route that is
+     * missing or unreachable leaves whatever `setProgressiveDisclosure` last
+     * said — a failed fetch must not silently re-hide a veteran's HUD.
+     */
     private progressiveDisclosure = true;
     /** Unsubscribe fns for widgets still waiting on their `revealOn`. */
     private pendingReveals = new Map<string, () => void>();
@@ -282,6 +342,28 @@ export class WidgetLoader {
     }
 
     /**
+     * Gate disclosure on how many missions this account has played.
+     *
+     * `/api/account/me` is the accounts lane's route (PLAN-beta.md §(b)); it
+     * does not exist yet on every build, and a guest has no account at all, so
+     * every failure mode here is "leave the flag as it is" rather than a
+     * default — the HUD must not change shape because a fetch timed out.
+     */
+    private async readSessionsPlayed(httpBase: string): Promise<void> {
+        try {
+            const res = await fetch(`${httpBase}/api/account/me`, { credentials: 'include' });
+            if (!res.ok) return;
+            const me = await res.json() as { sessions_played?: number };
+            if (typeof me?.sessions_played !== 'number') return;
+            this.progressiveDisclosure = me.sessions_played < NEW_PLAYER_SESSIONS;
+            console.log(`[widget-loader] progressiveDisclosure=${this.progressiveDisclosure} ` +
+                `(sessions_played=${me.sessions_played})`);
+        } catch {
+            /* no account route on this build — keep the current setting */
+        }
+    }
+
+    /**
      * Load and mount all widgets for the given game.
      *
      * @param gameId - Game identifier (e.g., "metalstorm")
@@ -301,12 +383,16 @@ export class WidgetLoader {
         accountId: number = 0,
     ): Promise<void> {
         this.gameId = gameId;
+        this.httpBase = httpBase;
         this.isSpectator = role === 'spectator';
         // Held on the instance rather than threaded through armReveal /
         // loadWidget: it is session-constant and only the ctx builder reads it.
         this.accountId = accountId;
         const generation = this.generation;
         const stale = () => this.generation !== generation;
+
+        await this.readSessionsPlayed(httpBase);
+        if (stale()) return;
 
         // Fetch the widget manifest
         const manifest = await this.fetchManifest(gameId, httpBase);
@@ -759,6 +845,7 @@ export class WidgetLoader {
             strategicMap: this.createStrategicMapStub(),
             setBadge: panel ? panel.setBadge : () => {},
             focus: createFocusPort(),
+            api: createWidgetApiPort(this.httpBase),
         };
 
         // Initialize widget

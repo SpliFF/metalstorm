@@ -1,0 +1,206 @@
+/*
+ * tokens.css — the ONE place a colour, a typeface or a surface texture is
+ * named (data/games/metalstorm/art/DIRECTION.md).
+ *
+ * Two layers:
+ *
+ *   --ms-*    the raw art-direction register, verbatim from DIRECTION.md's
+ *             palette table. Never referenced outside this file.
+ *   --nui-*   the semantic design-system tokens every stylesheet consumes.
+ *
+ * Everything else in the tree (native-ui.css, hud.css, the game skins, the
+ * bundled widgets) spends tokens and names no colour of its own — guarded by
+ * `tokens.test.ts`. Geometry/occlusion tokens (--nui-rail-*, --nui-inset,
+ * --hud-*-reserve) deliberately do NOT live here: they belong to the files
+ * that own that geometry (native-ui.css, hud/hud.css).
+ *
+ * Loaded as a real stylesheet from client/index.html, not injected: the
+ * files that consume it are `?raw` imports pushed into a <style> element,
+ * where a relative `@import` would resolve against the page URL instead of
+ * the module and 404 in a production build.
+ *
+ * UI metaphor (ONE): stencilled steel plate. Matte steel, 1px chalk
+ * hairline, rivets on top-level panels only, hazard stripe only on
+ * destructive actions, phosphor-on-black recessed readouts, radius <= 2px,
+ * no drop shadows — a 1px dark inset edge instead.
+ */
+
+/* ── fonts ─────────────────────────────────────────────────────────────
+   Self-hosted OFL woff2, latin subset only (ASSETS.md § Fonts). `swap` so a
+   cold cache shows the fallback rather than an empty HUD. Fallback stacks
+   are metric-adjacent on purpose: Arial Narrow for the condensed display,
+   the platform mono for readouts. */
+
+@font-face {
+    font-family: 'Barlow Condensed';
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url('/fonts/barlow-condensed-600-latin.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Barlow Condensed';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/barlow-condensed-700-latin.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Barlow';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/barlow-400-latin.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'IBM Plex Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'IBM Plex Mono';
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url('/fonts/ibm-plex-mono-500-latin.woff2') format('woff2');
+}
+
+:root {
+    /* ══ raw register — DIRECTION.md palette table ═══════════════════ */
+    --ms-olive: #3d3a2e;
+    --ms-khaki: #6b5a3e;
+    --ms-bone: #8a7f6a;
+    --ms-steel: #2b2e31;
+    --ms-steel-lit: #5a5f63;
+    --ms-rust: #7a3b1e;
+    --ms-hazard: #c9a227;
+    --ms-chalk: #d8dcd6;
+    --ms-hot: #e0561f;
+    --ms-phosphor: #7fd0c8;
+    --ms-blood: #9a2f2f;
+    --ms-green: #8fae5a;
+
+    /* Shades of the steel register. Derived, not new hues: the plate lit
+       from above, the plate in shadow, and the near-black behind readout
+       glass. */
+    --ms-steel-hi: #31353a;
+    --ms-steel-lo: #24272a;
+    --ms-steel-raised: #383c40;
+    --ms-steel-hover: #464b50;
+    --ms-glass: #0b0d0e;
+    --ms-void: #050607;
+    /* Text tints: the blood red and field green lightened until they clear
+       AA on plate. The tabled values stay the FILL colours. */
+    --ms-blood-text: #cf6a5c;
+    --ms-green-text: #a8c46a;
+
+    /* ══ surfaces ═══════════════════════════════════════════════════ */
+    /* The plate: one flat steel colour plus a 3% top-lit sheen. That sheen
+       is the only gradient the metaphor allows. */
+    --nui-plate-color: var(--ms-steel);
+    --nui-plate:
+        linear-gradient(180deg, rgba(216, 220, 214, 0.05) 0, rgba(216, 220, 214, 0) 16px),
+        linear-gradient(180deg, var(--ms-steel-hi) 0%, var(--ms-steel-lo) 100%);
+    --nui-bg: var(--nui-plate-color) var(--nui-plate);
+    --nui-bg-head: var(--ms-steel-lo);
+    --nui-bg-sunken: var(--ms-glass);
+    --nui-bg-raised: var(--ms-steel-raised);
+    --nui-bg-hover: var(--ms-steel-hover);
+    /* Panels that float over the battle rather than docking (menus, rung-4,
+       chips) sit on the same plate, dimmed so the world reads through. */
+    --nui-bg-float: rgba(38, 41, 44, 0.93);
+    /* The faintest surface in the system: a list row lifted off the plate. */
+    --nui-row-wash: rgba(216, 220, 214, 0.035);
+
+    /* ══ lines ══════════════════════════════════════════════════════
+       Chalk, at three weights. A hairline is chalk on steel, never a
+       lighter steel — that is what makes the plate read as stencilled. */
+    --nui-hairline: rgba(216, 220, 214, 0.24);
+    --nui-border: rgba(216, 220, 214, 0.13);
+    --nui-border-hi: rgba(216, 220, 214, 0.30);
+    --nui-border-sunken: var(--ms-void);
+    /* A ring on an arbitrary-hued swatch (team/faction colour chips): plain
+       black is the only border that reads over every hue on the plate. */
+    --nui-border-swatch: rgba(0, 0, 0, 0.6);
+
+    /* No drop shadows anywhere. Depth is a 1px inset edge: light on the top
+       lip, dark under the bottom one. --nui-edge raises, --nui-edge-sunken
+       recesses (readout glass, inputs). */
+    --nui-edge:
+        inset 0 1px 0 rgba(216, 220, 214, 0.07),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.55);
+    --nui-edge-sunken:
+        inset 0 1px 3px rgba(0, 0, 0, 0.85),
+        inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+
+    /* ══ text ═══════════════════════════════════════════════════════ */
+    --nui-text: var(--ms-chalk);
+    --nui-text-dim: #a5a99f;
+    --nui-text-faint: #7b7f75;
+    /* Text ON an accent fill (badges, selected menu rows). */
+    --nui-text-on-accent: #0b1a19;
+    --nui-text-bright: #f2f4f0;
+
+    /* ══ signals ════════════════════════════════════════════════════
+       accent = phosphor, the colour of anything powered and reporting.
+       gold   = hazard yellow: warning, selection, mission-critical.
+       good/bad are the TEXT tints; *-fill are the tabled colours. */
+    --nui-accent: var(--ms-phosphor);
+    --nui-accent-dim: #35625e;
+    --nui-accent-wash: rgba(127, 208, 200, 0.14);
+    --nui-gold: var(--ms-hazard);
+    --nui-gold-wash: rgba(201, 162, 39, 0.16);
+    --nui-good: var(--ms-green-text);
+    --nui-good-fill: var(--ms-green);
+    --nui-good-wash: rgba(143, 174, 90, 0.16);
+    --nui-bad: var(--ms-blood-text);
+    --nui-bad-fill: var(--ms-blood);
+    --nui-bad-wash: rgba(154, 47, 47, 0.18);
+    --nui-hot: var(--ms-hot);
+    --nui-rust: var(--ms-rust);
+
+    /* The scrim behind a full-screen overlay: dusty dark, not neutral. */
+    --nui-scrim: rgba(11, 13, 14, 0.8);
+
+    /* ══ texture ════════════════════════════════════════════════════ */
+    /* Rivets: one chalk highlight dot with a dark seat, painted at the four
+       corners of top-level panels only. */
+    --nui-rivet: radial-gradient(
+        circle at 50% 42%,
+        rgba(216, 220, 214, 0.34) 0 1px,
+        rgba(0, 0, 0, 0.55) 1px 2.2px,
+        transparent 2.4px);
+    /* Hazard stripe — destructive actions, nothing else. */
+    --nui-hazard-stripe: repeating-linear-gradient(
+        135deg,
+        var(--ms-hazard) 0 3px,
+        #17160f 3px 6px);
+    /* Grime overlay for large panels. `none` until L-IMAGEGEN delivers the
+       worn-metal plate: set this to a url() (6-10% alpha) and every large
+       panel picks it up with no rule change. */
+    --nui-grime: none;
+
+    /* ══ type ═══════════════════════════════════════════════════════ */
+    --nui-family-display: 'Barlow Condensed', 'Arial Narrow', system-ui, sans-serif;
+    --nui-family-text: 'Barlow', system-ui, sans-serif;
+    --nui-family-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+
+    /* Prose and control labels. */
+    --nui-font: 400 12.5px/1.45 var(--nui-family-text);
+    /* Stencil: headers, buttons, tabs, every uppercase label. Pair with
+       --nui-track; the size is set per-use. */
+    --nui-font-display: 600 12px/1.15 var(--nui-family-display);
+    --nui-font-display-hi: 700 12px/1.15 var(--nui-family-display);
+    /* Readouts: numbers, keys, paths, anything that must not reflow. */
+    --nui-font-mono: 400 11px/1.4 var(--nui-family-mono);
+    --nui-font-mono-hi: 500 11px/1.4 var(--nui-family-mono);
+    /* Display tracking, +4% (DIRECTION.md). */
+    --nui-track: 0.04em;
+
+    /* ══ metric ═════════════════════════════════════════════════════ */
+    /* The one radius in the system. Nothing rounds further; pills and
+       circles that survive (the edge pointers) are shapes, not corners. */
+    --nui-radius: 2px;
+}

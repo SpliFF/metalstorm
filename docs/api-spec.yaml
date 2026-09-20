@@ -929,6 +929,62 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Room" }
 
+  /api/broadcasts/list:
+    post:
+      summary: List mission broadcasts available to watch
+      description: >
+        404 if the lobby has no --broadcast-dir set. Only logs whose start
+        time plus the enforced delay (one hour, compiled into the relay) has
+        already elapsed are listed, newest segment first.
+      tags: [Broadcasts]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dir: { type: string }
+                  broadcasts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file: { type: string }
+                        mission_title: { type: string }
+                        map: { type: string }
+                        game: { type: string }
+                        state: { type: string, enum: [live, recorded] }
+                        behind_seconds: { type: integer }
+                        available_since: { type: integer, description: "Unix seconds" }
+                        duration: { type: integer, description: "Seconds tapped so far" }
+                        watching_room: { type: integer, nullable: true }
+
+  /api/broadcasts/watch:
+    post:
+      summary: Watch a mission broadcast
+      description: >
+        Joins the existing relay room for this file, or spawns one on a
+        9100+ port. 404 if the lobby has no --broadcast-dir set or the file
+        does not exist there; 422 if the log cannot be read.
+      tags: [Broadcasts]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string }
+      responses:
+        "200":
+          description: Room JSON with is_broadcast true and broadcast_file set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+
   /api/client-errors:
     post:
       summary: Submit a client-side crash/fatal report

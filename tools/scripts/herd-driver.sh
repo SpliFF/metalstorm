@@ -3,7 +3,7 @@
 # No scheduler exists; the hourly LaunchAgent stays disabled. Stop: touch .tasks/driver.stop
 REPO="${REPO:-/Users/shannon/WarriorHut/Projects/springrts-web}"
 INTERVAL="${INTERVAL:-120}"
-export PATH="$HOME/.nvm/versions/node/v22.13.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/v22.13.0/bin:/usr/bin:/bin:$PATH"
 LOG="$REPO/.tasks/logs/driver.log"
 mkdir -p "$REPO/.tasks/logs"
 echo "$(date '+%F %T') driver start pid $$ interval ${INTERVAL}s" >> "$LOG"
@@ -12,9 +12,14 @@ while true; do
   if [ -f "$REPO/.tasks/PAUSED" ] || [ -f "$REPO/.tasks/pause" ]; then sleep "$INTERVAL"; continue; fi
   line=$(taskherd status -C "$REPO" 2>/dev/null | head -1)
   max=$(echo "$line" | sed -n 's/.*max \([0-9]*\).*/\1/p'); running=$(echo "$line" | sed -n 's/.*running \([0-9]*\).*/\1/p')
+  # With parallel.max <= 1 taskherd prints no "parallel:" header; taskherd run itself
+  # refuses while a step is running, so treat the missing header as max=1/running=0.
+  if [ -z "$max" ]; then max=1; running=0; fi
   if [ -n "$max" ] && [ -n "$running" ] && [ "$running" -lt "$max" ]; then
-    out=$(taskherd run -C "$REPO" 2>&1 | tail -3 | tr '\n' ' ')
-    echo "$(date '+%F %T') running=$running/$max run: $out" >> "$LOG"
+    # fire in the background: `taskherd run` stays attached for the whole step
+    ( nohup taskherd run -C "$REPO" >> "$REPO/.tasks/logs/driver-runs.log" 2>&1 & )
+    echo "$(date '+%F %T') running=$running/$max fired one step" >> "$LOG"
+    sleep 30
   fi
   sleep "$INTERVAL"
 done

@@ -1,0 +1,11 @@
+{
+  "id": "overlay_dust_coat",
+  "class": "overlay",
+  "prompt": "Fine settled dust coat, patchy khaki film thicker in recesses and corners, low-contrast mottling on transparent alpha.",
+  "seed": 100502,
+  "width": 1024,
+  "height": 1024,
+  "tint": "#6b5a3e",
+  "output": "art/gen/overlays/dust_coat.png",
+  "post": ["overlay_alpha", "seamless", "pow2"]
+}

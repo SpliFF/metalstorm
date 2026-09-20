@@ -40,6 +40,13 @@
  * every query API (`getEntityPosition`, `getEntityPose`, `getPieceWorldPosition`)
  * deliberately reads *through* it — aim, beam origins and target sampling stay
  * on authoritative data. Only the drawn body and its selection ring lean.
+ *
+ * ## Hit-flinch (PLAN-beta-presentation.md L-ANIM)
+ *
+ * `impulse()` adds a second, unrelated offset source through the same
+ * `offsetFor` channel: a fixed-direction nudge that eases to 0, with no
+ * waypoint and no progress tracking — a reaction to being hit, not a lead
+ * toward an order. It sums with an active lean rather than replacing it.
  */
 
 /** Cap on the positional lead, in elmos. §5a's "a few elmos" — deliberately
@@ -87,6 +94,16 @@ const TURN_EPSILON = 64;
 /** Below this the order is "where you already are" — leaning toward it would
  *  be noise. */
 const MIN_TARGET_DIST = 8;
+
+/** Hit-flinch impulse cap (elmos) — a reaction, not a stagger; kept well
+ *  under MAX_LEAN_ELMOS so a hit landing mid-lean never dominates the
+ *  offset. */
+const MAX_IMPULSE_ELMOS = 3;
+
+/** Ease-out duration for a hit-flinch impulse (ms). Short and un-ramped (no
+ *  RAMP_MS-style lead-in): a hit is felt on the frame it lands, not built
+ *  up to. */
+const IMPULSE_EASE_MS = 220;
 
 /** The lead never exceeds this fraction of the remaining distance, so a short
  *  nudge order cannot lean past its own target and the lean tapers over the
@@ -178,6 +195,16 @@ interface Lean {
     originLatched: boolean;
 }
 
+/** A hit-flinch impulse: a fixed unit direction and magnitude that eases to
+ *  zero over IMPULSE_EASE_MS — no waypoint, no progress tracking, unlike
+ *  `Lean`. */
+interface Impulse {
+    readonly ux: number;
+    readonly uz: number;
+    readonly mag: number;
+    readonly startMs: number;
+}
+
 /** Shortest signed delta between two wire-u16 headings, in (-32768, 32768]. */
 function headingDelta(from: number, to: number): number {
     let d = ((to - from) % 65536 + 65536) % 65536;
@@ -210,6 +237,9 @@ export class MotionLeanRegistry {
      *  honest approximation for a shift-queued one (you lean toward the thing
      *  you just clicked). */
     private leans = new Map<number, Lean>();
+    /** One hit-flinch impulse per unit — see `impulse()`. Independent of
+     *  `leans`: a unit mid-lean that also takes a hit shows both, summed. */
+    private impulses = new Map<number, Impulse>();
     /** Per-frame memo, cleared by `beginFrame` — see `offsetFor`. */
     private frameMemo = new Map<number, LeanOffset | null>();
     private readonly now: () => number;
@@ -297,7 +327,47 @@ export class MotionLeanRegistry {
         return value;
     }
 
-    private computeOffset(unitId: number, x: number, z: number, heading: number)
+    /**
+     * Register a hit-flinch impulse: a brief nudge in the (dirX, dirZ)
+     * direction, independent of any move-order lean (see the module doc — a
+     * lean is a *lead*, this is a *reaction*: no waypoint, no progress
+     * tracking, just an offset that eases to 0 over IMPULSE_EASE_MS). The
+     * single method pres-fx's combat dispatch calls on a Hit event; a
+     * degenerate direction or non-positive magnitude is ignored. A second
+     * hit before the first eases out replaces it outright, same policy as
+     * `leans`.
+     */
+    impulse(unitId: number, dirX: number, dirZ: number, mag: number): void {
+        const len = Math.hypot(dirX, dirZ);
+        if (len < 1e-6 || mag <= 0) return;
+        this.impulses.set(unitId, {
+            ux: dirX / len, uz: dirZ / len,
+            mag: Math.min(mag, MAX_IMPULSE_ELMOS),
+            startMs: this.now(),
+        });
+    }
+
+    private computeOffset(unitId: number, x: number, z: number, heading: number): LeanOffset | null {
+        const lean = this.computeLeanOffset(unitId, x, z, heading);
+        const impulse = this.computeImpulseOffset(unitId);
+        if (!lean && !impulse) return null;
+        return {
+            dx: (lean?.dx ?? 0) + (impulse?.dx ?? 0),
+            dz: (lean?.dz ?? 0) + (impulse?.dz ?? 0),
+            dHeading: lean?.dHeading ?? 0,
+        };
+    }
+
+    private computeImpulseOffset(unitId: number): { dx: number; dz: number } | null {
+        const imp = this.impulses.get(unitId);
+        if (!imp) return null;
+        const t = this.now() - imp.startMs;
+        if (t >= IMPULSE_EASE_MS) { this.impulses.delete(unitId); return null; }
+        const decay = 1 - smoothstep(t / IMPULSE_EASE_MS);
+        return { dx: imp.ux * imp.mag * decay, dz: imp.uz * imp.mag * decay };
+    }
+
+    private computeLeanOffset(unitId: number, x: number, z: number, heading: number)
         : LeanOffset | null {
         const lean = this.leans.get(unitId);
         if (!lean) return null;
@@ -396,7 +466,6 @@ export class MotionLeanRegistry {
         this.activeLastPass = this.activeThisPass;
         this.activeThisPass = 0;
         this.frameMemo.clear();
-        if (this.leans.size === 0) return;
         const t = this.now();
         for (const [unitId, lean] of this.leans) {
             if (t > lean.holdUntilMs + DECAY_MS) {
@@ -404,11 +473,16 @@ export class MotionLeanRegistry {
                 this.decayedTotal++;
             }
         }
+        for (const [unitId, imp] of this.impulses) {
+            if (t - imp.startMs >= IMPULSE_EASE_MS) this.impulses.delete(unitId);
+        }
     }
 
-    /** Drop this unit's lean (queue cleared, unit died, selection reset). */
+    /** Drop this unit's lean and any hit-flinch impulse (queue cleared, unit
+     *  died, selection reset). */
     drop(unitId: number): void {
         if (this.leans.delete(unitId)) this.decayedTotal++;
+        this.impulses.delete(unitId);
     }
 
     stats(): MotionLeanStats {
@@ -436,6 +510,7 @@ export class MotionLeanRegistry {
 
     clear(): void {
         this.leans.clear();
+        this.impulses.clear();
         this.frameMemo.clear();
         this.activeThisPass = 0;
         this.activeLastPass = 0;

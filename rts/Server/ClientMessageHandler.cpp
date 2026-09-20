@@ -15,6 +15,8 @@
 #include "RoomWatchIntent.h"
 #include "AuthTokens.h"
 #include "WarPlayerBindings.h"
+#include "Standing.h"
+#include "Mentorship.h"
 #include "WarRejoinPolicy.h"
 #include "WarStateSim.h"
 #include "PlayerOnboarding.h"
@@ -22,6 +24,7 @@
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
 #include "ReplayControlDeck.h"
+#include "BroadcastRelay.h"
 #include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
@@ -90,6 +93,42 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
     if (ctx.logMessages) {
         SLOG(SPRING_LOG_DEBUG, "msg: client=%u type=%d size=%zu",
             msg.clientId, (int)clientMsg->payload_type(), msg.data.size());
+    }
+
+    // ── Broadcast relay admission (PLAN-beta-broadcast.md lane S2) ─────────
+    //
+    // A relay has no simulation to affect — it never GameStarts and never
+    // ticks — so "refuse the sim-affecting verbs" is not a strong enough rule
+    // here: it would leave a watcher able to reach the console, the eval
+    // relay, chat and the GM verbs on a process that boots a real game's Lua.
+    // So this is an ALLOW-LIST, not a deny-list, and a verb added to the
+    // protocol tomorrow is dropped by default rather than admitted by default.
+    //
+    // Five things get in. Handshake and AuthRequest, because a watcher must
+    // authenticate to watch anything (the same gap PLAN-replay §7.11 T2-a-3
+    // closed for replay spectators). Ping, so the connection can be kept.
+    // ReplayControl, which is the playback bar and is handled by the relay
+    // loop, not here. ViewportUpdate, which is accepted and IGNORED — a `.msb`
+    // is a global-view feed with no per-watcher filtering to steer, and
+    // dropping it silently would be indistinguishable from a broken client.
+    if (broadcast::IsRelaying()) {
+        const auto ptype = clientMsg->payload_type();
+        const bool admitted =
+            ptype == SpringWeb::ClientPayload_Handshake ||
+            ptype == SpringWeb::ClientPayload_AuthRequest ||
+            ptype == SpringWeb::ClientPayload_Ping ||
+            ptype == SpringWeb::ClientPayload_ReplayControl;
+        if (ptype == SpringWeb::ClientPayload_ViewportUpdate) return;
+        if (!admitted) {
+            static std::unordered_set<ClientID> warnedBroadcastClients;
+            if (warnedBroadcastClients.insert(msg.clientId).second) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "broadcast: client %u sent verb %u — dropped (a relay "
+                    "admits watchers, not players)",
+                    msg.clientId, static_cast<unsigned>(ptype));
+            }
+            return;
+        }
     }
 
     // ── Journal chokepoint #1 of 5: inbound client verbs (PLAN-replay task 1).
@@ -241,8 +280,13 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // player number from the reserved range, and deliberately absent
             // from `playerHandler`/`clientPlayerNum` so no synced pass can see
             // it (the reasoning is in ReplayPlayer.h next to the constants).
+            // A broadcast watcher takes the identical seat: forced spectator,
+            // team -1, a player number from the reserved range, absent from
+            // `playerHandler`. A relay has no sim for it to be absent FROM,
+            // which makes the rule cheaper here, not weaker.
             const bool replaySpectator =
-                replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
+                (replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId)) ||
+                broadcast::IsRelaying();
 
             // ── Dynamic join: a war may promote a non-roster account ────────
             // (PLAN-metalstorm-lobby.md §2.1/§2.3, task 2.) Task 1 let a
@@ -513,7 +557,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // and by the replay re-execution below, so a reconnect replays
             // through exactly the code it ran through.
             auto bindPlayer = [&](const std::string& name, int team,
-                                  bool spectator, int pNum) {
+                                  bool spectator, int pNum,
+                                  int tier = 0,
+                                  const std::string& mentor = std::string(),
+                                  const std::string& callsign = std::string()) {
                 // Only a FRESH row advances the counter. A reuse must not, or
                 // the next new player skips a slot and the replay's
                 // player-number cross-check diverges on a game nobody changed.
@@ -543,6 +590,28 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 p.active    = true;
                 p.playerNum = pNum;
                 p.spectator = spectator;
+                // ── Journey identity into the sim (§0) ─────────────────────
+                // PlayerBase::SetValue drops anything it does not name into
+                // `customValues`, which is what `Spring.GetPlayerInfo(pid,
+                // true)` hands synced Lua as its 11th return — the contract
+                // game_teams.lua publishes `rank_/mentor_/callsign_` from.
+                //
+                // Set HERE, in the shared seat installer, for the same reason
+                // the onboarding hook is: `bindPlayer` is also the replay
+                // re-execution's installer, and these values arrive from the
+                // journalled AuthIdentity there, so a recorded game seats a
+                // Veteran as a Veteran without asking an accounts database
+                // the replica does not have.
+                //
+                // `mentor` is set only when there is one: an empty custom
+                // value and an absent key read identically in Lua, and
+                // publishing `mentor_<pid>` for everyone would make
+                // "has a mentor" a string comparison instead of a presence
+                // check.
+                p.SetValue("tier", std::to_string(tier));
+                p.SetValue("callsign", callsign.empty() ? name : callsign);
+                if (!mentor.empty())
+                    p.SetValue("mentor", mentor);
                 // AddPlayer indexes by playerNum, so a reused number
                 // overwrites in place and the vector does not grow.
                 playerHandler.AddPlayer(p);
@@ -602,7 +671,9 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // player number the AuthResponse carries. Shared by the token and
             // the password path, which had drifted into two copies of it.
             auto registerLivePlayer = [&](const std::string& name, int team,
-                                          bool spectator) -> int {
+                                          bool spectator, int tier = 0,
+                                          const std::string& mentor = std::string(),
+                                          const std::string& callsign = std::string()) -> int {
                 if (replaySpectator) {
                     // No CPlayer, no clientPlayerNum entry, no consumption of
                     // `nextPlayerNum` — the recorded auths cross-check against
@@ -615,7 +686,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     return specNum;
                 }
                 const int pNum = playerNumForUsername(name, team, spectator);
-                bindPlayer(name, team, spectator, pNum);
+                bindPlayer(name, team, spectator, pNum, tier, mentor, callsign);
                 return pNum;
             };
 
@@ -752,6 +823,30 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 }
             };
 
+            // ── The journey identity, read once per auth (§0) ──────────
+            // Tier is DERIVED from `users.standing` rather than stored (see
+            // Standing.h), the callsign falls back to the username, and the
+            // mentor is the mentee's ACTIVE row only — an offer nobody has
+            // accepted must not seat a second commander over a Recruit.
+            //
+            // Returned as a tuple so the two live auth paths cannot pick up
+            // two different notions of "this player's tier" the way they had
+            // drifted into two copies of the seat registration.
+            auto journeyOf = [&db](const UserRecord& u)
+                -> std::tuple<int, std::string, std::string> {
+                std::string mentor;
+                if (auto m = Mentorship::ActiveFor(db.Handle(), u.id);
+                    m && m->state == "active") {
+                    if (m->mentorId == Mentorship::kAiMentorId) {
+                        mentor = "ai";
+                    } else if (auto mu = db.FindUserById(m->mentorId)) {
+                        mentor = mu->username;
+                    }
+                }
+                return {Standing::TierFor(u.standing), mentor,
+                        u.callsign.empty() ? u.username : u.callsign};
+            };
+
             // Journal chokepoint #1's companion (PLAN-replay T2-a). The
             // AuthRequest bytes are already in the stream; this records what
             // the accounts database turned them INTO, because a re-execution
@@ -761,7 +856,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             auto recordAuthIdentity = [&](int64_t userId,
                                           const std::string& name,
                                           const std::string& role, int team,
-                                          int pNum, bool spectator) {
+                                          int pNum, bool spectator,
+                                          int tier = 0,
+                                          const std::string& mentor = std::string(),
+                                          const std::string& callsign = std::string()) {
                 // A replay spectator is not part of any cause stream: it is an
                 // observer of one. (Nothing is written during a replay anyway
                 // — `--replay` and `--journal-file` are mutually exclusive —
@@ -774,6 +872,9 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 id.team      = team;
                 id.playerNum = pNum;
                 id.spectator = spectator;
+                id.tier      = tier;
+                id.mentor    = mentor;
+                id.callsign  = callsign;
                 syncedinput::Journal().RecordAuthIdentity(
                     static_cast<uint32_t>(msg.clientId), id);
             };
@@ -790,6 +891,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 auto* s = sessions.GetSession(msg.clientId);
                 if (!s) return;
                 s->replaySpectatorPlayerNum = pNum;
+                // A relay gives every watcher its own cursor, so there is no
+                // shared deck to hold and no controller to succeed to — the
+                // relay loop sees the session number and opens a cursor for it.
+                if (broadcast::IsRelaying()) return;
                 replay::Controls().Attach(pNum);
                 SLOG(SPRING_LOG_NOTICE,
                     "replay: spectator playerNum %d attached to the playback "
@@ -879,7 +984,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 }
 
                 const int pNum = rid->playerNum;
-                bindPlayer(rid->username, rid->team, rid->spectator, pNum);
+                bindPlayer(rid->username, rid->team, rid->spectator, pNum,
+                           rid->tier, rid->mentor, rid->callsign);
                 // Sent for symmetry with the live paths, and it costs nothing:
                 // the virtual id has no transport, so the reply is dropped.
                 // Keeping the send means the two paths do not drift.
@@ -977,8 +1083,11 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // now carries `player_num` — the client cannot derive it
                     // (it is a per-server allocation, not the account id), and
                     // every synced key it reads back is scoped by it.
+                    const auto [jTier, jMentor, jCallsign] =
+                        journeyOf(*reconnectUser);
                     const int pNum = registerLivePlayer(
-                        reconnectUser->username, team, isSpectator);
+                        reconnectUser->username, team, isSpectator, jTier,
+                        jMentor, jCallsign);
                     applyWarBinding(reconnectUser->id, reconnectUser->username,
                                     reconnectUser->factionId, team, isSpectator,
                                     pNum);
@@ -1007,7 +1116,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
                     recordAuthIdentity(userId, reconnectUser->username,
-                                       effectiveRole, team, pNum, isSpectator);
+                                       effectiveRole, team, pNum, isSpectator,
+                                       jTier, jMentor, jCallsign);
                     attachReplayWatcher(pNum);
                     // One-shot standing-order snapshot so a
                     // mid-game reconnect sees existing orders
@@ -1140,7 +1250,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Ordered ahead of BuildAuthResponse for the same reason as the
             // reconnect path above: the response carries `player_num`, and
             // nothing downstream can reconstruct it.
-            const int pNum = registerLivePlayer(user->username, team, isSpectator);
+            const auto [jTier, jMentor, jCallsign] = journeyOf(*user);
+            const int pNum = registerLivePlayer(user->username, team,
+                                                isSpectator, jTier, jMentor,
+                                                jCallsign);
             applyWarBinding(user->id, user->username, user->factionId, team,
                             isSpectator, pNum);
             auto resp = Protocol::BuildAuthResponse(
@@ -1153,7 +1266,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             if (auto* s = sessions.GetSession(msg.clientId))
                 s->team = team;
             recordAuthIdentity(user->id, user->username, effectiveRole, team,
-                               pNum, isSpectator);
+                               pNum, isSpectator, jTier, jMentor, jCallsign);
             attachReplayWatcher(pNum);
             // One-shot standing-order snapshot for the freshly
             // authenticated session — mirrors the reconnect

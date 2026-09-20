@@ -169,6 +169,13 @@ masked:
   with `RULESPARAMLOS_PUBLIC` cross the side boundary (`AIStateSnapshot.cpp`,
   finding F11). A game param that is not public reads as `nil` to you even
   though the sim has a value for it. Do not infer from absence.
+  **One allow-listed exception (2026-09-17):** keys beginning `parley_` or
+  `trust_` always reach you, whatever los they were published with. That is
+  the diplomacy board, and `Spring.GetGameRulesParam` serves GAME scope to
+  every player's Lua with `RULESPARAMLOS_PRIVATE_MASK` anyway — so this is
+  parity with a human client, not a channel they lack. Without it an AI could
+  not read a proposal addressed to it and so could never answer one
+  (`AISnapshotGameParamVisible`, `tests/test_ai_snapshot_params.cpp`).
 * **Never read a player viewport, an input, or another side's anything.** The
   LOD tier in `lib/scheduler.lua` is derived from *region-graph hops to seen
   enemies* rather than from who is looking at what, precisely because the

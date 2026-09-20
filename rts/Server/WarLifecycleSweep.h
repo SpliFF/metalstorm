@@ -12,7 +12,7 @@
 // jumps and because the intermediate rows are what the browser renders while
 // the sim settles. The cost of the lag is a few seconds on states nobody can
 // act on; the cost of jumping would be a war that was never observably
-// winding down, which is the state the "your war is ending" notification is
+// winding down, which is the state the "your Mission is ending" notification is
 // hung on.
 //
 // The operator retire is the deliberate exception and goes straight to

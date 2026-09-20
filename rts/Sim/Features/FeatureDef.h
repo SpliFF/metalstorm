@@ -5,6 +5,7 @@
 
 #include "Sim/Objects/SolidObjectDef.h"
 #include "System/float3.h"
+#include "Sim/Features/FeatureSeating.h"
 
 enum {
 	DRAWTYPE_MODEL = 0,
@@ -31,14 +32,16 @@ struct FeatureDef: public SolidObjectDef
 
 	int smokeTime;
 
-	/// PLAN-maps.md §2j option C: height of the trafficable deck above this
-	/// def's own model origin, or 0 for "no deck declared" (every def that is
-	/// not a bridge span). A positive value SEATS the feature: it holds the y
-	/// it was staged at instead of being clamped up to the ground, so a chain
-	/// of spans lays a level deck. Resolved from the `deckHeight` featuredef
-	/// key or, failing that, from the already-published
-	/// `customparams.deck_top`. See Sim/Features/FeatureSeating.h.
-	float deckHeight;
+	/// PLAN-maps.md §2j option C: whether this def declares a trafficable deck
+	/// and, if so, how far that deck sits above its own model origin. A def
+	/// that DECLARES one is SEATED — it holds the y it was staged at instead
+	/// of being clamped up to the ground, so a chain of spans lays a level
+	/// deck. The two facts are separate: a height of 0 is an ordinary deck
+	/// (§2j option A put both shipped spans' origins ON their deck), NOT the
+	/// way "no deck" is spelled. Resolved from the `deckHeight` featuredef key
+	/// or, failing that, from the already-published `customparams.deck_top`.
+	/// See Sim/Features/FeatureSeating.h.
+	FeatureSeating::DeckSpec deck;
 
 	bool destructable;
 	bool autoreclaim;

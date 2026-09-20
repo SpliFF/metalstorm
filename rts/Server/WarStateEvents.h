@@ -84,7 +84,7 @@ const char* ToString(Kind k);
 /// in the client so the lobby's log line and the player's toast cannot drift,
 /// and so a new `Kind` cannot be added without prose for it.
 ///
-/// Frame-free on purpose. "2h 06m of war" is a formatting of a frame into sim
+/// Frame-free on purpose. "2h 06m of mission" is a formatting of a frame into sim
 /// time that the client already owns (`formatFrozenFrame`, task 4a), and a
 /// second spelling of it here would be a second answer to the same question.
 /// The toast quotes the frame off the war row it already holds.

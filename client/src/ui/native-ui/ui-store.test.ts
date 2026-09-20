@@ -258,3 +258,53 @@ describe('UIStore', () => {
         expect(store.getPlayers()).toHaveLength(0);
     });
 });
+/** PLAN-beta.md "Command scope" / "Mentorship" — the journey layer's params,
+ *  read by name only. */
+describe('UIStore — assignment, standing, mentorship', () => {
+    let store: UIStore;
+    const ME = 7, TEAM = 1;
+
+    beforeEach(() => {
+        store = new UIStore();
+        store.setLocalIdentity(ME, TEAM);
+        store.updateTeamRulesParams(TEAM, {
+            assign_11: ME, assign_12: ME, assign_13: 4, assign_11_by: 2, assign_rev: 3,
+        });
+        store.updateGameRulesParams({ rank_2: 3, callsign_2: 'Vega', mentor_7: 2 });
+    });
+    afterEach(() => store.dispose());
+
+    it('lists only the units assigned to me', () => {
+        expect(store.getMyAssignments()).toEqual([11, 12]);
+    });
+
+    it('scopes a selection to my squads, and is identity with no assignments', () => {
+        expect(store.filterToAssignments([11, 13, 12, 99])).toEqual([11, 12]);
+        store.setLocalIdentity(4, TEAM);
+        expect(store.filterToAssignments([11, 13])).toEqual([13]);
+        store.setLocalIdentity(9, TEAM);                      // no carve at all
+        expect(store.filterToAssignments([11, 13])).toEqual([11, 13]);
+    });
+
+    it('filters box selection through the same rule', () => {
+        store.updateSelection([11, 13, 12]);
+        expect(store.getSelection().unitIds).toEqual([11, 12]);
+    });
+
+    it('renders a superior\'s order as "order from <callsign> (<tier>)"', () => {
+        expect(store.assignedBy(11)?.line).toBe('order from Vega (Officer)');
+        expect(store.assignedBy(12)).toBeNull();
+    });
+
+    it('filters chatter while mentored, until the player asks for everything', () => {
+        expect(store.isMentored()).toBe(true);
+        expect(store.isChatterFiltered()).toBe(true);
+        store.setShowEverything(true);
+        expect(store.isChatterFiltered()).toBe(false);
+
+        store.updateGameRulesParams({ mentor_7: null });
+        store.setShowEverything(false);
+        expect(store.isMentored()).toBe(false);
+        expect(store.isChatterFiltered()).toBe(false);
+    });
+});

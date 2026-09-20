@@ -83,6 +83,12 @@ local function newWorld(opts)
         end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
         GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
+        -- stageCivilians marks every scenario-staged ambient civilian
+        -- neutral so an army walking past does not stop to shoot it
+        -- (endtoend D53). Absent from this mock, the whole civilians
+        -- block raised 'attempt to call a nil value' and took the four
+        -- shipped-scenario cases with it.
+        SetUnitNeutral = function() end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
     }
 
@@ -92,9 +98,43 @@ local function newWorld(opts)
 
     -- Every def any scenario under test names must be "known" or validation
     -- rejects it; the real shipped scenario names several.
+    --
+    -- 2026-09-17 (battle-flow review finding 14): this used to be a SIX-NAME
+    -- HAND LIST, and it went red the moment meridian_basin.lua gained the §M4
+    -- resource sites — `units[21]: unknown unit def "ms_timber_yard"`. A
+    -- fixture that invents its own keyspace can only ever prove that the
+    -- scenario agrees with the fixture, and it fails for a reason that is
+    -- about the fixture. So the roster now comes from the PRODUCER: units/ is
+    -- executed with VFS.Include stubbed to dofile, the same way
+    -- scenario_references_spec.lua builds its universe (units/_builder.lua
+    -- mints the scale tiers, so the list cannot be transcribed). The literal
+    -- below is the fallback for a cwd where units/ is not reachable.
     _G.UnitDefs = {}
-    for i, name in ipairs({ 'ms_tanks_s1', 'ms_tanks_s2', 'ms_soldiers_s1',
-                            'ms_engineers_s1', 'ms_radar_s1', 'ms_civilians' }) do
+    local names = {}
+    do
+        local savedVFS = _G.VFS
+        _G.VFS = { Include = function(path) return dofile(path) end,
+                   DirList = function() return {} end }
+        local p = io.popen('ls units/*.lua 2>/dev/null')
+        if p then
+            for file in p:lines() do
+                local ok, t = pcall(dofile, file)
+                if ok and type(t) == 'table' then
+                    for name in pairs(t) do names[#names + 1] = name end
+                end
+            end
+            p:close()
+        end
+        _G.VFS = savedVFS
+    end
+    if #names == 0 then
+        names = { 'ms_tanks_s1', 'ms_tanks_s2', 'ms_soldiers_s1', 'ms_engineers_s1',
+                  'ms_radar_s1', 'ms_civilians', 'ms_artillery_s2', 'ms_habitat',
+                  'ms_depot', 'ms_transit_hub', 'ms_grain_silo', 'ms_tank_farm',
+                  'ms_timber_yard', 'ms_scout_buggy', 'ms_supply_truck',
+                  'ms_technical', 'fable_airship', 'ms_landing_ship' }
+    end
+    for i, name in ipairs(names) do
         _G.UnitDefs[i] = { name = name, customParams = { is_civilian = 'true' } }
     end
 
@@ -319,7 +359,14 @@ describe("the SHIPPED meridian_basin Basin Reavers", function()
         for _, u in ipairs(world.createdUnits) do
             if u.team == 8 then reavers = reavers + 1 end
         end
-        assert.are.equal(9, reavers)   -- 6 soldiers + 3 tanks
+        -- 6 ms_soldiers_s1 + 3 ms_tanks_s1 + 3 ms_technical. This read 9
+        -- until 2026-09-17, and it was RIGHT about what the fixture
+        -- staged and WRONG about what the scenario says: ms_technical
+        -- was not on the old hand-written mock def list, so the three
+        -- gun trucks were dropped by validation and the assertion was
+        -- pinned to the loss. Now the roster comes from units/ and the
+        -- band is the size scenarios/meridian_basin.lua:225-233 writes.
+        assert.are.equal(12, reavers)
 
         -- And the stipend runs.
         g:GameFrame(1800)

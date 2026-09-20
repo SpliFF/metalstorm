@@ -65,18 +65,18 @@ return {
             -- and they do NOT animate: FeatureRenderer thin-instances one
             -- mesh per def, so the spire's authored ring orbit goes
             -- unplayed — recorded in the def's static_clip_unplayed.
-            { def = 'ms_monolith_spire', x = 505, z = 2175, name = 'Cell 0 1 Spire' },
+            { def = 'ms_monolith_spire', x = 509, z = 2181, name = 'Cell 0 1 Spire' },
 
             -- THE WRECK FIELD, on the ground the war is about. These
             -- BLOCK (features/wrecks.lua), so the generator stamps every
             -- one into the passability mask and re-runs the reachability
             -- gate: a field that walls off the crossing it decorates is
             -- the Meridian defect re-created out of scenery.
-            { def = 'ms_tank_wreck', x = 2066, z = 3212, facing = 'south' },
-            { def = 'ms_train_wreck', x = 1889, z = 3535, facing = 'east' },
-            { def = 'ms_colossus_wreck', x = 1953, z = 3235, facing = 'east', name = 'Cell 1 2 Hulk' },
-            { def = 'ms_tank_wreck', x = 2219, z = 3310, facing = 'east' },
-            { def = 'ms_train_wreck', x = 2261, z = 3692, facing = 'south' },
+            { def = 'ms_colossus_wreck', x = 2233, z = 3484, facing = 'east', name = 'Cell 1 2 Hulk' },
+            { def = 'ms_tank_wreck', x = 1927, z = 3251, facing = 'west' },
+            { def = 'ms_tank_wreck', x = 1853, z = 3463, facing = 'south' },
+            { def = 'ms_colossus_wreck', x = 2126, z = 3595, facing = 'north', name = 'Cell 1 2 Hulk 2' },
+            { def = 'ms_tank_wreck', x = 2006, z = 3216, facing = 'south' },
         },
     },
 
@@ -233,15 +233,37 @@ return {
         { def = 'ms_shanty_block', team = 'neutral', x = 767, z = 2515, facing = 'west' },
         { def = 'ms_shanty_block', team = 'neutral', x = 1435, z = 3431, facing = 'south' },
         { def = 'ms_shanty_block', team = 'neutral', x = 975, z = 2732, facing = 'south' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 496, z = 3361, facing = 'south' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 539, z = 2559, facing = 'west' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 594, z = 2306, facing = 'north' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 1929, z = 2521, facing = 'east' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 1911, z = 2778, facing = 'east' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 1590, z = 3659, facing = 'south' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 782, z = 3557, facing = 'south' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 1800, z = 2444, facing = 'north' },
-        { def = 'ms_barricade_set', team = 'neutral', x = 1664, z = 3454, facing = 'east' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 484, z = 3353, facing = 'west' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 539, z = 2559, facing = 'west' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 594, z = 2306, facing = 'north' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 1929, z = 2521, facing = 'east' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 1911, z = 2778, facing = 'east' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 1590, z = 3659, facing = 'south' },
+        { def = 'ms_barricade_corner', team = 'neutral', x = 782, z = 3557, facing = 'south' },
+        { def = 'ms_barricade_gate', team = 'neutral', x = 514, z = 2912, facing = 'west' },
+        { def = 'ms_barricade_gate', team = 'neutral', x = 531, z = 2669, facing = 'west' },
+        { def = 'ms_barricade_gate', team = 'neutral', x = 1786, z = 2437, facing = 'north' },
+        { def = 'ms_barricade_gate', team = 'neutral', x = 1239, z = 3614, facing = 'south' },
+        { def = 'ms_barricade_gate', team = 'neutral', x = 973, z = 3581, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 509, z = 2997, facing = 'west' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 557, z = 2476, facing = 'west' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 576, z = 2389, facing = 'west' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 683, z = 2289, facing = 'north' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 784, z = 2271, facing = 'north' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1850, z = 2474, facing = 'north' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1923, z = 2605, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1917, z = 2694, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1884, z = 2852, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1690, z = 3383, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1664, z = 3454, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1624, z = 3565, facing = 'east' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1502, z = 3648, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1405, z = 3635, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 1309, z = 3623, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 886, z = 3570, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 710, z = 3508, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 605, z = 3436, facing = 'south' },
+        { def = 'ms_barricade_wall', team = 'neutral', x = 556, z = 3402, facing = 'south' },
         -- Township: Cell 2 1 (r2_1) — neutral (Gaia)
         { def = 'ms_habitat', team = 'neutral', x = 3412, z = 2047, facing = 'south' },
         { def = 'ms_depot', team = 'neutral', x = 3311, z = 2278, facing = 'south' },
@@ -306,9 +328,9 @@ return {
           orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
         { def = 'ms_soldiers_s1', team = 2, x = 512, z = 1917, facing = 'south',
           orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_technical', team = 2, x = 743, z = 2251, facing = 'south',
+        { def = 'ms_technical', team = 2, x = 883, z = 2115, facing = 'south',
           orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
-        { def = 'ms_artillery_s2', team = 2, x = 833, z = 2197, facing = 'south',
+        { def = 'ms_scout_buggy', team = 2, x = 833, z = 2197, facing = 'south',
           orders = { { cmd = 'FIGHT', params = { 682, 0, 2047 } } } },
 
         -- NAMED RESOURCE SITES (§M4, worldbuilding decision 1). One
@@ -322,27 +344,27 @@ return {
         -- it anchors an objective and because it is somewhere the story
         -- can point at, not because it produces.
         -- Cell 0 2 Grain Silo (r0_2)
-        { def = 'ms_grain_silo', team = 'neutral', x = 767, z = 3343, facing = 'south', name = 'Cell 0 2 Grain Silo' },
+        { def = 'ms_grain_silo', team = 'neutral', x = 459, z = 3171, facing = 'south', name = 'Cell 0 2 Grain Silo' },
         -- Cell 1 1 Metal Pit (r1_1)
-        { def = 'ms_metal_pit', team = 'neutral', x = 2162, z = 1861, facing = 'south', name = 'Cell 1 1 Metal Pit' },
+        { def = 'ms_metal_pit', team = 'neutral', x = 2332, z = 2207, facing = 'south', name = 'Cell 1 1 Metal Pit' },
         -- Cell 2 1 Oil Derrick (r2_1)
-        { def = 'ms_oil_derrick', team = 'neutral', x = 3325, z = 1846, facing = 'south', name = 'Cell 2 1 Oil Derrick' },
+        { def = 'ms_oil_derrick', team = 'neutral', x = 3475, z = 1838, facing = 'south', name = 'Cell 2 1 Oil Derrick' },
 
         -- ANCIENT-TECH GUARDIANS (§M4, worldbuilding directive 4). The
         -- relic itself is a FEATURE (see world.features above); what can
         -- be fought is the band squatting on it. Anarchic archetype —
         -- gun trucks and militia, not line armour.
         -- guarding Cell 0 1 Spire (r0_1)
-        { def = 'ms_technical', team = 2, x = 388, z = 2312, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
-        { def = 'ms_technical', team = 2, x = 339, z = 2104, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
-        { def = 'ms_militia', team = 2, x = 277, z = 2072, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
-        { def = 'ms_militia', team = 2, x = 400, z = 2028, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
-        { def = 'ms_militia', team = 2, x = 356, z = 1973, facing = 'south',
-          orders = { { cmd = 'FIGHT', params = { 505, 0, 2175 } } } },
+        { def = 'ms_technical', team = 2, x = 424, z = 2021, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 509, 0, 2181 } } } },
+        { def = 'ms_militia', team = 2, x = 333, z = 2139, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 509, 0, 2181 } } } },
+        { def = 'ms_militia', team = 2, x = 356, z = 2276, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 509, 0, 2181 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 288, z = 2299, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 509, 0, 2181 } } } },
+        { def = 'ms_soldiers_s1', team = 2, x = 462, z = 2354, facing = 'south',
+          orders = { { cmd = 'FIGHT', params = { 509, 0, 2181 } } } },
     },
 
     -- ======================================================================
@@ -480,11 +502,11 @@ return {
         -- the settlement does not have to come through whole — infra
         -- FAILS below quorum, and 'lose any one building' would be a
         -- failure condition the holder cannot reasonably meet.
-        -- Vesper Watch (r0_2): 6 building def(s)
+        -- Vesper Watch (r0_2): 8 building def(s)
         { type = 'infra', scope = 'tactical', forTeam = 0,
           params = { buildingUnitIDs = {}, quorum = 1, rewardPerMinute = 5 },
           _populateUnitsFrom = { x = 1189, z = 2905, r = 760,
-              defs = { 'ms_barricade_set', 'ms_market_stalls', 'ms_meeting_hall', 'ms_shanty_block', 'ms_watchtower', 'ms_water_works' }, team = 'neutral', into = 'buildingUnitIDs' },
+              defs = { 'ms_barricade_corner', 'ms_barricade_gate', 'ms_barricade_wall', 'ms_market_stalls', 'ms_meeting_hall', 'ms_shanty_block', 'ms_watchtower', 'ms_water_works' }, team = 'neutral', into = 'buildingUnitIDs' },
           reward = 0, expiresAtFrame = nil },
     },
 }

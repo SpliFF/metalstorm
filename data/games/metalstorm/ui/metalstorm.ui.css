@@ -11,6 +11,11 @@
  * tables, meters, badges, chips, toasts) belongs in the design system, not
  * here. If you find yourself restyling a .nui-* primitive, the primitive is
  * probably wrong — fix it upstream so every game and widget benefits.
+ *
+ * COLOUR RULE: no colour, typeface or texture is named here — only --nui-*
+ * tokens from client/src/ui/native-ui/tokens.css, which are the art
+ * direction of record (data/games/metalstorm/art/DIRECTION.md). Guarded by
+ * client/src/ui/native-ui/tokens.test.ts.
  */
 
 /* ── Authority pill (top-left, mounted bare — no panel header) ───────── */
@@ -34,14 +39,14 @@
 }
 
 .ms-authority-bar .nui-stat__label {
-    letter-spacing: 0.06em;
+    letter-spacing: var(--nui-track);
 }
 
 /* Hairline between the personal and team pools. */
 .ms-auth-sep {
     width: 1px;
     align-self: stretch;
-    background: var(--nui-border);
+    background: var(--nui-hairline);
 }
 
 /* ── Objectives ─────────────────────────────────────────────────────── */
@@ -80,7 +85,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    text-transform: capitalize;
+    font: var(--nui-font-display);
+    font-size: 13px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
 }
 
 .ms-obj-sub {
@@ -95,7 +103,7 @@
 /* "Yours to take" (PLAN-metalstorm-teams.md §3.3 joiner onboarding) — the
    row itself is marked, not just the badge, so it's findable at a glance. */
 .ms-obj.is-suggested {
-    background: rgba(74, 158, 255, 0.1);
+    background: var(--nui-accent-wash);
     box-shadow: inset 2px 0 0 var(--nui-accent);
 }
 
@@ -111,8 +119,9 @@
 
 .ms-obj__outcome-tag {
     justify-content: flex-end;
-    font: 600 9px/1 system-ui, sans-serif;
-    letter-spacing: 0.08em;
+    font: var(--nui-font-display);
+    font-size: 10px;
+    letter-spacing: var(--nui-track);
     color: var(--nui-text-faint);
 }
 
@@ -188,7 +197,7 @@
     gap: 5px;
     margin-top: 5px;
     padding-top: 5px;
-    border-top: 1px dashed var(--nui-border);
+    border-top: 1px dashed var(--nui-hairline);
 }
 
 .ms-obj-bounty-form[hidden],
@@ -215,8 +224,8 @@
     color: var(--nui-text-dim);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    border-bottom: 1px solid var(--nui-border);
+    letter-spacing: var(--nui-track);
+    border-bottom: 1px solid var(--nui-hairline);
 }
 
 .ms-score-teamhead.is-own-team td { color: var(--nui-gold); }
@@ -225,4 +234,68 @@
 .ms-score-ai {
     font-size: 9px;
     opacity: 0.75;
+}
+
+/* ── Mentor card ────────────────────────────────────────────────────── */
+
+/* The relationship, made visible (PLAN-beta.md "Mentorship") — its own plate
+   inside the panel body: a mentored player, an AI offer and an error note
+   are three distinct states, not rows in a list. Not a top-level panel, so
+   no rivets (native-ui.css metaphor rule 3) and no edge shadow of its own —
+   the frame around it already carries one. */
+.ms-mentor-card {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px;
+    background-color: var(--nui-plate-color);
+    background-image: var(--nui-plate);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+}
+
+/* Who: an identity chip, not a sentence — the mentor is a fact to spot at a
+   glance, the same affordance as a rank/ID token elsewhere in the system. */
+.ms-mentor-card__who {
+    align-self: flex-start;
+    padding: 2px 7px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-hairline);
+    border-radius: var(--nui-radius);
+    color: var(--nui-text);
+    font: var(--nui-font-display);
+    font-size: 11px;
+    letter-spacing: var(--nui-track);
+    text-transform: uppercase;
+}
+
+/* Scope: a muted readout — present, but quieter than the order line below
+   it, which is the thing that actually needs the player's attention. */
+.ms-mentor-card__scope {
+    color: var(--nui-text-faint);
+    font: var(--nui-font-mono);
+    font-size: 10px;
+}
+
+/* Order: phosphor-on-glass, the same recessed treatment as any other
+   powered readout, with a hazard-yellow rule on the left — an order issued
+   over the player's head is mission-critical, not routine chatter (the
+   colour reused from DIRECTION.md's table, not the destructive stripe
+   texture, which stays reserved for destructive actions only). */
+.ms-mentor-card__order {
+    padding: 3px 6px;
+    background: var(--nui-bg-sunken);
+    border-left: 2px solid var(--nui-gold);
+    border-radius: var(--nui-radius);
+    color: var(--nui-accent);
+    font: var(--nui-font-mono);
+    font-size: 10px;
+}
+
+/* Note: small chalk prose — an aside (a fetch error, a status line), not a
+   readout, so it stays in the text family rather than mono. */
+.ms-mentor-card__note {
+    color: var(--nui-text-dim);
+    font: var(--nui-font);
+    font-size: 10.5px;
 }

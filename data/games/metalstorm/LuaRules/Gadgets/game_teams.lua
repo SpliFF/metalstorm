@@ -26,6 +26,8 @@
 -- share (game_objectives.lua, redirects team-ward at resolve, not at leave).
 -- Both already exist elsewhere; this file only sequences the parts that are
 -- actually its own (leader bookkeeping, caretaker activation, scoreboard).
+-- The rank-precedence refusal in game_assignment.lua gates who may ISSUE an
+-- order, never who owns the unit — it is a responsibility check, not ownership.
 --
 -- ============================================================
 -- LEADER IS BOOKKEEPING, NOT A PRIVILEGE (§5)
@@ -282,6 +284,51 @@ local function suggestObjective(playerID, teamID)
     end
 end
 
+-- ============================================================
+-- Standing transport (PLAN-beta-journey.md §(c)) — rank/mentor/callsign
+-- ============================================================
+-- The lobby writes three per-player custom options at AuthRequest (`tier`,
+-- `mentor`, `callsign`); they reach the sim only through GetPlayerInfo's
+-- 11th return, the same channel isAIPlayer() reads above. This republishes
+-- them as PUBLIC game rulesParams so game_assignment.lua's precedence check
+-- and the HUD read one agreed key each. Absent options (dev launch, old
+-- lobby) publish nothing: every reader then defaults to rank 1 and the
+-- precedence machinery is inert.
+--
+-- `mentor` arrives as the mentor's USERNAME (or 'ai'); it is resolved to a
+-- playerID here, where the roster is live. 'ai' publishes -1; an unresolvable
+-- name publishes nothing rather than a guess.
+local PUBLIC = { public = true }
+
+local function playerOpts(playerID)
+    local opts = select(11, Spring.GetPlayerInfo(playerID, true))
+    return type(opts) == 'table' and opts or nil
+end
+
+local function playerIDByName(name)
+    for _, raw in ipairs(Spring.GetPlayerList()) do
+        local pid = math.floor(raw)   -- float playerIDs, see publishAIProfiles
+        if Spring.GetPlayerInfo(pid, false) == name then return pid end
+    end
+    return nil
+end
+
+local function publishStanding(playerID)
+    local opts = playerOpts(playerID)
+    if not opts then return end
+    local pid = math.floor(playerID)   -- float playerIDs, see publishAIProfiles
+
+    local tier = tonumber(opts.tier)
+    if tier then Spring.SetGameRulesParam('rank_' .. pid, tier, PUBLIC) end
+    if opts.callsign and opts.callsign ~= '' then
+        Spring.SetGameRulesParam('callsign_' .. pid, opts.callsign, PUBLIC)
+    end
+    if opts.mentor and opts.mentor ~= '' then
+        local mentorID = (opts.mentor == 'ai') and -1 or playerIDByName(opts.mentor)
+        if mentorID then Spring.SetGameRulesParam('mentor_' .. pid, mentorID, PUBLIC) end
+    end
+end
+
 function gadget:PlayerAdded(playerID)
     local _, spectator, teamID = playerInfo(playerID)
     if spectator or not teamID then return end   -- E2
@@ -290,8 +337,12 @@ function gadget:PlayerAdded(playerID)
         joinFrame[playerID] = Spring.GetGameFrame()
     end
 
+    publishStanding(playerID)   -- before the carve below reads rank_<pid>
     reassignLeader(teamID)      -- §5: a team with no present leader gets one
     suggestObjective(playerID, teamID)
+    if GG.Assignment and GG.Assignment.CarveForRecruit then
+        GG.Assignment.CarveForRecruit(playerID)
+    end
     refreshCoCommanders()       -- §5.1: a human (re)joining downgrades an AI to co-commander
 end
 
