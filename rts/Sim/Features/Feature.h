@@ -100,8 +100,9 @@ public:
 	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const final { return transMatrix[synced]; }
 	const CMatrix44f& GetTransformMatrixRef(bool synced = false) const { return transMatrix[synced]; }
 
-	/// PLAN-maps.md §2j option C. A feature whose def declares a deck height is
-	/// SEATED: it holds its staged y instead of being clamped up to the ground,
+	/// PLAN-maps.md §2j option C. A feature whose def DECLARES a deck (at any
+	/// height, 0 included) is SEATED: it holds its staged y instead of being
+	/// clamped up to the ground,
 	/// which is what lets a chain of bridge spans lay a level deck. Everything
 	/// else keeps the historic clamp. See Sim/Features/FeatureSeating.h.
 	bool IsSeated() const;

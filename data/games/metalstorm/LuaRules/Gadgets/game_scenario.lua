@@ -621,30 +621,40 @@ end
 ---     floating the same four settled to -31.0 / -34.5 / -45.9 / -57.6.
 ---     Over DRY ground the clamp used to win and a chain stepped with the
 ---     terrain (the rail run measured 26.1 -> 40.8). PLAN-maps §2j option C
----     fixed that by SEATING a def that publishes a positive
----     `customparams.deck_top` — the engine skips gravity and the up-clamp for
----     it. ⚠️ **§2j option A has since made `deck_top` ZERO for both spans**
----     (the origin is now the deck, see features/bridges.lua), and the engine
----     reads zero as "no deck declared", so NEITHER SPAN IS SEATED TODAY and
----     `floating` is carrying the water case on its own again. Passing `y` is
----     still right: it is used verbatim for every segment rather than
----     resampled per segment, which is what makes the whole chain one level
----     deck as long as the chain is over water.
+---     fixed that by SEATING a def that PUBLISHES `customparams.deck_top` —
+---     the engine skips gravity and the up-clamp for it. Presence of the key
+---     is the declaration; its value is only the offset to the deck, and since
+---     §2j option A that value is 0 for both steel spans (the origin IS the
+---     deck). For a month the engine spelled seating as `deck_top > 0` and so
+---     seated neither of them; repaired 2026-09-20, measured on dry ground
+---     with a deckless control. Passing `y` is still right: it is used
+---     verbatim for every segment rather than resampled per segment, which is
+---     what makes the whole chain one level deck — and now that the spans are
+---     seated again, that holds over DRY ground too, not only over water.
 ---
----     `y` NAMES THE DECK. §2j option A re-authored both spans with y = 0 at
----     the trafficable surface, so the `y` given here IS where the deck lands
----     — no `deck_top` to add, and `FeatureDefs[def].deckHeight` reads 0 for
----     both. To put a deck ON a road at height h, stage at h. (The general
----     form is still `h - deckHeight`; it degenerates because deckHeight is 0.
----     Nothing in this file does that arithmetic for an author, and while the
----     shipped spans deck at their origin nothing needs to.)
+---     `y` NAMES THE DECK. §2j option A re-authored both steel spans with
+---     y = 0 at the trafficable surface, so the `y` given here IS where the
+---     deck lands — no `deck_top` to add, and `FeatureDefs[def].deckHeight`
+---     reads 0 for both. To put a deck ON a road at height h, stage at h.
+---
+---     The general form is still `y = h - FeatureDefs[def].deckHeight`, and it
+---     degenerates to `y = h` only because deckHeight is 0 for these two. It
+---     does NOT degenerate for `ms_anc_bridge_span`, whose origin is still its
+---     footings (deckHeight 56): staging that one at h puts its deck 56 elmos
+---     ABOVE h. Nothing in this file does the arithmetic for an author today.
+---     A caller that wants to is warned: **deckHeight 0 is a real deck, not a
+---     missing one** — test `FeatureDefs[def].hasDeck` for that, published
+---     alongside it for exactly this reason. Reading 0 as "no deck" is the bug
+---     that unseated both steel spans between 2026-08-19 and 2026-09-20.
 ---
 ---     ⚠️ WHAT THAT COSTS OVER WATER: staging at y = 0 now puts the deck AT
 ---     the waterline rather than 1.5 above it. §2j priced this before A landed
 ---     — the gap to a wading unit becomes the ford's depth instead of a flat
 ---     1.5. Lifting the deck to a chosen freeboard means staging above zero,
 ---     which takes the span out of water, which is where `floating` stops
----     helping and seating would have to come back.
+---     helping — and seating is what carries it there. Since the 2026-09-20
+---     repair that is available again: stage a chain at a chosen freeboard and
+---     it holds, dry ground under it or not. No scenario does this yet.
 ---
 ---     A MAP-placed span cannot be seated at a useful level and never could:
 ---     a featureplacer objectlist entry carries only name/x/z/rot, so

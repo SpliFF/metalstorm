@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideRoomTransition, RoomState, type RoomViewState } from './room-transition.js';
+import { decideRoomTransition, effectiveRoomState, RoomState, type RoomViewState } from './room-transition.js';
 
 // PLAN-endtoend.md D25 — after a war finished, the room view kept reading
 // "Loading" and kept offering "Rejoin Game" against a port whose subprocess
@@ -158,5 +158,34 @@ describe('decideRoomTransition', () => {
             expect(decideRoomTransition(7, RoomState.Filling, 0, ASKED_TO_REJOIN_7, 'persistent'))
                 .toBe('refresh-room-game-gone');
         });
+    });
+});
+
+// D4 (docs/reviews/beta/README.md "E2E pass 1") — after a solo victory,
+// "RETURN TO LOBBY" landed back on the *finished* room, still reading
+// "In Progress" with a "REJOIN GAME" button: PostGamePolicy keeps the
+// subprocess (and therefore the Active state) alive for ~180s after a game
+// this browser already watched end.
+describe('effectiveRoomState', () => {
+    it('reports Ended for the room this browser just watched finish', () => {
+        expect(effectiveRoomState(RoomState.Active, 7, /*locallyEndedRoomId=*/7))
+            .toBe(RoomState.Ended);
+    });
+
+    it('does the same for Loading — the grace period can start before Active', () => {
+        expect(effectiveRoomState(RoomState.Loading, 7, 7)).toBe(RoomState.Ended);
+    });
+
+    it('leaves an unrelated room alone', () => {
+        expect(effectiveRoomState(RoomState.Active, 8, 7)).toBe(RoomState.Active);
+    });
+
+    it('leaves the room alone with no locally-ended room at all', () => {
+        expect(effectiveRoomState(RoomState.Active, 7, null)).toBe(RoomState.Active);
+    });
+
+    it('does not touch a genuinely pregame or Ended state', () => {
+        expect(effectiveRoomState(RoomState.Filling, 7, 7)).toBe(RoomState.Filling);
+        expect(effectiveRoomState(RoomState.Ended, 7, 7)).toBe(RoomState.Ended);
     });
 });
