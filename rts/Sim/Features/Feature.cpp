@@ -549,12 +549,12 @@ bool CFeature::UpdateVelocity(
 
 bool CFeature::IsSeated() const
 {
-	return (def != nullptr && FeatureSeating::IsSeated(def->deckHeight));
+	return (def != nullptr && FeatureSeating::IsSeated(def->deck));
 }
 
 float CFeature::GetDeckLevel() const
 {
-	return (def != nullptr) ? FeatureSeating::DeckLevel(pos.y, def->deckHeight) : pos.y;
+	return (def != nullptr) ? FeatureSeating::DeckLevel(pos.y, def->deck) : pos.y;
 }
 
 
@@ -579,8 +579,8 @@ bool CFeature::UpdatePosition()
 		//
 		// The clamp is the only thing skipped, so a seated span can stand with
 		// its piers below ground where an abutment buries them — which is the
-		// whole point, since the deck is `deckHeight` above the origin and the
-		// origin is at the pier base. See Sim/Features/FeatureSeating.h.
+		// whole point, since the substructure hangs below the deck and the
+		// deck is what the staged y names. See Sim/Features/FeatureSeating.h.
 		CWorldObject::SetVelocity(ZeroVector);
 
 		if (!pos.IsInBounds())
@@ -596,7 +596,7 @@ bool CFeature::UpdatePosition()
 		// vertical movement
 		Move((speed * UpVector) * moveCtrl.movementMask, true);
 		// adjusting vertical speed won't help if the ground moved and buried us
-		Move(UpVector * (FeatureSeating::SettleHeight(pos.y, CGround::GetHeightReal(pos.x, pos.z), def->deckHeight) - pos.y), true);
+		Move(UpVector * (FeatureSeating::SettleHeight(pos.y, CGround::GetHeightReal(pos.x, pos.z), def->deck) - pos.y), true);
 
 		// clamp final position
 		if (!pos.IsInBounds()) {

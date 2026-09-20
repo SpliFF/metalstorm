@@ -106,6 +106,8 @@ export default {
     }
     this.el = document.createElement('div');
     this.el.className = 'ms-tutorial';
+    this.el.setAttribute('role', 'region');
+    this.el.setAttribute('aria-label', 'Tutorial guide');
     ctx.mount.appendChild(this.el);
     this.acked = null;            // beat id already acked (never ack twice)
     this.onClick = (e) => this._onClick(e);
@@ -147,8 +149,8 @@ export default {
     if (m.visible && m.state === 'done') {
       parts.push('<div class="ms-tutorial__title">Training complete</div>');
       parts.push('<div class="ms-tutorial__text">You have finished every step of this Mission\'s coaching.</div>');
-      parts.push('<div class="ms-tutorial__actions"><button type="button" class="nui-btn" data-act="restart">Restart</button>' +
-        '<button type="button" class="nui-btn" data-act="stop">Hide</button></div>');
+      parts.push('<div class="ms-tutorial__actions"><button type="button" class="nui-btn" data-act="restart" aria-label="Restart tutorial">Restart</button>' +
+        '<button type="button" class="nui-btn" data-act="stop" aria-label="Hide tutorial guide">Hide</button></div>');
     } else if (m.visible) {
       parts.push(`<div class="ms-tutorial__step">Step ${m.index} of ${m.count}</div>`);
       parts.push(`<div class="ms-tutorial__title">${esc(m.title)}</div>`);
@@ -156,11 +158,17 @@ export default {
       if (m.stuck) parts.push('<div class="ms-tutorial__note">Stuck? Show me points the way; Skip moves on.</div>');
       const btns = [];
       const needsButton = m.wait === 'ack' || (m.wait === 'client' && typeof CLIENT_CHECKS[m.check] !== 'function');
-      if (needsButton) btns.push(`<button type="button" class="nui-btn" data-act="ack">${m.wait === 'ack' ? 'Next' : 'Done'}</button>`);
-      if (m.parley) btns.push(`<button type="button" class="nui-btn" data-act="parley">Propose ${esc(m.parley.kind.replace(/_/g, ' '))}</button>`);
-      if (m.show) btns.push('<button type="button" class="nui-btn" data-act="show">Show me</button>');
-      btns.push('<button type="button" class="nui-btn" data-act="skip">Skip</button>');
-      btns.push('<button type="button" class="nui-btn" data-act="stop">Hide</button>');
+      if (needsButton) {
+        const label = m.wait === 'ack' ? 'Next' : 'Done';
+        btns.push(`<button type="button" class="nui-btn" data-act="ack" aria-label="${label} step">${label}</button>`);
+      }
+      if (m.parley) {
+        const kind = esc(m.parley.kind.replace(/_/g, ' '));
+        btns.push(`<button type="button" class="nui-btn" data-act="parley" aria-label="Propose ${kind}">Propose ${kind}</button>`);
+      }
+      if (m.show) btns.push('<button type="button" class="nui-btn" data-act="show" aria-label="Show me on the map">Show me</button>');
+      btns.push('<button type="button" class="nui-btn" data-act="skip" aria-label="Skip step">Skip</button>');
+      btns.push('<button type="button" class="nui-btn" data-act="stop" aria-label="Hide tutorial guide">Hide</button>');
       parts.push(`<div class="ms-tutorial__actions">${btns.join('')}</div>`);
     }
     this.el.classList.toggle('ms-tutorial--stuck', !!m.stuck);

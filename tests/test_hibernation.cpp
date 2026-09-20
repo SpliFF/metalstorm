@@ -370,3 +370,75 @@ TEST_CASE("hibernate D1: an ineligible room never blames the war's ending") {
     CHECK_FALSE(d.deferredForWarEnding);
     CHECK(!d.reason.empty());
 }
+
+// ── Idle EXIT: the non-persistent counterpart (D13, beta E2E pass 1) ───────
+//
+// A broadcast relay ran 25+ minutes at zero watchers, and a plain skirmish
+// ran 9+ minutes at zero clients, neither honouring the boot-time log line
+// promising exit after 300s/120s-grace. The relay's loop turned out to have
+// no idle check of any kind — it REPLACES the sim loop rather than running
+// beside it, so it never reached the `if` this decision was extracted from.
+// These tests pin the decision itself so both call sites (the sim loop and
+// the relay loop) can share it instead of drifting apart again.
+
+namespace {
+
+/// An idle skirmish, eligible on every count except whatever the test
+/// changes.
+hibernate::IdleExitContext IdleSkirmish() {
+    hibernate::IdleExitContext c;
+    c.persistentRoom = false;
+    c.idleExitEnabled = true;
+    c.idleExitSec = 300;
+    c.sinceStartSec = 421;
+    c.startupGraceSec = 120;
+    c.idleForSec = 301;
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("idle-exit D13: an idle skirmish past its grace exits") {
+    const auto d = hibernate::DecideIdleExit(IdleSkirmish());
+    CHECK(d.exit);
+    CHECK(!d.reason.empty());
+}
+
+TEST_CASE("idle-exit D13: a persistent room never exits — it hibernates instead") {
+    auto c = IdleSkirmish();
+    c.persistentRoom = true;
+    const auto d = hibernate::DecideIdleExit(c);
+    CHECK_FALSE(d.exit);
+    CHECK(!d.reason.empty());
+}
+
+TEST_CASE("idle-exit D13: disabled (headless run, or idleExitSeconds<=0) never exits") {
+    auto c = IdleSkirmish();
+    c.idleExitEnabled = false;
+    CHECK_FALSE(hibernate::DecideIdleExit(c).exit);
+}
+
+TEST_CASE("idle-exit D13: boundaries are exclusive, same as the shipped `>`") {
+    // Inside the startup grace.
+    auto c = IdleSkirmish();
+    c.sinceStartSec = 120;
+    CHECK_FALSE(hibernate::DecideIdleExit(c).exit);
+    // Exactly at the idle window, not past it.
+    c = IdleSkirmish();
+    c.idleForSec = 300;
+    CHECK_FALSE(hibernate::DecideIdleExit(c).exit);
+    // A client connected within the window.
+    c = IdleSkirmish();
+    c.idleForSec = 0;
+    CHECK_FALSE(hibernate::DecideIdleExit(c).exit);
+}
+
+TEST_CASE("idle-exit D13: a relay with a live watcher does not exit") {
+    // What the relay loop feeds this each tick: `idleForSec` resets to 0
+    // whenever `rtcServer.GetClientCount() > 0`, exactly like the sim loop's
+    // `lastClientTime`. A relay someone is actually watching must not exit
+    // out from under them.
+    auto c = IdleSkirmish();
+    c.idleForSec = 5;
+    CHECK_FALSE(hibernate::DecideIdleExit(c).exit);
+}

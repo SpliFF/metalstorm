@@ -74,7 +74,7 @@ import { renderTemplate } from '../ui/ui.js';
 import {
     defaultTeamForNewSlot, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
-import { decideRoomTransition, type SessionKind } from './room-transition.js';
+import { decideRoomTransition, effectiveRoomState, type SessionKind } from './room-transition.js';
 import { resolveRoomSeat, roomSeatStatus, type RoomSeat } from './room-seat.js';
 import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
 import {
@@ -292,6 +292,15 @@ export class LobbyUI {
     /// re-entered — a passive poll mentioning the same war must not, or
     /// quitting a war to the lobby would be undone by the next broadcast.
     private rejoinRequestedRoomId: number | null = null;
+
+    /// D4: the room whose game this browser has already watched end via the
+    /// Game Over overlay. One-shot client memory, not server truth — the
+    /// room JSON can validly still read Loading/Active for ~180s after
+    /// (PostGamePolicy's disconnect/reconnect grace period). Folded into the
+    /// room render through `effectiveRoomState` so a returning player is
+    /// never offered "REJOIN GAME" on the mission they just finished; cleared
+    /// once a fresh game starts in the same room.
+    private locallyEndedRoomId: number | null = null;
 
     /// 8a-follow-on: no longer a cached string. LobbyUI was a holder of the
     /// access token that task 8a's "six call sites" note did not even count —
@@ -1295,6 +1304,13 @@ export class LobbyUI {
                 msgEl.className = code ? 'msg error' : 'msg';
                 return;
             }
+            // D7: a register 409 for the name THIS guest session already
+            // holds is not "somebody else has it" — offer the upgrade path.
+            const guestNameCheck = {
+                attempted: user,
+                heldByGuest: this.isProvisional
+                    ? localStorage.getItem('springrts-username') : null,
+            };
             if (outcome.kind === 'register') {
                 registered = true;
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
@@ -1303,9 +1319,21 @@ export class LobbyUI {
                     body: JSON.stringify({ username: user, password: pass, faction }),
                 });
                 data = await resp.json().catch(() => ({}));
-                outcome = classifyLoginResponse(resp, data, false);
+                outcome = classifyLoginResponse(resp, data, false, guestNameCheck);
             }
             if (outcome.kind !== 'ok') {
+                if (outcome.kind === 'failed' && outcome.claimable) {
+                    msgEl.innerHTML = `${this.esc(outcome.message)} — `
+                        + `<button type="button" class="entry-inline-link" id="login-claim-btn">`
+                        + `Claim this callsign</button>`;
+                    msgEl.className = 'msg error';
+                    document.getElementById('login-claim-btn')?.addEventListener('click', () => {
+                        this.watchMode = false;
+                        this.showBrowser();
+                        (document.getElementById('guest-upgrade-btn') as HTMLButtonElement | null)?.click();
+                    });
+                    return;
+                }
                 msgEl.textContent = outcome.kind === 'failed' ? outcome.message : 'Login failed';
                 msgEl.className = 'msg error';
                 return;
@@ -1803,10 +1831,16 @@ export class LobbyUI {
     }
 
     /// Land on the most appropriate lobby screen after the game canvas
-    /// is hidden (e.g. after the user clicks Quit mid-game). If the
-    /// player is still a member of a room, show the room view;
-    /// otherwise show the room browser.
-    showAfterGame(): void {
+    /// is hidden. If the player is still a member of a room, show the room
+    /// view; otherwise show the room browser.
+    ///
+    /// `gameEnded` is D4's case: the Game Over overlay's "Return to lobby",
+    /// where the game genuinely finished. The room JSON is not guaranteed to
+    /// reflect that yet (PostGamePolicy keeps the subprocess up ~180s), so
+    /// rather than show the finished room with a live "REJOIN GAME" button,
+    /// remember the room locally as ended and go straight to the Hub — the
+    /// mission's own result screen already served as the "game over summary".
+    showAfterGame(gameEnded: boolean = false): void {
         // The lobby owns the screen again. Restart the room stream that
         // entering the game stopped: without this the room view is frozen on
         // the state it had at kickoff, so a war that has finished (and whose
@@ -1814,6 +1848,11 @@ export class LobbyUI {
         // Game" button pointed at a dead port — D25's dead end.
         this.inGame = false;
         this.startPolling();
+        if (gameEnded) {
+            this.locallyEndedRoomId = this.currentRoom?.id ?? this.locallyEndedRoomId;
+            this.showHub();
+            return;
+        }
         if (this.currentRoom) {
             this.showRoom();
         } else {
@@ -3595,6 +3634,10 @@ export class LobbyUI {
         }
 
         el.innerHTML = rooms.map(r => {
+            // D4: a room this browser already watched end must not advertise
+            // Rejoin from the list either, even while the JSON still reports
+            // Loading/Active during PostGamePolicy's grace period.
+            const effState = effectiveRoomState(r.state, r.id, this.locallyEndedRoomId);
             const detail = r.replayFile
                 ? `replay · ${this.esc(r.replayFile)} · ` +
                   `${r.playerCount} watching`
@@ -3602,15 +3645,15 @@ export class LobbyUI {
                   `${r.playerCount}/${r.maxPlayers} players · ` +
                   `Host: ${this.esc(r.hostName)}`;
             const joinLabel = r.replayFile ? 'Join cast'
-                : r.state >= 5 ? 'Ended'
-                : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
+                : effState >= 5 ? 'Ended'
+                : (effState >= 3 ? 'Watch / Rejoin' : 'Join');
             // A room already Loading/Active auto-spectates anyone not on its
             // original roster (RoomManager::JoinRoom's isActive branch) — the
             // plain Join button already gets you in as a spectator there, so
             // the explicit Spectate button only adds value pre-game (Filling),
             // where the default Join would claim a player slot instead
             // (PLAN-metalstorm-onboarding.md §4).
-            const spectateHtml = (!r.replayFile && r.state < 3 && r.state < 5)
+            const spectateHtml = (!r.replayFile && effState < 3 && effState < 5)
                 ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
                 : '';
             // §2.4: a war's card says what joining it will DO to you — which
@@ -3627,11 +3670,11 @@ export class LobbyUI {
             return renderTemplate(this.templates.browserRoomEntry, {
                 id: r.id,
                 name: this.esc(r.name),
-                state: ROOM_STATE_LABELS[r.state] || '?',
+                state: ROOM_STATE_LABELS[effState] || '?',
                 detail,
                 preview_html: previewHtml,
                 join_label: joinLabel,
-                disabled_attr: r.state >= 5 ? ' disabled' : '',
+                disabled_attr: effState >= 5 ? ' disabled' : '',
                 spectate_html: spectateHtml,
             });
         }).join('');
@@ -3679,6 +3722,8 @@ export class LobbyUI {
     private patchRoom(): boolean {
         if (!this.currentRoom) return false;
         const r = this.currentRoom;
+        // D4: same overlay showRoom() applies — see effectiveRoomState.
+        const effState = effectiveRoomState(r.state, r.id, this.locallyEndedRoomId);
 
         // Structural checks — if these changed, the DOM shape is
         // different and we need a full re-render.
@@ -3690,7 +3735,7 @@ export class LobbyUI {
 
         // Patch room header
         const stateEl = this.container.querySelector('.room-state');
-        if (stateEl) stateEl.textContent = ROOM_STATE_LABELS[r.state] || '?';
+        if (stateEl) stateEl.textContent = ROOM_STATE_LABELS[effState] || '?';
 
         // Patch player rows — update team select, ready status, start
         // pos without touching innerHTML so focus/scroll are preserved.
@@ -3708,7 +3753,7 @@ export class LobbyUI {
             // the patch would put the flag's label back on the next poll.
             const statusEl = row.querySelector('.player-status');
             if (statusEl) {
-                const running = r.state === 3 || r.state === 4;
+                const running = effState === 3 || effState === 4;
                 statusEl.textContent =
                     roomSeatStatus(this.seatFor(p, running), p.ready, running);
             }
@@ -3753,9 +3798,13 @@ export class LobbyUI {
         const r = this.currentRoom;
         const myPlayer = r.players.find(p => p.playerId === this.myPlayerId);
         const amHost = myPlayer?.isHost ?? false;
+        // D4: fold in this browser's own memory that r's game already ended,
+        // in case the JSON hasn't caught up (PostGamePolicy's ~180s grace
+        // period) — see effectiveRoomState.
+        const effState = effectiveRoomState(r.state, r.id, this.locallyEndedRoomId);
         // Room is considered "running" while the host has an active
         // game subprocess — either Loading (3) or Active/In Progress (4).
-        const gameRunning = r.state === 3 || r.state === 4;
+        const gameRunning = effState === 3 || effState === 4;
         // Rooms persist across game sessions: after a game ends
         // members stay in the room to chat, adjust settings, and
         // launch another round. For UI purposes we treat both the
@@ -3763,7 +3812,7 @@ export class LobbyUI {
         // state (5+) as "preGame" — Ready / Start Game controls
         // reappear and the host can kick off a fresh game without
         // recreating the room.
-        const preGame = r.state < 3 || r.state >= 5;
+        const preGame = effState < 3 || effState >= 5;
 
         // Start-position metadata for the room's current map.
         // `availableMaps` is populated on showBrowser() from /api/maps;
@@ -3980,7 +4029,7 @@ export class LobbyUI {
 
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
-            state: ROOM_STATE_LABELS[r.state] || '?',
+            state: ROOM_STATE_LABELS[effState] || '?',
             setup_html: this.renderRoomSetupLine(r),
             players_html: playersHtml + aiRowsHtml + addAIHtml,
             actions_html: actions.join(''),
@@ -4166,6 +4215,7 @@ export class LobbyUI {
         if (!this.authToken) return;
         await this.lobbyPost('/api/rooms/leave');
         this.currentRoom = null;
+        this.locallyEndedRoomId = null;
         this.showBrowser();
     }
 
@@ -4206,14 +4256,14 @@ export class LobbyUI {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/start');
         const msgEl = document.getElementById('room-msg');
-        if (!msgEl) return;
         if (data?.error) {
-            msgEl.textContent = data.error;
-            msgEl.className = 'msg error';
-        } else {
-            msgEl.textContent = '';
-            msgEl.className = 'msg';
+            if (msgEl) { msgEl.textContent = data.error; msgEl.className = 'msg error'; }
+            return;
         }
+        if (msgEl) { msgEl.textContent = ''; msgEl.className = 'msg'; }
+        // D4: a fresh round is starting in this room — the local "already
+        // watched this one end" memory no longer applies to it.
+        this.locallyEndedRoomId = null;
     }
 
     // endGame() and closeRoom() removed — room lifecycle is handled

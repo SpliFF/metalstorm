@@ -17,6 +17,7 @@
 
 #include "Server/BroadcastCatalog.h"
 #include "Server/BroadcastLog.h"
+#include "Server/BroadcastRelay.h"
 
 namespace {
 
@@ -108,6 +109,17 @@ TEST_CASE("availability: a lower dev floor opens a segment sooner") {
                                                 /*nowMs=*/100000 + 30 * 1000);
   CHECK(a.available);
   CHECK(a.behindSeconds == 30);
+}
+
+TEST_CASE("effective floor: no override uses the compiled one-hour floor") {
+  CHECK(broadcastcatalog::EffectiveFloorSeconds(/*devFloorSec=*/-1) ==
+        broadcast::kMinBroadcastDelaySec);
+}
+
+TEST_CASE("effective floor: a dev override wins over the compiled floor") {
+  CHECK(broadcastcatalog::EffectiveFloorSeconds(/*devFloorSec=*/30) == 30);
+  // 0 is a real override (not the "unset" sentinel, which is negative).
+  CHECK(broadcastcatalog::EffectiveFloorSeconds(/*devFloorSec=*/0) == 0);
 }
 
 TEST_CASE("segment name parsing: the lobby's own <roomId>-<ts>.msb shape") {
