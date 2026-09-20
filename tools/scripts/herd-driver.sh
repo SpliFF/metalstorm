@@ -12,6 +12,9 @@ while true; do
   if [ -f "$REPO/.tasks/PAUSED" ] || [ -f "$REPO/.tasks/pause" ]; then sleep "$INTERVAL"; continue; fi
   line=$(taskherd status -C "$REPO" 2>/dev/null | head -1)
   max=$(echo "$line" | sed -n 's/.*max \([0-9]*\).*/\1/p'); running=$(echo "$line" | sed -n 's/.*running \([0-9]*\).*/\1/p')
+  # With parallel.max <= 1 taskherd prints no "parallel:" header; taskherd run itself
+  # refuses while a step is running, so treat the missing header as max=1/running=0.
+  if [ -z "$max" ]; then max=1; running=0; fi
   if [ -n "$max" ] && [ -n "$running" ] && [ "$running" -lt "$max" ]; then
     # fire in the background: `taskherd run` stays attached for the whole step
     ( nohup taskherd run -C "$REPO" >> "$REPO/.tasks/logs/driver-runs.log" 2>&1 & )
