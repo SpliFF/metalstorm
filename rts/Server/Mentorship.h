@@ -141,10 +141,22 @@ struct OfferResult {
     int64_t id = 0;
 };
 
+/// Declared ahead of `Offer` only because the supersede path below calls it;
+/// defined in its own place further down with the rest of the transitions.
+inline Status End(sqlite3* db, int64_t menteeId, int64_t callerId, int64_t now);
+
 /// Offer a mentorship. A human offer lands `offered` and waits for Respond;
 /// an AI one (`mentorId == kAiMentorId`) lands `active` immediately, because
 /// the mentee asking for it IS the acceptance — there is nobody on the other
 /// side to answer.
+///
+/// One live row still, but a HUMAN offer SUPERSEDES a live AI one: the AI
+/// mentor is a fallback (PLAN-beta-journey.md §(d)), and since the lobby now
+/// seats one automatically at spawn (MentorSeat.h), refusing the human offer
+/// would make a Recruit's first mission permanently disqualify them from the
+/// human mentorship the fallback stands in for. Ending the AI row first keeps
+/// the invariant exactly as the header states it — never two live rows — while
+/// leaving the fallback replaceable.
 inline OfferResult Offer(sqlite3* db, int64_t mentorId, int64_t menteeId,
                          int64_t now) {
     OfferResult res;
@@ -156,11 +168,14 @@ inline OfferResult Offer(sqlite3* db, int64_t mentorId, int64_t menteeId,
         res.status = Status::SelfMentor;
         return res;
     }
-    if (ActiveFor(db, menteeId)) {
-        res.status = Status::AlreadyMentored;
-        return res;
-    }
     const bool ai = (mentorId == kAiMentorId);
+    if (auto live = ActiveFor(db, menteeId)) {
+        if (ai || live->kind != "ai" ||
+            End(db, menteeId, live->menteeId, now) != Status::OK) {
+            res.status = Status::AlreadyMentored;
+            return res;
+        }
+    }
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO mentorships (mentor_id, mentee_id, kind, state, "

@@ -48,6 +48,7 @@
 #include "Server/WarSlotReservation.h"
 #include "Server/WarSummary.h"
 #include "Server/Standing.h"
+#include "Server/MentorSeat.h"
 #include "Server/Mentorship.h"
 #include "Server/Journey.h"
 #include "Server/SqliteThreading.h"
@@ -755,11 +756,17 @@ static GameServerInstance spawnGameServer(
   }
   // ── Mentor auto-seat (PLAN-beta-journey.md §(d)) ───────────────────────
   //
-  // A Recruit on a side with no Veteran+ human gets the suggest-only
-  // co-commander. Decided HERE, at spawn, and not at enlist (which is what
-  // the `RoomManager.cpp` TODO this replaces proposed): whether a Recruit
-  // needs a mentor depends on who else is on their side, and the roster is
-  // only final at the moment it is turned into `--player` arguments.
+  // An UNMENTORED Recruit on a side with no Veteran+ human gets the
+  // suggest-only co-commander. Decided HERE, at spawn, and not at enlist
+  // (which is what the `RoomManager.cpp` TODO this replaces proposed):
+  // whether a Recruit needs a mentor depends on who else is on their side,
+  // and the roster is only final at the moment it is turned into `--player`
+  // arguments.
+  //
+  // The rule itself is MentorSeat::Decide, and the seat is reconciled with
+  // the `mentorships` table by WRITING the row it implies — see MentorSeat.h
+  // for why that direction and not the other, and for why an existing
+  // mentorship (with a human who is not even in this room) suppresses it.
   //
   // Metalstorm-only by construction rather than by a game-id comparison: the
   // seat is a `strategos` AI running its `mentor` profile, so the test is
@@ -769,7 +776,7 @@ static GameServerInstance spawnGameServer(
   // Never on a replay, and never on a broadcast relay: the recording's roster
   // is the authority, and adding an AI it did not have would diverge on the
   // first frame — and a relay has no roster at all (playerRoster is always
-  // empty on that path), so the census below would run for nothing.
+  // empty on that path), so the roster census below would run for nothing.
   if (!isReplay && !isBroadcastRelay) {
     const std::filesystem::path mentorProfile =
         std::filesystem::path(gGamesDir) / gameId / "AI" / "strategos" /
@@ -777,57 +784,86 @@ static GameServerInstance spawnGameServer(
     std::error_code mpEc;
     if (std::filesystem::exists(mentorProfile, mpEc)) {
       // Tier is derived from `users.standing` (Standing.h), read here with a
-      // short-lived read-only handle rather than through the lobby's
-      // `Database` — `spawnGameServer` is a static function reached from five
-      // call sites and taking a Database& would thread a parameter through
-      // all of them for one query that runs once per process launch.
-      struct SideCensus { bool recruit = false; bool veteran = false; };
-      std::map<uint8_t, SideCensus> census;
+      // short-lived handle rather than through the lobby's `Database` —
+      // `spawnGameServer` is a static function reached from five call sites
+      // and taking a Database& would thread a parameter through all of them
+      // for queries that run once per process launch.
+      //
+      // Read-WRITE, unlike the census this replaces, because the seat now
+      // writes the `mentorships` row it implies (MentorSeat.h): the sim
+      // mirrors `mentor_<pid>` from that row at AuthRequest, so a seat with no
+      // row is a mentor the mentee cannot see and is offered a second time
+      // (beta-e2e E2E2 D18). Written BEFORE the fork below, so the row is
+      // already there when the game server reads it.
+      std::vector<MentorSeat::Candidate> roster;
       sqlite3 *accounts = nullptr;
-      if (sqlite3_open_v2(dbPath.c_str(), &accounts, SQLITE_OPEN_READONLY,
+      if (sqlite3_open_v2(dbPath.c_str(), &accounts, SQLITE_OPEN_READWRITE,
                           nullptr) == SQLITE_OK) {
+        // The lobby's own handle is live on another thread; a spawn must wait
+        // for it rather than fail the seat with SQLITE_BUSY.
+        sqlite3_busy_timeout(accounts, 2000);
         sqlite3_stmt *st = nullptr;
         if (sqlite3_prepare_v2(accounts,
-                               "SELECT standing FROM users WHERE username=?",
+                               "SELECT id, standing FROM users WHERE username=?",
                                -1, &st, nullptr) == SQLITE_OK) {
           for (const auto &p : playerRoster) {
             if (p.isSpectator)
               continue;
-            int standing = 0;
+            MentorSeat::Candidate c;
+            c.team = p.team;
             sqlite3_reset(st);
             sqlite3_bind_text(st, 1, p.username.c_str(), -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(st) == SQLITE_ROW)
-              standing = sqlite3_column_int(st, 0);
-            const int tier = Standing::TierFor(standing);
-            auto &c = census[p.team];
-            if (tier == 0)
-              c.recruit = true;
-            if (tier >= 2)
-              c.veteran = true;
+            if (sqlite3_step(st) == SQLITE_ROW) {
+              c.userId = sqlite3_column_int64(st, 0);
+              c.tier = Standing::TierFor(sqlite3_column_int(st, 1));
+            }
+            // An offer nobody has answered counts as a human mentor: ActiveFor
+            // is the one definition of "live" the offer gate uses, and a
+            // Recruit with an offer in flight is about to have one.
+            if (c.userId > 0) {
+              if (const auto live = Mentorship::ActiveFor(accounts, c.userId))
+                c.mentor = live->kind == "ai" ? MentorSeat::Mentor::Ai
+                                              : MentorSeat::Mentor::Human;
+            }
+            roster.push_back(c);
           }
         }
         sqlite3_finalize(st);
+
+        const MentorSeat::Decision seat = MentorSeat::Decide(roster);
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        for (const int64_t menteeId : seat.mentees) {
+          // The AI branch of Offer lands `active` immediately — there is
+          // nobody on the other side to answer, and by the time the mentee
+          // sees the HUD the AI is already commanding beside them.
+          const auto res =
+              Mentorship::Offer(accounts, Mentorship::kAiMentorId, menteeId, now);
+          if (res.status != Mentorship::Status::OK) {
+            SLOG(SPRING_LOG_WARNING,
+                 "room %u: could not record the AI mentorship for account %lld "
+                 "(status %d) — the seat is taken but the HUD will not show it",
+                 roomId, static_cast<long long>(menteeId),
+                 static_cast<int>(res.status));
+          }
+        }
+        for (const uint8_t team : seat.teams) {
+          // `-1` start position: the mentor commands nothing of its own and is
+          // never staged an army, so a real start box would be a slot taken
+          // away from a side the scenario sized.
+          const std::string spec =
+              "strategos:" + std::to_string(static_cast<int>(team)) + ":-1:mentor";
+          if (std::find(aiArgStorage.begin(), aiArgStorage.end(), spec) !=
+              aiArgStorage.end())
+            continue;
+          aiArgStorage.push_back(spec);
+          SLOG(SPRING_LOG_NOTICE,
+               "room %u: seating the mentor AI on team %d — an unmentored "
+               "Recruit is on a side with no Veteran",
+               roomId, static_cast<int>(team));
+        }
       }
       if (accounts)
         sqlite3_close(accounts);
-
-      for (const auto &[team, c] : census) {
-        if (!c.recruit || c.veteran)
-          continue;
-        // `-1` start position: the mentor commands nothing of its own and is
-        // never staged an army, so a real start box would be a slot taken
-        // away from a side the scenario sized.
-        const std::string spec =
-            "strategos:" + std::to_string(static_cast<int>(team)) + ":-1:mentor";
-        if (std::find(aiArgStorage.begin(), aiArgStorage.end(), spec) !=
-            aiArgStorage.end())
-          continue;
-        aiArgStorage.push_back(spec);
-        SLOG(SPRING_LOG_NOTICE,
-             "room %u: seating the mentor AI on team %d — a Recruit is on a "
-             "side with no Veteran",
-             roomId, static_cast<int>(team));
-      }
     }
   }
 
@@ -6098,8 +6134,13 @@ int main(int argc, char *argv[]) {
             if (tier > 1)
               continue;
             // Already spoken for — Mentorship::Offer would refuse it anyway,
-            // so listing them would be an offer button that cannot work.
-            if (Mentorship::ActiveFor(db.Handle(), id))
+            // so listing them would be an offer button that cannot work. A
+            // live AI fallback is NOT that: an offer supersedes it (see
+            // Mentorship::Offer), and with the lobby seating one at spawn
+            // (MentorSeat.h) skipping those would empty this list of exactly
+            // the Recruits it exists to surface.
+            if (const auto live = Mentorship::ActiveFor(db.Handle(), id);
+                live && live->kind != "ai")
               continue;
             PresenceFacts f;
             if (const auto w = warSeen.find(id); w != warSeen.end()) {

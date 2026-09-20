@@ -3,12 +3,14 @@
 #include "Server/Database.h"
 #include "Server/GuestAccounts.h"
 #include "Server/HttpAuth.h"
+#include "Server/MentorSeat.h"
 #include "Server/Mentorship.h"
 #include "Server/NetworkServer.h"
 #include "Server/Standing.h"
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // PLAN-beta-journey.md §(a)/§(b), lane A1 — one spec per new mechanism.
 //
@@ -233,9 +235,100 @@ TEST_CASE("one live mentorship per mentee, and one endorsement per pair per day"
     CHECK(live->state == "active");
     CHECK(live->kind == "ai");
 
+    // A human offer SUPERSEDES the AI fallback — the AI stands IN for a human
+    // mentor, so it must not be the thing that prevents one. Still one live
+    // row: the AI one is ended in the same call.
+    auto supersede = Mentorship::Offer(f.db.Handle(), mentor, mentee, 1007);
+    REQUIRE(supersede.status == Mentorship::Status::OK);
+    CHECK(Mentorship::ById(f.db.Handle(), ai.id)->state == "ended");
+    live = Mentorship::ActiveFor(f.db.Handle(), mentee);
+    REQUIRE(live.has_value());
+    CHECK(live->id == supersede.id);
+    CHECK(live->kind == "human");
+    // …and a HUMAN one is still refused, AI-seated or not.
+    CHECK(Mentorship::Offer(f.db.Handle(), other, mentee, 1008).status ==
+          Mentorship::Status::AlreadyMentored);
+    // An AI offer never supersedes anything — two AI rows would be two rows.
+    CHECK(Mentorship::Offer(f.db.Handle(), Mentorship::kAiMentorId, mentee, 1009)
+              .status == Mentorship::Status::AlreadyMentored);
+    CHECK(Mentorship::End(f.db.Handle(), mentee, mentee, 1010) ==
+          Mentorship::Status::OK);
+
     // The endorsement rate limit is the whole cap on +15 standing.
     const int64_t day = Mentorship::kEndorsementDaySeconds;
     CHECK(Mentorship::Endorse(f.db.Handle(), mentor, mentee, 5 * day + 10));
     CHECK_FALSE(Mentorship::Endorse(f.db.Handle(), mentor, mentee, 5 * day + 900));
     CHECK(Mentorship::Endorse(f.db.Handle(), mentor, mentee, 6 * day + 10));
+}
+
+// beta-e2e E2E2 D18. The spawn-time seat was invisible to the mentee because it
+// wrote no `mentorships` row, and it landed on top of a Recruit who already had
+// a human mentor elsewhere. Both halves are MentorSeat::Decide's job; the row
+// the lobby writes for each returned mentee is the ordinary AI Offer.
+TEST_CASE("the spawn-time AI mentor seat follows the mentorship rows") {
+    using MentorSeat::Candidate;
+    using MentorSeat::Mentor;
+
+    // A lone Recruit: seat on their side, and a row for them — without it the
+    // sim's `mentor_<pid>` mirror has nothing to mirror.
+    {
+        const auto d = MentorSeat::Decide({Candidate{7, 0, 0, Mentor::None}});
+        REQUIRE(d.teams.size() == 1);
+        CHECK(d.teams[0] == 0);
+        REQUIRE(d.mentees.size() == 1);
+        CHECK(d.mentees[0] == 7);
+    }
+    // A Veteran on the same side is the mentor — no AI, and no row.
+    {
+        const auto d = MentorSeat::Decide(
+            {Candidate{7, 0, 0, Mentor::None}, Candidate{8, 0, 2, Mentor::None}});
+        CHECK(d.teams.empty());
+        CHECK(d.mentees.empty());
+    }
+    // A Veteran on the OTHER side does not mentor anyone: per-side, not
+    // per-room.
+    {
+        const auto d = MentorSeat::Decide(
+            {Candidate{7, 0, 0, Mentor::None}, Candidate{8, 1, 2, Mentor::None}});
+        REQUIRE(d.teams.size() == 1);
+        CHECK(d.teams[0] == 0);
+        CHECK(d.mentees == std::vector<int64_t>{7});
+    }
+    // D18's second half (room 80): a Recruit already mentored — by a human who
+    // is not in this room — gets NO seat on top of the mentor they have.
+    {
+        const auto d = MentorSeat::Decide({Candidate{7, 0, 0, Mentor::Human}});
+        CHECK(d.teams.empty());
+        CHECK(d.mentees.empty());
+    }
+    // …but an unmentored squadmate still pulls the seat, and only they get the
+    // row: the seat is per side, the relationship is per mentee.
+    {
+        const auto d = MentorSeat::Decide(
+            {Candidate{7, 0, 0, Mentor::Human}, Candidate{9, 0, 0, Mentor::None}});
+        REQUIRE(d.teams.size() == 1);
+        CHECK(d.teams[0] == 0);
+        CHECK(d.mentees == std::vector<int64_t>{9});
+    }
+    // A roster name the accounts db cannot resolve gets neither — a seat with
+    // no account behind it is a mentor nobody can be told about.
+    {
+        const auto d = MentorSeat::Decide({Candidate{0, 0, 0, Mentor::None}});
+        CHECK(d.teams.empty());
+        CHECK(d.mentees.empty());
+    }
+    // A Recruit whose AI mentorship is ALREADY live still gets the seat — the
+    // second mission in a recycled room must not deploy them without the AI
+    // they are recorded as being mentored by — but no second row.
+    {
+        const auto d = MentorSeat::Decide({Candidate{7, 0, 0, Mentor::Ai}});
+        REQUIRE(d.teams.size() == 1);
+        CHECK(d.teams[0] == 0);
+        CHECK(d.mentees.empty());
+    }
+    // Tier 1 is not a Recruit and does not need one.
+    {
+        const auto d = MentorSeat::Decide({Candidate{7, 0, 1, Mentor::None}});
+        CHECK(d.teams.empty());
+    }
 }
