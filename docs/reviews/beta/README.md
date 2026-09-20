@@ -766,3 +766,134 @@ content problem outside pres-atmos's renderer scope (same reasoning as AT2's
 "part 2" residual), so it is handed off rather than patched here. The
 `TerrainFog` spectator-union fix above **is** committed this pass, on its own
 merits, but is explicitly not a fix for the defect this row describes.
+
+# E2E pass 2 — Support mission, responsibility, mentorship (2026-09-21)
+
+PLAN-beta.md §Verification item **3**, driven end to end against the live stack
+(`spring-lobby` :8011 from the MAIN checkout, vite :8012, game servers 9100+)
+with two isolated Chrome contexts on one side. Items 1–2 were E2E1; item 4 is
+E2E3 and was **not** attempted.
+
+**Fixtures.** Two fresh accounts, both faction `compact` so the lobby seats them
+on the same side by construction: `e2e_rec7` (id 209, standing 0 → **Recruit**,
+tier 0) and `e2e_vet7` (id 210, **Veteran**, tier 2). Standing was raised by a
+direct `UPDATE users SET standing=60` on the LIVE lobby DB
+(`$TASKHERD_REPO/data/spring-server.db`) — **there is no admin route for it**;
+`/api/mentor/endorse` is the only standing writer and it is +15 and needs a
+mentorship, which needs tier ≥ 2 first. `query_db` was NOT used (E2E1 D3: it
+answers from the stale clone snapshot).
+
+**Rooms.** 77 (Recruit+Veteran, `crossing_standoff`), 79 (same, after the
+mentorship was accepted), 80/81 (Recruit alone). All servers reaped; no port
+9100–9109 listener and no stray `spring-server` left behind.
+
+## PASS/FAIL — item 3, Support + responsibility + mentorship
+
+| # | Sub-step | Result | Evidence |
+|---|---|---|---|
+| 3a | Recruit and Veteran deploy into `crossing_standoff` on the **same side** | **PASS** | Room 77 roster: both `team:0`, `tier_name` `Recruit` / `Veteran`. Sim: `rank_0=2 callsign_0=e2e_vet7`, `rank_1=0 callsign_1=e2e_rec7` — `game_teams.lua`'s `publishStanding` carries the lobby's `tier`/`callsign` custom options into the sim intact. `e2e/p2-01-room-recruit-veteran-same-side.png`, `p2-02-recruit-in-game.png` |
+| 3b | Two squads **auto-carved** for the Recruit at deploy | **FAIL** | **D15** — `assign:` empty with 18 live team-0 units, in room 77 *and* room 79. `CarveForRecruit` itself is fine: called by hand post-spawn it returns `2` immediately (`assign_27836=1 assign_965=1`). The carve is called too early. |
+| 3c | `assign_<unitID>` rulesParams reach the client | **FAIL** | **D14** — published as `assign_965.0` / `assign_27836.0`; the store's `/^assign_(\d+)$/` never matches, `getMyAssignments()` → `[]`. **FIXED this pass**; proven live by republishing with floored keys, after which `getMyAssignments()` → `[965, 27836]`. |
+| 3d | Recruit's **box-select returns only those** | **PASS** (with the D14 fix applied live) | A full-screen box-drag on the Recruit's canvas: the engine selected `[27836, 965, 7086, 26633]`, `uiStore.selection.unitIds` was `[27836, 965]`, focus strip read **`Your squads · 2 × LIGHT ENGINEERS · UNITS 2`**. This is HUD scoping by design (`ui-store.ts:520` — "Unassigned units stay selectable by the engine … the refusal lives in `game_assignment.lua:AllowCommand`"), so the *engine* selection is deliberately wider. `e2e/p2-03-recruit-boxselect-scoped.png` |
+| 3e | Veteran's order on them shows **"order from `<callsign>` (Veteran)"** in the Recruit's HUD | **PASS** | Veteran issued a real client order (`window.test.clientOrder([965,27836], CMD.MOVE, …)`, i.e. the player's own network command, not a Lua/server one). `AllowCommand` passed it and marked `orderBy`. Recruit's focus drill-down rendered **`ORDERS  order from e2e_vet7 (Veteran)`**, and the mentor card the same line. `e2e/p2-04-recruit-hud-order-from-veteran.png` |
+| 3f | Recruit's order on the **Veteran's squad is refused** | **PASS** | Unit 15976 made the Veteran's responsibility; the Recruit's `clientOrder` MOVE never entered its queue (`cmds=1 [20.0]` — the pre-existing FIGHT — and no `_by` mark). Rule invoked directly for the truth table: `recruit→vetSquad=false`, `recruit→ownSquad=true`, `vet→recruitSquad=true`. Refusal is **silent** in the HUD — see D21. `e2e/p2-05-recruit-order-on-veteran-squad-refused-silently.png` |
+| 3g | Mentor **offer → accept** | **PASS** | `POST /api/factions/metalstorm/recruits` (as the Veteran) listed `e2e_rec7`; `POST /api/mentor/offer {mentee_id:209}` → `{"id":1,"state":"offered"}`; `POST /api/mentor/respond {id:1,accept:true}` (as the Recruit) → `{"id":1,"state":"active"}`. |
+| 3h | The mentorship **rides into the sim** | **PASS** | Room 79 (deployed *after* the accept): `mentor_0 = 1` — the mentee's option arrived at AuthRequest as the mentor's username and `game_teams.lua`'s `playerIDByName` resolved it to the Veteran's playerNum. Recruit's HUD: **`UNDER MENTORSHIP: E2E_VET7 · 2 squads under your command`**. `e2e/p2-06-mentor-card-active-chatter-filtered.png` |
+| 3i | **Chatter filter on** — `isChatterFiltered()` | **PASS** | `mentorOf(0)=1`, `isMentored()=true`, `isChatterFiltered()=true`, `showEverything=false`, and the card offers **SHOW EVERYTHING**. |
+| 3j | Chatter filter **hides all-chat** | **FAIL** | **D17** — the gate exists (`command-console.js:chatterHidden`) but nothing in the tree ever sets `extra.scope = 'all'` or `'enemy'`; the console's own doc comment says so ("The chat producer that would set it does not exist on the wire yet"). Only `moment-hud.ts` consumes the flag for real (scoping battle moments). |
+| 3k | `task <recruit>: hold <objective>` **NL command** | **FAIL** | **D16** — `task e2e_rec7: hold Raven Basin` → *"didn't understand: 'task', 'e2e_rec7:'"*, and it silently fell through to a **team-wide standing order** ("Whoever is free holding Raven Basin") instead of refusing. The other two phrasings `nl-instructions.md` documents fail too. `e2e/p2-07-veteran-nl-task-not-understood.png` |
+| 3l | **"Task from `<callsign>`" chip** | **PASS** | Exercised the verb the NL path is *documented* to emit, at the gadget's real entry point and as the Veteran: `RecvLuaMsg('cmd=objectives.createBounty&type=control&region=raven_basin&player=0&stake=20&hold=900', 1)` → `objective_11_player=0`. The same message issued as the **Recruit** (pid 0) created nothing — `mayTask` refused it. Recruit's HUD chip: **`HOLD RAVEN BASIN (BOUNTY) · ACTIVE · PROG 0% · ⬡20 · TASK FROM E2E_VET7`**. `e2e/p2-08-recruit-task-from-veteran-chip.png`. Caveat: the chip sat **8th of 8**, behind "show more" — D20. |
+| 3m | No Veteran → **AI mentor seated at spawn** (`ai_list`) | **PASS** | Rooms 80 and 81, Recruit alone: lobby logged `room 81: seating the mentor AI on team 0 — a Recruit is on a side with no Veteran`; `ai_list` team 0 → `AI:strategos@t0`, `active:true`, alongside `activeHumans:1`; the server's own argv carries `--ai strategos:0:-1:mentor` — the `mentor` profile at start-position `-1`, exactly as PLAN-beta specifies. `e2e/p2-09-recruit-alone-ai-mentor-seated-but-hud-says-no-mentor.png` |
+| 3n | …and the Recruit can **see** they have a mentor | **FAIL** | **D18** — with the AI mentor seated, `mentor_0` is unset and the card reads **"NO MENTOR YET — ACCEPT AN AI MENTOR"**. Same screenshot as 3m. |
+
+Bonus, not asked for: the mentor card's **ACCEPT AN AI MENTOR** button works
+(E2E1-era journey-hud D2's 401 is gone) — it created
+`{"id":2,"mentor_id":0,"mentor":"ai","kind":"ai","state":"active"}`. The card
+then rendered **empty** — D19.
+
+## Defects
+
+| # | Sev | Defect | Repro | Owning lane |
+|---|---|---|---|---|
+| D14 | **HIGH** | **`assign_<unitID>` is published under a float-formatted key**, so the entire Recruit command-scope HUD reads "nothing is assigned to me". `Spring.GetTeamUnits` hands unitIDs back as Lua-5.4 **floats**, and `'assign_' .. unitID` stringifies `965.0` as `"965.0"` — but `ui-store.ts`'s `ASSIGN_KEY = /^assign_(\d+)$/` requires digits only, and `assignedBy()` looks up `assign_${unitId}_by` with an integer. So `getMyAssignments()` returns `[]`, box-select is never scoped, and the superior's "order from …" line never renders. The gadget's own `pkey()` helper exists for exactly this float class of bug but only floors *playerIDs*. | Deploy a Recruit, carve, then `Spring.GetTeamRulesParams(0)` → `assign_965.0=1.0`. Client: `__msUiStore.getMyAssignments()` → `[]`. | **FIXED this pass** (journey-sim) |
+| D15 | **HIGH** | **The auto-carve never fires for a Recruit who starts the mission** — only for a mid-game joiner. `game_teams.lua:GameStart` seeds the initial roster through `PlayerAdded`, which calls `GG.Assignment.CarveForRecruit`; at that instant the scenario has spawned **nothing**, so `#Spring.GetTeamUnits(teamID)` is 0, the `< MIN_TEAM_SQUADS (6)` guard returns 0, and nothing is ever retried. Every Support deploy — the headline journey — therefore lands a Recruit with no squads and, because `countFor` is 0, with `AllowCommand` letting them command the **whole team roster** (the exact opposite of the rule). Called by hand once units exist it carves 2 instantly, so the logic is right and only the timing is wrong. NOT fixed here: the fix needs a retry with a deadline (and a Save/Load answer for the pending set), which is a policy call, not a mechanical one — suggested shape is a `carvePending[pid] = frame + N` set at the `< MIN_TEAM_SQUADS` return and drained from a `gadget:GameFrame` every 30 frames. | Room 77 and room 79, both `crossing_standoff`: `team0 units=18`, `assign:` empty, `assign_rev=nil`. Then `GG.Assignment.CarveForRecruit(<recruit pid>)` → `2`. | journey-sim |
+| D16 | **MEDIUM** | **The `task <name>: …` NL command does not exist, and fails unsafely.** `nl-instructions.md:104` tells the model to emit a `command` action with verb **`objectives.createBounty`** and a `player` field — but `COMMAND_VERBS` (derived from `TARGET_SHAPES_BY_VERB` in `compile-table.ts`) is the closed list `attack…build`, `nl-envelope.ts:437` rejects anything outside it, the JSON schema handed to the model enumerates the same list, and `NLCommandIntent` has no `player` field at all. So the documented sentence cannot be expressed even by a perfect model, and on the offline parser it is **silently reinterpreted** as a team-wide standing order rather than refused. | Veteran's console: `window.test.nl('task e2e_rec7: hold Raven Basin')` → "standing order set · normal priority (team-wide — no group named) / didn't understand: 'task', 'e2e_rec7:'". Also `'give e2e_rec7 the bridge'`, `'e2e_rec7, take Raven Basin'`. `grep -n "objectives.createBounty" client/src/ui/native-ui/compile-table.ts` → nothing. | journey-hud / nl-instructions |
+| D17 | **MEDIUM** | **The chatter filter's chat half is dead code.** `chatterHidden(scope)` only fires for `scope === 'all' \| 'enemy'`, and **nothing** in `client/`, `data/games/metalstorm/ui/` or any test ever passes a `scope` to `say()`. PLAN-beta's "console hides all-chat" is therefore unimplemented; what actually works is `moment-hud.ts`, which scopes battle moments to the player's own squads. The console's own comment admits it. | `grep -rn "scope: *'all'" client/ data/games/metalstorm/ui/` → no hits. | journey-hud |
+| D18 | **MEDIUM** | **The spawn-time AI mentor seat is invisible to the mentee.** The lobby seats `strategos:<team>:-1:mentor` when a Recruit has no tier ≥ 2 human on their side, but it writes **no `mentorships` row** — and the sim's `mentor_<pid>` is mirrored from that row at AuthRequest (`ClientMessageHandler.cpp:614`, value `"ai"` → `-1`). So the Recruit deploys with an AI mentor sitting on their team while their HUD says **"NO MENTOR YET"** and, 30 s later, offers to get them the AI mentor they already have. Two ways it bites: the card's copy is wrong, and a player who accepts creates a *second* mentor relationship the `Mentorship.h` invariant exists to prevent. | Room 81: lobby log `seating the mentor AI on team 0`; `ai_list` → `AI:strategos@t0` active; Recruit's client `mentorOf(0)` → undefined, `isMentored()` → false; card → "NO MENTOR YET". | journey-lobby-routes |
+| D19 | LOW | **The mentor card goes blank after "ACCEPT AN AI MENTOR".** The route succeeds and the lobby row goes `active`, but `mentor_<pid>` is fixed at AuthRequest for the running session, so `mentorCardModel` sees `kind:'none'` with the offer already dismissed and renders nothing. The player's click reads as "the button deleted the panel". | Room 81, click ACCEPT AN AI MENTOR → `#nui-panel-body-mentor-card` `innerText` becomes `""`; `/api/account/me` shows the mentorship active. | journey-hud |
+| D20 | LOW | **A task your mentor just handed you does not rank on the objective board.** `rankObjectives` boosts `o.suggested === playerId` by 800 but ignores `o.player`, which is the *stronger* signal ("this one is yours", not "yours to take"). The bounty landed **8th of 8**, below every scripted objective, hidden behind "+N more objectives". | `e2e/p2-08-recruit-task-from-veteran-chip.png` — visible only after clicking the overflow. `objective-model.ts:308`. | journey-hud |
+| D21 | LOW | **A refused order is silent.** `AllowCommand` returning false produces no client feedback of any kind — no toast, no console line, no cursor state. A Recruit who boxes the whole field (which the engine allows, by design) and orders gets partial obedience with no explanation, which is precisely the "the game silently ignored me" failure the console's own refusal-copy discipline exists to prevent. | Recruit `clientOrder` on the Veteran's squad → nothing in the DOM matches `/refus|cannot|denied/`. | journey-hud / journey-sim |
+
+## Fixed this pass (committed)
+
+- `data/games/metalstorm/LuaRules/Gadgets/game_assignment.lua` (D14, 2 code
+  lines + comment): `publish()` builds its key from `math.floor(unitID)`, the
+  same integer-normalisation `pkey()` already applies to playerIDs.
+  `tests/game_assignment_spec.lua` gains a regression case that calls
+  `GG.Assignment.Set(100.0, 1)` and asserts `assign_100` exists and
+  `assign_100.0` does not. Verified red-then-green: with the floor removed the
+  new case fails (`expected 1, got nil`), with it **17/17** pass. Proven live
+  too — republishing the running game's params with floored keys made the
+  Recruit's client report `getMyAssignments() → [965, 27836]` and scope the
+  box-select, which is how 3d/3e/3l could be tested at all.
+
+No other defect fits the ≤10-line budget. D15 is the one that most deserves a
+fix and explicitly does not (see its row).
+
+## Not done this pass (stated plainly)
+
+- **PLAN-beta.md §Verification item 4 (presentation)** — E2E3.
+- **The `assign.set` / `assign.release` wire verbs were not exercised.** A
+  Veteran re-assigning squads by hand is §(c) behaviour this pass never
+  touched; only the auto-carve path and `AllowCommand` were.
+- **`objectives.createBounty` was not sent from a browser client.** No wire
+  sender is reachable from the page (`window.__nativeUi` exposes only
+  `travelTo`/`open`), so 3l issued the exact documented payload at
+  `gadget:RecvLuaMsg` with the Veteran's playerID instead. That covers the
+  gadget's authority check and the publication contract; it does **not** cover
+  `integration.ts`'s `WIRE_VERB_PREFIXES` encoder.
+- **The carve was applied by hand in every run**, because D15 means the
+  automatic path never fires. Every downstream PASS (3d–3f, 3l) is therefore a
+  test of the mechanism, not of the journey a real Recruit would take today.
+- **`/api/mentor/endorse` was not exercised**, so the +15-once-a-day rule and
+  its day-bucket are unverified.
+- **Declining the AI mentor ("NO THANKS") was not tested**, nor
+  `/api/mentor/end` from the *mentor's* side (only the mentee's).
+- **One unreproduced observation, deliberately not written up as a defect**:
+  an early drill-down on the bounty objective showed no `Assigned: to you,
+  from e2e_vet7` row even though the chip later rendered `TASK FROM E2E_VET7`.
+  That first reading was taken with the briefing modal still up; room 79 was
+  gone before it could be re-checked. Named here so a later pass can look, not
+  claimed as a finding.
+- **The near-black `scorched_crossing_v2.4` render (E2E1 D11) recurred** in
+  rooms 77/79 and then did *not* in room 81 (`p2-08` shows properly lit
+  terrain). Not investigated — it is pres-atmos/terrain-streaming's row.
+
+## TOOLING GAP — one closed, the rest still open
+
+- **`1440×900` is now achievable.** E2E1 recorded `resize_page` as a no-op
+  (viewport stuck at 1440×801) and captured at the wrong size. **Use
+  `chrome-devtools emulate` with `viewport: "1440x900x1"` instead** — it sets
+  `Emulation.setDeviceMetricsOverride`, `innerHeight` reads 900, and every
+  screenshot in this section is a true 1440×900 PNG. `resize_page` is still a
+  no-op; nothing else changed.
+- `window.test` is a class instance, so `Object.keys(window.test)` shows only
+  `deps`/`renderPaused`/`nl` — the useful API is on the **prototype**
+  (`Object.getOwnPropertyNames(Object.getPrototypeOf(window.test))`).
+  `test.clientOrder(unitIds, cmdId, params, opts)` is the one that issues an
+  order **as the local player** (so `AllowCommand` sees a real playerID);
+  `test.order(...)` goes over the debug HTTP route and arrives with no player
+  behind it, which the rank rule passes unconditionally. `test.nl(utterance)`
+  is registered by the command-console widget, so it only exists once that
+  widget has mounted.
+- **A synthetic right-click does not issue a move order** (the box-drag
+  pointer sequence E2E1 documented still works for selection). Use
+  `test.selectUnits([...])` + `test.clientOrder(...)`.
+- **`/api/rooms/join` and `/api/rooms/start` take `room_id`, not `room`** — a
+  wrong key is parsed as `0` and comes back as a flat
+  `403 {"error":"cannot join room"}` with no hint that the field was missing.
+- The objective-hud chips (`.nui-objectives__stack`) cap at
+  `MAX_OBJECTIVE_CHIPS = 3`; anything ranked below that needs
+  `.nui-objectives__overflow` clicked before it is in the DOM at all.
+
+---
