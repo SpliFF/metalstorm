@@ -212,6 +212,93 @@ describe("carve for a Recruit (§(c))", function()
     end)
 end)
 
+describe("carve retry for a mission STARTER (E2E2 D15)", function()
+    -- game_teams.lua's GameStart seeds the whole starting roster through
+    -- PlayerAdded -> CarveForRecruit, but the scenario has spawned no units
+    -- yet at that frame. Without a retry the carve never fires for anyone who
+    -- STARTS a mission, and countFor == 0 then hands the Recruit the SOLO
+    -- branch of AllowCommand — command over the whole team roster.
+    local function spawnSix(world)
+        for i = 1, 6 do world.setUnit(100 + i, 7, i * 100, 0) end
+    end
+
+    it("carves once the scenario spawns, though the team was empty at seed time", function()
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+
+        -- GameStart: roster seeded before a single unit exists.
+        assert.are.equal(0, GG.Assignment.CarveForRecruit(1))
+        assert.are.equal(0, GG.Assignment.CountFor(1))
+
+        spawnSix(world)
+        world.frame = 30
+        g:GameFrame(30)
+
+        assert.are.equal(2, GG.Assignment.CountFor(1))
+    end)
+
+    it("gives up on the retry once the deadline passes", function()
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+        assert.are.equal(0, GG.Assignment.CarveForRecruit(1))
+
+        -- Nothing ever spawns inside the window; the retry expires...
+        world.frame = 900
+        g:GameFrame(900)
+        -- ...so a team that grows long afterwards is not carved from.
+        spawnSix(world)
+        world.frame = 1200
+        g:GameFrame(1200)
+
+        assert.are.equal(0, GG.Assignment.CountFor(1))
+    end)
+
+    it("does not renew its own deadline on each drained retry", function()
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+        assert.are.equal(0, GG.Assignment.CarveForRecruit(1))
+
+        for frame = 30, 900, 30 do
+            world.frame = frame
+            g:GameFrame(frame)
+        end
+        spawnSix(world)
+        world.frame = 930
+        g:GameFrame(930)
+
+        assert.are.equal(0, GG.Assignment.CountFor(1))
+    end)
+
+    it("drops a parked retry when the player leaves", function()
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+        assert.are.equal(0, GG.Assignment.CarveForRecruit(1))
+
+        g:PlayerRemoved(1, 'quit')
+        spawnSix(world)
+        world.frame = 30
+        g:GameFrame(30)
+
+        assert.are.equal(0, GG.Assignment.CountFor(1))
+    end)
+
+    it("keeps the parked retry across a save/load", function()
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+        assert.are.equal(0, GG.Assignment.CarveForRecruit(1))
+
+        local zip = {}
+        g:Save(zip)
+        g:Load(zip)
+
+        spawnSix(world)
+        world.frame = 30
+        g:GameFrame(30)
+
+        assert.are.equal(2, GG.Assignment.CountFor(1))
+    end)
+end)
+
 describe("wire verbs (§(c))", function()
     local Wire = require('parley.wire')
 

@@ -52,11 +52,21 @@ local DEFAULT_RANK      = 1    -- no `tier` option published -> Regular, gadget 
 local MIN_TEAM_SQUADS   = 6    -- §(c): carve only from a team that can spare them
 local CARVE_SQUADS      = 2    -- §(c): "2 unassigned squads"
 local WIRE_MIN_RANK     = 2    -- §(c): assign.set/release is a Veteran+ verb
+-- E2E2 D15: a Recruit who STARTS a mission is seeded by game_teams.lua's
+-- GameStart -> PlayerAdded loop, and at that instant the scenario has spawned
+-- nothing at all — GetTeamUnits is empty, the MIN_TEAM_SQUADS gate returns 0,
+-- and with nothing to retry the carve never fires for a starter (only for a
+-- mid-game joiner). Worse than "no squads": countFor == 0 is the SOLO case in
+-- AllowCommand, so the Recruit commands the WHOLE team roster — the inverse of
+-- the rule. So a too-small team parks a retry with a DEADLINE instead.
+local CARVE_RETRY_FRAMES = 900   -- ~30 s: long enough for any scenario spawn
+local CARVE_DRAIN_EVERY  = 30    -- drain cadence, ~1 s
 
 -- Per-game state (fresh Lua locals, reset every game — same as game_teams.lua)
 local responsible = {}   -- unitID -> playerID responsible for it
 local orderBy     = {}   -- unitID -> playerID of the last higher-rank issuer
 local countFor    = {}   -- playerID -> number of units they are responsible for
+local carvePending = {}  -- playerID -> frame after which the carve retry gives up
 local rev         = 0    -- bumped on every change; published as assign_rev
 
 GG.Assignment = GG.Assignment or {}
@@ -178,14 +188,22 @@ end
 --- spectator, or the team has fewer than MIN_TEAM_SQUADS live squads).
 function GG.Assignment.CarveForRecruit(playerID)
     local pid = pkey(playerID)
-    if rankOf(pid) ~= 0 then return 0 end
+    -- No longer eligible (promoted, or gone to the spectators): stop retrying.
+    if rankOf(pid) ~= 0 then carvePending[pid] = nil return 0 end
     local teamID = playerTeam(pid)
-    if not teamID then return 0 end
+    if not teamID then carvePending[pid] = nil return 0 end
 
     -- One sim unit IS one squad (squad.lua: "the squad illusion is entirely
     -- client-side"), so the team's unit list is its squad list.
     local units = Spring.GetTeamUnits(teamID) or {}
-    if #units < MIN_TEAM_SQUADS then return 0 end
+    if #units < MIN_TEAM_SQUADS then
+        -- Park a retry, but only arm the deadline once — a drained retry must
+        -- not keep pushing its own expiry out and spin forever.
+        if carvePending[pid] == nil then
+            carvePending[pid] = Spring.GetGameFrame() + CARVE_RETRY_FRAMES
+        end
+        return 0
+    end
 
     local free = {}
     for _, unitID in ipairs(units) do
@@ -213,6 +231,7 @@ function GG.Assignment.CarveForRecruit(playerID)
         if n >= CARVE_SQUADS then break end
         if GG.Assignment.Set(unitID, pid) then n = n + 1 end
     end
+    if n > 0 then carvePending[pid] = nil end
     return n
 end
 
@@ -301,6 +320,25 @@ function gadget:RecvLuaMsg(msg, playerID)
     end
 end
 
+--- D15 drain: retry each parked carve until it lands or its deadline passes.
+--- Cheap by construction — carvePending is empty in every game where the carve
+--- fired first time, which is the mid-game-joiner case.
+function gadget:GameFrame(frame)
+    if frame % CARVE_DRAIN_EVERY ~= 0 then return end
+    if next(carvePending) == nil then return end
+    for pid, deadline in pairs(carvePending) do
+        if (countFor[pid] or 0) > 0 then
+            -- Someone assigned them squads in the meantime (a wire assign.set):
+            -- the Recruit is no longer squadless, so the carve has no work.
+            carvePending[pid] = nil
+        elseif GG.Assignment.CarveForRecruit(pid) == 0 and frame >= deadline then
+            -- The team never grew to MIN_TEAM_SQUADS. Give up rather than
+            -- retry for the rest of the mission.
+            carvePending[pid] = nil
+        end
+    end
+end
+
 -- ============================================================
 -- Lifecycle
 -- ============================================================
@@ -316,19 +354,30 @@ function gadget:PlayerRemoved(playerID, reason)
         if resp == pid then GG.Assignment.Release(unitID) end
     end
     countFor[pid] = nil
+    carvePending[pid] = nil
 end
 
+-- carvePending IS captured. It is short-lived (<= CARVE_RETRY_FRAMES) and
+-- usually empty, so the tempting call is to drop it — but its value is an
+-- ABSOLUTE game frame, and the game frame survives a save/load, so it restores
+-- coherently with no rebasing. Dropping it would silently lose the carve for
+-- exactly the player D15 is about: a Recruit saved during the spawn window
+-- would reload with countFor == 0 and command the whole roster forever, since
+-- GameStart (and so game_teams.lua's PlayerAdded seed) never runs again on a
+-- load. A stale entry costs one no-op drain pass.
 function gadget:Save(zip)
-    zip.responsible = responsible
-    zip.orderBy     = orderBy
-    zip.countFor    = countFor
-    zip.rev         = rev
+    zip.responsible  = responsible
+    zip.orderBy      = orderBy
+    zip.countFor     = countFor
+    zip.carvePending = carvePending
+    zip.rev          = rev
 end
 
 function gadget:Load(zip)
-    responsible = (zip and zip.responsible) or {}
-    orderBy     = (zip and zip.orderBy) or {}
-    countFor    = (zip and zip.countFor) or {}
-    rev         = (zip and zip.rev) or 0
+    responsible  = (zip and zip.responsible) or {}
+    orderBy      = (zip and zip.orderBy) or {}
+    countFor     = (zip and zip.countFor) or {}
+    carvePending = (zip and zip.carvePending) or {}
+    rev          = (zip and zip.rev) or 0
     for unitID in pairs(responsible) do publish(unitID, unitTeamOf(unitID)) end
 end
