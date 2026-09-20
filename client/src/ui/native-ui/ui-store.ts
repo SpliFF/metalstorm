@@ -431,6 +431,36 @@ export class UIStore {
     }
 
     /**
+     * Everyone the local player may hand a TASK to (E2E2 D16).
+     *
+     * The client's honest mirror of `game_objectives.lua`'s `mayTask`: rank ≥ 2
+     * (Veteran) may task anyone, and anyone may task a player who names them as
+     * their mentor. Mirrored, never authoritative — the gadget still decides,
+     * and it decides on the SAME rulesParams this reads. The point of having it
+     * here is that a sentence the gadget would drop on the floor gets refused
+     * out loud by the console first, because the gadget's refusal is silent.
+     *
+     * Spectators, AI seats and the player themselves are never in the list; nor
+     * is anyone on another ally team — a bounty is a team affair.
+     */
+    taskablePlayers(): { playerId: number; callsign: string; tier: number }[] {
+        const me = this.localPlayerId;
+        if (me < 0) return [];
+        const myTier = this.rankOf(me);
+        const myAlly = this.players.get(me)?.allyTeamId;
+        const out: { playerId: number; callsign: string; tier: number }[] = [];
+        for (const p of this.players.values()) {
+            if (p.playerId === me || p.isSpectator || p.isAI) continue;
+            if (p.isActive === false) continue;
+            if (myAlly !== undefined && p.allyTeamId !== undefined && p.allyTeamId !== myAlly) continue;
+            const mentorsThem = this.mentorOf(p.playerId) === me;
+            if (myTier < 2 && !mentorsThem) continue;
+            out.push({ playerId: p.playerId, callsign: this.callsignOf(p.playerId), tier: this.rankOf(p.playerId) });
+        }
+        return out.sort((a, b) => a.playerId - b.playerId);
+    }
+
+    /**
      * Should external chatter be hidden right now?
      *
      * On while the player is under mentorship, off the moment they ask to see

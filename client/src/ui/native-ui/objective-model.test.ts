@@ -301,3 +301,38 @@ describe('createObjectiveAnnouncer', () => {
         expect(event.record.reward).toBe(110);
     });
 });
+
+describe('a task addressed to you outranks the board (E2E2 D20)', () => {
+    const rec = (id: number, extra: Record<string, unknown> = {}) =>
+        ({ id, title: `o${id}`, state: 'active', ...extra } as unknown as ObjectiveRecord);
+
+    it('puts `player === me` above every ordinary objective', () => {
+        const board = [
+            rec(1), rec(2), rec(3), rec(4), rec(5), rec(6), rec(7),
+            rec(8, { player: 4 }),
+        ];
+        const ranked = rankObjectives(board, { frame: 0, playerId: 4 });
+        expect(ranked[0].id).toBe(8);
+    });
+
+    it('still outranks a merely SUGGESTED one — "yours" beats "yours to take"', () => {
+        const ranked = rankObjectives(
+            [rec(1, { suggested: 4 }), rec(2, { player: 4 })],
+            { frame: 0, playerId: 4 },
+        );
+        expect(ranked.map((o) => o.id)).toEqual([2, 1]);
+    });
+
+    it('does not boost a task addressed to somebody else', () => {
+        const ranked = rankObjectives(
+            [rec(1, { player: 9 }), rec(2, { progress: 0.5 })],
+            { frame: 0, playerId: 4 },
+        );
+        expect(ranked[0].id).toBe(2);
+    });
+
+    it('parses objective_<id>_player as a number, not a string', () => {
+        const board = parseObjectives(params({ objective_count: 1, objective_1_player: 4, objective_1_type: "control", objective_1_state: "active" }));
+        expect(board[0]?.player).toBe(4);
+    });
+});

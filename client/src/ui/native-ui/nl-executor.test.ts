@@ -621,3 +621,95 @@ describe('the say line', () => {
         expect(report.lines.some((l) => l.text === 'Two things.')).toBe(false);
     });
 });
+
+// ────────────────────────── tasking (E2E2 D16) ──────────────────────────
+
+describe('handing a task to another player', () => {
+    const roster = [
+        { playerId: 7, callsign: 'Raven' },
+        { playerId: 9, callsign: 'e2e_rec7' },
+    ];
+    const withRoster = (taskable: typeof roster) => {
+        const h = harness('basin');
+        h.ports.tasks = { taskable: () => taskable };
+        return h;
+    };
+
+    it('sends one objectives.createBounty carrying the player and the place', () => {
+        const h = withRoster(roster);
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'Northgate' } }],
+        }, h.ports);
+
+        expect(h.sent).toHaveLength(1);
+        const sent = h.sent[0] as { type: string; data: string };
+        expect(sent.type).toBe('LuaRulesMsg');
+        expect(sent.data).toContain('cmd=objectives.createBounty');
+        expect(sent.data).toContain('player=7');
+        expect(sent.data).toContain('type=control');
+        expect(sent.data).toContain('x=2000');
+        expect(sent.data).toContain('z=500');
+        expect(sent.data).toContain('stake=25');
+        expect(report.lines.at(-1)).toMatchObject({ kind: 'ok' });
+    });
+
+    it('names the stake out loud — authority is never spent quietly', () => {
+        const h = withRoster(roster);
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'Northgate' } }],
+        }, h.ports);
+        expect(report.lines.at(-1)?.text).toMatch(/25 authority staked/);
+    });
+
+    it('honours an explicit stake', () => {
+        const h = withRoster(roster);
+        executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'Northgate', stake: 60 } }],
+        }, h.ports);
+        expect((h.sent[0] as { data: string }).data).toContain('stake=60');
+    });
+
+    it('matches a callsign the player said with punctuation on it', () => {
+        const h = withRoster(roster);
+        executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'e2e_rec7:', place: 'Northgate' } }],
+        }, h.ports);
+        expect((h.sent[0] as { data: string }).data).toContain('player=9');
+    });
+
+    it('asks who, with the roster as chips, for a name nobody answers to', () => {
+        const h = withRoster(roster);
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Nobody', place: 'Northgate' } }],
+        }, h.ports);
+        expect(h.sent).toEqual([]);
+        expect(report.lines.at(-1)).toMatchObject({ kind: 'ask', options: ['Raven', 'e2e_rec7'] });
+    });
+
+    it('refuses by name when there is nobody this player may task', () => {
+        const h = withRoster([]);
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'Northgate' } }],
+        }, h.ports);
+        expect(h.sent).toEqual([]);
+        expect(report.refusals.join(' ')).toMatch(/nobody you can task/i);
+    });
+
+    it('refuses by name with no task port at all, rather than sending', () => {
+        const h = harness('basin');
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'Northgate' } }],
+        }, h.ports);
+        expect(h.sent).toEqual([]);
+        expect(report.refusals.join(' ')).toMatch(/mentorship layer/i);
+    });
+
+    it('refuses a place the board does not have, and sends nothing', () => {
+        const h = withRoster(roster);
+        const report = executeNLResponse({
+            actions: [{ kind: 'task', task: { player: 'Raven', place: 'The Ridge' } }],
+        }, h.ports);
+        expect(h.sent).toEqual([]);
+        expect(report.refusals).not.toEqual([]);
+    });
+});

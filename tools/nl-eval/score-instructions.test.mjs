@@ -39,9 +39,9 @@ describe('the contract is read from the shipped schema, not restated', () => {
         ]);
     });
 
-    it('finds the seven action kinds', () => {
+    it('finds the eight action kinds', () => {
         expect([...contract.kinds].sort()).toEqual([
-            'camera', 'command', 'group', 'guidance', 'query', 'refuse', 'ui',
+            'camera', 'command', 'group', 'guidance', 'query', 'refuse', 'task', 'ui',
         ]);
     });
 

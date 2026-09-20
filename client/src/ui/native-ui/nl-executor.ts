@@ -28,12 +28,13 @@ import {
     type CommandIntent, type CommandSubject, type CommandTarget,
     type CompiledMessage, type WhenCondition,
 } from './compile-table.js';
-import { aiGuidanceToWire, encodeGuidance } from './guidance-wire.js';
+import { aiGuidanceToWire, encodeGuidance, encodeWire } from './guidance-wire.js';
 import type { NLResolver, Resolution } from './nl-resolver.js';
 import type {
     NLAction, NLCameraAction, NLClarification, NLCommandIntent,
-    NLGuidance, NLGroupAction, NLQuery, NLResponse, NLUiAction,
+    NLGuidance, NLGroupAction, NLQuery, NLResponse, NLTask, NLUiAction,
 } from './nl-envelope.js';
+import { NL_TASK_DEFAULT_STAKE } from './nl-envelope.js';
 
 /** One rendered transcript line. `ask` is a clarification (chips), `refused` is
  *  a visible no-op, `ok` is something that actually happened. */
@@ -82,6 +83,31 @@ export interface NLQueryPort {
     answer(query: NLQuery): PortResult;
 }
 
+/**
+ * Who the local player may hand a task to right now (D16).
+ *
+ * A LIST, not a resolver: the name matching, the ambiguity question and the
+ * refusal copy all belong with every other refusal in this file, and a port
+ * that resolved would have to grow its own voice to say "nobody here is called
+ * Raven". `game_objectives.lua`'s `mayTask` is the real gate — this list is the
+ * client's honest mirror of it, so a sentence the sim would drop on the floor
+ * is refused out loud before it is sent.
+ *
+ * Absent port ⇒ `runTask` refuses by name. That is the case for any surface
+ * with no journey layer (a fixture run, a harness), and it is deliberately not
+ * "send it anyway and hope": an unmentored solo player who says "task Raven…"
+ * gets a sentence back, not silence.
+ */
+export interface NLTaskablePlayer {
+    /** `playerNum`, the id `objectives.createBounty` wants in `player=`. */
+    playerId: number;
+    callsign: string;
+}
+
+export interface NLTaskPort {
+    taskable(): readonly NLTaskablePlayer[];
+}
+
 export interface ExecutorPorts {
     /** The one and only command path (`integration.ts createSendCommand`). */
     sendCommand: (cmd: unknown) => void;
@@ -90,6 +116,8 @@ export interface ExecutorPorts {
     camera?: NLCameraPort;
     uiActions?: NLUiActionPort;
     queryEngine?: NLQueryPort;
+    /** Mentorship/standing layer (`game_objectives.lua` wire verbs). */
+    tasks?: NLTaskPort;
 }
 
 /**
@@ -127,6 +155,9 @@ export type ClarifySlot =
     | 'group-ref'
     | 'camera-target'
     | 'query-target'
+    /** The callsign in a `task` (D16). Patchable: the chips are callsigns, and
+     *  substituting one back in is exactly what answers the question. */
+    | 'task-player'
     /** A panel id. Never ambiguous (the registry answers yes or no), so no
      *  patcher handles it — it is here so every dispatch site has an honest
      *  slot rather than borrowing one that means something else. */
@@ -307,6 +338,8 @@ function describeAction(action: NLAction): string {
             return `the ${action.query.op} question`;
         case 'group':
             return `${action.group.op} ${action.group.name}`;
+        case 'task':
+            return `task ${action.task.player}`;
         case 'refuse':
             return 'that one';
     }
@@ -366,6 +399,7 @@ function dispatch(action: NLAction, ports: ExecutorPorts, report: ExecutionRepor
         case 'camera': return runCamera(action.camera, ports);
         case 'ui': return runUi(action.ui, ports);
         case 'query': return runQuery(action.query, ports);
+        case 'task': return runTask(action.task, ports, report);
         case 'refuse': return no(action.reason);
     }
 }
@@ -574,4 +608,102 @@ function runQuery(query: NLQuery, ports: ExecutorPorts): Dispatched {
     const port = ports.queryEngine;
     if (!port) return no(`I can't answer questions yet — "${query.op}" not yet supported.`);
     return fromPortResult('query-target', port.answer(query));
+}
+
+// ─────────────────────────────── task ──────────────────────────────
+
+/**
+ * Case- and punctuation-insensitive callsign match.
+ *
+ * Callsigns come off `callsign_<pid>`, which a lobby account name feeds; what
+ * the player SAYS is whatever the console heard ("e2e_rec7:", "Raven,"). The
+ * resolver's place matching normalises the same way for the same reason, and a
+ * task that refused over a trailing colon would be the D16 failure with better
+ * manners.
+ */
+function normaliseCallsign(s: string): string {
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Hand a place to another player as a staked bounty (D16).
+ *
+ * The whole point of this path is that it is NOT an order: nothing here
+ * compiles a directive, resolves a subject, or touches a unit. It resolves a
+ * callsign against the people the sim says may be tasked, resolves a place the
+ * same way every other target is resolved, and sends one
+ * `objectives.createBounty` over the `parley/wire.lua` codec.
+ *
+ * The place travels as `x=&z=` rather than `region=`. `wireBountyDef` accepts
+ * either, and the client has no region-KEY vocabulary — only names and
+ * positions — so shipping coordinates and letting `GG.Regions.KeyAt` name the
+ * region is the one form that cannot disagree with the sim about which place a
+ * name means.
+ */
+function runTask(task: NLTask, ports: ExecutorPorts, report: ExecutionReport): Dispatched {
+    const port = ports.tasks;
+    if (!port) {
+        return no(
+            `Handing someone a task needs the mentorship layer, which isn't running here ` +
+            `— nothing sent.`);
+    }
+
+    const roster = port.taskable();
+    if (roster.length === 0) {
+        return no(
+            `There's nobody you can task right now — you can task someone you mentor, ` +
+            `or anyone below your standing.`);
+    }
+
+    const wanted = normaliseCallsign(task.player);
+    const hits = roster.filter((p) => normaliseCallsign(p.callsign) === wanted);
+    if (hits.length === 0) {
+        return {
+            kind: 'clarify',
+            question: `Nobody you can task is called "${task.player}" — who did you mean?`,
+            options: roster.map((p) => p.callsign),
+            slot: 'task-player',
+            patchable: true,
+        };
+    }
+    // Two accounts with the same callsign is a lobby problem, not a sentence
+    // problem: the names are identical, so substituting one back would ask the
+    // same question forever — hence no `patchable`.
+    if (hits.length > 1) {
+        return {
+            kind: 'clarify',
+            question: `More than one player answers to "${task.player}" — which one?`,
+            options: hits.map((p) => `${p.callsign} (player ${p.playerId})`),
+            slot: 'task-player',
+        };
+    }
+    const who = hits[0];
+
+    // `secure` only picks the place-shaped branch of `resolveTarget`; the verb
+    // never reaches the wire, because a wire bounty is always `control`.
+    const place = ports.resolver.resolveTarget('secure', { type: 'entity-ref', name: task.place });
+    if (place.kind !== 'ok') return failed('target', place);
+    const at = place.value.entity ?? place.value.point;
+    if (!at) {
+        return no(`I can't put "${task.place}" on the map, so there's nothing to task.`);
+    }
+
+    const stake = task.stake ?? NL_TASK_DEFAULT_STAKE;
+    const command = {
+        type: 'LuaRulesMsg' as const,
+        data: encodeWire('objectives.createBounty', {
+            type: 'control',
+            player: who.playerId,
+            x: Math.round(at.x),
+            z: Math.round(at.z),
+            stake,
+        }),
+    };
+    ports.sendCommand(command);
+    report.sent.push(command);
+
+    const where = place.value.entity?.name ?? task.place;
+    // The stake is named every time. A task that spent authority quietly would
+    // be the same silent-cost failure the refusal-copy discipline exists for.
+    return done(`${who.callsign} is asked to hold ${where} — ${stake} authority staked`);
 }

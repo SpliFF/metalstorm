@@ -1195,7 +1195,7 @@
       "utterance": "give the AI 250 authority",
       "context": "basin",
       "source": "offline-parser",
-      "refusedOffline": true,
+      "refusedOffline": false,
       "expected": {
         "actions": [
           {
@@ -1208,10 +1208,14 @@
         ]
       },
       "actual": {
+        "say": "Tasking the with AI 250 authority",
         "actions": [
           {
-            "kind": "refuse",
-            "reason": "I didn't hear an order in that. Verbs I know: attack, secure, defend, hold, patrol, screen, scout, escort, withdraw, reinforce, build. Try \"defend Northgate\" or \"3rd Armoured attack Slag Forge high\". To name a squad: \"name this group Hammerfall\"."
+            "kind": "task",
+            "task": {
+              "player": "the",
+              "place": "AI 250 authority"
+            }
           }
         ]
       }

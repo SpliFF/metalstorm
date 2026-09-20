@@ -389,8 +389,7 @@ function delegatedSet(ctx: WidgetContext): ReadonlySet<number> {
 function taskFrom(board: Board, o: ObjectiveRecord): string | null {
     const me = board.playerId;
     if (me === undefined || me < 0) return null;
-    const forPlayer = (o as { player?: number | string }).player;
-    if (forPlayer === undefined || Number(forPlayer) !== me) return null;
+    if (o.player !== me) return null;
     const mentor = uiStore.mentorOf(me);
     if (mentor === undefined) return 'yours';
     return `from ${mentor < 0 ? 'your AI mentor' : uiStore.callsignOf(mentor)}`;

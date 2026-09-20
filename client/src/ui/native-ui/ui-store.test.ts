@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { UIStore, BATTLE_HISTORY_MAX, type DirectiveSummary } from './ui-store';
+import { UIStore, BATTLE_HISTORY_MAX, type DirectiveSummary, type PlayerInfo } from './ui-store';
 
 describe('UIStore', () => {
     let store: UIStore;
@@ -306,5 +306,43 @@ describe('UIStore — assignment, standing, mentorship', () => {
         store.setShowEverything(false);
         expect(store.isMentored()).toBe(false);
         expect(store.isChatterFiltered()).toBe(false);
+    });
+});
+
+describe('who the local player may task (E2E2 D16)', () => {
+    const roster = (over: Partial<PlayerInfo> = {}) => [
+        { playerId: 1, name: 'Vega', teamId: 0, allyTeamId: 0, isSpectator: false, isAI: false },
+        { playerId: 7, name: 'Raven', teamId: 0, allyTeamId: 0, isSpectator: false, isAI: false, ...over },
+        { playerId: 8, name: 'Watcher', teamId: 0, allyTeamId: 0, isSpectator: true, isAI: false },
+        { playerId: 9, name: 'Enemy', teamId: 4, allyTeamId: 1, isSpectator: false, isAI: false },
+    ] as PlayerInfo[];
+
+    let store: UIStore;
+    beforeEach(() => {
+        store = new UIStore();
+        store.updatePlayerRoster(roster());
+        store.setLocalIdentity(1, 0);
+    });
+
+    it('is empty for a Recruit who mentors nobody', () => {
+        store.updateGameRulesParams({ rank_1: 0 });
+        expect(store.taskablePlayers()).toEqual([]);
+    });
+
+    it('lets a Veteran task their own side, but never spectators, AIs or the enemy', () => {
+        store.updateGameRulesParams({ rank_1: 2, callsign_7: 'Raven' });
+        expect(store.taskablePlayers()).toEqual([
+            { playerId: 7, callsign: 'Raven', tier: 0 },
+        ]);
+    });
+
+    it('lets a sub-Veteran task exactly the players who name them as mentor', () => {
+        store.updateGameRulesParams({ rank_1: 1, mentor_7: 1 });
+        expect(store.taskablePlayers().map((p) => p.playerId)).toEqual([7]);
+    });
+
+    it('never lists the local player themselves', () => {
+        store.updateGameRulesParams({ rank_1: 3 });
+        expect(store.taskablePlayers().some((p) => p.playerId === 1)).toBe(false);
     });
 });

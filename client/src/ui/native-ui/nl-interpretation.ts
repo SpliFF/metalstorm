@@ -97,7 +97,9 @@ export function interpret(
         const phrase = describe(action, deps);
         if (!phrase) continue;
         parts.push(phrase);
-        if (action.kind === 'command' || action.kind === 'guidance') commits = true;
+        if (action.kind === 'command' || action.kind === 'guidance' || action.kind === 'task') {
+            commits = true;
+        }
     }
 
     if (parts.length === 0) return null;
@@ -119,6 +121,11 @@ function describe(action: NLAction, deps: InterpretDeps): string | null {
     switch (action.kind) {
         case 'command': return describeCommand(action.intent, deps);
         case 'guidance': return null;   // the guidance codec writes its own line
+        // A task SPENDS AUTHORITY on someone else's board, so it earns a
+        // reading even though the executor also echoes the stake: the echo
+        // comes after the send, and this is the half a confirm gate can stop.
+        case 'task':
+            return `asking ${action.task.player} to hold ${action.task.place}`;
         case 'camera': case 'ui': case 'query': case 'group': case 'refuse':
             return null;
     }

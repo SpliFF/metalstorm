@@ -106,8 +106,8 @@
     }
   },
   "offline": {
-    "refused": 60,
-    "coverage": 0.659,
+    "refused": 59,
+    "coverage": 0.665,
     "skipped": 1,
     "invalid": 2,
     "invalidSentences": [
