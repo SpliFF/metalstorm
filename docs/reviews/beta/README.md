@@ -766,3 +766,398 @@ content problem outside pres-atmos's renderer scope (same reasoning as AT2's
 "part 2" residual), so it is handed off rather than patched here. The
 `TerrainFog` spectator-union fix above **is** committed this pass, on its own
 merits, but is explicitly not a fix for the defect this row describes.
+
+# E2E pass 2 — Support mission, responsibility, mentorship (2026-09-21)
+
+PLAN-beta.md §Verification item **3**, driven end to end against the live stack
+(`spring-lobby` :8011 from the MAIN checkout, vite :8012, game servers 9100+)
+with two isolated Chrome contexts on one side. Items 1–2 were E2E1; item 4 is
+E2E3 and was **not** attempted.
+
+**Fixtures.** Two fresh accounts, both faction `compact` so the lobby seats them
+on the same side by construction: `e2e_rec7` (id 209, standing 0 → **Recruit**,
+tier 0) and `e2e_vet7` (id 210, **Veteran**, tier 2). Standing was raised by a
+direct `UPDATE users SET standing=60` on the LIVE lobby DB
+(`$TASKHERD_REPO/data/spring-server.db`) — **there is no admin route for it**;
+`/api/mentor/endorse` is the only standing writer and it is +15 and needs a
+mentorship, which needs tier ≥ 2 first. `query_db` was NOT used (E2E1 D3: it
+answers from the stale clone snapshot).
+
+**Rooms.** 77 (Recruit+Veteran, `crossing_standoff`), 79 (same, after the
+mentorship was accepted), 80/81 (Recruit alone). All servers reaped; no port
+9100–9109 listener and no stray `spring-server` left behind.
+
+## PASS/FAIL — item 3, Support + responsibility + mentorship
+
+| # | Sub-step | Result | Evidence |
+|---|---|---|---|
+| 3a | Recruit and Veteran deploy into `crossing_standoff` on the **same side** | **PASS** | Room 77 roster: both `team:0`, `tier_name` `Recruit` / `Veteran`. Sim: `rank_0=2 callsign_0=e2e_vet7`, `rank_1=0 callsign_1=e2e_rec7` — `game_teams.lua`'s `publishStanding` carries the lobby's `tier`/`callsign` custom options into the sim intact. `e2e/p2-01-room-recruit-veteran-same-side.png`, `p2-02-recruit-in-game.png` |
+| 3b | Two squads **auto-carved** for the Recruit at deploy | **FAIL** | **D15** — `assign:` empty with 18 live team-0 units, in room 77 *and* room 79. `CarveForRecruit` itself is fine: called by hand post-spawn it returns `2` immediately (`assign_27836=1 assign_965=1`). The carve is called too early. |
+| 3c | `assign_<unitID>` rulesParams reach the client | **FAIL** | **D14** — published as `assign_965.0` / `assign_27836.0`; the store's `/^assign_(\d+)$/` never matches, `getMyAssignments()` → `[]`. **FIXED this pass**; proven live by republishing with floored keys, after which `getMyAssignments()` → `[965, 27836]`. |
+| 3d | Recruit's **box-select returns only those** | **PASS** (with the D14 fix applied live) | A full-screen box-drag on the Recruit's canvas: the engine selected `[27836, 965, 7086, 26633]`, `uiStore.selection.unitIds` was `[27836, 965]`, focus strip read **`Your squads · 2 × LIGHT ENGINEERS · UNITS 2`**. This is HUD scoping by design (`ui-store.ts:520` — "Unassigned units stay selectable by the engine … the refusal lives in `game_assignment.lua:AllowCommand`"), so the *engine* selection is deliberately wider. `e2e/p2-03-recruit-boxselect-scoped.png` |
+| 3e | Veteran's order on them shows **"order from `<callsign>` (Veteran)"** in the Recruit's HUD | **PASS** | Veteran issued a real client order (`window.test.clientOrder([965,27836], CMD.MOVE, …)`, i.e. the player's own network command, not a Lua/server one). `AllowCommand` passed it and marked `orderBy`. Recruit's focus drill-down rendered **`ORDERS  order from e2e_vet7 (Veteran)`**, and the mentor card the same line. `e2e/p2-04-recruit-hud-order-from-veteran.png` |
+| 3f | Recruit's order on the **Veteran's squad is refused** | **PASS** | Unit 15976 made the Veteran's responsibility; the Recruit's `clientOrder` MOVE never entered its queue (`cmds=1 [20.0]` — the pre-existing FIGHT — and no `_by` mark). Rule invoked directly for the truth table: `recruit→vetSquad=false`, `recruit→ownSquad=true`, `vet→recruitSquad=true`. Refusal is **silent** in the HUD — see D21. `e2e/p2-05-recruit-order-on-veteran-squad-refused-silently.png` |
+| 3g | Mentor **offer → accept** | **PASS** | `POST /api/factions/metalstorm/recruits` (as the Veteran) listed `e2e_rec7`; `POST /api/mentor/offer {mentee_id:209}` → `{"id":1,"state":"offered"}`; `POST /api/mentor/respond {id:1,accept:true}` (as the Recruit) → `{"id":1,"state":"active"}`. |
+| 3h | The mentorship **rides into the sim** | **PASS** | Room 79 (deployed *after* the accept): `mentor_0 = 1` — the mentee's option arrived at AuthRequest as the mentor's username and `game_teams.lua`'s `playerIDByName` resolved it to the Veteran's playerNum. Recruit's HUD: **`UNDER MENTORSHIP: E2E_VET7 · 2 squads under your command`**. `e2e/p2-06-mentor-card-active-chatter-filtered.png` |
+| 3i | **Chatter filter on** — `isChatterFiltered()` | **PASS** | `mentorOf(0)=1`, `isMentored()=true`, `isChatterFiltered()=true`, `showEverything=false`, and the card offers **SHOW EVERYTHING**. |
+| 3j | Chatter filter **hides all-chat** | **FAIL** | **D17** — the gate exists (`command-console.js:chatterHidden`) but nothing in the tree ever sets `extra.scope = 'all'` or `'enemy'`; the console's own doc comment says so ("The chat producer that would set it does not exist on the wire yet"). Only `moment-hud.ts` consumes the flag for real (scoping battle moments). |
+| 3k | `task <recruit>: hold <objective>` **NL command** | **FAIL** | **D16** — `task e2e_rec7: hold Raven Basin` → *"didn't understand: 'task', 'e2e_rec7:'"*, and it silently fell through to a **team-wide standing order** ("Whoever is free holding Raven Basin") instead of refusing. The other two phrasings `nl-instructions.md` documents fail too. `e2e/p2-07-veteran-nl-task-not-understood.png` |
+| 3l | **"Task from `<callsign>`" chip** | **PASS** | Exercised the verb the NL path is *documented* to emit, at the gadget's real entry point and as the Veteran: `RecvLuaMsg('cmd=objectives.createBounty&type=control&region=raven_basin&player=0&stake=20&hold=900', 1)` → `objective_11_player=0`. The same message issued as the **Recruit** (pid 0) created nothing — `mayTask` refused it. Recruit's HUD chip: **`HOLD RAVEN BASIN (BOUNTY) · ACTIVE · PROG 0% · ⬡20 · TASK FROM E2E_VET7`**. `e2e/p2-08-recruit-task-from-veteran-chip.png`. Caveat: the chip sat **8th of 8**, behind "show more" — D20. |
+| 3m | No Veteran → **AI mentor seated at spawn** (`ai_list`) | **PASS** | Rooms 80 and 81, Recruit alone: lobby logged `room 81: seating the mentor AI on team 0 — a Recruit is on a side with no Veteran`; `ai_list` team 0 → `AI:strategos@t0`, `active:true`, alongside `activeHumans:1`; the server's own argv carries `--ai strategos:0:-1:mentor` — the `mentor` profile at start-position `-1`, exactly as PLAN-beta specifies. `e2e/p2-09-recruit-alone-ai-mentor-seated-but-hud-says-no-mentor.png` |
+| 3n | …and the Recruit can **see** they have a mentor | **FAIL** | **D18** — with the AI mentor seated, `mentor_0` is unset and the card reads **"NO MENTOR YET — ACCEPT AN AI MENTOR"**. Same screenshot as 3m. |
+
+Bonus, not asked for: the mentor card's **ACCEPT AN AI MENTOR** button works
+(E2E1-era journey-hud D2's 401 is gone) — it created
+`{"id":2,"mentor_id":0,"mentor":"ai","kind":"ai","state":"active"}`. The card
+then rendered **empty** — D19.
+
+## Defects
+
+| # | Sev | Defect | Repro | Owning lane |
+|---|---|---|---|---|
+| D14 | **HIGH** | **`assign_<unitID>` is published under a float-formatted key**, so the entire Recruit command-scope HUD reads "nothing is assigned to me". `Spring.GetTeamUnits` hands unitIDs back as Lua-5.4 **floats**, and `'assign_' .. unitID` stringifies `965.0` as `"965.0"` — but `ui-store.ts`'s `ASSIGN_KEY = /^assign_(\d+)$/` requires digits only, and `assignedBy()` looks up `assign_${unitId}_by` with an integer. So `getMyAssignments()` returns `[]`, box-select is never scoped, and the superior's "order from …" line never renders. The gadget's own `pkey()` helper exists for exactly this float class of bug but only floors *playerIDs*. | Deploy a Recruit, carve, then `Spring.GetTeamRulesParams(0)` → `assign_965.0=1.0`. Client: `__msUiStore.getMyAssignments()` → `[]`. | **FIXED this pass** (journey-sim) |
+| D15 | **HIGH** | **The auto-carve never fires for a Recruit who starts the mission** — only for a mid-game joiner. `game_teams.lua:GameStart` seeds the initial roster through `PlayerAdded`, which calls `GG.Assignment.CarveForRecruit`; at that instant the scenario has spawned **nothing**, so `#Spring.GetTeamUnits(teamID)` is 0, the `< MIN_TEAM_SQUADS (6)` guard returns 0, and nothing is ever retried. Every Support deploy — the headline journey — therefore lands a Recruit with no squads and, because `countFor` is 0, with `AllowCommand` letting them command the **whole team roster** (the exact opposite of the rule). Called by hand once units exist it carves 2 instantly, so the logic is right and only the timing is wrong. NOT fixed here: the fix needs a retry with a deadline (and a Save/Load answer for the pending set), which is a policy call, not a mechanical one — suggested shape is a `carvePending[pid] = frame + N` set at the `< MIN_TEAM_SQUADS` return and drained from a `gadget:GameFrame` every 30 frames. | Room 77 and room 79, both `crossing_standoff`: `team0 units=18`, `assign:` empty, `assign_rev=nil`. Then `GG.Assignment.CarveForRecruit(<recruit pid>)` → `2`. | journey-sim |
+| D16 | **MEDIUM** | **The `task <name>: …` NL command does not exist, and fails unsafely.** `nl-instructions.md:104` tells the model to emit a `command` action with verb **`objectives.createBounty`** and a `player` field — but `COMMAND_VERBS` (derived from `TARGET_SHAPES_BY_VERB` in `compile-table.ts`) is the closed list `attack…build`, `nl-envelope.ts:437` rejects anything outside it, the JSON schema handed to the model enumerates the same list, and `NLCommandIntent` has no `player` field at all. So the documented sentence cannot be expressed even by a perfect model, and on the offline parser it is **silently reinterpreted** as a team-wide standing order rather than refused. | Veteran's console: `window.test.nl('task e2e_rec7: hold Raven Basin')` → "standing order set · normal priority (team-wide — no group named) / didn't understand: 'task', 'e2e_rec7:'". Also `'give e2e_rec7 the bridge'`, `'e2e_rec7, take Raven Basin'`. `grep -n "objectives.createBounty" client/src/ui/native-ui/compile-table.ts` → nothing. | journey-hud / nl-instructions |
+| D17 | **MEDIUM** | **The chatter filter's chat half is dead code.** `chatterHidden(scope)` only fires for `scope === 'all' \| 'enemy'`, and **nothing** in `client/`, `data/games/metalstorm/ui/` or any test ever passes a `scope` to `say()`. PLAN-beta's "console hides all-chat" is therefore unimplemented; what actually works is `moment-hud.ts`, which scopes battle moments to the player's own squads. The console's own comment admits it. | `grep -rn "scope: *'all'" client/ data/games/metalstorm/ui/` → no hits. | journey-hud |
+| D18 | **MEDIUM** | **The spawn-time AI mentor seat is invisible to the mentee.** The lobby seats `strategos:<team>:-1:mentor` when a Recruit has no tier ≥ 2 human on their side, but it writes **no `mentorships` row** — and the sim's `mentor_<pid>` is mirrored from that row at AuthRequest (`ClientMessageHandler.cpp:614`, value `"ai"` → `-1`). So the Recruit deploys with an AI mentor sitting on their team while their HUD says **"NO MENTOR YET"** and, 30 s later, offers to get them the AI mentor they already have. Two ways it bites: the card's copy is wrong, and a player who accepts creates a *second* mentor relationship the `Mentorship.h` invariant exists to prevent. | Room 81: lobby log `seating the mentor AI on team 0`; `ai_list` → `AI:strategos@t0` active; Recruit's client `mentorOf(0)` → undefined, `isMentored()` → false; card → "NO MENTOR YET". | journey-lobby-routes |
+| D19 | LOW | **The mentor card goes blank after "ACCEPT AN AI MENTOR".** The route succeeds and the lobby row goes `active`, but `mentor_<pid>` is fixed at AuthRequest for the running session, so `mentorCardModel` sees `kind:'none'` with the offer already dismissed and renders nothing. The player's click reads as "the button deleted the panel". | Room 81, click ACCEPT AN AI MENTOR → `#nui-panel-body-mentor-card` `innerText` becomes `""`; `/api/account/me` shows the mentorship active. | journey-hud |
+| D20 | LOW | **A task your mentor just handed you does not rank on the objective board.** `rankObjectives` boosts `o.suggested === playerId` by 800 but ignores `o.player`, which is the *stronger* signal ("this one is yours", not "yours to take"). The bounty landed **8th of 8**, below every scripted objective, hidden behind "+N more objectives". | `e2e/p2-08-recruit-task-from-veteran-chip.png` — visible only after clicking the overflow. `objective-model.ts:308`. | journey-hud |
+| D21 | LOW | **A refused order is silent.** `AllowCommand` returning false produces no client feedback of any kind — no toast, no console line, no cursor state. A Recruit who boxes the whole field (which the engine allows, by design) and orders gets partial obedience with no explanation, which is precisely the "the game silently ignored me" failure the console's own refusal-copy discipline exists to prevent. | Recruit `clientOrder` on the Veteran's squad → nothing in the DOM matches `/refus|cannot|denied/`. | journey-hud / journey-sim |
+
+## Fixed this pass (committed)
+
+- `data/games/metalstorm/LuaRules/Gadgets/game_assignment.lua` (D14, 2 code
+  lines + comment): `publish()` builds its key from `math.floor(unitID)`, the
+  same integer-normalisation `pkey()` already applies to playerIDs.
+  `tests/game_assignment_spec.lua` gains a regression case that calls
+  `GG.Assignment.Set(100.0, 1)` and asserts `assign_100` exists and
+  `assign_100.0` does not. Verified red-then-green: with the floor removed the
+  new case fails (`expected 1, got nil`), with it **17/17** pass. Proven live
+  too — republishing the running game's params with floored keys made the
+  Recruit's client report `getMyAssignments() → [965, 27836]` and scope the
+  box-select, which is how 3d/3e/3l could be tested at all.
+
+No other defect fits the ≤10-line budget. D15 is the one that most deserves a
+fix and explicitly does not (see its row).
+
+## Not done this pass (stated plainly)
+
+- **PLAN-beta.md §Verification item 4 (presentation)** — E2E3.
+- **The `assign.set` / `assign.release` wire verbs were not exercised.** A
+  Veteran re-assigning squads by hand is §(c) behaviour this pass never
+  touched; only the auto-carve path and `AllowCommand` were.
+- **`objectives.createBounty` was not sent from a browser client.** No wire
+  sender is reachable from the page (`window.__nativeUi` exposes only
+  `travelTo`/`open`), so 3l issued the exact documented payload at
+  `gadget:RecvLuaMsg` with the Veteran's playerID instead. That covers the
+  gadget's authority check and the publication contract; it does **not** cover
+  `integration.ts`'s `WIRE_VERB_PREFIXES` encoder.
+- **The carve was applied by hand in every run**, because D15 means the
+  automatic path never fires. Every downstream PASS (3d–3f, 3l) is therefore a
+  test of the mechanism, not of the journey a real Recruit would take today.
+- **`/api/mentor/endorse` was not exercised**, so the +15-once-a-day rule and
+  its day-bucket are unverified.
+- **Declining the AI mentor ("NO THANKS") was not tested**, nor
+  `/api/mentor/end` from the *mentor's* side (only the mentee's).
+- **One unreproduced observation, deliberately not written up as a defect**:
+  an early drill-down on the bounty objective showed no `Assigned: to you,
+  from e2e_vet7` row even though the chip later rendered `TASK FROM E2E_VET7`.
+  That first reading was taken with the briefing modal still up; room 79 was
+  gone before it could be re-checked. Named here so a later pass can look, not
+  claimed as a finding.
+- **The near-black `scorched_crossing_v2.4` render (E2E1 D11) recurred** in
+  rooms 77/79 and then did *not* in room 81 (`p2-08` shows properly lit
+  terrain). Not investigated — it is pres-atmos/terrain-streaming's row.
+
+## TOOLING GAP — one closed, the rest still open
+
+- **`1440×900` is now achievable.** E2E1 recorded `resize_page` as a no-op
+  (viewport stuck at 1440×801) and captured at the wrong size. **Use
+  `chrome-devtools emulate` with `viewport: "1440x900x1"` instead** — it sets
+  `Emulation.setDeviceMetricsOverride`, `innerHeight` reads 900, and every
+  screenshot in this section is a true 1440×900 PNG. `resize_page` is still a
+  no-op; nothing else changed.
+- `window.test` is a class instance, so `Object.keys(window.test)` shows only
+  `deps`/`renderPaused`/`nl` — the useful API is on the **prototype**
+  (`Object.getOwnPropertyNames(Object.getPrototypeOf(window.test))`).
+  `test.clientOrder(unitIds, cmdId, params, opts)` is the one that issues an
+  order **as the local player** (so `AllowCommand` sees a real playerID);
+  `test.order(...)` goes over the debug HTTP route and arrives with no player
+  behind it, which the rank rule passes unconditionally. `test.nl(utterance)`
+  is registered by the command-console widget, so it only exists once that
+  widget has mounted.
+- **A synthetic right-click does not issue a move order** (the box-drag
+  pointer sequence E2E1 documented still works for selection). Use
+  `test.selectUnits([...])` + `test.clientOrder(...)`.
+- **`/api/rooms/join` and `/api/rooms/start` take `room_id`, not `room`** — a
+  wrong key is parsed as `0` and comes back as a flat
+  `403 {"error":"cannot join room"}` with no hint that the field was missing.
+- The objective-hud chips (`.nui-objectives__stack`) cap at
+  `MAX_OBJECTIVE_CHIPS = 3`; anything ranked below that needs
+  `.nui-objectives__overflow` clicked before it is in the DOM at all.
+
+---
+
+# E2E pass 3 — Presentation (2026-09-21)
+
+PLAN-beta.md §Verification item **4 (presentation)**, driven against the live
+stack (`spring-lobby` :8011 from the MAIN checkout, vite :8012, game servers
+9100+) with mcp-tools step 4 (`drive_pattern`, `populate_tranche`) folded in
+per this step's brief. Items 1–3 were E2E1/E2E2.
+
+**mcp-tools step 4 check**: both tools exist and work as documented —
+`drive_pattern` (figure8/circle/line/zigzag waypoint loops, optional spawn +
+capture) and `populate_tranche` (PLAN-perf.md §M19 XL-battle rungs S..XL1200
+in one batched `exec_lua` call) landed `f0748514f0` per PLAN-beta.md's LIVE
+STATE log. No gaps found in either this pass — see (b2) and (c) below, both
+of which depend on them working correctly.
+
+## (a) capture_sequence per weapon family — native FX, no orange cubes
+
+Ran the client-side `?scenario=weapon-showcase` bench (not a lobby scenario —
+a dev harness reached by URL param, `client/src/scenarios/bench/
+weapon-showcase.ts`) via `open_client` + `capture_sequence(mode:realtime)`,
+one weapon per Metalstorm WeaponDef family:
+
+| Family | Entry | Shooter | Evidence |
+|---|---|---|---|
+| Cannon (autocannon) | `only=autocannon` | ms_tanks_s2 | `e2e/pres3/fx-autocannon-f000.jpg` — pale straw tracer, thin, short (matches DIRECTION.md's FX spec) |
+| MissileLauncher (SAM) | `only=sam` | ms_mechs_s3 | `e2e/pres3/fx-sam-f000.jpg` — red missile streak toward the airborne target |
+| AircraftBomb | `only=bomb` | ms_bombers_s2 | `e2e/pres3/fx-bomb-f000.jpg` — bomber silhouette on its run |
+
+No orange emissive cubes or coloured spheres in any frame — every effect
+rendered as its own native mesh/particle shape, not a debug-placeholder
+primitive. **Not exhaustive**: the showcase has 9 entries across 4 families
+(mg, autocannon, railgun, howitzer, flak, cruise, sam, bomb, air-to-air); this
+pass sampled one representative entry per the 3 families that have visible
+projectile FX (Cannon/MissileLauncher/AircraftBomb), not all 9. **Torpedo is
+a documented placeholder** (the scenario's own comment: "the test map has no
+water") — not run, matching the file's own stated limitation, not a defect.
+
+## (b) client_screenshot — meridian_basin grading, scorched_crossing_v2.4 wedge recheck
+
+**meridian_basin** (`e2e/pres3/01-meridian-basin-sky-fog-grading.png`,
+1440×900): sky dome gradient, aerial perspective toward a desaturated
+blue-grey horizon, and value-contrast grading all read as intended per
+DIRECTION.md ("contrast 1.15, exposure 0.9 … aerial perspective towards a
+desaturated horizon"). One re-confirmed (not new) observation: a faint
+crosshatch dither persists over midground terrain even with `set_los(true)`
+— the same FOW-rendering class of finding pres-atmos AT3/D11 already own;
+not re-investigated here.
+
+**scorched_crossing_v2.4** black-wedge recheck
+(`e2e/pres3/02-scorched-crossing-corner-recheck.png`, low-angle shot of the
+`X≈0-1000, Z≈6000-7168` corner, global LOS on): the AT2 diffuse-alpha fix
+holds — no repeat of the original hard-edged wedge crushing a large fraction
+of the frame. The **residual** black patch in that exact corner is still
+visible, exactly as terrain-streaming K2/K3 left it: independently
+byte/pixel-audited and closed as **genuine map content** (a real dark, flat
+corner at the map's playable-area boundary), not a rendering defect. No
+regression, nothing new to route.
+
+## (b2) Tread marks — DT5 (`c366641847`) confirmed LIVE for all three trackTypes
+
+DT5 wired `leaveTracks`/`trackType` into `units/_builder.lua`'s
+`trackDefaults` (StdTank / StdWheel / StdBipedFoot) but — per PLAN-beta.md's
+LIVE STATE log — was "NEVER SEEN LIVE" (its own fire had no MCP wired in).
+This pass drove one unit of each trackType through a `drive_pattern
+figure8` on `green_flat_x34_v3` (team 1, Null AI, avoiding the team-0
+`strategos` co-commander re-routing gotcha the pres-decals TOOLING GAP
+already named) and shot `capture_subject` top + low at the end of each loop:
+
+| Unit | trackType | Result | Evidence |
+|---|---|---|---|
+| ms_tanks_s2 | StdTank | **PASS** — wide paired tread scuffs, clearly visible top-down | `pres-decals/02-treadmarks-top-ms_tanks_s2.jpg`, `03-…-low-…jpg` |
+| ms_scout_buggy | StdWheel | **PASS** — thin double-rut wheel track, distinct pattern from the tank's | `pres-decals/04-treadmarks-top-ms_scout_buggy.jpg`, `05-…-low-…jpg` |
+| fable_mech | StdBipedFoot | **PASS** — alternating two-legged footprint trail | `pres-decals/06-treadmarks-top-fable_mech.jpg`, `07-…-low-…jpg` |
+
+All three trackType buckets (`decal-overlay.ts` `classifyTrackType`) render
+correctly and distinctly live. DT5's finding is closed: the feature is not
+dead in production.
+
+The old `00-figure8-top-no-trail.jpg` / `01-figure8-low-no-trail.jpg`
+evidence row (pres-verify fire 3, pre-DT5) is superseded by the above. **Not
+deleted** — `git rm` requires interactive approval this headless session
+cannot grant, so the two old files plus one stray duplicate from a
+mid-capture mishap were moved to `pres-decals/superseded-no-trail/` instead
+(same "harness gates file deletion" pattern the 2026-09-17 killed-fire
+screenshots used). A human running `git rm -r
+docs/reviews/beta/pres-decals/superseded-no-trail` can finish the cleanup.
+
+**One tooling incident recorded for the next fire**: opening a *second*
+admin-username browser client into a room already holding a spring-debug
+`open_client` admin session invalidates the first — the original client's
+streamed units vanish from its scene (they're still alive server-side,
+confirmed via `list_units`) and a stale objective board renders instead.
+Fix used: never mix `spring-debug open_client` and a second `chrome-devtools`
+client into the *same* room under the *same* username — pick one driver per
+room. Cost this pass: the first tank+buggy drive had to be redone.
+
+## (c) XL900 perf — Medium preset
+
+`populate_tranche(rung:"XL900")` on `meridian_basin` (the contested-core
+ford, 8192,8192): **900 units spawned in one call** (450 north / 450 south),
+`gfx.quality` set to `medium` first (`window.__settings.applyPreset('medium')`,
+confirmed `get('gfx.quality') === 'medium'`). Measured over a 30 s window
+after a short settle:
+
+**Client render pipeline** (`browser_test.perfDump()`):
+
+| phase | mean | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| camera | 0.08 | 0.10 | 0.20 | 0.20 | 0.70 |
+| entity | 5.42 | 5.20 | 6.80 | 7.90 | 10.50 |
+| fx | 0.06 | 0.10 | 0.20 | 0.30 | 0.40 |
+| decals+lights | 0.16 | 0.10 | 0.20 | 0.40 | 11.40 |
+| **render** | **5.10** | **5.00** | **6.70** | 7.80 | 23.50 |
+| ui | 0.90 | 0.90 | 1.10 | 1.30 | 2.40 |
+| total | 11.74 | 11.50 | 14.50 | 16.40 | 31.10 |
+
+fps 58.9, 1768 frames sampled. **`render` phase p95 = 6.7 ms — PASSES the
+≤8.5 ms budget** with headroom (the acceptance criterion, per this pass's
+brief and pres-verify's original "render p95 ≤ 8.5 ms" framing, is the
+render phase specifically, not the `total` p95 of 14.5 ms, which also sums
+in `entity` — a separate phase).
+
+**Server sim** (`profile(target:"sim")`, 829 frames sampled): avg 5.5 ms/frame
+(96.9% `native-sim`, 2.9% `lua-gameframe`, 0.2% `unit-script`), comfortably
+inside the 33.3 ms/frame budget for a 30 Hz sim; one 94.7 ms outlier frame,
+almost certainly the `populate_tranche` spawn burst itself rather than
+sustained load (829 samples, one spike).
+
+**Conclusion**: XL900 on Medium passes its perf bar on both the client render
+phase and the server sim tick. This closes the tooling gap pres-verify fire 3
+and this lane's own "Not done" list carried forward from E2E1/E2E2 (no
+committed XL900 spawn script existed before `populate_tranche` landed).
+
+## (d) Lobby + in-game HUD at 1440×900 vs docs/ui-style.md
+
+Captured via `chrome-devtools` `emulate(viewport:"1440x900x1")` +
+`take_screenshot`, then **programmatically audited computed styles** on every
+visible element (not just eyeballed) for the two hard rules in
+`docs/ui-style.md` / DIRECTION.md: no drop shadows (only a 1px **inset**
+edge is allowed) and no radius above `--nui-radius` (2px):
+
+| Screen | Screenshot | box-shadow violations | radius > 2px violations |
+|---|---|---|---|
+| Welcome | `e2e/pres3/04-lobby-welcome-1440x900.png` | 0 | 0 |
+| Intro slide 1/3 | `e2e/pres3/05-lobby-intro-slide1-1440x900.png` | 0 | 0 |
+| Intro slide 3/3 ("Your Role") | `e2e/pres3/06-lobby-intro-slide3-yourrole-1440x900.png` | 0 | 0 (gradient placeholder fix from pres-ui-ds still holds) |
+| Hub (existing admin session) | `e2e/pres3/03-lobby-hub-1440x900.png` | 0 | 0 |
+| Hub (fresh sign-up) | `e2e/pres3/07-lobby-hub-fresh-1440x900.png` | 0 | 0 |
+| In-game HUD, rest state (`crossing_standoff`) | `e2e/pres3/08-ingame-hud-rest-1440x900.png` | 0 | 0 |
+
+The only elements anywhere with radius > 2px (3–4px) belong to a hidden
+dev/debug log panel (`pane-clear-btn`, `panel-level-filter`, etc.,
+`offsetParent === null` — never shown to a player); excluded as noise, not a
+finding. Six for six clean — no violations of the stencilled-steel-plate
+rules found this pass.
+
+## (e) Audio — offline loudness report + live weapon-fire/reverb check
+
+**Offline loudness report**: `docs/reviews/beta/audio-loudness.md` already
+exists (`tools/audiogen/build.py --loudness-report`, ffmpeg `ebur128`) and is
+**verified fresh** this pass — `find data/games/metalstorm/sounds -newer
+docs/reviews/beta/audio-loudness.md` returns 0 files, i.e. nothing shipped
+has changed since the report was generated. All 9 categories present
+(ambience, death, explosion, impact, music, reverb, ui, unit, weapon). Not
+regenerated (would just re-synthesise identical output).
+
+**Live check — weapon fires a sound**: `AudioManager` isn't exposed on
+`window`, so this pass instrumented the two real Web Audio globals it
+actually calls, via a `navigate_page` `initScript` (runs before any page
+script): `AudioContext.prototype.createBufferSource` (counts real one-shot
+voice creation) and `AudioParam.prototype.value`'s setter (tagged by
+call-stack function name). Spawned a tank + a static target
+(`crossing_standoff`), ordered ATTACK, waited for reload: **the target's HP
+dropped 12000 → 8787, confirming real weapon fire**, but
+`__audioProbe.sourceCreates` stayed **0** — because `AudioManager.play()`'s
+first line is `if (!this.resumed) return;`, and `resumed` is only set by a
+**real user gesture** on the canvas (`canvas.addEventListener('click', …
+resume(), {once:true})` in `main.ts`) — exactly the browser autoplay-policy
+gate, never fired by a synthetic/headless session. Dispatching one synthetic
+`click` on the canvas resumed the context; the very next reload cycle
+produced **20 real `createBufferSource()` calls**. **PASS**: the
+fire → SoundEvent → `SoundEventPlayer` → `AudioManager.play()` pipeline
+genuinely plays audio live, once the (expected, platform-level) autoplay
+gate is past.
+
+**Live check — reverb preset applies**: the same instrumentation caught
+`setReverbPreset` live at map load, setting `reverbWetGain.value=0` /
+`reverbDryGain.value=1` (fully dry) for `crossing_standoff`
+(`scorched_crossing_v2.4`). Traced to the map's own `mapinfo.lua`:
+`sound.preset = "default"` — the unedited Spring stock-template value, which
+`setReverbPreset`'s first branch (`!preset || preset === 'default'`)
+special-cases to dry passthrough on purpose. Cross-checked every shipped
+map: most declare no `sound` table at all (→ `resolveReverbPreset`'s
+`'open'` default, i.e. real reverb), but `scorched_crossing_v2.4`,
+`pools_of_ilys_1.0.0` and `wanderlust2.1` all still carry the literal
+`preset = "default"` boilerplate, and `techno_lands_final_2.60_wide` sets
+`preset = "forest"`, which doesn't match any shipped
+`sounds/efx/{open,urban,valley}.webm` and would *also* fall through to dry
+(same defect class, worse — a mismatched name where `data-review` would
+list it as intentional). **PASS on mechanism** (the setReverbPreset pipeline
+itself is correct and verified live); **content gap found and fixed for the
+map this pass tested**.
+
+**Fixed this pass** (`data/maps/scorched_crossing_v2.4/mapinfo.lua`, 3
+lines): `preset = "default"` → `preset = "open"`, matching the map's real
+outdoor river-crossing setting and the "open" preset meridian_basin gets by
+default. **Not verified on the live stack** — this clone's `data/maps/` is
+an independent CoW copy, not a symlink into `TASKHERD_REPO`; the running
+stack still serves the unedited map until a human syncs or a lane with write
+access to MAIN's map data lands it. Same "clone edit invisible live" caveat
+this README's pres-atmos/K-series sections already document repeatedly.
+`pools_of_ilys_1.0.0` and `wanderlust2.1`'s identical `"default"` and
+`techno_lands_final_2.60_wide`'s mismatched `"forest"` are **not fixed** —
+out of this pass's tested scope (neither map was touched by items a–d
+above); named here so whoever owns map content can batch them.
+
+## Defects — E2E pass 3
+
+| # | Sev | Defect | Repro | Owning lane |
+|---|---|---|---|---|
+| D22 | LOW | `scorched_crossing_v2.4` shipped with `mapinfo.lua`'s `sound.preset` at the unedited Spring template value `"default"` (→ fully dry, no reverb) despite 3 real EFX IRs (open/urban/valley) being shipped. **FIXED this pass** (see above), not yet visible live (clone-only edit). | `data/maps/scorched_crossing_v2.4/mapinfo.lua:50`; live: `setReverbPreset` probe caught `wet=0,dry=1` at map load. | map content (untriaged — same map pres-atmos/terrain-streaming already own for the black-wedge/residual-corner work) |
+| D23 | LOW/INFO | Same `"default"` boilerplate on `pools_of_ilys_1.0.0` and `wanderlust2.1`; `techno_lands_final_2.60_wide` sets `preset = "forest"`, which matches no shipped EFX file and falls through to dry the same way. Not fixed this pass (out of scope — none of these maps were tested this fire). | `grep -A1 'preset = ' data/maps/*/mapinfo.lua` | map content |
+| D24 | INFO (tooling) | A second admin-username browser client connecting into a room already holding a `spring-debug open_client` admin session invalidates the first client's stream (units vanish from its scene; a stale objective board renders) without erroring. Cost one redo of the tread-mark tank+buggy drive this pass. | Open a room via `launch_scenario(openBrowser:true)`, then `chrome-devtools navigate_page` the same `user=admin` URL into a *second* browser context. | mcp-tools |
+
+## Not done this pass (stated plainly)
+
+- **capture_sequence coverage is 3 of 9 weapon-showcase entries** (one per
+  visible-projectile family: Cannon/MissileLauncher/AircraftBomb) — mg,
+  railgun, howitzer, flak, cruise, air-to-air were not individually shot.
+  Torpedo is a documented placeholder (no water on the test map), correctly
+  skipped, not a gap.
+- **D22's fix is not verified live** — this clone's `data/maps/` doesn't
+  reach the shared stack; needs a lane with MAIN write access (or a human)
+  to land it and restart the lobby before the fixed reverb is audible.
+- **D23's two `"default"` maps and one mismatched `"forest"` preset were
+  found but not fixed** — not touched by this pass's tested scope.
+- **XL900 was only measured on Medium** — Low/High presets and the
+  XL1200 rung (also offered by `populate_tranche`) were not swept.
+- **`git rm` for the superseded pres-decals evidence** could not be run in
+  this headless session (interactive approval required) — the old files were
+  moved aside instead of deleted; a human still needs to finish the delete.
+- **The E2E2 leftover room in the lobby's "Missions" list** (`e2e3-perf`
+  and similar rooms from this pass's own launches) will clear once their
+  idle-exit timers fire; not force-cleaned beyond the normal `end_game` calls
+  already issued for every room this pass opened.
+
+## TOOLING GAP
+
+- **mcp-tools MT4/MT5 (`drive_pattern`, `populate_tranche`) — none found this
+  pass.** Both worked exactly as documented across every call.
+- See D24 above (dual-admin-client collision).
+- `AudioManager` has no debug/test surface on `window` — verifying live
+  audio behaviour needs the `navigate_page initScript` +
+  `AudioContext.prototype`/`AudioParam.prototype` monkey-patch trick used
+  this pass (patch the real Web Audio API globals before the page's own
+  scripts run, since prototype methods resolve dynamically at call time
+  regardless of when the instance was constructed). Worth a real
+  `window.test.audioDebug()` hook if audio gets tested live again.
+- The browser autoplay gate (`AudioManager.resumed`, set only by a real
+  canvas click) silently no-ops every `play()` call in a headless/synthetic
+  session until something dispatches that click. Easy to mistake for "sound
+  is broken" — it isn't; it's the platform gate.
+
+---

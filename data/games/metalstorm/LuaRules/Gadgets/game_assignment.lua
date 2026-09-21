@@ -106,8 +106,13 @@ end
 
 local function publish(unitID, teamID)
     if not teamID then return end
-    Spring.SetTeamRulesParam(teamID, 'assign_' .. unitID, responsible[unitID], ALLIED_LOS)
-    Spring.SetTeamRulesParam(teamID, 'assign_' .. unitID .. '_by', orderBy[unitID], ALLIED_LOS)
+    -- Integer-normalised for the same Lua-5.4-float reason pkey() documents:
+    -- Spring.GetTeamUnits hands unitIDs back as FLOATS, so an un-floored id
+    -- concatenates as 'assign_965.0' and the client's /^assign_(\d+)$/ never
+    -- matches — the whole HUD scope reads as "nothing assigned to me".
+    local key = 'assign_' .. math.floor(unitID)
+    Spring.SetTeamRulesParam(teamID, key, responsible[unitID], ALLIED_LOS)
+    Spring.SetTeamRulesParam(teamID, key .. '_by', orderBy[unitID], ALLIED_LOS)
     bumpRev(teamID)
 end
 

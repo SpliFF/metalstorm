@@ -119,6 +119,18 @@ describe("rank precedence (§(c))", function()
         assert.are.equal(1, world.trp(7, 'assign_100'))   -- responsibility unchanged
     end)
 
+    it("publishes an integer key for a FLOAT unitID (Lua-5.4 GetTeamUnits)", function()
+        -- E2E2: 'assign_' .. 965.0 concatenated as 'assign_965.0', which the
+        -- client's /^assign_(\\d+)$/ never matches — the HUD scope read empty.
+        local world, g = newWorld()
+        world.setPlayer(1, 7, 0)
+        world.setUnit(100, 7)
+        GG.Assignment.Set(100.0, 1)
+
+        assert.are.equal(1, world.trp(7, 'assign_100'))
+        assert.is_nil(world.trp(7, 'assign_100.0'))
+    end)
+
     it("clears the superior's mark when the responsible player next orders", function()
         local world, g = newWorld()
         world.setPlayer(1, 7, 0)
