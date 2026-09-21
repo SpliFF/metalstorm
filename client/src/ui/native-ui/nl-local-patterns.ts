@@ -156,7 +156,13 @@ export function matchLocalPattern(
     if (!text) return null;
 
     return (
-        matchClassCountOrder(text, deps)   // before everything: "send two tank
+        matchTask(text)                    // before everything, including the
+                                           // class-count order: "task Raven:
+                                           // hold Storm Sound" leads with a
+                                           // verb the accelerator would read as
+                                           // an order to the player's OWN
+                                           // squads (D16)
+        ?? matchClassCountOrder(text, deps)   // before everything: "send two tank
                                            // squads to X" starts like nothing
                                            // else here, and the slot-filler has
                                            // no subject slot that can hold it
@@ -178,6 +184,53 @@ export function matchLocalPattern(
         ?? matchStatus(text)
         ?? null
     );
+}
+
+// ──────────────────────────── tasking ────────────────────────────
+
+/**
+ * "task Raven: hold Storm Sound" / "give Raven the bridge" / "Raven, take
+ * Northgate" — hand a place to a player rather than order your own squads
+ * there (E2E2 D16).
+ *
+ * This is FIRST in the chain for the reason the defect recorded: without it the
+ * sentence reached `free-text-accelerator.ts`, which found `hold` in its verb
+ * table, found no subject, and compiled a TEAM-WIDE standing order on Storm
+ * Sound while reporting the callsign as words it "didn't understand". A
+ * sentence that means "you take it" became "everyone take it" — a wrong order
+ * issued silently, which is worse than the refusal it replaced.
+ *
+ * Only the two EXPLICIT forms are matched. "Raven, take Northgate" (the third
+ * form the instructions offer the model) is deliberately NOT parsed offline: a
+ * bare leading name is indistinguishable from a group name ("Chimera, take
+ * Northgate" is an order to Chimera Squad), and the offline path has no roster
+ * to tell them apart. The proxy path has `context.players` and can. An offline
+ * player who says it still lands on the accelerator's ordinary refusal, which
+ * names the words it could not place — not on a silent misreading.
+ *
+ * The place is handed on UNRESOLVED, like every other ref in this file; the
+ * executor's `runTask` resolves it and the callsign, and owns both refusals.
+ */
+const TASK_COLON = /^(?:task|assign|tell)\s+(.+?)\s*:\s*(?:to\s+)?(?:take|hold|secure|get|grab|control|defend|capture|seize)\s+(?:the\s+)?(.+?)\s*$/i;
+const TASK_GIVE = /^(?:give|hand)\s+(.+?)\s+(?:the\s+|)(.+?)\s*$/i;
+/** "task Raven with Storm Sound" / "task Raven to take Storm Sound". */
+const TASK_WITH = /^(?:task|assign)\s+(.+?)\s+(?:with|to\s+(?:take|hold|secure|control|defend))\s+(?:the\s+)?(.+?)\s*$/i;
+
+function taskMatch(player: string, place: string): LocalPatternMatch {
+    return {
+        action: { kind: 'task', task: { player, place } },
+        say: `Tasking ${player} with ${place}`,
+    };
+}
+
+function matchTask(text: string): LocalPatternMatch | null {
+    const colon = TASK_COLON.exec(text);
+    if (colon) return taskMatch(cleanRef(colon[1]), cleanRef(colon[2]));
+    const withForm = TASK_WITH.exec(text);
+    if (withForm) return taskMatch(cleanRef(withForm[1]), cleanRef(withForm[2]));
+    const give = TASK_GIVE.exec(text);
+    if (give) return taskMatch(cleanRef(give[1]), cleanRef(give[2]));
+    return null;
 }
 
 // ────────────────────── a counted class of squads ──────────────────────

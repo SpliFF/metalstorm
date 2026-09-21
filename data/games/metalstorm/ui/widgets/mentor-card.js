@@ -42,8 +42,20 @@ function esc(s) {
  * superior has ordered over the player's head; `squads` is how many they are
  * responsible for.
  */
-export function mentorCardModel(store, playerId) {
-  const mentor = store.mentorOf(playerId);
+export function mentorCardModel(store, playerId, opts = {}) {
+  // `acceptedAi` is the ACK for a route that has already succeeded (E2E2 D19).
+  //
+  // `mentor_<pid>` is mirrored from the `mentorships` row at AuthRequest and
+  // never again for the life of the session, so accepting an AI mentor mid-game
+  // moves the lobby row and the sim's view of the world not at all until the
+  // next connect. Rendering off the rulesParam alone therefore produced an
+  // EMPTY card the instant the player clicked — the offer dismissed, `kind`
+  // still 'none' — which reads as "the button deleted the panel".
+  //
+  // The rulesParam still WINS whenever it says anything: this only fills the
+  // gap between a 2xx and the session that will carry it, so the card cannot
+  // outlive a mentorship the sim later disagrees about.
+  const mentor = store.mentorOf(playerId) ?? (opts.acceptedAi ? -1 : undefined);
   const assignments = store.getMyAssignments();
   const orders = [];
   for (const unitId of assignments) {
@@ -58,6 +70,9 @@ export function mentorCardModel(store, playerId) {
         ? 'Under mentorship: an AI mentor'
         : `Under mentorship: ${store.callsignOf(mentor)}`,
     squads: assignments.length,
+    /** True while the card is showing an accepted AI mentor the sim has not
+     *  published yet — the one case where the headline is ahead of the sim. */
+    pendingAi: mentor === -1 && store.mentorOf(playerId) === undefined,
     // Distinct lines only: one superior re-ordering four squads is one fact,
     // not four, and four identical rows read as a bug.
     orders: [...new Set(orders)],
@@ -78,6 +93,7 @@ export default {
     // being nagged into a mentor is the opposite of the point.
     this.offerAi = false;
     this.declined = false;
+    this.acceptedAi = false;
     this.timer = setTimeout(() => {
       this.offerAi = true;
       this._render();
@@ -94,7 +110,9 @@ export default {
 
   _render() {
     const { store, identity } = this.ctx;
-    const model = mentorCardModel(store, identity?.playerId ?? -1);
+    const model = mentorCardModel(store, identity?.playerId ?? -1, {
+      acceptedAi: this.acceptedAi === true,
+    });
     const parts = [];
 
     if (model.headline) {
@@ -105,6 +123,14 @@ export default {
       }
       for (const line of model.orders) {
         parts.push(`<div class="ms-mentor-card__order">${esc(line)}</div>`);
+      }
+      if (model.pendingAi) {
+        // Said plainly rather than hidden: the mentorship is real (the lobby
+        // has the row), but the SIM will not act on it until the next session,
+        // and a player whose AI mentor never says anything deserves to know
+        // which of those two things is true.
+        parts.push('<div class="ms-mentor-card__note">Assigned — they take over ' +
+          'from your next mission.</div>');
       }
       // The filter is ON while a mentorship is active; this is how a player
       // gets the whole battle back without ending the mentorship.
@@ -157,10 +183,13 @@ export default {
       } else if (!res.ok) {
         this.error = `Could not get an AI mentor (${res.status}).`;
       } else {
-        // The sim publishes `mentor_<me>` when the mentorship takes effect;
-        // the subscription above is what actually swaps the card over.
+        // The lobby row is live, but the sim's `mentor_<me>` is fixed at
+        // AuthRequest and will not move for this session (D18/D19), so the card
+        // has to carry the acknowledgement itself. `declined` stops the 30 s
+        // offer coming back; `acceptedAi` is what makes the card render.
         this.error = null;
         this.declined = true;
+        this.acceptedAi = true;
       }
     } catch {
       this.error = 'Could not reach the server.';

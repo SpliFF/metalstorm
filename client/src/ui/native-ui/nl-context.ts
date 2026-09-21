@@ -68,6 +68,19 @@ export interface NLContextSelf {
     counts: Record<string, number>;
 }
 
+/**
+ * Someone the player may hand a task to (E2E2 D16).
+ *
+ * Callsigns, never playerNums — the same names-only rule everything else here
+ * obeys, and `nl-executor.ts`'s task port resolves them back. The list is
+ * already gated by whether the local player MAY task them, so its emptiness is
+ * meaningful: no entries means the model should refuse a tasking sentence, not
+ * guess at a name.
+ */
+export interface NLContextPlayer {
+    n: string;
+}
+
 export interface NLContext {
     /**
      * Omitted entirely when the client does not know the map's name.
@@ -100,6 +113,12 @@ export interface NLContext {
     classes: string[];
     /** Panel ids a `ui` action may name. */
     panels: string[];
+    /**
+     * Who this player may task (D16). Omitted entirely when nobody can be
+     * tasked — the common case (a solo mission, a Recruit) — so a payload that
+     * carries the field is one where the `task` kind is actually live.
+     */
+    players?: NLContextPlayer[];
     self: NLContextSelf;
     /**
      * What the player is looking at right now (battle-clarity U4).
@@ -131,6 +150,9 @@ export const MAX_PLACES = 60;
 export const MAX_GROUPS = 40;
 export const MAX_ENEMIES = 20;
 export const MAX_OBJECTIVES = 12;
+/** Teammates a player could plausibly name in a sentence. A war with more than
+ *  this many taskable players is one where the org panel is the right tool. */
+export const MAX_PLAYERS = 12;
 
 /** Index types that are places a player would say the name of. */
 const PLACE_TYPES: readonly EntityType[] = ['city', 'district', 'region', 'landmark'];
@@ -153,6 +175,8 @@ export interface BuildContextDeps {
     authority?: number;
     /** `focusContextFor(focusModel.nlFocus())`. Omitted ⇒ no `focus` field. */
     focus?: NLContextFocus;
+    /** Callsigns the local player may task (`uiStore.taskablePlayers()`). */
+    taskable?: readonly { callsign: string }[];
 }
 
 /**
@@ -224,6 +248,13 @@ export function buildNLContext(deps: BuildContextDeps): NLContext {
         .sort((a, b) => a.localeCompare(b))
         .slice(0, MAX_OBJECTIVES);
 
+    // ── taskable players ──
+    const players: NLContextPlayer[] = [...(deps.taskable ?? [])]
+        .map((p) => ({ n: p.callsign }))
+        .filter((p) => p.n.trim().length > 0)
+        .sort((a, b) => a.n.localeCompare(b.n))
+        .slice(0, MAX_PLAYERS);
+
     const self: NLContextSelf = {
         selection: deps.selectionCount,
         ...(deps.authority !== undefined && Number.isFinite(deps.authority)
@@ -246,6 +277,7 @@ export function buildNLContext(deps: BuildContextDeps): NLContext {
         objectives,
         classes,
         panels: [...deps.panelIds].sort(),
+        ...(players.length > 0 ? { players } : {}),
         self,
         ...(deps.focus ? { focus: deps.focus } : {}),
     };

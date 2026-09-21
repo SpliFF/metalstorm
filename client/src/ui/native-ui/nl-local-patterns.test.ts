@@ -263,3 +263,38 @@ describe('what it must NOT claim', () => {
         }
     });
 });
+
+describe('tasking another player (E2E2 D16)', () => {
+    it('reads "task <name>: hold <place>" as a task, not a team-wide order', () => {
+        expect(action('task e2e_rec7: hold Raven Basin')).toEqual({
+            kind: 'task', task: { player: 'e2e_rec7', place: 'Raven Basin' },
+        });
+    });
+
+    it('reads the "give" phrasing', () => {
+        expect(action('give Raven the bridge')).toEqual({
+            kind: 'task', task: { player: 'Raven', place: 'bridge' },
+        });
+    });
+
+    it('reads "task <name> with <place>" and "task <name> to take <place>"', () => {
+        expect(action('task Raven with Storm Sound')).toEqual({
+            kind: 'task', task: { player: 'Raven', place: 'Storm Sound' },
+        });
+        expect(action('task Raven to take Storm Sound')).toEqual({
+            kind: 'task', task: { player: 'Raven', place: 'Storm Sound' },
+        });
+    });
+
+    it('does NOT claim a bare leading name — "Chimera, take Northgate" is an order', () => {
+        // The offline path has no roster, so it cannot tell a callsign from a
+        // group name. It leaves the sentence to the accelerator rather than
+        // guessing, which is the opposite of D16's silent misreading.
+        expect(action('Chimera Squad, take Northgate')).toBeNull();
+    });
+
+    it('leaves ordinary orders alone', () => {
+        expect(action('hold Northgate')).toBeNull();
+        expect(action('defend Randtown')).toBeNull();
+    });
+});

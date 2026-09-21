@@ -202,6 +202,13 @@ function patchAction(
         // A panel id is never ambiguous — the registry answers yes or no — so
         // there is no question here to answer. Listed rather than defaulted so
         // a new slot has to decide for itself.
+        // The chips are callsigns off the taskable roster, so putting the
+        // chosen one back into `player` is the whole answer — no round trip.
+        case 'task-player': {
+            if (action.kind !== 'task' || chosen.length !== 1) return null;
+            return [{ ...action, task: { ...action.task, player: one } }];
+        }
+
         case 'panel':
             return null;
     }

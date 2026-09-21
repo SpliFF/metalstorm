@@ -142,7 +142,7 @@ const WHEN: Record<string, JsonValue> = {
     })(),
 };
 
-// ───────────────────────────── the seven actions ───────────────────────────
+// ───────────────────────────── the eight actions ───────────────────────────
 
 function commandAction(classNames: readonly string[]): Record<string, JsonValue> {
     return variant('kind', 'command', {
@@ -276,6 +276,35 @@ function groupAction(): Record<string, JsonValue> {
     }, ['group']);
 }
 
+/**
+ * Hand a place to another player as a staked task (D16).
+ *
+ * No `verb`: the wire can build exactly one bounty type, `control` of a place,
+ * so a verb field would be a promise the sim cannot keep. The description says
+ * so in the model's own terms rather than leaving it to be inferred.
+ */
+function taskAction(): Record<string, JsonValue> {
+    return variant('kind', 'task', {
+        task: obj({
+            player: {
+                type: 'string',
+                description:
+                    'The callsign of the player being tasked, exactly as it appears in the '
+                    + 'context payload\'s `players` list. A name that is not in that list is '
+                    + 'a `refuse`, never a guess.',
+            },
+            place: NAME,
+            priority: { enum: [...NL_PRIORITIES] },
+            stake: {
+                type: 'number',
+                description:
+                    'Authority to put up, above 0. Omit it unless the player said a figure '
+                    + '— the game uses its own default and says what it spent.',
+            },
+        }, ['player', 'place']),
+    }, ['task']);
+}
+
 const REFUSE_ACTION = variant('kind', 'refuse', {
     reason: {
         type: 'string',
@@ -320,6 +349,7 @@ export function buildNLResponseSchema(opts: SchemaOptions = {}): Record<string, 
         ui: uiAction(panelIds),
         query: queryAction(classNames),
         group: groupAction(),
+        task: taskAction(),
         refuse: REFUSE_ACTION,
     };
 

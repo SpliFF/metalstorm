@@ -78,7 +78,7 @@ describe('schema vocabularies agree with the validator', () => {
     const kinds = (items.anyOf as Record<string, JsonValue>[])
         .map((v) => ((v.properties as Record<string, JsonValue>).kind as Record<string, JsonValue>).const);
 
-    it('offers exactly the seven action kinds, in contract order', () => {
+    it('offers exactly the eight action kinds, in contract order', () => {
         expect(kinds).toEqual([...NL_ACTION_KINDS]);
     });
 
@@ -188,6 +188,7 @@ describe('the fixtures the validator accepts are shaped like the schema', () => 
             ui: { actions: [{ kind: 'ui', ui: { op: 'open', panelId: 'minimap' } }] },
             query: { actions: [{ kind: 'query', query: { op: 'resources' } }] },
             group: { actions: [{ kind: 'group', group: { op: 'rename', name: 'Hammerfall' } }] },
+            task: { actions: [{ kind: 'task', task: { player: 'Raven', place: 'Storm Sound' } }] },
             refuse: { actions: [{ kind: 'refuse', reason: 'I have no record of that place.' }] },
         };
         for (const kind of NL_ACTION_KINDS) {

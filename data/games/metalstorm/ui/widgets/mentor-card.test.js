@@ -121,3 +121,47 @@ describe('mentor-card widget', () => {
     mentorCard.dispose();
   });
 });
+
+describe('accepting an AI mentor (E2E2 D19)', () => {
+  function mount(store, { api } = {}) {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    mentorCard.init({ mount: el, store, identity: { playerId: 7 }, api });
+    return el;
+  }
+
+  it('renders the AI mentor immediately, rather than going blank', async () => {
+    // `mentor_7` stays absent for the whole session — the sim mirrors it at
+    // AuthRequest only — so the card has to carry the acknowledgement itself.
+    const store = fakeStore();
+    const el = mount(store, {
+      api: { lobbyBase: '', fetch: () => Promise.resolve({ ok: true, status: 200 }) },
+    });
+    mentorCard.offerAi = true;
+    await mentorCard._acceptAi();
+
+    expect(el.textContent).toContain('Under mentorship: an AI mentor');
+    expect(el.textContent).toContain('next mission');
+    expect(el.textContent).not.toBe('');
+    mentorCard.dispose();
+  });
+
+  it('does not claim a mentorship when the route refused', async () => {
+    const el = mount(fakeStore(), {
+      api: { lobbyBase: '', fetch: () => Promise.resolve({ ok: false, status: 404 }) },
+    });
+    mentorCard.offerAi = true;
+    await mentorCard._acceptAi();
+
+    expect(el.textContent).not.toContain('Under mentorship');
+    expect(el.textContent).toContain('not available');
+    mentorCard.dispose();
+  });
+
+  it('lets the sim override the local acknowledgement once it publishes one', () => {
+    const m = mentorCardModel(fakeStore({ game: { mentor_7: 2, callsign_2: 'Vega' } }), 7,
+      { acceptedAi: true });
+    expect(m.kind).toBe('human');
+    expect(m.pendingAi).toBe(false);
+  });
+});

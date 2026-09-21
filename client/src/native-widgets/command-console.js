@@ -566,6 +566,13 @@ function dispose() {
  * chat producer that would set it does not exist on the wire yet; this is the
  * gate it lands into, and `uiStore.setShowEverything(true)` (the mentor card's
  * toggle) opens it.
+ *
+ * E2E2 D17 measured how far "yet" goes: there is no in-game chat AT ALL.
+ * `ChatSend` is in the protocol and is explicitly REJECTED by the server
+ * (`ClientMessageHandler.cpp` — "protocol niceties with no server side
+ * today"), and `ChatReceive` is never constructed anywhere in `rts/`. So this
+ * is not a call site someone forgot to write; it is a gate waiting on a server
+ * feature. `docs/reviews/beta/d17-d21-options.md` has the options.
  */
 function chatterHidden(scope) {
     if (scope !== 'all' && scope !== 'enemy') return false;
@@ -768,6 +775,13 @@ function buildLocalPorts(resolver) {
     if (uiActionRegistry.ids().length > 0) {
         ports.uiActions = createNLUiActionPort(uiActionRegistry);
     }
+
+    // The mentorship/standing layer (E2E2 D16). Always wired — an EMPTY roster
+    // is a meaningful answer ("there's nobody you can task"), and it is the one
+    // the executor turns into a sentence. Omitting the port would instead say
+    // "the mentorship layer isn't running here", which is a different and
+    // usually wrong claim.
+    ports.tasks = { taskable: () => uiStore.taskablePlayers() };
 
     if (censusCacheHolder.current) {
         ports.queryEngine = new QueryEngine({
@@ -1119,6 +1133,10 @@ function buildProxyDeps() {
         directives: state.ctx.store.getDirectives(),
         panelIds: uiActionRegistry.ids(),
         selectionCount: state.ctx.store.getSelection().unitIds.length,
+        // D16: who the `task` kind may name. Gated by the same rank/mentor
+        // rule the gadget applies, so the model is never shown a name that
+        // would be refused on arrival.
+        taskable: state.ctx.store.taskablePlayers(),
         // U4: the model's view of what the player is looking at. Names, kinds
         // and place names — `nlFocus()` is what guarantees no ids leak here.
         focus: focusContextFor(focusModel.nlFocus()),

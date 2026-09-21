@@ -173,6 +173,39 @@ export type NLGroupAction =
     | { op: 'create'; name: string; memberRefs?: string[] }
     | { op: 'rename'; groupRef?: string; name: string };
 
+/**
+ * Hand a TASK to another player (PLAN-beta-journey.md §(c), D16).
+ *
+ * A task is not an order: the units are not the issuer's to move, so this
+ * never compiles to a directive. It compiles to a player-staked bounty
+ * (`objectives.createBounty` with `player=`), which `game_objectives.lua`
+ * already accepts over the `parley/wire.lua` codec and already gates — rank ≥ 2
+ * or the target's mentor. The target then chooses HOW.
+ *
+ * There is deliberately **no verb**. `wireBountyDef` can construct exactly one
+ * bounty type from a wire payload — `control` of a place — because every other
+ * type is defined by unit ids the envelope may not carry. A `verb` field here
+ * would be a field the wire cannot deliver, which is precisely the defect this
+ * type exists to close: a documented sentence that could not compile. So the
+ * sentence "task Raven: hold Storm Sound" and "give Raven the bridge" mean the
+ * same thing, and that thing is "take and hold this place".
+ *
+ * `stake` is authority the ISSUER escrows and gets back when the task is met
+ * (`GG.Authority.Stake`). It is optional in the envelope because no player says
+ * a number out loud; absent means `NL_TASK_DEFAULT_STAKE`, and the executor
+ * names the figure in its echo — a task that silently spent authority would be
+ * the same silent-cost failure in a different place.
+ */
+export interface NLTask {
+    /** Callsign of the player being tasked — verbatim from `context.players`. */
+    player: string;
+    /** The place they are asked to take and hold — a name, like every ref. */
+    place: string;
+    priority?: NLPriority;
+    /** Authority to escrow. Omitted ⇒ `NL_TASK_DEFAULT_STAKE`. */
+    stake?: number;
+}
+
 export type NLAction =
     | { kind: 'command'; intent: NLCommandIntent }
     | { kind: 'guidance'; guidance: NLGuidance }
@@ -180,6 +213,7 @@ export type NLAction =
     | { kind: 'ui'; ui: NLUiAction }
     | { kind: 'query'; query: NLQuery }
     | { kind: 'group'; group: NLGroupAction }
+    | { kind: 'task'; task: NLTask }
     | { kind: 'refuse'; reason: string };
 
 export interface NLClarification {
@@ -221,15 +255,30 @@ export interface NLResponse {
  *   2 — 2026-09-10: `query.events`; `withdraw` may omit its target (the
  *       resolver picks the nearest departure zone); `patrol`/`screen` accept a
  *       place (a ring route is drawn around it).
+ *   3 — 2026-09-21: the `task` kind (E2E2 D16) — hand a place to a player you
+ *       mentor or outrank, as a staked bounty rather than an order.
  *
  * Carried in the schema's `description` (the one keyword structured outputs
  * is guaranteed to accept) and sent by the client as `contract` on every proxy
  * request, which the proxy ignores today and may one day route on.
  */
-export const NL_CONTRACT_VERSION = 2;
+export const NL_CONTRACT_VERSION = 3;
+
+/**
+ * Authority a spoken task escrows when the sentence names no figure (D16).
+ *
+ * A bounty with no stake is not a bounty — `GG.Objectives.CreateBounty` refuses
+ * `stake <= 0` — so the NL path has to choose one, and the choice is the
+ * player's money. 25 is the smallest figure that is worth winning next to the
+ * authored objectives on a beta board and small enough that handing out four
+ * tasks is not a commitment a mentor has to plan around. It is named in the
+ * console echo on every task, so it is never spent quietly, and the envelope
+ * keeps an explicit `stake` field for the day a panel or a sentence sets one.
+ */
+export const NL_TASK_DEFAULT_STAKE = 25;
 
 export const NL_ACTION_KINDS = [
-    'command', 'guidance', 'camera', 'ui', 'query', 'group', 'refuse',
+    'command', 'guidance', 'camera', 'ui', 'query', 'group', 'task', 'refuse',
 ] as const;
 
 export const NL_PRIORITIES: readonly NLPriority[] = ['low', 'normal', 'high', 'urgent'];
@@ -418,6 +467,7 @@ function validateAction(
         case 'ui': return validateUi(action.ui, `${path}.ui`, opts, push);
         case 'query': return validateQuery(action.query, `${path}.query`, opts, push);
         case 'group': return validateGroup(action.group, `${path}.group`, push);
+        case 'task': return validateTask(action.task, `${path}.task`, push);
         case 'refuse':
             if (typeof action.reason !== 'string' || !action.reason.trim()) {
                 push(`${path}.reason must be a non-empty string`);
@@ -425,6 +475,24 @@ function validateAction(
                 push(`${path}.reason exceeds ${MAX_TEXT_LENGTH} chars`);
             }
             return;
+    }
+}
+
+function validateTask(task: unknown, path: string, push: (m: string) => void): void {
+    if (!isPlainObject(task)) { push(`${path} is not an object`); return; }
+    checkRef(task.player, `${path}.player`, push);
+    checkRef(task.place, `${path}.place`, push);
+    if (task.priority !== undefined
+        && !NL_PRIORITIES.includes(task.priority as NLPriority)) {
+        push(`${path}.priority ${JSON.stringify(task.priority)} is not one of ${NL_PRIORITIES.join('|')}`);
+    }
+    if (task.stake !== undefined) {
+        const n = task.stake;
+        // Upper bound so a hallucinated figure cannot escrow a whole pool; the
+        // gadget refuses an unaffordable stake anyway, but silently.
+        if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0 || n > 1000) {
+            push(`${path}.stake must be a number in (0, 1000]`);
+        }
     }
 }
 

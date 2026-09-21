@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NLResponse",
-  "description": "NLResponse contract v2. The one shape a natural-language command may take. Either `actions` is non-empty and `clarify` is absent, or `clarify` is present and `actions` is empty — asking and acting are mutually exclusive.",
+  "description": "NLResponse contract v3. The one shape a natural-language command may take. Either `actions` is non-empty and `clarify` is absent, or `clarify` is present and `actions` is empty — asking and acting are mutually exclusive.",
   "type": "object",
   "properties": {
     "actions": {
@@ -904,6 +904,49 @@
             "required": [
               "kind",
               "group"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "task"
+              },
+              "task": {
+                "type": "object",
+                "properties": {
+                  "player": {
+                    "type": "string",
+                    "description": "The callsign of the player being tasked, exactly as it appears in the context payload's `players` list. A name that is not in that list is a `refuse`, never a guess."
+                  },
+                  "place": {
+                    "type": "string",
+                    "description": "A name exactly as it appears in the context payload. Never invent one, never translate or pluralise one, never abbreviate one."
+                  },
+                  "priority": {
+                    "enum": [
+                      "low",
+                      "normal",
+                      "high",
+                      "urgent"
+                    ]
+                  },
+                  "stake": {
+                    "type": "number",
+                    "description": "Authority to put up, above 0. Omit it unless the player said a figure — the game uses its own default and says what it spent."
+                  }
+                },
+                "required": [
+                  "player",
+                  "place"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "kind",
+              "task"
             ],
             "additionalProperties": false
           },

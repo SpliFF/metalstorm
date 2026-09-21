@@ -77,6 +77,17 @@ export interface ObjectiveRecord {
     r?: number;
     /** A sim playerNum this was suggested to (joiner onboarding). */
     suggested?: number;
+    /**
+     * A sim playerNum this objective IS FOR — `objective_<id>_player`, set by
+     * `def.forPlayer` when a mentor stakes a bounty on someone (PLAN-beta
+     * §(c)). Stronger than `suggested`: "this is yours", not "yours to take".
+     *
+     * It was published and rendered (`objective-hud.ts`'s `taskFrom`) but never
+     * DECLARED here, so it arrived as an untyped string and the ranker could
+     * not see it — E2E2 D20, where a task a mentor had just handed over ranked
+     * 8th of 8, below the overflow fold.
+     */
+    player?: number;
     /** `scripted | systemic | bounty`. */
     source?: string;
     /** 1 when winning this ends the war. */
@@ -104,7 +115,7 @@ const FIELD_KEY = /^objective_(\d+)_(\w+)$/;
 
 const NUMERIC_FIELDS: ReadonlySet<string> = new Set([
     'reward', 'team', 'team2', 'progress', 'phase', 'expire', 'x', 'z', 'r',
-    'suggested', 'completed_by', 'victory',
+    'suggested', 'player', 'completed_by', 'victory',
 ]);
 
 /** Wire field → record field. Only the one that differs. */
@@ -305,7 +316,16 @@ export function rankObjectives(
         }
         const p = o.progress ?? 0;
         if (p > 0.02 && p < 1) s += 1_000 + p * 200;
-        if (ctx.playerId !== undefined && o.suggested === ctx.playerId) s += 800;
+        if (ctx.playerId !== undefined) {
+            // `player` and `suggested` are different facts and must not share a
+            // band (E2E2 D20). `player` is "this one IS yours" — a bounty your
+            // mentor staked authority on and addressed to you by name; it has
+            // to outrank the whole scripted board or it lands below the "+N
+            // more" fold, which is where the live pass found one. `suggested`
+            // is only "yours to take", which is advice, and keeps its 800.
+            if (o.player === ctx.playerId) s += 6_000;
+            else if (o.suggested === ctx.playerId) s += 800;
+        }
         s += Math.min(o.reward ?? 0, 999) / 1000;
         return s;
     };
