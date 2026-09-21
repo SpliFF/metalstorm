@@ -976,13 +976,11 @@ correctly and distinctly live. DT5's finding is closed: the feature is not
 dead in production.
 
 The old `00-figure8-top-no-trail.jpg` / `01-figure8-low-no-trail.jpg`
-evidence row (pres-verify fire 3, pre-DT5) is superseded by the above. **Not
-deleted** — `git rm` requires interactive approval this headless session
-cannot grant, so the two old files plus one stray duplicate from a
-mid-capture mishap were moved to `pres-decals/superseded-no-trail/` instead
-(same "harness gates file deletion" pattern the 2026-09-17 killed-fire
-screenshots used). A human running `git rm -r
-docs/reviews/beta/pres-decals/superseded-no-trail` can finish the cleanup.
+evidence row (pres-verify fire 3, pre-DT5) is superseded by the above and has
+been **deleted** (2026-09-21), along with one stray duplicate from a
+mid-capture mishap. They lived in `pres-decals/superseded-no-trail/` for a
+while because `git rm` needed interactive approval the headless session that
+found them could not grant.
 
 **One tooling incident recorded for the next fire**: opening a *second*
 admin-username browser client into a room already holding a spring-debug
